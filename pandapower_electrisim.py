@@ -7612,6 +7612,39 @@ def analyze_shortcircuit_input_data(in_data):
     return recommendations
 
 
+def _three_phase_kappa(net, case, bus, tk_s, r_fault_ohm, x_fault_ohm):
+    """
+    Each bus's peak factor kappa for a three-phase fault, as pandapower
+    computes it (method C), indexed like net.res_bus_sc.
+
+    A single-phase run computes kappa too but clears it before returning, and
+    ip / (sqrt(2) Ik'') is not kappa: pandapower adds the current-source part
+    (static generators, storage) without it. So run the three-phase fault on a
+    copy and read kappa from the result table pandapower leaves behind.
+    """
+    import copy
+    from pandapower.pypower.idx_bus_sc import KAPPA
+    net3 = copy.deepcopy(net)
+    sc.calc_sc(net3, fault='3ph', case=case, bus=bus, ip=True, ith=False, tk_s=tk_s,
+               kappa_method='C', r_fault_ohm=r_fault_ohm, x_fault_ohm=x_fault_ohm,
+               check_connectivity=False, branch_results=False)
+    index = net.res_bus_sc.index
+    rows = net3['_pd2ppc_lookups']['bus'][index.values]
+    return pd.Series(net3['_ppc']['bus'][rows, KAPPA], index=index)
+
+
+def _iec_thermal_m(kappa, tk_s, f_hz):
+    """
+    IEC 60909-0 factor m, the heat effect of the DC component, for a fault of
+    tk_s seconds: m = (exp(4 f tk ln(kappa - 1)) - 1) / (2 f tk ln(kappa - 1)).
+    pandapower's own formula, with the network frequency where it assumes
+    50 Hz, and 0 as it gives for kappa > 1.99.
+    """
+    ln = np.log(kappa - 1.0)
+    m = (np.exp(4.0 * f_hz * tk_s * ln) - 1.0) / (2.0 * f_hz * tk_s * ln)
+    return m.where(kappa <= 1.99, 0.0)
+
+
 def _sc_missing_machine_data(net):
     """
     In-service machines that lack what pandapower's short-circuit calculation
@@ -7813,30 +7846,16 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
         
         # Check if ip_ka and ith_ka calculations failed (all NaN) for single-phase faults
         if fault_type == '1ph' and net.res_bus_sc['ip_ka'].isna().all() and net.res_bus_sc['ith_ka'].isna().all():
-            
-            # Calculate ip_ka and ith_ka from ikss_ka using standard electrical engineering formulas
-            # ip_ka = kappa * sqrt(2) * ikss_ka (peak current)
-            # ith_ka = ikss_ka (for short duration faults, thermal current ≈ initial current)
+            # pandapower computes no peak or thermal current for an earth
+            # fault. IEC 60909-0 allows the three-phase kappa at the same bus:
+            #   ip1 = kappa * sqrt(2) * Ik1''     ith1 = Ik1'' * sqrt(m + n)
+            # with n = 1 (far from generator) and m from kappa, f and tk.
+            kappa = _three_phase_kappa(net, fault_location, bus, tk_s, r_fault_ohm, x_fault_ohm)
+            ikss = net.res_bus_sc['ikss_ka']
+            net.res_bus_sc['ip_ka'] = kappa * np.sqrt(2) * ikss
+            net.res_bus_sc['ith_ka'] = ikss * np.sqrt(
+                _iec_thermal_m(kappa, tk_s, float(getattr(net, 'f_hz', 50.0) or 50.0)) + 1.0)
 
-            # Kappa factor for peak current calculation (typical value for medium voltage networks)
-            # This can vary from 1.0 to 2.0 depending on network characteristics
-            kappa_factor = 1.8  # Conservative estimate for medium voltage networks
-            
-            # Calculate ip_ka (peak short-circuit current)
-            net.res_bus_sc['ip_ka'] = kappa_factor * np.sqrt(2) * net.res_bus_sc['ikss_ka']
-            
-            # Calculate ith_ka (thermal short-circuit current)
-            # For short duration faults (tk_s = 1.0), ith ≈ ikss
-            # For longer durations, ith would be calculated differently
-            if tk_s <= 1.0:
-                net.res_bus_sc['ith_ka'] = net.res_bus_sc['ikss_ka']
-            else:
-                # For longer fault durations, thermal current is typically lower
-                # ith = ikss * sqrt(thermal_factor) where thermal_factor depends on fault duration
-                thermal_factor = 1.0 / tk_s if tk_s > 1.0 else 1.0
-                net.res_bus_sc['ith_ka'] = net.res_bus_sc['ikss_ka'] * np.sqrt(thermal_factor)
-            
-        
     except Exception as e:
         
         # Capture the diagnostic output and process it
