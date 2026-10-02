@@ -268,6 +268,8 @@ def build_network(spec):
         if bus is None:
             continue
         s_sc_max = _num(row.get('s_sc_max_mva'), 's_sc_max_mva', where, problems, default=None)
+        x0x_max = _num(row.get('x0x_max'), 'x0x_max', where, problems, default=1.0, positive=True)
+        r0x0_max = _num(row.get('r0x0_max'), 'r0x0_max', where, problems, default=0.1)
         rx_max = _num(row.get('rx_max'), 'rx_max', where, problems, default=None)
         idx = pp.create_ext_grid(
             net, bus=bus_index[bus], name=str(row.get('name') or ident),
@@ -282,8 +284,11 @@ def build_network(spec):
             # Zero sequence, for earth faults: X0/X and R0/X0 of the grid. A
             # grid without them is a zero zero-sequence impedance, and a
             # single-phase fault fails on it.
-            x0x_max=_num(row.get('x0x_max'), 'x0x_max', where, problems, default=1.0, positive=True),
-            r0x0_max=_num(row.get('r0x0_max'), 'r0x0_max', where, problems, default=0.1),
+            x0x_max=x0x_max, r0x0_max=r0x0_max,
+            # And for a minimum-case earth fault, as the backend assumes too.
+            x0x_min=_num(row.get('x0x_min'), 'x0x_min', where, problems, default=x0x_max,
+                         positive=True),
+            r0x0_min=_num(row.get('r0x0_min'), 'r0x0_min', where, problems, default=r0x0_max),
         )
         record('ext_grid', idx, ident)
 
@@ -455,6 +460,11 @@ def build_network(spec):
             net.line.at[idx, field] = _num(
                 row.get(field), field, where, problems,
                 default=round(factor * float(net.line.at[idx, positive_field]), 6))
+        # Conductor temperature at the end of a fault: a minimum-case short
+        # circuit raises line resistance to it (IEC 60909-0), and pandapower
+        # refuses that case without it.
+        net.line.at[idx, 'endtemp_degree'] = _num(row.get('endtemp_degree'), 'endtemp_degree',
+                                                  where, problems, default=80.0, positive=True)
         record('line', idx, ident)
 
     # --- loads, machines, compensation -----------------------------------

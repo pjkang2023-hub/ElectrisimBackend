@@ -29,7 +29,8 @@ A bus has no default voltage; it must always be given.
 for short-circuit studies; without it Electrisim treats the grid as an
 infinite 1,000,000 MVA source), `rx_max`, `s_sc_min_mva` and `rx_min` (for a
 minimum-case study; default to the maximum values), and zero sequence for
-earth faults: `x0x_max` (X0/X, 1.0) and `r0x0_max` (R0/X0, 0.1).
+earth faults: `x0x_max` (X0/X, 1.0) and `r0x0_max` (R0/X0, 0.1), with `x0x_min`
+and `r0x0_min` for the minimum case (default: the maximum values).
 
 **transformers** - two-winding.
 `id`, **`hv_bus`**, **`lv_bus`**, `sn_mva` (25), `vn_hv_kv` / `vn_lv_kv` (taken
@@ -79,6 +80,8 @@ either
 Either way, zero sequence for earth faults: `r0_ohm_per_km` (4 x r),
 `x0_ohm_per_km` (3 x x), `c0_nf_per_km` (= c) - a rule of thumb, since
 pandapower's line types carry none; give the cable's own for a real study.
+And `endtemp_degree` (80): the conductor temperature at the end of a fault,
+to which a minimum-case short circuit raises the line's resistance.
 
 **loads** - `id`, **`bus`**, `p_mw` (0), `q_mvar` (0.33 x p_mw, about pf 0.95),
 `name`, `in_service`.

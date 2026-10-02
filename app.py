@@ -1681,7 +1681,8 @@ def pandapower_net_to_json(net):
                 if _is_blank_name(nm):
                     nm = f'Line_{idx}'
                 sidecar['line'][str(nm)] = {
-                    k: _scalar(r.get(k)) for k in ('r0_ohm_per_km', 'x0_ohm_per_km', 'c0_nf_per_km')
+                    k: _scalar(r.get(k)) for k in ('r0_ohm_per_km', 'x0_ohm_per_km', 'c0_nf_per_km',
+                                                   'endtemp_degree')
                 }
         return sidecar
 
