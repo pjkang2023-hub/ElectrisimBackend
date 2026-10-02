@@ -49,11 +49,13 @@
     {"id": "LD_AUX", "bus": "TERT", "p_mw": 0.5, "q_mvar": 0.2, "name": "Station auxiliaries"}
   ],
   "generators": [
-    {"id": "G1", "bus": "MV2", "p_mw": 4.0, "vm_pu": 1.01, "sn_mva": 6.0, "name": "CHP plant"}
+    {"id": "G1", "bus": "MV2", "p_mw": 4.0, "vm_pu": 1.01, "sn_mva": 6.0, "name": "CHP plant",
+     "xdss_pu": 0.18, "rdss_ohm": 0.02, "cos_phi": 0.8}
   ],
   "static_generators": [
     {"id": "PV", "bus": "LV2", "p_mw": 0.3, "name": "Rooftop PV"},
-    {"id": "WF", "bus": "F3", "p_mw": 2.0, "q_mvar": -0.2, "kind": "wind", "name": "Wind farm"}
+    {"id": "WF", "bus": "F3", "p_mw": 2.0, "q_mvar": -0.2, "kind": "wind", "name": "Wind farm",
+     "sn_mva": 2.5, "k": 1.2}
   ],
   "shunts": [
     {"id": "SR", "bus": "TERT", "q_mvar": 2.0, "name": "Station reactor"},

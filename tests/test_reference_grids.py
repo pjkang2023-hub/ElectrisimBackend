@@ -24,21 +24,24 @@ Each grid is checked three ways:
    tests/reference/<grid>.diagram_payload.json is the load-flow request the
    frontend sent for that grid after drawing it from the spec - so it is what
    the diagram holds, not what the spec says. Posted to the load-flow route, it
-   must reproduce the spec's own results.
+   must reproduce the spec's own results. The short-circuit tests do the same
+   for a maximum three-phase fault at every bus, from
+   tests/reference/<grid>.diagram_sc_payload.json.
 
 Regenerate goldens with:  pytest --regen-golden
 
-Recapture a diagram payload after changing the frontend import or the load-flow
-payload builder: draw the spec through the MCP server into an empty diagram,
-run Load Flow, and save the request body of the POST to the backend's "/" from
-the browser's network panel over the old file. The test says whether the new
-drawing still computes the spec's answer.
+Recapture the diagram payloads after changing the frontend import or a payload
+builder: draw the spec through the MCP server into an empty diagram, run Load
+Flow and Short Circuit, and save the body of each POST to the backend's "/"
+from the browser's network panel over the old files. The tests say whether the
+new drawing still computes the spec's answers.
 """
 
 import json
 import os
 
 import pandapower as pp
+import pandapower.shortcircuit as sc
 import pytest
 
 import electrisim_sld as sld
@@ -69,6 +72,16 @@ def load_spec(grid):
 
 def run(net):
     pp.runpp(net, algorithm='nr', calculate_voltage_angles='auto', init='auto')
+    return net
+
+
+def run_sc(net):
+    """A maximum three-phase fault at every bus, called as the backend calls it."""
+    # Branch results need the state a power flow leaves; the backend's
+    # pp.diagnostic() runs one before it calls calc_sc.
+    run(net)
+    sc.calc_sc(net, fault='3ph', case='max', ip=True, ith=True, tk_s=1.0, kappa_method='C',
+               r_fault_ohm=0.0, x_fault_ohm=0.0, check_connectivity=False, branch_results=True)
     return net
 
 
@@ -138,9 +151,11 @@ def hand_built_transmission():
                              ('LD_LV1', 'LV1', 0.4, 0.4 * 0.33),  # unstated q: 0.33 x p
                              ('LD_LV2', 'LV2', 0.6, 0.15), ('LD_AUX', 'TERT', 0.5, 0.2)):
         h.add('load', ident, pp.create_load(net, b(bus), p_mw=p, q_mvar=q))
-    h.add('gen', 'G1', pp.create_gen(net, b('MV2'), p_mw=4.0, vm_pu=1.01, sn_mva=6.0))
-    h.add('sgen', 'PV', pp.create_sgen(net, b('LV2'), p_mw=0.3, q_mvar=0.0))
-    h.add('sgen', 'WF', pp.create_sgen(net, b('F3'), p_mw=2.0, q_mvar=-0.2))
+    h.add('gen', 'G1', pp.create_gen(net, b('MV2'), p_mw=4.0, vm_pu=1.01, sn_mva=6.0,
+                                     vn_kv=20, xdss_pu=0.18, rdss_ohm=0.02, cos_phi=0.8))
+    # Unstated sgen rating: 1.1 x p_mw, at least 0.1 MVA; k defaults to 1.1.
+    h.add('sgen', 'PV', pp.create_sgen(net, b('LV2'), p_mw=0.3, q_mvar=0.0, sn_mva=0.33, k=1.1))
+    h.add('sgen', 'WF', pp.create_sgen(net, b('F3'), p_mw=2.0, q_mvar=-0.2, sn_mva=2.5, k=1.2))
     h.add('shunt', 'SR', pp.create_shunt(net, b('TERT'), q_mvar=2.0, p_mw=0.0))
     h.add('shunt', 'CAP', pp.create_shunt(net, b('F1'), q_mvar=-1.5, p_mw=0.0))
     h.add('storage', 'BESS', pp.create_storage(net, b('LV1'), p_mw=0.1, max_e_mwh=0.5))
@@ -186,10 +201,12 @@ def hand_built_radial():
     h.add('load', 'LD_A1', pp.create_load(net, b('A1'), p_mw=1.5, q_mvar=1.5 * 0.33))
     h.add('load', 'LD_LVA', pp.create_load(net, b('LVA'), p_mw=0.5, q_mvar=0.12))
     h.add('load', 'LD_B1', pp.create_load(net, b('B1'), p_mw=2.0, q_mvar=0.8))
-    # sn_mva defaults to 1.2 x p_mw, at least 1.
-    h.add('gen', 'GE', pp.create_gen(net, b('B2'), p_mw=1.5, vm_pu=1.0, sn_mva=1.8))
-    h.add('sgen', 'WF', pp.create_sgen(net, b('C1'), p_mw=3.0, q_mvar=0.0))
-    h.add('sgen', 'PV', pp.create_sgen(net, b('LVA'), p_mw=0.1, q_mvar=0.0))
+    # sn_mva defaults to 1.2 x p_mw, at least 1. Short-circuit data defaults:
+    # the bus voltage, xdss 0.2 pu, rdss 0 ohm, cos phi 0.85.
+    h.add('gen', 'GE', pp.create_gen(net, b('B2'), p_mw=1.5, vm_pu=1.0, sn_mva=1.8,
+                                     vn_kv=20, xdss_pu=0.2, rdss_ohm=0.0, cos_phi=0.85))
+    h.add('sgen', 'WF', pp.create_sgen(net, b('C1'), p_mw=3.0, q_mvar=0.0, sn_mva=3.3, k=1.3))
+    h.add('sgen', 'PV', pp.create_sgen(net, b('LVA'), p_mw=0.1, q_mvar=0.0, sn_mva=0.11, k=1.1))
     h.add('shunt', 'CAP', pp.create_shunt(net, b('B1'), q_mvar=-0.6, p_mw=0.0))
     h.add('storage', 'BESS', pp.create_storage(net, b('C1'), p_mw=-0.5, max_e_mwh=2.0))
 
@@ -226,6 +243,15 @@ def results_by_id(net, ids):
         out[table] = {ident: {c: float(res.at[idx, c]) for c in columns}
                       for ident, idx in ids[table].items()}
     return out
+
+
+SC_COLUMNS = ('ikss_ka', 'ip_ka', 'ith_ka')
+
+
+def sc_by_id(net, ids):
+    """{spec bus id: {column: value}} from a net after run_sc."""
+    return {ident: {c: float(net.res_bus_sc.at[idx, c]) for c in SC_COLUMNS}
+            for ident, idx in ids['bus'].items()}
 
 
 def spec_ids(net):
@@ -280,6 +306,7 @@ def test_spec_matches_hand_built_network(grid):
 def _summarise(grid):
     net, _ = sld.build_network(load_spec(grid))
     results = results_by_id(run(net), spec_ids(net))
+    results['bus_sc'] = sc_by_id(run_sc(net), spec_ids(net))
     return {table: {ident: {c: round(v, 10) for c, v in values.items()}
                     for ident, values in rows.items()}
             for table, rows in results.items()}
@@ -291,6 +318,19 @@ def _tolerance(column):
     if column == 'va_degree':
         return VA_TOL
     return FLOW_TOL
+
+
+@pytest.mark.parametrize('grid', GRIDS)
+def test_short_circuit_matches_hand_built_network(grid):
+    """Short-circuit data, given or defaulted, must reach the network as documented."""
+    net, _ = sld.build_network(load_spec(grid))
+    built = sc_by_id(run_sc(net), spec_ids(net))
+    oracle = HAND_BUILT[grid]()
+    expected = sc_by_id(run_sc(oracle.net), oracle.ids)
+    worst = [f'bus {ident} {c}: {want[c]!r} by hand, {built[ident][c]!r} by spec'
+             for ident, want in expected.items() for c in SC_COLUMNS
+             if abs(built[ident][c] - want[c]) > ORACLE_TOL]
+    assert not worst, f'{grid}: {len(worst)} value(s) differ\n  ' + '\n  '.join(worst[:20])
 
 
 @pytest.mark.parametrize('grid', GRIDS)
@@ -426,3 +466,65 @@ def test_drawn_diagram_matches_spec(client, quiet, grid):
                           f'drawn {got["loading_percent"]!r}')
 
     assert not differ, f'{grid}: the drawn diagram differs from the spec\n  ' + '\n  '.join(differ[:20])
+
+
+@pytest.mark.parametrize('grid', GRIDS)
+def test_drawn_diagram_short_circuit_matches_spec(client, quiet, grid):
+    """
+    A maximum three-phase fault at every bus of the drawn diagram must give the
+    spec's currents. This needs the external grid's fault level, the machines'
+    short-circuit data and the inverter model to have survived the drawing -
+    none of which the load flow notices.
+    """
+    with open(os.path.join(REFERENCE_DIR, f'{grid}.diagram_sc_payload.json'), encoding='utf-8') as handle:
+        payload = json.load(handle)
+    with quiet():
+        response = client.post('/', json=payload)
+    assert response.status_code == 200, response.get_data(as_text=True)[:400]
+    drawn = json.loads(response.get_data(as_text=True))
+    assert not drawn.get('error'), drawn.get('message') or drawn.get('exception')
+
+    spec = load_spec(grid)
+    net, _ = sld.build_network(spec)
+    want = sc_by_id(run_sc(net), spec_ids(net))
+
+    label_of_cell = {v['name']: v.get('userFriendlyName') for v in payload.values()
+                     if isinstance(v, dict) and 'name' in v}
+    rows = {label_of_cell.get(r['name'], r['name']): r for r in drawn.get('busbars', [])}
+    differ = []
+    for bus in spec['buses']:
+        got = rows.get(str(bus.get('name') or bus['id']))
+        if got is None:
+            differ.append(f"bus {bus['id']}: not in the drawn short circuit")
+            continue
+        for column in SC_COLUMNS:
+            if abs(float(got[column]) - want[bus['id']][column]) > DRAWN_TOL:
+                differ.append(f"bus {bus['id']} {column}: spec {want[bus['id']][column]!r}, "
+                              f"drawn {got[column]!r}")
+    assert not differ, f'{grid}: the drawn short circuit differs\n  ' + '\n  '.join(differ[:20])
+
+
+def test_short_circuit_names_missing_machine_data(client, quiet):
+    """
+    A diagram whose machines lack short-circuit data - every generator placed
+    before the spec carried it - gets told which element needs which field, not
+    pandas' "'DataFrame' object has no attribute 'vn_kv'".
+    """
+    with open(os.path.join(REFERENCE_DIR, 'reference_radial.diagram_sc_payload.json'),
+              encoding='utf-8') as handle:
+        payload = json.load(handle)
+    for element in payload.values():
+        if element.get('typ') == 'Generator':
+            element.update(vn_kv='0', xdss_pu='0', rdss_ohm='0', cos_phi='0')
+        if element.get('typ') in ('Static Generator', 'Wind Turbine'):
+            element['sn_mva'] = 'null'
+    with quiet():
+        response = client.post('/', json=payload)
+    # The frontend drops any other status without showing the message.
+    assert response.status_code == 200
+    message = json.loads(response.get_data(as_text=True)).get('message', '')
+    assert "generator 'Gas engine' has no vn_kv" in message
+    assert 'xdss_pu' in message and 'cos_phi' in message
+    assert "static generator 'Wind farm C' has no sn_mva" in message
+    assert "static generator 'Rooftop PV' has no sn_mva" in message
+    assert 'DataFrame' not in message

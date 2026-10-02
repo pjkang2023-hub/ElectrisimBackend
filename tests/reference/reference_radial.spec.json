@@ -37,7 +37,7 @@
     {"id": "GE", "bus": "B2", "p_mw": 1.5, "vm_pu": 1.0, "name": "Gas engine"}
   ],
   "static_generators": [
-    {"id": "WF", "bus": "C1", "p_mw": 3.0, "kind": "wind", "name": "Wind farm C"},
+    {"id": "WF", "bus": "C1", "p_mw": 3.0, "kind": "wind", "name": "Wind farm C", "k": 1.3},
     {"id": "PV", "bus": "LVA", "p_mw": 0.1, "name": "Rooftop PV"}
   ],
   "shunts": [
