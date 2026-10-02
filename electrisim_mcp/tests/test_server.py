@@ -138,6 +138,17 @@ async def test_layout_falls_back_to_the_spec_then_auto(backend, bridge):
     assert page2.drawn[0]['layout'] == 'auto'
 
 
+async def test_auto_layout_avoids_radial_for_three_winding_transformers(backend, bridge):
+    backend.counts = {'bus': 3, 'trafo3w': 1}
+    with FakePage(bridge) as page:
+        await call(backend, bridge, 'draw_diagram', {'spec': SPEC})
+    assert page.drawn[0]['layout'] == 'transmission'
+    # An explicit choice is still honoured; the unplaced warning covers it.
+    with FakePage(bridge) as page2:
+        await call(backend, bridge, 'draw_diagram', {'spec': SPEC, 'layout': 'radial'})
+    assert page2.drawn[0]['layout'] == 'radial'
+
+
 async def test_unknown_layout_is_rejected_before_anything_runs(backend, bridge):
     result = await call(backend, bridge, 'draw_diagram', {'spec': SPEC, 'layout': 'sideways'})
     assert result.is_error

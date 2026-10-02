@@ -25,6 +25,7 @@ class FakeBackend:
         self.problems = None
         self.error = None
         self.layout = None
+        self.counts = {'bus': 2}
 
     def build_model(self, spec, run_power_flow=False, include_model=True, limits=None):
         self.calls.append({'spec': spec, 'run_power_flow': run_power_flow,
@@ -33,7 +34,7 @@ class FakeBackend:
             raise SpecProblems(self.problems)
         if self.error:
             raise BackendError(self.error)
-        body = {'report': {'warnings': [], 'counts': {'bus': 2}, 'layout': self.layout}}
+        body = {'report': {'warnings': [], 'counts': dict(self.counts), 'layout': self.layout}}
         if include_model:
             body['model'] = MODEL
         if run_power_flow:

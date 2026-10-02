@@ -48,7 +48,7 @@ def problems_of(spec):
 def test_minimal_statement_builds_with_defaults():
     net, report = sld.build_network(substation())
     assert report['counts'] == {
-        'bus': 4, 'line': 2, 'trafo': 1, 'load': 1, 'gen': 0, 'sgen': 1,
+        'bus': 4, 'line': 2, 'trafo': 1, 'trafo3w': 0, 'load': 1, 'gen': 0, 'sgen': 1,
         'ext_grid': 1, 'shunt': 0, 'storage': 0, 'switch': 1,
     }
     assert report['warnings'] == []
@@ -203,6 +203,94 @@ def test_divergent_case_reports_instead_of_raising():
     assert 'did not converge' in result['hint']
 
 
+# --- three-winding transformers --------------------------------------------
+
+def tertiary():
+    """110/20/10 kV: a three-winding unit with a feeder on each lower winding."""
+    return {
+        'buses': [
+            {'id': 'HV', 'vn_kv': 110}, {'id': 'MV', 'vn_kv': 20}, {'id': 'LV', 'vn_kv': 10},
+            {'id': 'F1', 'vn_kv': 20}, {'id': 'F2', 'vn_kv': 10},
+        ],
+        'external_grids': [{'bus': 'HV'}],
+        'three_winding_transformers': [
+            {'id': 'T3', 'hv_bus': 'HV', 'mv_bus': 'MV', 'lv_bus': 'LV', 'sn_hv_mva': 40}],
+        'lines': [{'id': 'L1', 'from_bus': 'MV', 'to_bus': 'F1', 'length_km': 3},
+                  {'id': 'L2', 'from_bus': 'LV', 'to_bus': 'F2', 'length_km': 2}],
+        'loads': [{'bus': 'F1', 'p_mw': 12}, {'bus': 'F2', 'p_mw': 5}],
+    }
+
+
+def test_three_winding_defaults_follow_the_pair_ratings():
+    net, report = sld.build_network(tertiary())
+    t = net.trafo3w.iloc[0]
+    assert report['counts']['trafo3w'] == 1 and report['warnings'] == []
+    # Tertiary at a third of the HV rating; ratios from the three buses.
+    assert (t.sn_hv_mva, t.sn_mv_mva, t.sn_lv_mva) == (40.0, 40.0, pytest.approx(13.333))
+    assert (t.vn_hv_kv, t.vn_mv_kv, t.vn_lv_kv) == (110.0, 20.0, 10.0)
+    # Each pair defaults by the smaller rating of the pair, as pandapower refers it.
+    assert (t.vk_hv_percent, t.vk_mv_percent, t.vk_lv_percent) == (12.0, 12.0, 12.0)
+
+
+def test_three_winding_pair_names_map_onto_pandapowers():
+    spec = tertiary()
+    spec['three_winding_transformers'][0].update(
+        vk_hv_mv_percent=11, vk_mv_lv_percent=7, vk_hv_lv_percent=18)
+    net, _ = sld.build_network(spec)
+    t = net.trafo3w.iloc[0]
+    # pandapower: vk_hv = HV-MV, vk_mv = MV-LV, vk_lv = HV-LV.
+    assert (t.vk_hv_percent, t.vk_mv_percent, t.vk_lv_percent) == (11.0, 7.0, 18.0)
+
+
+@pytest.mark.parametrize('field, hint', [
+    ('vk_mv_percent', "use vk_mv_lv_percent, not pandapower's vk_mv_percent (which means MV-LV)"),
+    ('vk_lv_percent', "use vk_hv_lv_percent, not pandapower's vk_lv_percent (which means HV-LV)"),
+    ('shift_lv_degree', 'shift_lv_degree is not supported'),
+])
+def test_three_winding_names_that_would_be_ignored_are_refused(field, hint):
+    spec = tertiary()
+    spec['three_winding_transformers'][0][field] = 8
+    (problem,) = problems_of(spec)
+    assert hint in problem
+
+
+def test_three_winding_needs_three_different_buses():
+    spec = tertiary()
+    spec['three_winding_transformers'][0]['lv_bus'] = 'MV'
+    (problem,) = problems_of(spec)
+    assert 'must be three different buses' in problem
+
+
+def test_three_winding_swapped_voltages_are_warned_about():
+    spec = tertiary()
+    spec['three_winding_transformers'][0].update(mv_bus='LV', lv_bus='MV')
+    _, report = sld.build_network(spec)
+    assert any('not in HV >= MV >= LV order' in w for w in report['warnings'])
+
+
+def test_three_winding_switch_must_sit_at_one_of_its_windings():
+    spec = tertiary()
+    spec['switches'] = [{'bus': 'MV', 'element': 'T3', 'et': 'three_winding_transformer'}]
+    net, _ = sld.build_network(spec)
+    assert net.switch.iloc[0]['et'] == 't3'
+
+    spec['switches'] = [{'bus': 'F1', 'element': 'T3', 'et': 't3'}]
+    (problem,) = problems_of(spec)
+    assert "bus 'F1' is not a terminal of three-winding transformer 'T3'" in problem
+    assert 'HV, MV, LV' in problem
+
+
+def test_three_winding_power_flow_balances_under_its_id():
+    net, _ = sld.build_network(tertiary())
+    result = sld.solve(net)
+    (t3,) = result['three_winding_transformers']
+    assert t3['id'] == 'T3'
+    # What enters on HV leaves on MV and LV, less the transformer's losses.
+    assert t3['p_hv_mw'] == pytest.approx(-(t3['p_mv_mw'] + t3['p_lv_mw']) + t3['losses_mw'],
+                                          abs=1e-3)
+    assert 0 < t3['loading_percent'] < 100
+
+
 # --- the HTTP endpoint -----------------------------------------------------
 
 #: Tables insertComponentsForData JSON.parse()s unconditionally. A model missing
@@ -229,6 +317,49 @@ def test_endpoint_returns_a_drawable_model(client):
     assert not missing, f'model lacks tables the canvas requires: {sorted(missing)}'
     assert len(json.loads(tables['bus']['_object'])['data']) == 4
     assert 'power_flow' not in body
+
+
+#: The positions insertComponentsForData destructures transformer rows into
+#: (frontend supportingFunctions.js). The canvas reads by position, so a column
+#: pandapower adds in the middle shifts every later field - three-winding rows
+#: carried 40 fields against the importer's 29, and every tap setting landed one
+#: place late.
+IMPORTER_TRAFO = [
+    'name', 'std_type', 'hv_bus', 'lv_bus', 'sn_mva', 'vn_hv_kv', 'vn_lv_kv', 'vk_percent',
+    'vkr_percent', 'pfe_kw', 'i0_percent', 'shift_degree', 'tap_side', 'tap_neutral', 'tap_min',
+    'tap_max', 'tap_step_percent', 'tap_step_degree', 'tap_pos', 'tap_phase_shifter', 'parallel',
+    'df', 'in_service',
+]
+IMPORTER_TRAFO3W = [
+    'name', 'std_type', 'hv_bus', 'mv_bus', 'lv_bus', 'sn_hv_mva', 'sn_mv_mva', 'sn_lv_mva',
+    'vn_hv_kv', 'vn_mv_kv', 'vn_lv_kv', 'vk_hv_percent', 'vk_mv_percent', 'vk_lv_percent',
+    'vkr_hv_percent', 'vkr_mv_percent', 'vkr_lv_percent', 'pfe_kw', 'i0_percent',
+    'shift_mv_degree', 'tap_side', 'tap_neutral', 'tap_min', 'tap_max', 'tap_step_percent',
+    'tap_step_degree', 'tap_pos', 'tap_at_star_point', 'in_service',
+]
+
+
+def rows_as_the_importer_reads(model, table, positions):
+    rows = json.loads(json.loads(model)['_object'][table]['_object'])['data']
+    for row in rows:
+        assert len(row) == len(positions), f'{table} row has {len(row)} fields, importer reads {len(positions)}'
+    return [dict(zip(positions, row)) for row in rows]
+
+
+def test_transformer_rows_line_up_with_the_importer(client):
+    spec = tertiary()
+    spec['buses'].append({'id': 'X', 'vn_kv': 20})
+    spec['transformers'] = [{'id': 'T2', 'hv_bus': 'HV', 'lv_bus': 'X', 'sn_mva': 25}]
+    model = client.post('/build-model', json={'spec': spec}).get_json()['model']
+
+    (t2,) = rows_as_the_importer_reads(model, 'trafo', IMPORTER_TRAFO)
+    assert (t2['name'], t2['vn_hv_kv'], t2['vk_percent'], t2['in_service']) == ('T2', 110.0, 12.0, True)
+
+    (t3,) = rows_as_the_importer_reads(model, 'trafo3w', IMPORTER_TRAFO3W)
+    assert (t3['name'], t3['hv_bus'], t3['mv_bus'], t3['lv_bus']) == ('T3', 0, 1, 2)
+    assert (t3['vn_hv_kv'], t3['vn_mv_kv'], t3['vn_lv_kv']) == (110.0, 20.0, 10.0)
+    assert t3['shift_mv_degree'] == 0.0
+    assert t3['in_service'] is True
 
 
 def test_endpoint_accepts_a_bare_spec(client):

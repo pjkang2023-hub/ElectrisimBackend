@@ -52,11 +52,22 @@ _LINE_STD_TYPE_BY_KV = (
     (400.0, '490-AL1/64-ST1A 380.0'),
 )
 
+#: pandapower's three-winding field names -> the spec's pair-named equivalents.
+_TRAFO3W_PANDAPOWER_NAMES = {
+    'vk_hv_percent': 'vk_hv_mv_percent', 'vk_mv_percent': 'vk_mv_lv_percent',
+    'vk_lv_percent': 'vk_hv_lv_percent', 'vkr_hv_percent': 'vkr_hv_mv_percent',
+    'vkr_mv_percent': 'vkr_mv_lv_percent', 'vkr_lv_percent': 'vkr_hv_lv_percent',
+}
+_TRAFO3W_PAIR_MEANING = {
+    'vk_hv_percent': 'HV-MV', 'vk_mv_percent': 'MV-LV', 'vk_lv_percent': 'HV-LV',
+    'vkr_hv_percent': 'HV-MV', 'vkr_mv_percent': 'MV-LV', 'vkr_lv_percent': 'HV-LV',
+}
+
 #: Accepted values for the spec's optional `layout` hint.
 _LAYOUTS = ('transmission', 'radial', 'auto')
 
 _ELEMENT_TABLES = (
-    'buses', 'external_grids', 'transformers', 'lines', 'loads',
+    'buses', 'external_grids', 'transformers', 'three_winding_transformers', 'lines', 'loads',
     'generators', 'static_generators', 'shunts', 'storage', 'switches',
 )
 
@@ -184,7 +195,8 @@ def build_network(spec):
     # pandapower row index -> spec id, per table. Switches resolve their element
     # through it, and results are reported back under the ids the caller wrote.
     ids = {table: {} for table in
-           ('bus', 'ext_grid', 'trafo', 'line', 'load', 'gen', 'sgen', 'shunt', 'storage', 'switch')}
+           ('bus', 'ext_grid', 'trafo', 'trafo3w', 'line', 'load', 'gen', 'sgen', 'shunt',
+            'storage', 'switch')}
 
     def record(table, idx, ident):
         ids[table][int(idx)] = ident
@@ -272,6 +284,76 @@ def build_network(spec):
             in_service=bool(row.get('in_service', True)),
         )
         record('trafo', idx, ident)
+
+    # --- three-winding transformers --------------------------------------
+    # Short-circuit voltages are named by winding pair. pandapower's own names
+    # mislead: its vk_mv_percent is MV-LV and its vk_lv_percent is HV-LV. Each is
+    # referred to the smaller rating of its pair, as pandapower does, so the
+    # two-winding rating rule supplies a default per pair.
+    for i, row in enumerate(_as_list(spec, 'three_winding_transformers', problems)):
+        ident = _ident(row, i, 'T3W', problems, used_ids)
+        where = f'three_winding_transformers[{i}] ({ident})'
+        hv = bus_of(row, 'hv_bus', where)
+        mv = bus_of(row, 'mv_bus', where)
+        lv = bus_of(row, 'lv_bus', where)
+        # pandapower's names would otherwise be ignored silently and the defaults
+        # used - and they are the names someone who knows pandapower will write.
+        for theirs, ours in _TRAFO3W_PANDAPOWER_NAMES.items():
+            if theirs in row:
+                problems.append(f'{where}: use {ours}, not pandapower\'s {theirs} '
+                                f'(which means {_TRAFO3W_PAIR_MEANING[theirs]})')
+        if 'shift_lv_degree' in row:
+            problems.append(f'{where}: shift_lv_degree is not supported - the Electrisim '
+                            f'canvas has no place to keep it, so the drawn transformer '
+                            f'would differ from the one checked')
+        if hv is None or mv is None or lv is None:
+            continue
+        if len({hv, mv, lv}) < 3:
+            problems.append(f'{where}: hv_bus, mv_bus and lv_bus must be three different '
+                            f'buses, got {hv}, {mv}, {lv}')
+            continue
+        if not bus_kv[hv] >= bus_kv[mv] >= bus_kv[lv]:
+            report.warn(
+                f'{ident}: winding voltages are not in HV >= MV >= LV order '
+                f'({hv} {bus_kv[hv]} kV, {mv} {bus_kv[mv]} kV, {lv} {bus_kv[lv]} kV) - '
+                f'the windings look swapped'
+            )
+        sn_hv = _num(row.get('sn_hv_mva'), 'sn_hv_mva', where, problems, default=40.0, positive=True)
+        sn_mv = _num(row.get('sn_mv_mva'), 'sn_mv_mva', where, problems, default=sn_hv, positive=True)
+        sn_lv = _num(row.get('sn_lv_mva'), 'sn_lv_mva', where, problems,
+                     default=round(sn_hv / 3.0, 3), positive=True)
+
+        def pair_vk(field, a, b):
+            return _num(row.get(field), field, where, problems,
+                        default=_vk_percent_for(min(a, b)), positive=True)
+
+        vk_hm = pair_vk('vk_hv_mv_percent', sn_hv, sn_mv)
+        vk_ml = pair_vk('vk_mv_lv_percent', sn_mv, sn_lv)
+        vk_hl = pair_vk('vk_hv_lv_percent', sn_hv, sn_lv)
+        idx = pp.create_transformer3w_from_parameters(
+            net, hv_bus=bus_index[hv], mv_bus=bus_index[mv], lv_bus=bus_index[lv],
+            name=str(row.get('name') or ident),
+            vn_hv_kv=_num(row.get('vn_hv_kv'), 'vn_hv_kv', where, problems,
+                          default=bus_kv[hv], positive=True),
+            vn_mv_kv=_num(row.get('vn_mv_kv'), 'vn_mv_kv', where, problems,
+                          default=bus_kv[mv], positive=True),
+            vn_lv_kv=_num(row.get('vn_lv_kv'), 'vn_lv_kv', where, problems,
+                          default=bus_kv[lv], positive=True),
+            sn_hv_mva=sn_hv, sn_mv_mva=sn_mv, sn_lv_mva=sn_lv,
+            vk_hv_percent=vk_hm, vk_mv_percent=vk_ml, vk_lv_percent=vk_hl,
+            vkr_hv_percent=_num(row.get('vkr_hv_mv_percent'), 'vkr_hv_mv_percent', where,
+                                problems, default=round(vk_hm / 25.0, 3)),
+            vkr_mv_percent=_num(row.get('vkr_mv_lv_percent'), 'vkr_mv_lv_percent', where,
+                                problems, default=round(vk_ml / 25.0, 3)),
+            vkr_lv_percent=_num(row.get('vkr_hv_lv_percent'), 'vkr_hv_lv_percent', where,
+                                problems, default=round(vk_hl / 25.0, 3)),
+            pfe_kw=_num(row.get('pfe_kw'), 'pfe_kw', where, problems, default=sn_hv * 0.6),
+            i0_percent=_num(row.get('i0_percent'), 'i0_percent', where, problems, default=0.1),
+            shift_mv_degree=_num(row.get('shift_mv_degree'), 'shift_mv_degree', where,
+                                 problems, default=0.0),
+            in_service=bool(row.get('in_service', True)),
+        )
+        record('trafo3w', idx, ident)
 
     # --- lines -----------------------------------------------------------
     for i, row in enumerate(_as_list(spec, 'lines', problems)):
@@ -406,17 +488,25 @@ def build_network(spec):
     # --- switches --------------------------------------------------------
     # The element is named by its spec id, never by its display name - a line
     # with id "L1" and name "Feeder cable" is switched as "L1".
+    # pandapower switch type -> (table, spec word, terminal columns)
+    switched = {
+        'l': ('line', 'line', ('from_bus', 'to_bus')),
+        't': ('trafo', 'transformer', ('hv_bus', 'lv_bus')),
+        't3': ('trafo3w', 'three-winding transformer', ('hv_bus', 'mv_bus', 'lv_bus')),
+    }
     by_id = {table: {ident: idx for idx, ident in ids[table].items()}
-             for table in ('line', 'trafo')}
+             for table, _, _ in switched.values()}
     for i, row in enumerate(_as_list(spec, 'switches', problems)):
         ident = _ident(row, i, 'Sw', problems, used_ids)
         where = f'switches[{i}] ({ident})'
         bus = bus_of(row, 'bus', where)
         et_raw = str(row.get('et') or row.get('element_type') or 'line').lower()
         et = {'line': 'l', 'l': 'l', 'trafo': 't', 'transformer': 't', 't': 't',
+              'three_winding_transformer': 't3', 'trafo3w': 't3', 't3': 't3',
               'bus': 'b', 'b': 'b'}.get(et_raw)
         if et is None:
-            problems.append(f'{where}: et={et_raw!r} must be one of line, transformer, bus')
+            problems.append(f'{where}: et={et_raw!r} must be one of line, transformer, '
+                            f'three_winding_transformer, bus')
             continue
         element = str(row.get('element') or '').strip()
         if bus is None:
@@ -431,22 +521,21 @@ def build_network(spec):
                 continue
             target = bus_index[element]
         else:
-            table = 'line' if et == 'l' else 'trafo'
+            table, word, ends = switched[et]
             if element not in by_id[table]:
                 known = ', '.join(sorted(by_id[table])) or '(none defined)'
                 problems.append(
-                    f'{where}: element={element!r} is not a {table} id. Defined: {known}')
+                    f'{where}: element={element!r} is not a {word} id. Defined: {known}')
                 continue
             target = by_id[table][element]
             # pandapower accepts a switch at any bus; it only means something at
             # one of the element's own terminals.
-            ends = ('from_bus', 'to_bus') if et == 'l' else ('hv_bus', 'lv_bus')
-            df = net.line if et == 'l' else net.trafo
+            df = net[table]
             terminals = {int(df.at[target, c]) for c in ends}
             if int(bus_index[bus]) not in terminals:
                 names = ', '.join(ids['bus'][t] for t in sorted(terminals))
                 problems.append(
-                    f'{where}: bus {bus!r} is not a terminal of {table} {element!r}; '
+                    f'{where}: bus {bus!r} is not a terminal of {word} {element!r}; '
                     f'a switch on it must sit at one of: {names}')
                 continue
         idx = pp.create_switch(net, bus=bus_index[bus], element=target, et=et,
@@ -465,7 +554,8 @@ def build_network(spec):
         )
 
     connected = set()
-    for table, cols in (('line', ('from_bus', 'to_bus')), ('trafo', ('hv_bus', 'lv_bus'))):
+    for table, cols in (('line', ('from_bus', 'to_bus')), ('trafo', ('hv_bus', 'lv_bus')),
+                        ('trafo3w', ('hv_bus', 'mv_bus', 'lv_bus'))):
         df = getattr(net, table)
         for col in cols:
             connected.update(int(v) for v in df[col].tolist())
@@ -484,6 +574,7 @@ def build_network(spec):
     report.layout = str(layout).lower() if layout is not None else None
     report.counts = {
         'bus': len(net.bus), 'line': len(net.line), 'trafo': len(net.trafo),
+        'trafo3w': len(net.trafo3w),
         'load': len(net.load), 'gen': len(net.gen), 'sgen': len(net.sgen),
         'ext_grid': len(net.ext_grid), 'shunt': len(net.shunt),
         'storage': len(net.storage), 'switch': len(net.switch),
@@ -556,6 +647,15 @@ def solve(net, vm_min_pu=0.95, vm_max_pu=1.05, max_loading_percent=100.0):
         'losses_mw': _r(row['pl_mw'], 5),
     } for idx, row in net.res_trafo.iterrows()]
 
+    trafos3w = [{
+        'id': ident('trafo3w', idx),
+        'loading_percent': _r(row['loading_percent'], 1),
+        'p_hv_mw': _r(row['p_hv_mw'], 4),
+        'p_mv_mw': _r(row['p_mv_mw'], 4),
+        'p_lv_mw': _r(row['p_lv_mw'], 4),
+        'losses_mw': _r(row['pl_mw'], 5),
+    } for idx, row in net.res_trafo3w.iterrows()]
+
     grids = [{
         'id': ident('ext_grid', idx),
         'p_mw': _r(row['p_mw'], 4),
@@ -570,13 +670,15 @@ def solve(net, vm_min_pu=0.95, vm_max_pu=1.05, max_loading_percent=100.0):
     ]
     overloads = [
         {'id': e['id'], 'kind': kind, 'loading_percent': e['loading_percent']}
-        for kind, rows in (('line', lines), ('transformer', trafos))
+        for kind, rows in (('line', lines), ('transformer', trafos),
+                           ('three-winding transformer', trafos3w))
         for e in rows
         if e['loading_percent'] is not None and e['loading_percent'] > max_loading_percent
     ]
 
     load_mw = float(net.res_load['p_mw'].sum()) if len(net.res_load) else 0.0
-    losses_mw = float(net.res_line['pl_mw'].sum() + net.res_trafo['pl_mw'].sum())
+    losses_mw = float(net.res_line['pl_mw'].sum() + net.res_trafo['pl_mw'].sum()
+                      + net.res_trafo3w['pl_mw'].sum())
     vms = [b['vm_pu'] for b in buses if b['vm_pu'] is not None]
 
     return {
@@ -595,5 +697,6 @@ def solve(net, vm_min_pu=0.95, vm_max_pu=1.05, max_loading_percent=100.0):
         'buses': buses,
         'lines': lines,
         'transformers': trafos,
+        'three_winding_transformers': trafos3w,
         'external_grids': grids,
     }

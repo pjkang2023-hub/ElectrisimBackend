@@ -155,6 +155,10 @@ def create_server(backend=None, bridge=None):
         report = dict(body['report'])
         spec_layout = report.pop('layout', None)
         chosen = layout or spec_layout or 'auto'
+        if chosen == 'auto' and (report.get('counts') or {}).get('trafo3w'):
+            # The radial layout cannot place three-winding transformers yet, and
+            # auto picks radial for small networks. Don't let it guess wrong.
+            chosen = 'transmission'
         job = bridge.submit(body['model'], chosen, title or spec.get('name'))
 
         if not job.wait(max(0.0, min(float(wait_seconds), 120.0))):

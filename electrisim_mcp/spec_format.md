@@ -13,7 +13,7 @@ Units: kV, MW, MVAr, MVA, km, per-unit (`_pu`), percent (`_percent`), degrees.
 | `name` | network name |
 | `frequency_hz` | 50 (default) or 60 |
 | `layout` | `transmission`, `radial` or `auto` - see Layout below |
-| `buses`, `external_grids`, `transformers`, `lines`, `loads`, `generators`, `static_generators`, `shunts`, `storage`, `switches` | lists of elements |
+| `buses`, `external_grids`, `transformers`, `three_winding_transformers`, `lines`, `loads`, `generators`, `static_generators`, `shunts`, `storage`, `switches` | lists of elements |
 
 Any other top-level key is rejected.
 
@@ -34,6 +34,28 @@ from the two buses), `vk_percent` (by rating: up to 2.5 MVA -> 4, up to 10 -> 6,
 up to 40 -> 12, above -> 14), `vkr_percent` (vk / 25), `pfe_kw` (0.6 x sn_mva),
 `i0_percent` (0.1), `shift_degree` (0), `name`, `in_service`.
 A warning is raised if `hv_bus` is the lower voltage.
+
+**three_winding_transformers** - one unit joining three voltage levels, e.g.
+110/20/10 kV with a tertiary for station supply.
+`id`, **`hv_bus`**, **`mv_bus`**, **`lv_bus`** (three different buses),
+`sn_hv_mva` (40), `sn_mv_mva` (= sn_hv_mva), `sn_lv_mva` (sn_hv_mva / 3),
+`vn_hv_kv` / `vn_mv_kv` / `vn_lv_kv` (from the three buses), `pfe_kw`
+(0.6 x sn_hv_mva), `i0_percent` (0.1), `shift_mv_degree` (0), `name`,
+`in_service`, and short-circuit voltages **named by winding pair**:
+
+| field | between | default |
+|---|---|---|
+| `vk_hv_mv_percent` | HV and MV | by the smaller rating of the pair, as for a two-winding transformer |
+| `vk_mv_lv_percent` | MV and LV | likewise |
+| `vk_hv_lv_percent` | HV and LV | likewise |
+| `vkr_hv_mv_percent`, `vkr_mv_lv_percent`, `vkr_hv_lv_percent` | the same pairs | vk / 25 |
+
+Each percentage is referred to the smaller rated power of its pair.
+pandapower's own names (`vk_hv_percent`, `vk_mv_percent`, `vk_lv_percent`)
+are refused, because they mislead: its `vk_mv_percent` is MV-LV and its
+`vk_lv_percent` is HV-LV. `shift_lv_degree` is refused too - the canvas cannot
+keep it, so the drawn transformer would differ from the one checked.
+A warning is raised unless the voltages run HV >= MV >= LV.
 
 **lines** - joins two buses at the **same** voltage; use a transformer between
 voltage levels.
@@ -66,9 +88,9 @@ negative injects - a capacitor bank), `p_mw` (0), `name`, `in_service`.
 `max_e_mwh` (1.0), `name`, `in_service`.
 
 **switches** - `id`, **`bus`**, **`element`**, `et` (`line` default,
-`transformer`, or `bus`), `closed` (true), `name`.
-- `et: line` / `transformer`: `element` is that line's or transformer's id, and
-  `bus` must be one of its two terminals.
+`transformer`, `three_winding_transformer`, or `bus`), `closed` (true), `name`.
+- `et: line` / `transformer` / `three_winding_transformer`: `element` is that
+  element's id, and `bus` must be one of its terminals.
 - `et: bus`: a bus coupler; `element` is the other bus's id.
 
 ## Layout
@@ -79,6 +101,11 @@ negative injects - a capacitor bank), `p_mw` (0), `name`, `in_service`.
   columns below, machines at the feeder ends.
 - `auto` (default) - Electrisim guesses the way the import dialog's "Other"
   button does: more than 60 buses or many loops means transmission, else radial.
+  A network with a three-winding transformer always gets transmission.
+
+The radial layout cannot place three-winding transformers yet. Asked for
+explicitly, it draws them, but stacks the buses below them in one column, and
+`draw_diagram` warns and names those buses.
 
 ## Example
 
