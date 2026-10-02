@@ -337,6 +337,18 @@ IMPORTER_TRAFO3W = [
     'shift_mv_degree', 'tap_side', 'tap_neutral', 'tap_min', 'tap_max', 'tap_step_percent',
     'tap_step_degree', 'tap_pos', 'tap_at_star_point', 'in_service',
 ]
+#: Static generators came through in pandapower's order, with min_q_mvar and
+#: max_q_mvar where the importer reads sn_mva and scaling: every imported unit
+#: drew with scaling "null" and type "1". Shunts read in_service from
+#: pandapower's characteristic-table column.
+IMPORTER_SGEN = [
+    'name', 'bus', 'p_mw', 'q_mvar', 'sn_mva', 'scaling', 'in_service', 'type', 'current_source',
+]
+IMPORTER_SHUNT = ['bus', 'name', 'q_mvar', 'p_mw', 'vn_kv', 'step', 'max_step', 'in_service']
+IMPORTER_STORAGE = [
+    'name', 'bus', 'p_mw', 'q_mvar', 'sn_mva', 'soc_percent', 'min_e_mwh', 'max_e_mwh',
+    'scaling', 'in_service', 'type',
+]
 
 
 def rows_as_the_importer_reads(model, table, positions):
@@ -360,6 +372,24 @@ def test_transformer_rows_line_up_with_the_importer(client):
     assert (t3['vn_hv_kv'], t3['vn_mv_kv'], t3['vn_lv_kv']) == (110.0, 20.0, 10.0)
     assert t3['shift_mv_degree'] == 0.0
     assert t3['in_service'] is True
+
+
+def test_injection_rows_line_up_with_the_importer(client):
+    spec = substation()
+    spec['shunts'] = [{'id': 'CAP', 'bus': 'F1', 'q_mvar': -1.5}]
+    spec['storage'] = [{'id': 'BESS', 'bus': 'F2', 'p_mw': 0.2, 'max_e_mwh': 0.8}]
+    model = client.post('/build-model', json={'spec': spec}).get_json()['model']
+
+    (pv,) = rows_as_the_importer_reads(model, 'sgen', IMPORTER_SGEN)
+    assert (pv['name'], pv['bus'], pv['p_mw'], pv['q_mvar']) == ('PV', 3, 1.5, 0.0)
+    assert (pv['scaling'], pv['in_service'], pv['type']) == (1.0, True, 'wye')
+
+    (cap,) = rows_as_the_importer_reads(model, 'shunt', IMPORTER_SHUNT)
+    assert (cap['bus'], cap['name'], cap['q_mvar'], cap['in_service']) == (2, 'CAP', -1.5, True)
+
+    (bess,) = rows_as_the_importer_reads(model, 'storage', IMPORTER_STORAGE)
+    assert (bess['name'], bess['bus'], bess['p_mw'], bess['max_e_mwh']) == ('BESS', 3, 0.2, 0.8)
+    assert (bess['scaling'], bess['in_service']) == (1.0, True)
 
 
 def test_endpoint_accepts_a_bare_spec(client):

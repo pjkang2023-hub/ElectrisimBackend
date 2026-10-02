@@ -1519,6 +1519,57 @@ def pandapower_net_to_json(net):
             ])
         return rows
 
+    def normalize_sgen_rows():
+        # The importer reads sgen rows by position. pandapower's own column order
+        # has min_q_mvar / max_q_mvar after q_mvar, which shifted sn_mva, scaling,
+        # in_service and type each onto the wrong field.
+        df = net.sgen
+        if df.empty:
+            return []
+        rows = []
+        for idx in df.index:
+            r = df.loc[idx]
+            nm = r['name'] if 'name' in df.columns else None
+            if _is_blank_name(nm):
+                nm = f'Sgen_{idx}'
+            rows.append([
+                nm,
+                _pos_bus(r['bus']),
+                _scalar(r['p_mw']),
+                _scalar(r['q_mvar']),
+                _scalar(r['sn_mva']) if 'sn_mva' in df.columns else None,
+                _scalar(r['scaling']) if 'scaling' in df.columns else 1.0,
+                bool(_scalar(r['in_service'])) if r.get('in_service') is not None else True,
+                _scalar(r['type']) if r.get('type') is not None else 'wye',
+                bool(_scalar(r['current_source'])) if r.get('current_source') is not None else True,
+            ])
+        return rows
+
+    def normalize_shunt_rows():
+        # Importer order: bus, name, q_mvar, p_mw, vn_kv, step, max_step,
+        # in_service. pandapower 3.x puts its characteristic-table columns
+        # before in_service.
+        df = net.shunt
+        if df.empty:
+            return []
+        rows = []
+        for idx in df.index:
+            r = df.loc[idx]
+            nm = r['name'] if 'name' in df.columns else None
+            if _is_blank_name(nm):
+                nm = f'Shunt_{idx}'
+            rows.append([
+                _pos_bus(r['bus']),
+                nm,
+                _scalar(r['q_mvar']),
+                _scalar(r['p_mw']),
+                _scalar(r['vn_kv']),
+                _scalar(r['step']),
+                _scalar(r['max_step']),
+                bool(_scalar(r['in_service'])) if r.get('in_service') is not None else True,
+            ])
+        return rows
+
     def build_electrisim_import_sidecar():
         """Extra SC / breaker fields keyed by element name for frontend import."""
         sidecar = {'switch': {}, 'gen': {}, 'sgen': {}, 'storage': {}, 'trafo': {}}
@@ -1798,7 +1849,7 @@ def pandapower_net_to_json(net):
             },
             "sgen": {
                 "_object": json.dumps({
-                    "data": export_element_rows(net.sgen) if hasattr(net, 'sgen') and not net.sgen.empty else []
+                    "data": normalize_sgen_rows() if hasattr(net, 'sgen') else []
                 })
             },
             "asymmetric_sgen": {
@@ -1818,7 +1869,7 @@ def pandapower_net_to_json(net):
             },
             "shunt": {
                 "_object": json.dumps({
-                    "data": export_element_rows(net.shunt) if hasattr(net, 'shunt') and not net.shunt.empty else []
+                    "data": normalize_shunt_rows() if hasattr(net, 'shunt') else []
                 })
             },
             "load": {
