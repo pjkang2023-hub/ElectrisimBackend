@@ -107,7 +107,8 @@
   "tap_step_degree": "0",
   "tap_pos": "0",
   "tap_phase_shifter": "false",
-  "in_service": true
+  "in_service": true,
+  "userFriendlyName": "Transformer B 110/20"
  },
  "12": {
   "typ": "Transformer",
@@ -131,7 +132,8 @@
   "tap_step_degree": "0",
   "tap_pos": "0",
   "tap_phase_shifter": "false",
-  "in_service": true
+  "in_service": true,
+  "userFriendlyName": "T_LV1"
  },
  "13": {
   "typ": "Transformer",
@@ -155,7 +157,8 @@
   "tap_step_degree": "0",
   "tap_pos": "0",
   "tap_phase_shifter": "false",
-  "in_service": true
+  "in_service": true,
+  "userFriendlyName": "Substation LV2"
  },
  "14": {
   "typ": "Line",
@@ -173,10 +176,11 @@
   "max_i_ka": "0.47",
   "type": "ol",
   "in_service": true,
-  "r0_ohm_per_km": "0.1",
-  "x0_ohm_per_km": "0.1",
-  "c0_nf_per_km": "0.1",
-  "endtemp_degree": "0"
+  "r0_ohm_per_km": "0.35",
+  "x0_ohm_per_km": "1.25",
+  "c0_nf_per_km": "5",
+  "endtemp_degree": "0",
+  "userFriendlyName": "110 kV overhead line"
  },
  "15": {
   "typ": "Line",
@@ -194,10 +198,11 @@
   "max_i_ka": "0.421",
   "type": "cs",
   "in_service": true,
-  "r0_ohm_per_km": "0.1",
-  "x0_ohm_per_km": "0.1",
-  "c0_nf_per_km": "0.1",
-  "endtemp_degree": "0"
+  "r0_ohm_per_km": "0.488",
+  "x0_ohm_per_km": "0.336",
+  "c0_nf_per_km": "304",
+  "endtemp_degree": "0",
+  "userFriendlyName": "L1"
  },
  "16": {
   "typ": "Line",
@@ -215,10 +220,11 @@
   "max_i_ka": "0.42",
   "type": "cs",
   "in_service": true,
-  "r0_ohm_per_km": "0.1",
-  "x0_ohm_per_km": "0.1",
-  "c0_nf_per_km": "0.1",
-  "endtemp_degree": "0"
+  "r0_ohm_per_km": "0.5",
+  "x0_ohm_per_km": "0.336",
+  "c0_nf_per_km": "300",
+  "endtemp_degree": "0",
+  "userFriendlyName": "Cable with given impedance"
  },
  "17": {
   "typ": "Line",
@@ -236,10 +242,11 @@
   "max_i_ka": "0.362",
   "type": "cs",
   "in_service": true,
-  "r0_ohm_per_km": "0.1",
-  "x0_ohm_per_km": "0.1",
-  "c0_nf_per_km": "0.1",
-  "endtemp_degree": "0"
+  "r0_ohm_per_km": "0.644",
+  "x0_ohm_per_km": "0.351",
+  "c0_nf_per_km": "273",
+  "endtemp_degree": "0",
+  "userFriendlyName": "L3"
  },
  "18": {
   "typ": "Line",
@@ -257,10 +264,11 @@
   "max_i_ka": "0.421",
   "type": "cs",
   "in_service": true,
-  "r0_ohm_per_km": "0.1",
-  "x0_ohm_per_km": "0.1",
-  "c0_nf_per_km": "0.1",
-  "endtemp_degree": "0"
+  "r0_ohm_per_km": "0.488",
+  "x0_ohm_per_km": "0.336",
+  "c0_nf_per_km": "304",
+  "endtemp_degree": "0",
+  "userFriendlyName": "L4"
  },
  "19": {
   "typ": "Switch",
@@ -320,16 +328,17 @@
   "vm_pu": 1.02,
   "va_degree": 0,
   "s_sc_max_mva": 5000,
-  "s_sc_min_mva": 0,
+  "s_sc_min_mva": 5000,
   "rx_max": 0.1,
-  "rx_min": 0,
-  "r0x0_max": 0,
-  "x0x_max": 0,
-  "r0x0_min": 0,
-  "x0x_min": 0,
+  "rx_min": 0.1,
+  "r0x0_max": 0.2,
+  "x0x_max": 2.5,
+  "r0x0_min": 0.2,
+  "x0x_min": 2.5,
   "in_service": true,
   "spectrum": "defaultvsource",
-  "spectrum_csv": ""
+  "spectrum_csv": "",
+  "userFriendlyName": "Utility 110 kV"
  },
  "25": {
   "typ": "Generator",
@@ -356,7 +365,8 @@
   "spectrum": "defaultgen",
   "spectrum_csv": "",
   "Xdpp": "0.20",
-  "XRdp": "20"
+  "XRdp": "20",
+  "userFriendlyName": "CHP plant"
  },
  "26": {
   "typ": "Static Generator",
@@ -447,7 +457,7 @@
   "vkr_lv_percent": "0.48",
   "pfe_kw": "24",
   "i0_percent": "0.1",
-  "vector_group": "YNyn0yn0",
+  "vector_group": "YNynd",
   "shift_mv_degree": "0",
   "shift_lv_degree": "0",
   "tap_side": "hv",
@@ -457,7 +467,8 @@
   "tap_step_percent": "0",
   "tap_pos": "0",
   "tap_changer_type": "Ratio",
-  "tap_step_degree": 0
+  "tap_step_degree": 0,
+  "userFriendlyName": "Main transformer 110/20/10"
  },
  "29": {
   "typ": "Shunt Reactor",
@@ -479,7 +490,8 @@
   "line_flow_reference_line_id": "",
   "line_flow_step_table_json": "[]",
   "line_flow_p_use_abs": "true",
-  "line_flow_p_reference": "p_from_mw"
+  "line_flow_p_reference": "p_from_mw",
+  "userFriendlyName": "Station reactor"
  },
  "30": {
   "typ": "Capacitor",
@@ -496,7 +508,8 @@
   "step_max": 1,
   "step_pos": 1,
   "step_phase_shifter": false,
-  "in_service": true
+  "in_service": true,
+  "userFriendlyName": "Capacitor bank"
  },
  "31": {
   "typ": "Load",
@@ -524,7 +537,8 @@
   "pctSeriesRL": "100",
   "conn": "wye",
   "puXharm": "0.0",
-  "XRharm": "6.0"
+  "XRharm": "6.0",
+  "userFriendlyName": "Town"
  },
  "32": {
   "typ": "Load",
@@ -552,7 +566,8 @@
   "pctSeriesRL": "100",
   "conn": "wye",
   "puXharm": "0.0",
-  "XRharm": "6.0"
+  "XRharm": "6.0",
+  "userFriendlyName": "Industrial park"
  },
  "33": {
   "typ": "Load",
@@ -580,7 +595,8 @@
   "pctSeriesRL": "100",
   "conn": "wye",
   "puXharm": "0.0",
-  "XRharm": "6.0"
+  "XRharm": "6.0",
+  "userFriendlyName": "LD_LV1"
  },
  "34": {
   "typ": "Load",
@@ -608,7 +624,8 @@
   "pctSeriesRL": "100",
   "conn": "wye",
   "puXharm": "0.0",
-  "XRharm": "6.0"
+  "XRharm": "6.0",
+  "userFriendlyName": "LD_LV2"
  },
  "35": {
   "typ": "Load",
@@ -636,7 +653,8 @@
   "pctSeriesRL": "100",
   "conn": "wye",
   "puXharm": "0.0",
-  "XRharm": "6.0"
+  "XRharm": "6.0",
+  "userFriendlyName": "Station auxiliaries"
  },
  "36": {
   "typ": "Storage",
@@ -691,6 +709,7 @@
   "curve_style": "straightLineYValues",
   "q_capability_curve_json": "[{\"p_mw\":-0.1,\"q_min_mvar\":0,\"q_max_mvar\":0},{\"p_mw\":-0.09375,\"q_min_mvar\":-0.034799,\"q_max_mvar\":0.034799},{\"p_mw\":-0.0875,\"q_min_mvar\":-0.048412,\"q_max_mvar\":0.048412},{\"p_mw\":-0.08125,\"q_min_mvar\":-0.058296,\"q_max_mvar\":0.058296},{\"p_mw\":-0.075,\"q_min_mvar\":-0.066144,\"q_max_mvar\":0.066144},{\"p_mw\":-0.06875,\"q_min_mvar\":-0.072618,\"q_max_mvar\":0.072618},{\"p_mw\":-0.0625,\"q_min_mvar\":-0.078062,\"q_max_mvar\":0.078062},{\"p_mw\":-0.05625,\"q_min_mvar\":-0.08268,\"q_max_mvar\":0.08268},{\"p_mw\":-0.05,\"q_min_mvar\":-0.086603,\"q_max_mvar\":0.086603},{\"p_mw\":-0.04375,\"q_min_mvar\":-0.089922,\"q_max_mvar\":0.089922},{\"p_mw\":-0.0375,\"q_min_mvar\":-0.092702,\"q_max_mvar\":0.092702},{\"p_mw\":-0.03125,\"q_min_mvar\":-0.094992,\"q_max_mvar\":0.094992},{\"p_mw\":-0.025,\"q_min_mvar\":-0.096825,\"q_max_mvar\":0.096825},{\"p_mw\":-0.01875,\"q_min_mvar\":-0.098226,\"q_max_mvar\":0.098226},{\"p_mw\":-0.0125,\"q_min_mvar\":-0.099216,\"q_max_mvar\":0.099216},{\"p_mw\":-0.00625,\"q_min_mvar\":-0.099804,\"q_max_mvar\":0.099804},{\"p_mw\":0,\"q_min_mvar\":-0.1,\"q_max_mvar\":0.1},{\"p_mw\":0.00625,\"q_min_mvar\":-0.099804,\"q_max_mvar\":0.099804},{\"p_mw\":0.0125,\"q_min_mvar\":-0.099216,\"q_max_mvar\":0.099216},{\"p_mw\":0.01875,\"q_min_mvar\":-0.098226,\"q_max_mvar\":0.098226},{\"p_mw\":0.025,\"q_min_mvar\":-0.096825,\"q_max_mvar\":0.096825},{\"p_mw\":0.03125,\"q_min_mvar\":-0.094992,\"q_max_mvar\":0.094992},{\"p_mw\":0.0375,\"q_min_mvar\":-0.092702,\"q_max_mvar\":0.092702},{\"p_mw\":0.04375,\"q_min_mvar\":-0.089922,\"q_max_mvar\":0.089922},{\"p_mw\":0.05,\"q_min_mvar\":-0.086603,\"q_max_mvar\":0.086603},{\"p_mw\":0.05625,\"q_min_mvar\":-0.08268,\"q_max_mvar\":0.08268},{\"p_mw\":0.0625,\"q_min_mvar\":-0.078062,\"q_max_mvar\":0.078062},{\"p_mw\":0.06875,\"q_min_mvar\":-0.072618,\"q_max_mvar\":0.072618},{\"p_mw\":0.075,\"q_min_mvar\":-0.066144,\"q_max_mvar\":0.066144},{\"p_mw\":0.08125,\"q_min_mvar\":-0.058296,\"q_max_mvar\":0.058296},{\"p_mw\":0.0875,\"q_min_mvar\":-0.048412,\"q_max_mvar\":0.048412},{\"p_mw\":0.09375,\"q_min_mvar\":-0.034799,\"q_max_mvar\":0.034799},{\"p_mw\":0.1,\"q_min_mvar\":0,\"q_max_mvar\":0}]",
   "q_capability_preset": "pcs_circle",
-  "q_setpoint_mode": "manual"
+  "q_setpoint_mode": "manual",
+  "userFriendlyName": "Battery"
  }
 }

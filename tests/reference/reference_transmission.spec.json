@@ -16,6 +16,7 @@
   ],
   "external_grids": [
     {"id": "Grid", "bus": "HV", "vm_pu": 1.02, "s_sc_max_mva": 5000, "rx_max": 0.1,
+     "x0x_max": 2.5, "r0x0_max": 0.2,
      "name": "Utility 110 kV"}
   ],
   "three_winding_transformers": [
@@ -25,13 +26,15 @@
   ],
   "transformers": [
     {"id": "T2", "hv_bus": "HV2", "lv_bus": "MV2", "sn_mva": 25,
-     "vk_percent": 12, "vkr_percent": 0.41, "name": "Transformer B 110/20"},
+     "vk_percent": 12, "vkr_percent": 0.41, "vector_group": "YNd5",
+     "name": "Transformer B 110/20"},
     {"id": "T_LV1", "hv_bus": "F1", "lv_bus": "LV1", "sn_mva": 0.63},
     {"id": "T_LV2", "hv_bus": "F2", "lv_bus": "LV2", "sn_mva": 1.0, "vk_percent": 6,
      "name": "Substation LV2"}
   ],
   "lines": [
     {"id": "L_HV", "from_bus": "HV", "to_bus": "HV2", "length_km": 12,
+     "r0_ohm_per_km": 0.35, "x0_ohm_per_km": 1.25, "c0_nf_per_km": 5.0,
      "name": "110 kV overhead line"},
     {"id": "L1", "from_bus": "MV1", "to_bus": "F1", "length_km": 3},
     {"id": "L2", "from_bus": "MV2", "to_bus": "F2", "length_km": 2.5,
