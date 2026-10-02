@@ -57,6 +57,7 @@ import opendss_electrisim
 import electrisim_auth
 from electrisim_auth import require_auth, authenticated_email
 import electrisim_ops
+import electrisim_sld
 import opender_electrisim
 import arcflash_electrisim
 import andes_electrisim
@@ -1889,6 +1890,57 @@ def import_pandapower():
         error_details = traceback.format_exc()
         print(f"Error in import_pandapower: {error_details}")
         return jsonify({'error': str(e), 'details': error_details}), 400
+
+
+@app.route('/build-model', methods=['POST'])
+@require_auth
+def build_model():
+    """
+    Build a network from a declarative single-line-diagram spec and return the
+    model JSON the canvas consumes.
+
+    This is the structured counterpart to /import-pandapower. That route takes a
+    Python script and exec()s it, which is why it is disabled by default; this
+    one takes data and validates it field by field, so it is safe to leave on.
+    """
+    payload = request.get_json(force=True, silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({'error': 'Request body must be a JSON object holding the spec.'}), 400
+
+    # Accept either {"spec": {...}, options} or the spec itself.
+    wrapped = isinstance(payload.get('spec'), dict)
+    spec = payload['spec'] if wrapped else payload
+    options = payload if wrapped else {}
+
+    try:
+        net, report = electrisim_sld.build_network(spec)
+    except electrisim_sld.SpecError as exc:
+        # Every problem at once: the caller is usually generating the spec and
+        # can fix them in one pass rather than one round trip each.
+        return jsonify({
+            'error': 'The spec could not be built.',
+            'problems': exc.problems,
+        }), 400
+    except Exception as exc:  # pragma: no cover - unexpected pandapower failure
+        return jsonify({'error': f'Could not build the network: {exc}'}), 400
+
+    body = {'report': report}
+    if options.get('include_model', True):
+        # Serialised before solving, so result tables never reach the diagram.
+        body['model'] = pandapower_net_to_json(net)
+    if options.get('run_power_flow'):
+        def _limit(key, default):
+            try:
+                return float(options.get(key, default))
+            except (TypeError, ValueError):
+                return default
+        body['power_flow'] = electrisim_sld.solve(
+            net,
+            vm_min_pu=_limit('vm_min_pu', 0.95),
+            vm_max_pu=_limit('vm_max_pu', 1.05),
+            max_loading_percent=_limit('max_loading_percent', 100.0),
+        )
+    return jsonify(body), 200
 
 
 def _infer_opendss_voltage_bases(dss, dss_text=''):
