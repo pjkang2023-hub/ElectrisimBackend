@@ -173,18 +173,10 @@ def test_payload_carries_case_frequency():
         assert sent == float(net.f_hz), f'{name}: sent {sent} Hz for a {net.f_hz} Hz network'
 
 
-@pytest.mark.xfail(
-    reason='Known backend bug: safe_int() returns its default (1) for any '
-           'decimal-formatted string, so a tap field arriving as "0.0" or "2.0" '
-           'silently becomes 1 and shifts the transformer ratio. '
-           'Fix: int(float(value)) in pandapower_electrisim.safe_int, and a '
-           'tap_neutral default of 0 rather than 1. Remove this xfail with the fix.',
-    strict=True,
-)
 def test_safe_int_accepts_decimal_strings():
     """
-    Found by this suite: case39 transformers have tap_neutral = 0, which came
-    back as 1 and moved every bus voltage.
+    Regression test. Found by this suite: case39 transformers have
+    tap_neutral = 0, which came back as 1 and moved every bus voltage.
 
     The browser happens to send '0' for these today, so this is latent rather
     than live - but any value that reaches the payload as '2.0' (an imported
@@ -195,3 +187,25 @@ def test_safe_int_accepts_decimal_strings():
     assert pe.safe_int('0.0') == 0
     assert pe.safe_int('2.0') == 2
     assert pe.safe_int('-1.0') == -1
+
+    # The other half of the same bug: an absent tap field fell back to 1.
+    # Every tap call site relies on this default, so it has to be 0.
+    assert pe.safe_int('') == 0
+    assert pe.safe_int(None) == 0
+    assert pe.safe_int('null') == 0
+    assert pe.safe_int('None') == 0
+
+    # An explicit default still wins - 'parallel' and the shunt control
+    # increment pass 1 and must keep getting it.
+    assert pe.safe_int('', 1) == 1
+    assert pe.safe_int('rubbish', 1) == 1
+
+    # Values that already converted keep converting, exactly.
+    assert pe.safe_int(3) == 3
+    assert pe.safe_int('-4') == -4
+    assert pe.safe_int(10 ** 20) == 10 ** 20
+
+    # Nothing numeric to read still falls back rather than raising.
+    assert pe.safe_int('rubbish') == 0
+    assert pe.safe_int(float('nan')) == 0
+    assert pe.safe_int(float('inf')) == 0

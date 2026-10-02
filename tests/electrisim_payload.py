@@ -39,9 +39,9 @@ def _i(value, default=''):
     """
     Integer-valued field, rendered without a decimal point.
 
-    The backend parses tap fields with safe_int(), which is int(value) with a
-    fallback of 1 - so '0.0' becomes 1 rather than 0. The browser sends '0' for
-    these, so the tests must too. See test_safe_int_decimal_strings.
+    The browser sends '0' rather than '0.0' for tap fields, so the tests do too
+    and the goldens hold what a real client produces. safe_int() reads either
+    form now; see test_safe_int_accepts_decimal_strings.
     """
     text = _s(value, '')
     if text == '':

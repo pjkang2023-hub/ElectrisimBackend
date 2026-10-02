@@ -9969,13 +9969,27 @@ def safe_float(value, default=0.0):
     except (ValueError, TypeError):
         return default
 
-def safe_int(value, default=1):
-    """Convert value to int with default fallback. Handles 'null', 'None', empty string."""
+def safe_int(value, default=0):
+    """Convert value to int with default fallback. Handles 'null', 'None', empty string.
+
+    A decimal-formatted integer ('0.0', '2.0') is parsed as the number it is.
+    int() rejects those outright, so they used to fall through to the default -
+    and the default was 1, which silently turned a tap position of 0 into 1 and
+    shifted the transformer ratio. Values that reach the payload that way come
+    from imported models, grid cells and JSON round-trips of floats.
+
+    int() is still tried first so anything that already converted exactly keeps
+    doing so, rather than losing precision through float.
+    """
     if value is None or value == 'null' or value == 'None' or value == '':
         return default
     try:
         return int(value)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
+        pass
+    try:
+        return int(float(value))
+    except (ValueError, TypeError, OverflowError):
         return default
 
 def parse_vector_group(vector_group):
