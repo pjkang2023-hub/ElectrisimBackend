@@ -7717,6 +7717,33 @@ def _sc_missing_zero_sequence_data(net):
     return out
 
 
+def _sc_missing_min_case_data(net):
+    """
+    What a minimum-case short circuit needs and the network lacks: each line's
+    end-of-fault temperature, to which IEC 60909-0 raises its resistance, and
+    each grid's minimum fault level. The canvas stores 0 for both; at 0 degC
+    the lines come out 8 % less resistive than at 20 degC, so the "minimum"
+    currents were higher than they should be.
+    """
+    def positive(df, idx, column):
+        try:
+            value = float(df.at[idx, column])
+        except (TypeError, ValueError, KeyError):
+            return False
+        return value == value and value > 0
+
+    out = []
+    for idx in net.line.index:
+        if bool(net.line.at[idx, 'in_service']) and not positive(net.line, idx, 'endtemp_degree'):
+            out.append(f"line '{get_element_display_name(net, 'line', idx)}' has no endtemp_degree "
+                       f"(conductor temperature at the end of the fault, typically 80-160 degC)")
+    for idx in net.ext_grid.index:
+        if bool(net.ext_grid.at[idx, 'in_service']) and not positive(net.ext_grid, idx, 's_sc_min_mva'):
+            out.append(f"external grid '{get_element_display_name(net, 'ext_grid', idx)}' has no "
+                       f"s_sc_min_mva (minimum fault level)")
+    return out
+
+
 def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=None):
     
     # Add diagnostic prints
@@ -7821,6 +7848,8 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
         missing_machine_data = _sc_missing_machine_data(net)
         if fault_type == '1ph':
             missing_machine_data += _sc_missing_zero_sequence_data(net)
+        if fault_location == 'min':
+            missing_machine_data += _sc_missing_min_case_data(net)
         if missing_machine_data:
             raise ValueError(
                 'data is missing - '
