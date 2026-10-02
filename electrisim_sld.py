@@ -31,6 +31,7 @@ documented for callers in electrisim_mcp/spec_format.md.
 """
 
 import math
+import re
 
 import pandapower as pp
 
@@ -113,6 +114,30 @@ def _line_std_type_for(vn_kv):
         if vn_kv <= limit:
             return std
     return _LINE_STD_TYPE_BY_KV[-1][1]
+
+
+def _vector_group(value, default):
+    """A vector group as pandapower's short circuit names it: "Dyn5" -> "Dyn"."""
+    return re.sub(r'\d+', '', str(value or default)) or default
+
+
+def _trafo3w_zero_sequence(row, where, problems, vk_hm, vk_ml, vk_hl):
+    """
+    pandapower's zero-sequence short-circuit voltages for a three-winding
+    transformer, named by winding pair in the spec as the positive-sequence
+    ones are. Each defaults to its positive-sequence value - the rule pandapower
+    applies to two-winding transformers.
+    """
+    out = {}
+    for pair, theirs, vk in (('hv_mv', 'hv', vk_hm), ('mv_lv', 'mv', vk_ml), ('hv_lv', 'lv', vk_hl)):
+        # Already checked, and reported, with the positive-sequence values.
+        vkr = _num(row.get(f'vkr_{pair}_percent'), f'vkr_{pair}_percent', where, [],
+                   default=round(vk / 25.0, 3) if vk is not None else None)
+        out[f'vk0_{theirs}_percent'] = _num(row.get(f'vk0_{pair}_percent'), f'vk0_{pair}_percent',
+                                            where, problems, default=vk, positive=True)
+        out[f'vkr0_{theirs}_percent'] = _num(row.get(f'vkr0_{pair}_percent'), f'vkr0_{pair}_percent',
+                                             where, problems, default=vkr)
+    return out
 
 
 def _num(value, field, where, problems, default=None, positive=False):
@@ -242,12 +267,23 @@ def build_network(spec):
         bus = bus_of(row, 'bus', where)
         if bus is None:
             continue
+        s_sc_max = _num(row.get('s_sc_max_mva'), 's_sc_max_mva', where, problems, default=None)
+        rx_max = _num(row.get('rx_max'), 'rx_max', where, problems, default=None)
         idx = pp.create_ext_grid(
             net, bus=bus_index[bus], name=str(row.get('name') or ident),
             vm_pu=_num(row.get('vm_pu'), 'vm_pu', where, problems, default=1.0, positive=True),
             va_degree=_num(row.get('va_degree'), 'va_degree', where, problems, default=0.0),
-            s_sc_max_mva=_num(row.get('s_sc_max_mva'), 's_sc_max_mva', where, problems, default=None),
-            rx_max=_num(row.get('rx_max'), 'rx_max', where, problems, default=None),
+            s_sc_max_mva=s_sc_max, rx_max=rx_max,
+            # A minimum-case study needs its own fault level; until one is given
+            # it is the maximum, so the study runs rather than failing.
+            s_sc_min_mva=_num(row.get('s_sc_min_mva'), 's_sc_min_mva', where, problems,
+                              default=s_sc_max),
+            rx_min=_num(row.get('rx_min'), 'rx_min', where, problems, default=rx_max),
+            # Zero sequence, for earth faults: X0/X and R0/X0 of the grid. A
+            # grid without them is a zero zero-sequence impedance, and a
+            # single-phase fault fails on it.
+            x0x_max=_num(row.get('x0x_max'), 'x0x_max', where, problems, default=1.0, positive=True),
+            r0x0_max=_num(row.get('r0x0_max'), 'r0x0_max', where, problems, default=0.1),
         )
         record('ext_grid', idx, ident)
 
@@ -267,6 +303,8 @@ def build_network(spec):
         sn_mva = _num(row.get('sn_mva'), 'sn_mva', where, problems, default=25.0, positive=True)
         vk = _num(row.get('vk_percent'), 'vk_percent', where, problems,
                   default=_vk_percent_for(sn_mva), positive=True)
+        vkr = _num(row.get('vkr_percent'), 'vkr_percent', where, problems,
+                   default=round(vk / 25.0, 3) if vk is not None else None)
         idx = pp.create_transformer_from_parameters(
             net, hv_bus=bus_index[hv], lv_bus=bus_index[lv],
             name=str(row.get('name') or ident),
@@ -276,11 +314,20 @@ def build_network(spec):
             vn_lv_kv=_num(row.get('vn_lv_kv'), 'vn_lv_kv', where, problems,
                           default=bus_kv[lv], positive=True),
             vk_percent=vk,
-            vkr_percent=_num(row.get('vkr_percent'), 'vkr_percent', where, problems,
-                             default=round(vk / 25.0, 3)),
+            vkr_percent=vkr,
             pfe_kw=_num(row.get('pfe_kw'), 'pfe_kw', where, problems, default=sn_mva * 0.6),
             i0_percent=_num(row.get('i0_percent'), 'i0_percent', where, problems, default=0.1),
             shift_degree=_num(row.get('shift_degree'), 'shift_degree', where, problems, default=0.0),
+            # Zero sequence, for earth faults.
+            vector_group=_vector_group(row.get('vector_group'), 'Dyn'),
+            vk0_percent=_num(row.get('vk0_percent'), 'vk0_percent', where, problems,
+                             default=vk, positive=True),
+            vkr0_percent=_num(row.get('vkr0_percent'), 'vkr0_percent', where, problems,
+                              default=vkr),
+            mag0_percent=_num(row.get('mag0_percent'), 'mag0_percent', where, problems, default=100.0),
+            mag0_rx=_num(row.get('mag0_rx'), 'mag0_rx', where, problems, default=0.0),
+            si0_hv_partial=_num(row.get('si0_hv_partial'), 'si0_hv_partial', where, problems,
+                                default=0.9),
             in_service=bool(row.get('in_service', True)),
         )
         record('trafo', idx, ident)
@@ -351,6 +398,11 @@ def build_network(spec):
             i0_percent=_num(row.get('i0_percent'), 'i0_percent', where, problems, default=0.1),
             shift_mv_degree=_num(row.get('shift_mv_degree'), 'shift_mv_degree', where,
                                  problems, default=0.0),
+            # Zero sequence, for earth faults. YNynd - a star-star unit with a
+            # delta tertiary - is the usual 110/20/10 kV arrangement and one
+            # pandapower can fault; it cannot fault YNyn0yn0, the canvas default.
+            vector_group=_vector_group(row.get('vector_group'), 'YNynd'),
+            **_trafo3w_zero_sequence(row, where, problems, vk_hm, vk_ml, vk_hl),
             in_service=bool(row.get('in_service', True)),
         )
         record('trafo3w', idx, ident)
@@ -394,6 +446,15 @@ def build_network(spec):
                     f'Give r_ohm_per_km and x_ohm_per_km instead, or omit std_type for the default'
                 )
                 continue
+        # Zero sequence, for earth faults. pandapower's line types carry none,
+        # so a rule of thumb stands in until the cable's own are given:
+        # R0 = 4 R1 and X0 = 3 X1 (earth return), C0 = C1.
+        for field, factor, positive_field in (('r0_ohm_per_km', 4.0, 'r_ohm_per_km'),
+                                              ('x0_ohm_per_km', 3.0, 'x_ohm_per_km'),
+                                              ('c0_nf_per_km', 1.0, 'c_nf_per_km')):
+            net.line.at[idx, field] = _num(
+                row.get(field), field, where, problems,
+                default=round(factor * float(net.line.at[idx, positive_field]), 6))
         record('line', idx, ident)
 
     # --- loads, machines, compensation -----------------------------------

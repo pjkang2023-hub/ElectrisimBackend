@@ -1597,7 +1597,8 @@ def pandapower_net_to_json(net):
 
     def build_electrisim_import_sidecar():
         """Extra SC / breaker fields keyed by element name for frontend import."""
-        sidecar = {'switch': {}, 'gen': {}, 'sgen': {}, 'storage': {}, 'trafo': {}}
+        sidecar = {'switch': {}, 'gen': {}, 'sgen': {}, 'storage': {}, 'trafo': {},
+                   'trafo3w': {}, 'line': {}}
         if hasattr(net, 'switch') and net.switch is not None and not net.switch.empty:
             for idx, r in net.switch.iterrows():
                 nm = r.get('name', f'Switch_{idx}')
@@ -1658,6 +1659,29 @@ def pandapower_net_to_json(net):
                     'vkr0_percent': _scalar(r.get('vkr0_percent')),
                     'rn_ohm': _scalar(r.get('rn_ohm')),
                     'xn_ohm': _scalar(r.get('xn_ohm')),
+                    'mag0_percent': _scalar(r.get('mag0_percent')),
+                    'mag0_rx': _scalar(r.get('mag0_rx')),
+                    'si0_hv_partial': _scalar(r.get('si0_hv_partial')),
+                }
+        # Zero sequence the row formats have no place for: without it a
+        # single-phase fault on the drawing used the canvas placeholders.
+        if hasattr(net, 'trafo3w') and not net.trafo3w.empty:
+            for idx, r in net.trafo3w.iterrows():
+                nm = r.get('name', f'Trafo3w_{idx}')
+                if _is_blank_name(nm):
+                    nm = f'Trafo3w_{idx}'
+                sidecar['trafo3w'][str(nm)] = {
+                    k: _scalar(r.get(k)) for k in (
+                        'vector_group', 'vk0_hv_percent', 'vk0_mv_percent', 'vk0_lv_percent',
+                        'vkr0_hv_percent', 'vkr0_mv_percent', 'vkr0_lv_percent')
+                }
+        if hasattr(net, 'line') and not net.line.empty:
+            for idx, r in net.line.iterrows():
+                nm = r.get('name', f'Line_{idx}')
+                if _is_blank_name(nm):
+                    nm = f'Line_{idx}'
+                sidecar['line'][str(nm)] = {
+                    k: _scalar(r.get(k)) for k in ('r0_ohm_per_km', 'x0_ohm_per_km', 'c0_nf_per_km')
                 }
         return sidecar
 

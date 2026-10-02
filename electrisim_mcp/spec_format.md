@@ -27,13 +27,18 @@ A bus has no default voltage; it must always be given.
 **external_grids** - the connection to the wider grid, and the power-flow slack.
 `id`, **`bus`**, `vm_pu` (1.0), `va_degree` (0), `s_sc_max_mva` (none - give it
 for short-circuit studies; without it Electrisim treats the grid as an
-infinite 1,000,000 MVA source), `rx_max`.
+infinite 1,000,000 MVA source), `rx_max`, `s_sc_min_mva` and `rx_min` (for a
+minimum-case study; default to the maximum values), and zero sequence for
+earth faults: `x0x_max` (X0/X, 1.0) and `r0x0_max` (R0/X0, 0.1).
 
 **transformers** - two-winding.
 `id`, **`hv_bus`**, **`lv_bus`**, `sn_mva` (25), `vn_hv_kv` / `vn_lv_kv` (taken
 from the two buses), `vk_percent` (by rating: up to 2.5 MVA -> 4, up to 10 -> 6,
 up to 40 -> 12, above -> 14), `vkr_percent` (vk / 25), `pfe_kw` (0.6 x sn_mva),
-`i0_percent` (0.1), `shift_degree` (0), `name`, `in_service`.
+`i0_percent` (0.1), `shift_degree` (0), `name`, `in_service`, and zero sequence
+for earth faults: `vector_group` (`Dyn`), `vk0_percent` / `vkr0_percent` (the
+positive-sequence values), `mag0_percent` (100), `mag0_rx` (0),
+`si0_hv_partial` (0.9).
 A warning is raised if `hv_bus` is the lower voltage.
 
 **three_winding_transformers** - one unit joining three voltage levels, e.g.
@@ -42,7 +47,9 @@ A warning is raised if `hv_bus` is the lower voltage.
 `sn_hv_mva` (40), `sn_mv_mva` (= sn_hv_mva), `sn_lv_mva` (sn_hv_mva / 3),
 `vn_hv_kv` / `vn_mv_kv` / `vn_lv_kv` (from the three buses), `pfe_kw`
 (0.6 x sn_hv_mva), `i0_percent` (0.1), `shift_mv_degree` (0), `name`,
-`in_service`, and short-circuit voltages **named by winding pair**:
+`in_service`, `vector_group` (`YNynd`: star-star with a delta tertiary; a
+single-phase fault also accepts YNdyn, YNdd, YNyy, Dynyn - not the canvas
+default YNyn0yn0), and short-circuit voltages **named by winding pair**:
 
 | field | between | default |
 |---|---|---|
@@ -50,6 +57,7 @@ A warning is raised if `hv_bus` is the lower voltage.
 | `vk_mv_lv_percent` | MV and LV | likewise |
 | `vk_hv_lv_percent` | HV and LV | likewise |
 | `vkr_hv_mv_percent`, `vkr_mv_lv_percent`, `vkr_hv_lv_percent` | the same pairs | vk / 25 |
+| `vk0_hv_mv_percent` ... `vkr0_hv_lv_percent` | zero sequence, the same pairs | the positive-sequence value |
 
 Each percentage is referred to the smaller rated power of its pair.
 pandapower's own names (`vk_hv_percent`, `vk_mv_percent`, `vk_lv_percent`)
@@ -67,6 +75,10 @@ either
   `149-AL1/24-ST1A 110.0`; above `490-AL1/64-ST1A 380.0`. Or
 - explicit impedance: `r_ohm_per_km` (0.1), `x_ohm_per_km` (0.1),
   `c_nf_per_km` (0), `max_i_ka` (0.4). Giving `r` or `x` selects this form.
+
+Either way, zero sequence for earth faults: `r0_ohm_per_km` (4 x r),
+`x0_ohm_per_km` (3 x x), `c0_nf_per_km` (= c) - a rule of thumb, since
+pandapower's line types carry none; give the cable's own for a real study.
 
 **loads** - `id`, **`bus`**, `p_mw` (0), `q_mvar` (0.33 x p_mw, about pf 0.95),
 `name`, `in_service`.
