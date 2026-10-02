@@ -34,7 +34,7 @@
   ],
   "lines": [
     {"id": "L_HV", "from_bus": "HV", "to_bus": "HV2", "length_km": 12,
-     "r0_ohm_per_km": 0.35, "x0_ohm_per_km": 1.25, "c0_nf_per_km": 5.0,
+     "r0_ohm_per_km": 0.35, "x0_ohm_per_km": 1.25, "c0_nf_per_km": 5.0, "endtemp_degree": 70,
      "name": "110 kV overhead line"},
     {"id": "L1", "from_bus": "MV1", "to_bus": "F1", "length_km": 3},
     {"id": "L2", "from_bus": "MV2", "to_bus": "F2", "length_km": 2.5,

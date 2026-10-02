@@ -32,11 +32,13 @@ Regenerate goldens with:  pytest --regen-golden
 
 Recapture the diagram payloads after changing the frontend import or a payload
 builder: draw the spec through the MCP server into an empty diagram, run Load
-Flow, Short Circuit (three-phase, two-phase, single-phase), Harmonic Analysis and
+Flow, Short Circuit (three-phase, two-phase, single-phase, each in the maximum
+and the minimum case), Harmonic Analysis and
 Load Flow again on the OpenDSS engine tab, and save the body of each POST to
 the backend's "/" from the browser's network panel over the old files
 (<grid>.diagram_payload.json, .diagram_sc_payload.json,
-.diagram_sc2ph_payload.json, .diagram_sc1ph_payload.json, .diagram_harmonic_payload.json and
+.diagram_sc2ph_payload.json, .diagram_sc1ph_payload.json, the same with _min
+before _payload, .diagram_harmonic_payload.json and
 .diagram_opendss_payload.json). The tests say whether the
 new drawing still computes the spec's answers.
 """
@@ -80,12 +82,12 @@ def run(net):
     return net
 
 
-def run_sc(net, fault='3ph'):
-    """A maximum fault at every bus, called as the backend calls it."""
+def run_sc(net, fault='3ph', case='max'):
+    """A fault at every bus, called as the backend calls it."""
     # Branch results need the state a power flow leaves; the backend's
     # pp.diagnostic() runs one before it calls calc_sc.
     run(net)
-    sc.calc_sc(net, fault=fault, case='max', ip=True, ith=True, tk_s=1.0, kappa_method='C',
+    sc.calc_sc(net, fault=fault, case=case, ip=True, ith=True, tk_s=1.0, kappa_method='C',
                r_fault_ohm=0.0, x_fault_ohm=0.0, check_connectivity=False, branch_results=True)
     return net
 
@@ -109,12 +111,12 @@ class _Builder:
         self.ids[table][ident] = idx
 
 
-def _zero_sequence(net, trafos, trafo3w=None, lines=None):
+def _zero_sequence(net, trafos, trafo3w=None, lines=None, endtemps=None):
     """
     Zero-sequence data, as the spec reference documents it. trafos maps index
     -> vector group; vk0/vkr0 are the positive-sequence values, mag0 100 %,
     mag0_rx 0, si0_hv_partial 0.9. Lines not given explicitly get R0 = 4 R1,
-    X0 = 3 X1, C0 = C1.
+    X0 = 3 X1, C0 = C1, and an end-of-fault temperature of 80 degC.
     """
     for idx, group in trafos.items():
         net.trafo.loc[idx, ['vector_group']] = group
@@ -132,6 +134,7 @@ def _zero_sequence(net, trafos, trafo3w=None, lines=None):
                                         round(3 * net.line.at[idx, 'x_ohm_per_km'], 6),
                                         round(net.line.at[idx, 'c_nf_per_km'], 6)))
         net.line.loc[idx, ['r0_ohm_per_km', 'x0_ohm_per_km', 'c0_nf_per_km']] = (r0, x0, c0)
+        net.line.loc[idx, ['endtemp_degree']] = (endtemps or {}).get(idx, 80.0)
 
 
 def hand_built_transmission():
@@ -146,7 +149,8 @@ def hand_built_transmission():
     h.add('ext_grid', 'Grid', pp.create_ext_grid(net, b('HV'), vm_pu=1.02, va_degree=0.0,
                                                  s_sc_max_mva=5000, rx_max=0.1,
                                                  s_sc_min_mva=5000, rx_min=0.1,
-                                                 x0x_max=2.5, r0x0_max=0.2))
+                                                 x0x_max=2.5, r0x0_max=0.2,
+                                                 x0x_min=2.5, r0x0_min=0.2))
     # vk by the smaller rating of each pair: MV-LV and HV-LV pair with the
     # 15 MVA tertiary, which is in the "up to 40 MVA" class -> 12 %.
     # vkr = vk / 25, pfe = 0.6 kW per MVA of HV rating, i0 = 0.1 %.
@@ -198,7 +202,8 @@ def hand_built_transmission():
     _zero_sequence(net, {ids['trafo']['T2']: 'YNd', ids['trafo']['T_LV1']: 'Dyn',
                          ids['trafo']['T_LV2']: 'Dyn'},
                    trafo3w={ids['trafo3w']['T3W']: 'YNynd'},
-                   lines={ids['line']['L_HV']: (0.35, 1.25, 5.0)})
+                   lines={ids['line']['L_HV']: (0.35, 1.25, 5.0)},
+                   endtemps={ids['line']['L_HV']: 70.0})
     for ident, bus, element, et, closed in (
             ('CB_LHV', 'HV', ids['line']['L_HV'], 'l', True),
             ('CB_T3W', 'HV', ids['trafo3w']['T3W'], 't3', True),
@@ -222,7 +227,8 @@ def hand_built_radial():
     h.add('ext_grid', 'Grid', pp.create_ext_grid(net, b('GRID'), vm_pu=1.0, va_degree=0.0,
                                                  s_sc_max_mva=3000, rx_max=0.1,
                                                  s_sc_min_mva=3000, rx_min=0.1,
-                                                 x0x_max=1.0, r0x0_max=0.1))
+                                                 x0x_max=1.0, r0x0_max=0.1,
+                                                 x0x_min=1.0, r0x0_min=0.1))
     # 40 MVA -> 12 %, 0.8 MVA -> 4 %.
     h.add('trafo', 'T1', pp.create_transformer_from_parameters(
         net, b('GRID'), b('SUB'), sn_mva=40, vn_hv_kv=110, vn_lv_kv=20,
@@ -354,6 +360,9 @@ def _summarise(grid):
     results['bus_sc'] = sc_by_id(run_sc(net), spec_ids(net))
     results['bus_sc_2ph'] = sc_by_id(run_sc(net, '2ph'), spec_ids(net))
     results['bus_sc_1ph'] = sc_by_id(run_sc(net, '1ph'), spec_ids(net), SC_1PH_COLUMNS)
+    results['bus_sc_min'] = sc_by_id(run_sc(net, '3ph', 'min'), spec_ids(net))
+    results['bus_sc_2ph_min'] = sc_by_id(run_sc(net, '2ph', 'min'), spec_ids(net))
+    results['bus_sc_1ph_min'] = sc_by_id(run_sc(net, '1ph', 'min'), spec_ids(net), SC_1PH_COLUMNS)
     return {table: {ident: {c: round(v, 10) for c, v in values.items()}
                     for ident, values in rows.items()}
             for table, rows in results.items()}
@@ -367,27 +376,29 @@ def _tolerance(column):
     return FLOW_TOL
 
 
+@pytest.mark.parametrize('case', ('max', 'min'))
 @pytest.mark.parametrize('fault', ('3ph', '2ph'))
 @pytest.mark.parametrize('grid', GRIDS)
-def test_short_circuit_matches_hand_built_network(grid, fault):
+def test_short_circuit_matches_hand_built_network(grid, fault, case):
     """Short-circuit data, given or defaulted, must reach the network as documented."""
     net, _ = sld.build_network(load_spec(grid))
-    built = sc_by_id(run_sc(net, fault), spec_ids(net))
+    built = sc_by_id(run_sc(net, fault, case), spec_ids(net))
     oracle = HAND_BUILT[grid]()
-    expected = sc_by_id(run_sc(oracle.net, fault), oracle.ids)
+    expected = sc_by_id(run_sc(oracle.net, fault, case), oracle.ids)
     worst = [f'bus {ident} {c}: {want[c]!r} by hand, {built[ident][c]!r} by spec'
              for ident, want in expected.items() for c in SC_COLUMNS
              if abs(built[ident][c] - want[c]) > ORACLE_TOL]
     assert not worst, f'{grid}: {len(worst)} value(s) differ\n  ' + '\n  '.join(worst[:20])
 
 
+@pytest.mark.parametrize('case', ('max', 'min'))
 @pytest.mark.parametrize('grid', GRIDS)
-def test_single_phase_short_circuit_matches_hand_built_network(grid):
+def test_single_phase_short_circuit_matches_hand_built_network(grid, case):
     """Zero-sequence data, given or defaulted, reaches the network as documented."""
     net, _ = sld.build_network(load_spec(grid))
-    built = sc_by_id(run_sc(net, '1ph'), spec_ids(net), SC_1PH_COLUMNS)
+    built = sc_by_id(run_sc(net, '1ph', case), spec_ids(net), SC_1PH_COLUMNS)
     oracle = HAND_BUILT[grid]()
-    expected = sc_by_id(run_sc(oracle.net, '1ph'), oracle.ids, SC_1PH_COLUMNS)
+    expected = sc_by_id(run_sc(oracle.net, '1ph', case), oracle.ids, SC_1PH_COLUMNS)
     worst = [f'bus {ident} {c}: {want[c]!r} by hand, {built[ident][c]!r} by spec'
              for ident, want in expected.items() for c in SC_1PH_COLUMNS
              if abs(built[ident][c] - want[c]) > ORACLE_TOL]
@@ -530,12 +541,26 @@ def test_drawn_diagram_matches_spec(client, quiet, grid):
 
 
 # Each fault type's request, as the frontend sent it with that fault selected.
-SC_FIXTURE = {'3ph': 'diagram_sc_payload', '2ph': 'diagram_sc2ph_payload'}
+SC_FIXTURE = {('3ph', 'max'): 'diagram_sc_payload', ('2ph', 'max'): 'diagram_sc2ph_payload',
+              ('1ph', 'max'): 'diagram_sc1ph_payload',
+              ('3ph', 'min'): 'diagram_sc_min_payload', ('2ph', 'min'): 'diagram_sc2ph_min_payload',
+              ('1ph', 'min'): 'diagram_sc1ph_min_payload'}
 
 
+def _sc_fixture(grid, fault, case):
+    """The drawn request for this fault and case, checked to be for them."""
+    with open(os.path.join(REFERENCE_DIR, f'{grid}.{SC_FIXTURE[(fault, case)]}.json'),
+              encoding='utf-8') as handle:
+        payload = json.load(handle)
+    params = next(v for v in payload.values() if 'Parameters' in str(v.get('typ')))
+    assert (params['fault_type'], params['fault_location']) == (fault, case)
+    return payload
+
+
+@pytest.mark.parametrize('case', ('max', 'min'))
 @pytest.mark.parametrize('fault', ('3ph', '2ph'))
 @pytest.mark.parametrize('grid', GRIDS)
-def test_drawn_diagram_short_circuit_matches_spec(client, quiet, grid, fault):
+def test_drawn_diagram_short_circuit_matches_spec(client, quiet, grid, fault, case):
     """
     A maximum three-phase or two-phase fault at every bus of the drawn diagram
     must give the spec's currents - initial, peak and thermal, all of which
@@ -543,11 +568,7 @@ def test_drawn_diagram_short_circuit_matches_spec(client, quiet, grid, fault):
     level, the machines' short-circuit data and the inverter model to have
     survived the drawing - none of which the load flow notices.
     """
-    with open(os.path.join(REFERENCE_DIR, f'{grid}.{SC_FIXTURE[fault]}.json'),
-              encoding='utf-8') as handle:
-        payload = json.load(handle)
-    assert next(v for v in payload.values()
-                if 'Parameters' in str(v.get('typ')))['fault_type'] == fault
+    payload = _sc_fixture(grid, fault, case)
     with quiet():
         response = client.post('/', json=payload)
     assert response.status_code == 200, response.get_data(as_text=True)[:400]
@@ -556,7 +577,7 @@ def test_drawn_diagram_short_circuit_matches_spec(client, quiet, grid, fault):
 
     spec = load_spec(grid)
     net, _ = sld.build_network(spec)
-    want = sc_by_id(run_sc(net, fault), spec_ids(net))
+    want = sc_by_id(run_sc(net, fault, case), spec_ids(net))
 
     label_of_cell = {v['name']: v.get('userFriendlyName') for v in payload.values()
                      if isinstance(v, dict) and 'name' in v}
@@ -774,23 +795,22 @@ def _post_short_circuit(client, quiet, payload):
     return json.loads(response.get_data(as_text=True))
 
 
+@pytest.mark.parametrize('case', ('max', 'min'))
 @pytest.mark.parametrize('grid', GRIDS)
-def test_drawn_diagram_single_phase_short_circuit_matches_spec(client, quiet, grid):
+def test_drawn_diagram_single_phase_short_circuit_matches_spec(client, quiet, grid, case):
     """
     An earth fault at every bus of the drawn diagram gives the spec's currents.
     The drawing used to carry no zero sequence - a zero-impedance grid (a NaN
     in the Ybus), 0.1 ohm/km placeholder lines, a YNyn0yn0 three-winding
     transformer pandapower cannot fault - so this checks it all arrived.
     """
-    with open(os.path.join(REFERENCE_DIR, f'{grid}.diagram_sc1ph_payload.json'),
-              encoding='utf-8') as handle:
-        payload = json.load(handle)
+    payload = _sc_fixture(grid, '1ph', case)
     drawn = _post_short_circuit(client, quiet, payload)
     assert not drawn.get('error'), drawn.get('message') or drawn.get('exception')
 
     spec = load_spec(grid)
     net, _ = sld.build_network(spec)
-    want = sc_by_id(run_sc(net, '1ph'), spec_ids(net), SC_1PH_COLUMNS)
+    want = sc_by_id(run_sc(net, '1ph', case), spec_ids(net), SC_1PH_COLUMNS)
     label_of_cell = {v['name']: v.get('userFriendlyName') for v in payload.values()
                      if isinstance(v, dict) and 'name' in v}
     rows = {label_of_cell.get(r['name'], r['name']): r for r in drawn.get('busbars', [])}
@@ -798,7 +818,7 @@ def test_drawn_diagram_single_phase_short_circuit_matches_spec(client, quiet, gr
     # IEC 60909-0 peak and thermal current for an earth fault, from
     # pandapower's own three-phase kappa and m at each bus:
     # ip1 = kappa sqrt(2) Ik1'', ith1 = Ik1'' sqrt(m + 1).
-    kappa, m = iec_kappa_and_m(spec)
+    kappa, m = iec_kappa_and_m(spec, case)
 
     differ = []
     for bus in spec['buses']:
@@ -816,7 +836,7 @@ def test_drawn_diagram_single_phase_short_circuit_matches_spec(client, quiet, gr
     assert not differ, f'{grid}: the drawn earth fault differs\n  ' + '\n  '.join(differ)
 
 
-def iec_kappa_and_m(spec):
+def iec_kappa_and_m(spec, case='max'):
     """
     Each bus's peak factor kappa and thermal factor m for a maximum
     three-phase fault, read from pandapower's own result table - the backend
@@ -824,7 +844,7 @@ def iec_kappa_and_m(spec):
     """
     from pandapower.pypower.idx_bus_sc import KAPPA, M
     net, _ = sld.build_network(spec)
-    run_sc(net)
+    run_sc(net, '3ph', case)
     rows = net['_pd2ppc_lookups']['bus']
     table = net['_ppc']['bus']
     ids = spec_ids(net)['bus']
@@ -851,3 +871,21 @@ def test_single_phase_short_circuit_names_missing_zero_sequence(client, quiet):
     assert "external grid 'Utility 110 kV' has no x0x_max" in message, message
     assert "'Main transformer 110/20/10' has vector group 'YNynyn'" in message, message
     assert 'nan value' not in message.lower()
+
+
+def test_minimum_case_names_missing_line_temperature(client, quiet):
+    """
+    A minimum-case study on lines without an end-of-fault temperature - the
+    canvas stores 0 - is refused with the lines named. At 0 degC the lines came
+    out 8 % less resistive than at 20 degC, so the "minimum" currents were too
+    high, with no warning.
+    """
+    payload = _sc_fixture('reference_radial', '3ph', 'min')
+    for element in payload.values():
+        if str(element.get('typ', '')).startswith('Line'):
+            element['endtemp_degree'] = '0'
+        if str(element.get('typ', '')).startswith('External Grid'):
+            element['s_sc_min_mva'] = '0'
+    message = _post_short_circuit(client, quiet, payload).get('message', '')
+    assert "line 'LA2' has no endtemp_degree" in message, message
+    assert "external grid 'Grid' has no s_sc_min_mva" in message, message

@@ -180,7 +180,7 @@
   "r0_ohm_per_km": "0.35",
   "x0_ohm_per_km": "1.25",
   "c0_nf_per_km": "5",
-  "endtemp_degree": "0",
+  "endtemp_degree": "70",
   "userFriendlyName": "110 kV overhead line"
  },
  "15": {
@@ -202,7 +202,7 @@
   "r0_ohm_per_km": "0.488",
   "x0_ohm_per_km": "0.336",
   "c0_nf_per_km": "304",
-  "endtemp_degree": "0",
+  "endtemp_degree": "80",
   "userFriendlyName": "L1"
  },
  "16": {
@@ -224,7 +224,7 @@
   "r0_ohm_per_km": "0.5",
   "x0_ohm_per_km": "0.336",
   "c0_nf_per_km": "300",
-  "endtemp_degree": "0",
+  "endtemp_degree": "80",
   "userFriendlyName": "Cable with given impedance"
  },
  "17": {
@@ -246,7 +246,7 @@
   "r0_ohm_per_km": "0.644",
   "x0_ohm_per_km": "0.351",
   "c0_nf_per_km": "273",
-  "endtemp_degree": "0",
+  "endtemp_degree": "80",
   "userFriendlyName": "L3"
  },
  "18": {
@@ -268,7 +268,7 @@
   "r0_ohm_per_km": "0.488",
   "x0_ohm_per_km": "0.336",
   "c0_nf_per_km": "304",
-  "endtemp_degree": "0",
+  "endtemp_degree": "80",
   "userFriendlyName": "L4"
  },
  "19": {

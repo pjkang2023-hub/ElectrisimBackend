@@ -2,7 +2,7 @@
  "0": {
   "typ": "ShortCircuitPandaPower Parameters",
   "fault_type": "2ph",
-  "fault_location": "max",
+  "fault_location": "min",
   "fault_bus_mode": "all",
   "fault_bus_ids": [],
   "fault_bus_names": [],

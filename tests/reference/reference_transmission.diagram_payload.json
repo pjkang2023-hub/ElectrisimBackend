@@ -491,7 +491,7 @@
   "r0_ohm_per_km": "0.35",
   "x0_ohm_per_km": "1.25",
   "c0_nf_per_km": "5",
-  "endtemp_degree": "0"
+  "endtemp_degree": "70"
  },
  "28": {
   "typ": "Line1",
@@ -513,7 +513,7 @@
   "r0_ohm_per_km": "0.488",
   "x0_ohm_per_km": "0.336",
   "c0_nf_per_km": "304",
-  "endtemp_degree": "0"
+  "endtemp_degree": "80"
  },
  "29": {
   "typ": "Line2",
@@ -535,7 +535,7 @@
   "r0_ohm_per_km": "0.5",
   "x0_ohm_per_km": "0.336",
   "c0_nf_per_km": "300",
-  "endtemp_degree": "0"
+  "endtemp_degree": "80"
  },
  "30": {
   "typ": "Line3",
@@ -557,7 +557,7 @@
   "r0_ohm_per_km": "0.644",
   "x0_ohm_per_km": "0.351",
   "c0_nf_per_km": "273",
-  "endtemp_degree": "0"
+  "endtemp_degree": "80"
  },
  "31": {
   "typ": "Line4",
@@ -579,7 +579,7 @@
   "r0_ohm_per_km": "0.488",
   "x0_ohm_per_km": "0.336",
   "c0_nf_per_km": "304",
-  "endtemp_degree": "0"
+  "endtemp_degree": "80"
  },
  "32": {
   "typ": "Switch0",
