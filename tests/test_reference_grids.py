@@ -32,11 +32,11 @@ Regenerate goldens with:  pytest --regen-golden
 
 Recapture the diagram payloads after changing the frontend import or a payload
 builder: draw the spec through the MCP server into an empty diagram, run Load
-Flow, Short Circuit (three-phase, then single-phase), Harmonic Analysis and
+Flow, Short Circuit (three-phase, two-phase, single-phase), Harmonic Analysis and
 Load Flow again on the OpenDSS engine tab, and save the body of each POST to
 the backend's "/" from the browser's network panel over the old files
 (<grid>.diagram_payload.json, .diagram_sc_payload.json,
-.diagram_sc1ph_payload.json, .diagram_harmonic_payload.json and
+.diagram_sc2ph_payload.json, .diagram_sc1ph_payload.json, .diagram_harmonic_payload.json and
 .diagram_opendss_payload.json). The tests say whether the
 new drawing still computes the spec's answers.
 """
@@ -352,6 +352,7 @@ def _summarise(grid):
     net, _ = sld.build_network(load_spec(grid))
     results = results_by_id(run(net), spec_ids(net))
     results['bus_sc'] = sc_by_id(run_sc(net), spec_ids(net))
+    results['bus_sc_2ph'] = sc_by_id(run_sc(net, '2ph'), spec_ids(net))
     results['bus_sc_1ph'] = sc_by_id(run_sc(net, '1ph'), spec_ids(net), SC_1PH_COLUMNS)
     return {table: {ident: {c: round(v, 10) for c, v in values.items()}
                     for ident, values in rows.items()}
@@ -366,13 +367,14 @@ def _tolerance(column):
     return FLOW_TOL
 
 
+@pytest.mark.parametrize('fault', ('3ph', '2ph'))
 @pytest.mark.parametrize('grid', GRIDS)
-def test_short_circuit_matches_hand_built_network(grid):
+def test_short_circuit_matches_hand_built_network(grid, fault):
     """Short-circuit data, given or defaulted, must reach the network as documented."""
     net, _ = sld.build_network(load_spec(grid))
-    built = sc_by_id(run_sc(net), spec_ids(net))
+    built = sc_by_id(run_sc(net, fault), spec_ids(net))
     oracle = HAND_BUILT[grid]()
-    expected = sc_by_id(run_sc(oracle.net), oracle.ids)
+    expected = sc_by_id(run_sc(oracle.net, fault), oracle.ids)
     worst = [f'bus {ident} {c}: {want[c]!r} by hand, {built[ident][c]!r} by spec'
              for ident, want in expected.items() for c in SC_COLUMNS
              if abs(built[ident][c] - want[c]) > ORACLE_TOL]
@@ -527,16 +529,25 @@ def test_drawn_diagram_matches_spec(client, quiet, grid):
     assert not differ, f'{grid}: the drawn diagram differs from the spec\n  ' + '\n  '.join(differ[:20])
 
 
+# Each fault type's request, as the frontend sent it with that fault selected.
+SC_FIXTURE = {'3ph': 'diagram_sc_payload', '2ph': 'diagram_sc2ph_payload'}
+
+
+@pytest.mark.parametrize('fault', ('3ph', '2ph'))
 @pytest.mark.parametrize('grid', GRIDS)
-def test_drawn_diagram_short_circuit_matches_spec(client, quiet, grid):
+def test_drawn_diagram_short_circuit_matches_spec(client, quiet, grid, fault):
     """
-    A maximum three-phase fault at every bus of the drawn diagram must give the
-    spec's currents. This needs the external grid's fault level, the machines'
-    short-circuit data and the inverter model to have survived the drawing -
-    none of which the load flow notices.
+    A maximum three-phase or two-phase fault at every bus of the drawn diagram
+    must give the spec's currents - initial, peak and thermal, all of which
+    pandapower computes for these faults. This needs the external grid's fault
+    level, the machines' short-circuit data and the inverter model to have
+    survived the drawing - none of which the load flow notices.
     """
-    with open(os.path.join(REFERENCE_DIR, f'{grid}.diagram_sc_payload.json'), encoding='utf-8') as handle:
+    with open(os.path.join(REFERENCE_DIR, f'{grid}.{SC_FIXTURE[fault]}.json'),
+              encoding='utf-8') as handle:
         payload = json.load(handle)
+    assert next(v for v in payload.values()
+                if 'Parameters' in str(v.get('typ')))['fault_type'] == fault
     with quiet():
         response = client.post('/', json=payload)
     assert response.status_code == 200, response.get_data(as_text=True)[:400]
@@ -545,7 +556,7 @@ def test_drawn_diagram_short_circuit_matches_spec(client, quiet, grid):
 
     spec = load_spec(grid)
     net, _ = sld.build_network(spec)
-    want = sc_by_id(run_sc(net), spec_ids(net))
+    want = sc_by_id(run_sc(net, fault), spec_ids(net))
 
     label_of_cell = {v['name']: v.get('userFriendlyName') for v in payload.values()
                      if isinstance(v, dict) and 'name' in v}
@@ -560,7 +571,7 @@ def test_drawn_diagram_short_circuit_matches_spec(client, quiet, grid):
             if abs(float(got[column]) - want[bus['id']][column]) > DRAWN_TOL:
                 differ.append(f"bus {bus['id']} {column}: spec {want[bus['id']][column]!r}, "
                               f"drawn {got[column]!r}")
-    assert not differ, f'{grid}: the drawn short circuit differs\n  ' + '\n  '.join(differ[:20])
+    assert not differ, f'{grid} {fault}: the drawn short circuit differs\n  ' + '\n  '.join(differ[:20])
 
 
 def test_short_circuit_names_missing_machine_data(client, quiet):
