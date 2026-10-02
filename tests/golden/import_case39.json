@@ -1,0 +1,90 @@
+{
+  "asymmetric_load": {
+    "columns": 0,
+    "rows": 0
+  },
+  "asymmetric_sgen": {
+    "columns": 0,
+    "rows": 0
+  },
+  "bus": {
+    "columns": 6,
+    "rows": 39
+  },
+  "dcline": {
+    "columns": 0,
+    "rows": 0
+  },
+  "electrisim_import_sidecar": {
+    "columns": 0,
+    "rows": 0
+  },
+  "ext_grid": {
+    "columns": 6,
+    "rows": 1
+  },
+  "gen": {
+    "columns": 12,
+    "rows": 9
+  },
+  "impedance": {
+    "columns": 0,
+    "rows": 0
+  },
+  "line": {
+    "columns": 14,
+    "rows": 35
+  },
+  "load": {
+    "columns": 9,
+    "rows": 21
+  },
+  "motor": {
+    "columns": 0,
+    "rows": 0
+  },
+  "sgen": {
+    "columns": 0,
+    "rows": 0
+  },
+  "shunt": {
+    "columns": 0,
+    "rows": 0
+  },
+  "storage": {
+    "columns": 0,
+    "rows": 0
+  },
+  "svc": {
+    "columns": 0,
+    "rows": 0
+  },
+  "switch": {
+    "columns": 0,
+    "rows": 0
+  },
+  "tcsc": {
+    "columns": 0,
+    "rows": 0
+  },
+  "trafo": {
+    "columns": 23,
+    "rows": 11
+  },
+  "trafo3w": {
+    "columns": 0,
+    "rows": 0
+  },
+  "user_friendly_names": {
+    "columns": 0,
+    "rows": 0
+  },
+  "ward": {
+    "columns": 0,
+    "rows": 0
+  },
+  "xward": {
+    "columns": 0,
+    "rows": 0
+  }
+}

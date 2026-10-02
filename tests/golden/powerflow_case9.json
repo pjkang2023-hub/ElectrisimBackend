@@ -1,0 +1,87 @@
+{
+  "busbars": {
+    "1": {
+      "va_degree": 0.0,
+      "vm_pu": 1.0
+    },
+    "2": {
+      "va_degree": 9.66874113,
+      "vm_pu": 1.0
+    },
+    "3": {
+      "va_degree": 4.77107324,
+      "vm_pu": 1.0
+    },
+    "4": {
+      "va_degree": -2.40664392,
+      "vm_pu": 0.9870068524
+    },
+    "5": {
+      "va_degree": -4.01726433,
+      "vm_pu": 0.9754721771
+    },
+    "6": {
+      "va_degree": 1.92560169,
+      "vm_pu": 1.0033754365
+    },
+    "7": {
+      "va_degree": 0.62154456,
+      "vm_pu": 0.9856448817
+    },
+    "8": {
+      "va_degree": 3.79912019,
+      "vm_pu": 0.9961852458
+    },
+    "9": {
+      "va_degree": -4.34993358,
+      "vm_pu": 0.9576210404
+    }
+  },
+  "lines": {
+    "Line_0": {
+      "loading_percent": 30.34941531,
+      "p_from_mw": 71.95470159,
+      "q_from_mvar": 24.06895777
+    },
+    "Line_1": {
+      "loading_percent": 13.72897115,
+      "p_from_mw": 30.72828028,
+      "q_from_mvar": -0.58585082
+    },
+    "Line_2": {
+      "loading_percent": 42.12848529,
+      "p_from_mw": -59.44531444,
+      "q_from_mvar": -16.3120495
+    },
+    "Line_3": {
+      "loading_percent": 28.35942992,
+      "p_from_mw": 85.0,
+      "q_from_mvar": -3.64902553
+    },
+    "Line_4": {
+      "loading_percent": 23.15448395,
+      "p_from_mw": 24.10613417,
+      "q_from_mvar": 4.53679118
+    },
+    "Line_5": {
+      "loading_percent": 31.1369746,
+      "p_from_mw": -75.98935222,
+      "q_from_mvar": -10.59923756
+    },
+    "Line_6": {
+      "loading_percent": 65.45605556,
+      "p_from_mw": -163.0,
+      "q_from_mvar": 2.27618988
+    },
+    "Line_7": {
+      "loading_percent": 35.60690768,
+      "p_from_mw": 86.50443566,
+      "q_from_mvar": -2.53242935
+    },
+    "Line_8": {
+      "loading_percent": 22.70049663,
+      "p_from_mw": -40.96011313,
+      "q_from_mvar": -35.71801701
+    }
+  }
+}
