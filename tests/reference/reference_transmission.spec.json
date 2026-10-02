@@ -1,0 +1,74 @@
+{
+  "name": "Electrisim reference grid - transmission",
+  "frequency_hz": 50,
+  "layout": "transmission",
+  "buses": [
+    {"id": "HV", "vn_kv": 110, "name": "110 kV busbar A"},
+    {"id": "HV2", "vn_kv": 110, "name": "110 kV busbar B"},
+    {"id": "MV1", "vn_kv": 20, "name": "20 kV busbar 1"},
+    {"id": "MV2", "vn_kv": 20, "name": "20 kV busbar 2"},
+    {"id": "F1", "vn_kv": 20},
+    {"id": "F2", "vn_kv": 20},
+    {"id": "F3", "vn_kv": 20, "name": "Ring node"},
+    {"id": "TERT", "vn_kv": 10, "name": "10 kV station supply"},
+    {"id": "LV1", "vn_kv": 0.4},
+    {"id": "LV2", "vn_kv": 0.4}
+  ],
+  "external_grids": [
+    {"id": "Grid", "bus": "HV", "vm_pu": 1.02, "s_sc_max_mva": 5000, "rx_max": 0.1,
+     "name": "Utility 110 kV"}
+  ],
+  "three_winding_transformers": [
+    {"id": "T3W", "hv_bus": "HV", "mv_bus": "MV1", "lv_bus": "TERT",
+     "sn_hv_mva": 40, "sn_mv_mva": 40, "sn_lv_mva": 15,
+     "vk_hv_mv_percent": 12.5, "name": "Main transformer 110/20/10"}
+  ],
+  "transformers": [
+    {"id": "T2", "hv_bus": "HV2", "lv_bus": "MV2", "sn_mva": 25,
+     "vk_percent": 12, "vkr_percent": 0.41, "name": "Transformer B 110/20"},
+    {"id": "T_LV1", "hv_bus": "F1", "lv_bus": "LV1", "sn_mva": 0.63},
+    {"id": "T_LV2", "hv_bus": "F2", "lv_bus": "LV2", "sn_mva": 1.0, "vk_percent": 6,
+     "name": "Substation LV2"}
+  ],
+  "lines": [
+    {"id": "L_HV", "from_bus": "HV", "to_bus": "HV2", "length_km": 12,
+     "name": "110 kV overhead line"},
+    {"id": "L1", "from_bus": "MV1", "to_bus": "F1", "length_km": 3},
+    {"id": "L2", "from_bus": "MV2", "to_bus": "F2", "length_km": 2.5,
+     "r_ohm_per_km": 0.125, "x_ohm_per_km": 0.112, "c_nf_per_km": 300, "max_i_ka": 0.42,
+     "name": "Cable with given impedance"},
+    {"id": "L3", "from_bus": "F1", "to_bus": "F3", "length_km": 1.8,
+     "std_type": "NA2XS2Y 1x185 RM/25 12/20 kV"},
+    {"id": "L4", "from_bus": "F2", "to_bus": "F3", "length_km": 2.2}
+  ],
+  "loads": [
+    {"id": "LD_MV1", "bus": "MV1", "p_mw": 6.0, "q_mvar": 2.0, "name": "Town"},
+    {"id": "LD_F3", "bus": "F3", "p_mw": 3.0, "q_mvar": 1.0, "name": "Industrial park"},
+    {"id": "LD_LV1", "bus": "LV1", "p_mw": 0.4},
+    {"id": "LD_LV2", "bus": "LV2", "p_mw": 0.6, "q_mvar": 0.15},
+    {"id": "LD_AUX", "bus": "TERT", "p_mw": 0.5, "q_mvar": 0.2, "name": "Station auxiliaries"}
+  ],
+  "generators": [
+    {"id": "G1", "bus": "MV2", "p_mw": 4.0, "vm_pu": 1.01, "sn_mva": 6.0, "name": "CHP plant"}
+  ],
+  "static_generators": [
+    {"id": "PV", "bus": "LV2", "p_mw": 0.3, "name": "Rooftop PV"},
+    {"id": "WF", "bus": "F3", "p_mw": 2.0, "q_mvar": -0.2, "kind": "wind", "name": "Wind farm"}
+  ],
+  "shunts": [
+    {"id": "SR", "bus": "TERT", "q_mvar": 2.0, "name": "Station reactor"},
+    {"id": "CAP", "bus": "F1", "q_mvar": -1.5, "name": "Capacitor bank"}
+  ],
+  "storage": [
+    {"id": "BESS", "bus": "LV1", "p_mw": 0.1, "max_e_mwh": 0.5, "name": "Battery"}
+  ],
+  "switches": [
+    {"id": "CB_LHV", "bus": "HV", "element": "L_HV"},
+    {"id": "CB_T3W", "bus": "HV", "element": "T3W", "et": "three_winding_transformer"},
+    {"id": "CB_T2", "bus": "HV2", "element": "T2", "et": "transformer"},
+    {"id": "CB_L1", "bus": "MV1", "element": "L1", "et": "line"},
+    {"id": "CB_L4", "bus": "F3", "element": "L4", "et": "line"},
+    {"id": "TIE", "bus": "MV1", "element": "MV2", "et": "bus", "closed": false,
+     "name": "Bus tie (normally open)"}
+  ]
+}
