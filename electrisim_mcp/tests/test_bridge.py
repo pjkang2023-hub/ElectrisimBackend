@@ -55,6 +55,19 @@ def test_newer_design_supersedes_one_still_waiting(bridge):
     assert request(bridge, 'GET', '/next')[2]['id'] == second.id
 
 
+def test_page_without_a_diagram_open_leaves_the_job_queued(bridge):
+    # Drawing into the placeholder graph behind the start dialog loses the
+    # diagram, so a not-ready poll must not take the job.
+    job = bridge.submit('{}', 'auto')
+    assert request(bridge, 'GET', '/next?ready=0')[0] == 204
+    assert job.status == 'pending'
+    status = bridge.status()
+    assert status['page_connected'] is True and status['diagram_open'] is False
+    # Once a diagram is open, the same job is handed over.
+    assert request(bridge, 'GET', '/next')[2]['id'] == job.id
+    assert bridge.status()['diagram_open'] is True
+
+
 def test_poll_marks_the_page_connected(bridge):
     assert bridge.status()['page_connected'] is False
     request(bridge, 'GET', '/next')

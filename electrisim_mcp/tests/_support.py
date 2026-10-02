@@ -68,16 +68,18 @@ def request(bridge, method, path, body=None, origin=PAGE_ORIGIN, host=None, head
 class FakePage:
     """Polls the bridge like mcpBridge.js and acknowledges with a chosen outcome."""
 
-    def __init__(self, bridge, outcome=None):
+    def __init__(self, bridge, outcome=None, ready=True):
         self.bridge = bridge
         self.outcome = outcome or {'ok': True, 'cellsAdded': 19, 'layout': 'vertical'}
+        # ready=False: Electrisim is open but no diagram file is.
+        self.path = '/next' if ready else '/next?ready=0'
         self.drawn = []
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def _run(self):
         while not self._stop.is_set():
-            status, _, job = request(self.bridge, 'GET', '/next')
+            status, _, job = request(self.bridge, 'GET', self.path)
             if status == 200:
                 self.drawn.append(job)
                 request(self.bridge, 'POST', '/ack', {'id': job['id'], **self.outcome})

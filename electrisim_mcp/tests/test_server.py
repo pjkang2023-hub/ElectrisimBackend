@@ -108,6 +108,16 @@ async def test_draw_without_a_page_queues_and_says_where_to_go(backend, bridge):
     assert bridge.status()['pending'] == [data['id']]
 
 
+async def test_draw_with_no_diagram_open_queues_and_says_so(backend, bridge):
+    with FakePage(bridge, ready=False) as page:
+        result = await call(backend, bridge, 'draw_diagram', {'spec': SPEC, 'wait_seconds': 0.5})
+    data = result.structured_content
+    assert data['status'] == 'queued'
+    assert 'Electrisim is open but no diagram is' in data['hint']
+    assert page.drawn == []
+    assert bridge.status()['pending'] == [data['id']]
+
+
 async def test_draw_failure_on_the_page_is_an_error(backend, bridge):
     outcome = {'ok': False, 'error': 'The Electrisim editor is not ready.', 'errors': ['boom']}
     with FakePage(bridge, outcome):

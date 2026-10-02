@@ -160,10 +160,14 @@ def create_server(backend=None, bridge=None):
         if not job.wait(max(0.0, min(float(wait_seconds), 120.0))):
             status = bridge.status()
             where = _frontend_url()
-            hint = (f'The page is connected but has not finished drawing yet.'
-                    if status['page_connected'] else
-                    f'No Electrisim page is connected. Open {where} - the diagram '
-                    f'is queued and will be drawn as soon as the page loads.')
+            if not status['page_connected']:
+                hint = (f'No Electrisim page is connected. Open {where} and open or create a '
+                        f'diagram - the diagram is queued and will be drawn then.')
+            elif status['diagram_open'] is False:
+                hint = ('Electrisim is open but no diagram is. Open or create one (File > New) '
+                        '- the diagram is queued and will be drawn as soon as one is open.')
+            else:
+                hint = 'The page is connected but has not finished drawing yet.'
             return {'status': 'queued', 'id': job.id, 'layout': chosen,
                     'hint': hint, **report}
 

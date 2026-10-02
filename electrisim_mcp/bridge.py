@@ -113,6 +113,8 @@ class Bridge:
         self._lock = threading.Lock()
         self._ids = itertools.count(1)
         self._last_poll = None
+        # Whether the polling page has a diagram open; None until it first polls.
+        self._page_ready = None
         self._server = None
         self._thread = None
         self.start_error = None
@@ -170,9 +172,14 @@ class Bridge:
                 self._jobs.popitem(last=False)
             return job
 
-    def _next_locked(self):
+    def _next_locked(self, ready=True):
         self._last_poll = time.monotonic()
+        self._page_ready = ready
         self._expire_locked()
+        if not ready:
+            # The page is here but has no diagram open. Leave the job queued:
+            # drawing it now would land in a placeholder graph and be discarded.
+            return None
         for job in self._jobs.values():
             if job.status == 'pending':
                 job.status = 'delivered'
@@ -208,11 +215,16 @@ class Bridge:
             self._expire_locked()
             age = None if self._last_poll is None else time.monotonic() - self._last_poll
             pending = [j.id for j in self._jobs.values() if j.status == 'pending']
+            ready = self._page_ready
+        connected = age is not None and age <= CONNECTED_WITHIN_S
         return {
             'running': self.running,
             'url': self.url,
             'error': self.start_error,
-            'page_connected': age is not None and age <= CONNECTED_WITHIN_S,
+            'page_connected': connected,
+            # Meaningful only while connected: False means Electrisim is open
+            # but no diagram is, so queued diagrams wait.
+            'diagram_open': ready if connected else None,
             'seconds_since_last_poll': None if age is None else round(age, 1),
             'pending': pending,
         }
@@ -296,8 +308,10 @@ class Bridge:
                 if path == '/health':
                     self._send(200, {'ok': True, **bridge.status()})
                 elif path == '/next':
+                    query = self.path.split('?', 1)[1] if '?' in self.path else ''
+                    ready = 'ready=0' not in query.split('&')
                     with bridge._lock:
-                        job = bridge._next_locked()
+                        job = bridge._next_locked(ready)
                     if job is None:
                         self._send(204)
                     else:
