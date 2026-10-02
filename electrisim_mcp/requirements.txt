@@ -1,0 +1,4 @@
+# The MCP server runs in its own environment: it talks to the backend over HTTP
+# and needs nothing from requirements.txt. Kept separate so the SDK's dependencies
+# never reach the backend's deploy.
+mcp>=2.2,<3
