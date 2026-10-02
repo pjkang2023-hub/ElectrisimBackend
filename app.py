@@ -1490,6 +1490,10 @@ def pandapower_net_to_json(net):
                 _scalar(r['va_degree']),
                 _scalar(r['slack_weight']),
                 bool(_scalar(r['in_service'])) if r.get('in_service') is not None else True,
+                # The importer reads the short-circuit data from here on; without
+                # it every imported grid drew as an infinite 1e6 MVA source.
+                *[_scalar(r.get(c)) for c in ('s_sc_max_mva', 's_sc_min_mva', 'rx_max', 'rx_min',
+                                             'r0x0_max', 'x0x_max', 'r0x0_min', 'x0x_min')],
             ])
         return rows
 
@@ -1595,6 +1599,7 @@ def pandapower_net_to_json(net):
                     'xdss_pu': _scalar(r.get('xdss_pu')),
                     'rdss_ohm': _scalar(r.get('rdss_ohm')),
                     'rdss_pu': _scalar(r.get('rdss_pu')),
+                    'cos_phi': _scalar(r.get('cos_phi')),
                     'min_p_mw': _scalar(r.get('min_p_mw')),
                     'max_p_mw': _scalar(r.get('max_p_mw')),
                 }

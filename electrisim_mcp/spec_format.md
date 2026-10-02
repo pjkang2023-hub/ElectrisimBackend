@@ -26,7 +26,8 @@ A bus has no default voltage; it must always be given.
 
 **external_grids** - the connection to the wider grid, and the power-flow slack.
 `id`, **`bus`**, `vm_pu` (1.0), `va_degree` (0), `s_sc_max_mva` (none - give it
-for short-circuit studies), `rx_max`.
+for short-circuit studies; without it Electrisim treats the grid as an
+infinite 1,000,000 MVA source), `rx_max`.
 
 **transformers** - two-winding.
 `id`, **`hv_bus`**, **`lv_bus`**, `sn_mva` (25), `vn_hv_kv` / `vn_lv_kv` (taken
@@ -73,10 +74,16 @@ either
 **generators** - voltage-controlled synchronous machines.
 `id`, **`bus`**, `p_mw` (0), `vm_pu` (1.0), `sn_mva` (1.2 x p_mw, at least 1),
 `slack` (false - set true on one generator if there is no external grid),
-`name`, `in_service`.
+`name`, `in_service`, and short-circuit data: `vn_kv` (the bus voltage),
+`xdss_pu` (subtransient reactance, 0.2), `rdss_ohm` (0), `cos_phi` (0.85).
+The defaults are typical values so a short-circuit study runs; give the
+machine's own for a study you will rely on.
 
 **static_generators** - inverter-connected PV, wind, batteries in PQ mode.
-`id`, **`bus`**, `p_mw` (0), `q_mvar` (0), `name`, `in_service`.
+`id`, **`bus`**, `p_mw` (0), `q_mvar` (0), `name`, `in_service`, and for
+short circuit `sn_mva` (rated power: 1.1 x |p_mw|, at least |q_mvar| and
+0.1) and `k` (short-circuit to rated current, 1.1). Modelled as an inverter
+(current source).
 On a radial layout a static generator whose `name` contains "wind" or
 "turbine" is drawn as a wind turbine. `kind: "wind"` with a name that does not
 say so raises a warning rather than renaming it.

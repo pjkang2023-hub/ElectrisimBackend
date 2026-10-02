@@ -419,11 +419,21 @@ def build_network(spec):
         if bus is None:
             continue
         p_mw = _num(row.get('p_mw'), 'p_mw', where, problems, default=0.0)
+        cos_phi = _num(row.get('cos_phi'), 'cos_phi', where, problems, default=0.85, positive=True)
+        if cos_phi is not None and cos_phi > 1:
+            problems.append(f'{where}: cos_phi={cos_phi} must be at most 1')
+        # Short-circuit data: a short-circuit study fails on a generator without
+        # it, so typical values stand in until real ones are given.
         idx = pp.create_gen(
             net, bus=bus_index[bus], name=str(row.get('name') or ident), p_mw=p_mw,
             vm_pu=_num(row.get('vm_pu'), 'vm_pu', where, problems, default=1.0, positive=True),
             sn_mva=_num(row.get('sn_mva'), 'sn_mva', where, problems,
                         default=max(p_mw * 1.2, 1.0), positive=True),
+            vn_kv=_num(row.get('vn_kv'), 'vn_kv', where, problems,
+                       default=bus_kv[bus], positive=True),
+            xdss_pu=_num(row.get('xdss_pu'), 'xdss_pu', where, problems, default=0.2, positive=True),
+            rdss_ohm=_num(row.get('rdss_ohm'), 'rdss_ohm', where, problems, default=0.0),
+            cos_phi=cos_phi,
             slack=bool(row.get('slack', False)),
             in_service=bool(row.get('in_service', True)),
         )
@@ -436,10 +446,19 @@ def build_network(spec):
         if bus is None:
             continue
         name = str(row.get('name') or ident)
+        p_mw = _num(row.get('p_mw'), 'p_mw', where, problems, default=0.0)
+        q_mvar = _num(row.get('q_mvar'), 'q_mvar', where, problems, default=0.0)
+        # A short-circuit study needs a rating and the short-circuit to rated
+        # current ratio k; 1.1 is the value Electrisim has always assumed.
         idx = pp.create_sgen(
-            net, bus=bus_index[bus], name=name,
-            p_mw=_num(row.get('p_mw'), 'p_mw', where, problems, default=0.0),
-            q_mvar=_num(row.get('q_mvar'), 'q_mvar', where, problems, default=0.0),
+            net, bus=bus_index[bus], name=name, p_mw=p_mw, q_mvar=q_mvar,
+            sn_mva=_num(row.get('sn_mva'), 'sn_mva', where, problems,
+                        default=round(max(abs(p_mw or 0) * 1.1, abs(q_mvar or 0), 0.1), 6),
+                        positive=True),
+            k=_num(row.get('k'), 'k', where, problems, default=1.1, positive=True),
+            # pandapower assumes this when it is unset, but the canvas defaults a
+            # static generator to "async", which needs locked-rotor data instead.
+            generator_type='current_source',
             type=str(row.get('type') or 'wye'),
             in_service=bool(row.get('in_service', True)),
         )
