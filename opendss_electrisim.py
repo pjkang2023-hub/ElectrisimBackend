@@ -5932,6 +5932,24 @@ def harmonic_analysis(in_data, frequency, mode, algorithm, loadmodel, max_iterat
             bus_key = BusbarsDictConnectionToName.get(bt, bt).lower()
             elem_terminal_to_bus.append(('Transformer', dss_trafo_name, 2, bus_key))
 
+    # Three-winding transformers too: a bus reached only through one (a
+    # tertiary, say) otherwise had no monitor and reported 0 % THD.
+    for trafo_key, dss_trafo_name in Transformers3WDict.items():
+        ed = next((in_data[k] for k in in_data
+                   if isinstance(in_data[k], dict)
+                   and str(in_data[k].get('typ', '')).startswith('Three Winding Transformer')
+                   and (in_data[k].get('name', '') == trafo_key
+                        or in_data[k].get('id', '') == Transformers3WDictId.get(trafo_key, ''))), None)
+        if ed is None:
+            continue
+        for terminal, field in ((1, 'hv_bus'), (2, 'mv_bus'), (3, 'lv_bus')):
+            execute_dss_command(f'New Monitor.mon_{dss_trafo_name}_t{terminal} '
+                                f'element=Transformer.{dss_trafo_name} terminal={terminal} mode=0')
+            ref = ed.get(field, '')
+            if ref and ref in BusbarsDictConnectionToName:
+                elem_terminal_to_bus.append(('Transformer', dss_trafo_name, terminal,
+                                             BusbarsDictConnectionToName.get(ref, ref).lower()))
+
     # ---- Step 3: Solve fundamental power flow on the fresh circuit ------------
     if neglect_load_y:
         execute_dss_command('set NeglectLoadY=Yes')
