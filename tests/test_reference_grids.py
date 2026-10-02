@@ -32,8 +32,10 @@ Regenerate goldens with:  pytest --regen-golden
 
 Recapture the diagram payloads after changing the frontend import or a payload
 builder: draw the spec through the MCP server into an empty diagram, run Load
-Flow and Short Circuit, and save the body of each POST to the backend's "/"
-from the browser's network panel over the old files. The tests say whether the
+Flow, Short Circuit and Harmonic Analysis, and save the body of each POST to
+the backend's "/" from the browser's network panel over the old files
+(<grid>.diagram_payload.json, .diagram_sc_payload.json and
+.diagram_harmonic_payload.json). The tests say whether the
 new drawing still computes the spec's answers.
 """
 
@@ -528,3 +530,98 @@ def test_short_circuit_names_missing_machine_data(client, quiet):
     assert "static generator 'Wind farm C' has no sn_mva" in message
     assert "static generator 'Rooftop PV' has no sn_mva" in message
     assert 'DataFrame' not in message
+
+
+# --- harmonics (OpenDSS) -------------------------------------------------------------
+
+# OpenDSS models the grid behind its short-circuit impedance where pandapower's
+# external grid is ideal, so fundamental voltages agree to this, not to rounding.
+OPENDSS_VM_TOL = 0.01
+
+
+@pytest.fixture
+def opendss_scratch(tmp_path):
+    """
+    Point OpenDSS at a scratch directory. It saves solved voltages to a file in
+    its data path - the backend directory by default - and a backend running
+    from there holds that file open, failing the run with "Error opening/
+    creating file to save voltages".
+    """
+    import opendssdirect as dss
+    before = dss.Basic.DataPath()
+    dss.Basic.DataPath(str(tmp_path))
+    yield
+    dss.Basic.DataPath(before)
+
+
+def _post_harmonics(client, quiet, payload):
+    with quiet():
+        response = client.post('/', json=payload)
+    assert response.status_code == 200, response.get_data(as_text=True)[:400]
+    result = json.loads(response.get_data(as_text=True))
+    assert not result.get('error'), result.get('error')
+    return result
+
+
+def _harmonic_payload(grid):
+    with open(os.path.join(REFERENCE_DIR, f'{grid}.diagram_harmonic_payload.json'),
+              encoding='utf-8') as handle:
+        return json.load(handle)
+
+
+@pytest.mark.parametrize('grid', GRIDS)
+def test_drawn_diagram_harmonics_reach_every_bus(client, quiet, opendss_scratch, grid):
+    """
+    A harmonic analysis of the drawn diagram energises every bus at the spec's
+    voltage and reports distortion at every bus. Lines behind a breaker used
+    to reach OpenDSS with no bus at that end, leaving everything beyond them at
+    0 pu, and a bus fed only through a three-winding transformer read 0 % THD.
+    """
+    payload = _harmonic_payload(grid)
+    result = _post_harmonics(client, quiet, payload)
+
+    spec = load_spec(grid)
+    net, _ = sld.build_network(spec)
+    want = results_by_id(run(net), spec_ids(net))['bus']
+    label_of_cell = {v['name']: v.get('userFriendlyName') for v in payload.values()
+                     if isinstance(v, dict) and 'name' in v}
+    rows = {label_of_cell.get(r['name'], r['name']): r for r in result['busbars']}
+
+    differ = []
+    for bus in spec['buses']:
+        got = rows.get(str(bus.get('name') or bus['id']))
+        if got is None:
+            differ.append(f"bus {bus['id']}: not in the harmonic results")
+            continue
+        if abs(float(got['vm_pu']) - want[bus['id']]['vm_pu']) > OPENDSS_VM_TOL:
+            differ.append(f"bus {bus['id']}: {got['vm_pu']} pu in OpenDSS, "
+                          f"{want[bus['id']]['vm_pu']:.4f} pu in the spec")
+        if not float(got.get('vthd_percent') or 0) > 0:
+            differ.append(f"bus {bus['id']}: no distortion reported")
+    assert not differ, f'{grid}:\n  ' + '\n  '.join(differ)
+
+
+def test_opendss_takes_defaults_for_null_text(client, quiet, opendss_scratch):
+    """
+    Diagrams imported before the frontend stopped writing pandapower's empty
+    cells hold them as the text "null". OpenDSS stopped on the first one with
+    "could not convert string to float: 'null'"; it now uses its defaults and
+    gives the same answer as for a clean diagram.
+    """
+    clean = _post_harmonics(client, quiet, _harmonic_payload('reference_radial'))
+
+    stale = _harmonic_payload('reference_radial')
+    for element in stale.values():
+        typ = str(element.get('typ', ''))
+        if typ.startswith('Transformer'):
+            element.update(tap_pos='null', tap_step_percent='null', tap_side='null',
+                           tap_neutral='null')
+        elif typ.startswith('Storage'):
+            element.update(sn_mva='null', soc_percent='null', type='null')
+        elif typ.startswith('Load'):
+            element['sn_mva'] = 'null'
+    result = _post_harmonics(client, quiet, stale)
+
+    got = {r['name']: float(r['vm_pu']) for r in result['busbars']}
+    for row in clean['busbars']:
+        assert got[row["name"]] == pytest.approx(float(row["vm_pu"]), abs=1e-3)
