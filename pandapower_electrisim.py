@@ -9,6 +9,7 @@ from pandapower.diagnostic import diagnostic
 import pandapower.topology as top
 from typing import List
 import math
+import re
 import json
 import numpy as np
 import pandas as pd
@@ -3713,9 +3714,20 @@ def create_other_elements(in_data,net,x, Busbars):
                 value = in_data[x].get(param)
                 if value is not None and value not in ('None', '', 'null'):
                     if param == 'vector_group':
-                        transformer_params[param] = vector_group  # Use parsed base group
+                        # pandapower names three-winding groups without clock
+                        # numbers ("YNynd"); parse_vector_group only strips a
+                        # trailing one, so "YNyn0d5" reached it unrecognised.
+                        transformer_params[param] = re.sub(r'\d+', '', str(value))
                     else:
                         transformer_params[param] = safe_float(value)  # Convert to float
+            # A zero zero-sequence voltage is the canvas placeholder, and a
+            # zero impedance; fall back to the positive-sequence value, the rule
+            # pandapower itself applies to two-winding transformers.
+            for winding in ('hv', 'mv', 'lv'):
+                for kind in ('vk', 'vkr'):
+                    zero_key = f'{kind}0_{winding}_percent'
+                    if not (safe_float(transformer_params.get(zero_key), 0.0) > 0):
+                        transformer_params[zero_key] = transformer_params[f'{kind}_{winding}_percent']
             
             # Add in_service parameter (default to True if not specified)
             if 'in_service' in in_data[x]:
@@ -7636,6 +7648,42 @@ def _sc_missing_machine_data(net):
     return out
 
 
+# Three-winding vector groups pandapower can fault single-phase (pd2ppc_zero).
+_SC_1PH_TRAFO3W_GROUPS = (
+    {a + b + c for a in 'dy' for b in 'dy' for c in 'dy'}
+    | {'ynyd', 'yndy', 'yynd', 'ydyn', 'ynynd', 'yndyn', 'yndd', 'ynyy', 'dynyn'}
+)
+
+
+def _sc_missing_zero_sequence_data(net):
+    """
+    What a single-phase fault needs and the network lacks, one line each:
+    an external grid with no zero-sequence impedance (a NaN in the Ybus, and
+    a diagnostic that blamed s_sc_min_mva), or a three-winding transformer in
+    a vector group pandapower cannot fault.
+    """
+    out = []
+    for idx in net.ext_grid.index:
+        if not bool(net.ext_grid.at[idx, 'in_service']):
+            continue
+        x0x = net.ext_grid.at[idx, 'x0x_max'] if 'x0x_max' in net.ext_grid.columns else None
+        try:
+            ok = float(x0x) > 0
+        except (TypeError, ValueError):
+            ok = False
+        if not ok:
+            out.append(f"external grid '{get_element_display_name(net, 'ext_grid', idx)}' has no "
+                       f"x0x_max (zero-sequence X0/X, typically 1-3) - set it with r0x0_max")
+    if 'vector_group' in net.trafo3w.columns:
+        for idx in net.trafo3w.index:
+            group = str(net.trafo3w.at[idx, 'vector_group'] or '')
+            if bool(net.trafo3w.at[idx, 'in_service']) and group.lower() not in _SC_1PH_TRAFO3W_GROUPS:
+                out.append(f"three-winding transformer '{get_element_display_name(net, 'trafo3w', idx)}' "
+                           f"has vector group {group!r}, which pandapower cannot fault single-phase; "
+                           f"use one of YNynd, YNdyn, YNdd, YNyy, Dynyn")
+    return out
+
+
 def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=None):
     
     # Add diagnostic prints
@@ -7734,15 +7782,19 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
         #       For UI display, we want max/min per branch, so keep return_all_currents=False.
         # Raised inside the try so it reaches the diagnostic dialog - the
         # frontend drops a non-200 response without showing its message.
+        # Long-standing defaults for grids whose zero-sequence columns are
+        # absent come first, so only an explicit zero is reported below.
+        ensure_ext_grid_zero_sequence_min(net)
         missing_machine_data = _sc_missing_machine_data(net)
+        if fault_type == '1ph':
+            missing_machine_data += _sc_missing_zero_sequence_data(net)
         if missing_machine_data:
             raise ValueError(
-                'machine data is missing - '
+                'data is missing - '
                 + '; '.join(missing_machine_data)
                 + '. Enter it under the element\'s Short circuit parameters, '
                   'or take the element out of service'
             )
-        ensure_ext_grid_zero_sequence_min(net)
         sc.calc_sc(
             net,
             fault=fault_type,
