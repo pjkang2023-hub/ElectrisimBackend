@@ -32,10 +32,11 @@ Regenerate goldens with:  pytest --regen-golden
 
 Recapture the diagram payloads after changing the frontend import or a payload
 builder: draw the spec through the MCP server into an empty diagram, run Load
-Flow, Short Circuit and Harmonic Analysis, and save the body of each POST to
-the backend's "/" from the browser's network panel over the old files
-(<grid>.diagram_payload.json, .diagram_sc_payload.json and
-.diagram_harmonic_payload.json). The tests say whether the
+Flow, Short Circuit, Harmonic Analysis and Load Flow again on the OpenDSS
+engine tab, and save the body of each POST to the backend's "/" from the
+browser's network panel over the old files (<grid>.diagram_payload.json,
+.diagram_sc_payload.json, .diagram_harmonic_payload.json and
+.diagram_opendss_payload.json). The tests say whether the
 new drawing still computes the spec's answers.
 """
 
@@ -625,3 +626,51 @@ def test_opendss_takes_defaults_for_null_text(client, quiet, opendss_scratch):
     got = {r['name']: float(r['vm_pu']) for r in result['busbars']}
     for row in clean['busbars']:
         assert got[row["name"]] == pytest.approx(float(row["vm_pu"]), abs=1e-3)
+
+
+# The OpenDSS load flow feeds the grid through its short-circuit impedance where
+# pandapower's external grid is ideal; voltages, and so flows, differ by that.
+OPENDSS_LF_VM_TOL = 0.002   # pu
+OPENDSS_LF_P_TOL = 0.05     # MW at the external grid
+OPENDSS_STORAGE_TOL = 1e-3  # MW
+
+
+@pytest.mark.parametrize('grid', GRIDS)
+def test_drawn_diagram_opendss_load_flow_matches_spec(client, quiet, opendss_scratch, grid):
+    """
+    The OpenDSS load flow of the drawn diagram gives the spec's answer: every
+    bus at the spec's voltage - generators at their own setpoint, which OpenDSS
+    used to ignore - the grid supplying the spec's active power, and each
+    battery at its dispatch, which OpenDSS refused while the drawing gave it no
+    state of charge.
+    """
+    with open(os.path.join(REFERENCE_DIR, f'{grid}.diagram_opendss_payload.json'),
+              encoding='utf-8') as handle:
+        payload = json.load(handle)
+    result = _post_harmonics(client, quiet, payload)
+
+    spec = load_spec(grid)
+    net, _ = sld.build_network(spec)
+    want = results_by_id(run(net), spec_ids(net))
+    label_of_cell = {v['name']: v.get('userFriendlyName') for v in payload.values()
+                     if isinstance(v, dict) and 'name' in v}
+    rows = {label_of_cell.get(r['name'], r['name']): r for r in result['busbars']}
+
+    differ = []
+    for bus in spec['buses']:
+        got = rows.get(str(bus.get('name') or bus['id']))
+        if got is None:
+            differ.append(f"bus {bus['id']}: not in the OpenDSS results")
+        elif abs(float(got['vm_pu']) - want['bus'][bus['id']]['vm_pu']) > OPENDSS_LF_VM_TOL:
+            differ.append(f"bus {bus['id']}: {got['vm_pu']} pu in OpenDSS, "
+                          f"{want['bus'][bus['id']]['vm_pu']:.4f} pu in the spec")
+    grid_p = float(result['externalgrids'][0]['p_mw'])
+    if abs(grid_p - want['ext_grid']['Grid']['p_mw']) > OPENDSS_LF_P_TOL:
+        differ.append(f"external grid: {grid_p:.4f} MW in OpenDSS, "
+                      f"{want['ext_grid']['Grid']['p_mw']:.4f} MW in the spec")
+    drawn_storage = sorted(float(s['p_mw']) for s in result.get('storages', []))
+    spec_storage = sorted(float(s['p_mw']) for s in spec.get('storage', []))
+    if len(drawn_storage) != len(spec_storage) or any(
+            abs(a - b) > OPENDSS_STORAGE_TOL for a, b in zip(drawn_storage, spec_storage)):
+        differ.append(f'storage dispatch {drawn_storage} MW in OpenDSS, {spec_storage} in the spec')
+    assert not differ, f'{grid}:\n  ' + '\n  '.join(differ)

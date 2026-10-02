@@ -390,6 +390,8 @@ def test_injection_rows_line_up_with_the_importer(client):
     (bess,) = rows_as_the_importer_reads(model, 'storage', IMPORTER_STORAGE)
     assert (bess['name'], bess['bus'], bess['p_mw'], bess['max_e_mwh']) == ('BESS', 3, 0.2, 0.8)
     assert (bess['scaling'], bess['in_service']) == (1.0, True)
+    # OpenDSS holds an empty battery idle; the default keeps it dispatchable.
+    assert bess['soc_percent'] == 50.0
 
 
 def test_endpoint_accepts_a_bare_spec(client):

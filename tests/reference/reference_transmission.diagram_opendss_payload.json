@@ -9,10 +9,11 @@
   "tolerance": "0.0001",
   "controlmode": "Static",
   "exportCommands": false,
+  "monteCarloNumber": "100",
+  "monteCarloRandom": "Uniform",
+  "monteCarloHour": "0",
   "exportOpenDSSResults": false,
-  "analysisType": "harmonic",
-  "harmonics": "3,5,7,11,13",
-  "neglectLoadY": false,
+  "exportPdfReport": false,
   "user_email": "unknown@user.com"
  },
  "1": {

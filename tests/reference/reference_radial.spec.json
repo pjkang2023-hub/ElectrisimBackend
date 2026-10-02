@@ -44,7 +44,7 @@
     {"id": "CAP", "bus": "B1", "q_mvar": -0.6, "name": "Capacitor bank"}
   ],
   "storage": [
-    {"id": "BESS", "bus": "C1", "p_mw": -0.5, "max_e_mwh": 2.0, "name": "Battery"}
+    {"id": "BESS", "bus": "C1", "p_mw": -0.5, "max_e_mwh": 2.0, "soc_percent": 80, "name": "Battery"}
   ],
   "switches": [
     {"id": "CB_T1", "bus": "SUB", "element": "T1", "et": "transformer"},
