@@ -50,6 +50,23 @@ def _coerce_export_flag(value):
     return False
 
 
+def _drop_null_text(in_data):
+    """
+    Remove fields whose value is the text "null", "undefined" or "NaN".
+
+    Diagrams imported before the frontend stopped writing them hold pandapower's
+    empty cells as that text. OpenDSS reads every field with .get(key, default),
+    so a dropped field takes its default, where the text stopped the run with
+    "could not convert string to float: 'null'".
+    """
+    for element in (in_data.values() if isinstance(in_data, dict) else in_data):
+        if not isinstance(element, dict):
+            continue
+        for key in [k for k, v in element.items()
+                    if isinstance(v, str) and v in ('null', 'undefined', 'NaN')]:
+            del element[key]
+
+
 import pandapower_electrisim
 import grid_code_pq_electrisim
 import grid_code_vq_electrisim
@@ -199,6 +216,7 @@ def simulation():
         if isinstance(dg_params, dict) and 'DgInterconnectionOpenDss' in str(dg_params.get('typ', '')):
             user_email = dg_params.get('user_email', 'unknown@user.com')
             print(f"=== DG INTERCONNECTION SCREENING REQUESTED BY USER: {user_email} ===")
+            _drop_null_text(in_data)
             response_data = opendss_electrisim.dg_interconnection_screening(in_data, dg_params)
             accept_encoding = request.headers.get('Accept-Encoding', '')
             if 'gzip' in accept_encoding and len(response_data) > 1024:
@@ -920,6 +938,7 @@ def simulation():
                 return response_data
 
             if "ShortCircuitOpenDss" in typ:
+                _drop_null_text(in_data)
                 # Extract user email for logging
                 user_email = in_data[x].get('user_email', 'unknown@user.com')
                 frequency = int(in_data[x].get('frequency', 50))
@@ -950,6 +969,7 @@ def simulation():
                     return response_data
            
             if "DgInterconnectionOpenDss" in typ:
+                _drop_null_text(in_data)
                 user_email = in_data[x].get('user_email', 'unknown@user.com')
                 print(f"=== DG INTERCONNECTION SCREENING REQUESTED BY USER: {user_email} ===")
                 response_data = opendss_electrisim.dg_interconnection_screening(in_data, in_data[x])
@@ -964,6 +984,7 @@ def simulation():
                 return response_data
 
             if "PowerFlowOpenDss" in typ:
+                _drop_null_text(in_data)
                 # Extract user email for logging
                 user_email = in_data[x].get('user_email', 'unknown@user.com')
                 
