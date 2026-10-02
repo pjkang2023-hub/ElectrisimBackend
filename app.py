@@ -43,6 +43,8 @@ import pandapower_electrisim
 import grid_code_pq_electrisim
 import grid_code_vq_electrisim
 import opendss_electrisim
+import electrisim_auth
+from electrisim_auth import require_auth, authenticated_email
 import opender_electrisim
 import arcflash_electrisim
 import andes_electrisim
@@ -89,6 +91,8 @@ CORS(app,
                     'Access-Control-Allow-Credentials'],
      supports_credentials=True)
 
+_console(electrisim_auth.startup_report())
+
 app.config['CORS_HEADERS'] = 'Content-Type'
 #app.config['CORS_ORIGINS'] = 'http://128.0.0.1:5500' #nie było tego
  #nie było tego
@@ -130,6 +134,7 @@ def _log_incoming_request():
 
 
 @app.route('/', methods=['POST'])
+@require_auth
 def simulation():
     try:
         in_data = request.get_json(force=True, silent=True)
@@ -137,6 +142,15 @@ def simulation():
             return jsonify({
                 'error': 'Request body must be a JSON object with simulation elements.'
             }), 400
+
+        # Identity: prefer the verified token claim over the request body.
+        # in_data[...]['user_email'] is set by the client and must not be
+        # trusted for logging, attribution, quota, or billing.
+        _verified_email = authenticated_email(None)
+        if _verified_email:
+            for _el in in_data.values():
+                if isinstance(_el, dict) and 'user_email' in _el:
+                    _el['user_email'] = _verified_email
         try:
             _typs = sorted({
                 _element_typ(v) for v in in_data.values() if _element_typ(v)
@@ -1803,6 +1817,7 @@ def pandapower_net_to_json(net):
 
 
 @app.route('/import-pandapower', methods=['POST'])
+@require_auth
 def import_pandapower():
     """
     Accepts a Pandapower .py script, executes it to build `net`,
@@ -1954,6 +1969,7 @@ def _bus_voltages_from_equipment(dss, bus_names):
 
 
 @app.route('/import-opendss', methods=['POST'])
+@require_auth
 def import_opendss():
     """
     Accepts an OpenDSS .dss text, builds a model, and returns
