@@ -495,11 +495,17 @@ def build_network(spec):
         bus = bus_of(row, 'bus', where)
         if bus is None:
             continue
+        soc = _num(row.get('soc_percent'), 'soc_percent', where, problems, default=50.0)
+        if soc is not None and not 0 <= soc <= 100:
+            problems.append(f'{where}: soc_percent={soc} must be between 0 and 100')
+        # pandapower's load flow ignores the state of charge; OpenDSS does not,
+        # and holds an empty battery idle whatever p_mw asks for.
         idx = pp.create_storage(
             net, bus=bus_index[bus], name=str(row.get('name') or ident),
             p_mw=_num(row.get('p_mw'), 'p_mw', where, problems, default=0.0),
             max_e_mwh=_num(row.get('max_e_mwh'), 'max_e_mwh', where, problems,
                            default=1.0, positive=True),
+            soc_percent=soc,
             in_service=bool(row.get('in_service', True)),
         )
         record('storage', idx, ident)

@@ -92,7 +92,9 @@ say so raises a warning rather than renaming it.
 negative injects - a capacitor bank), `p_mw` (0), `name`, `in_service`.
 
 **storage** - `id`, **`bus`**, `p_mw` (0; positive charges, negative discharges),
-`max_e_mwh` (1.0), `name`, `in_service`.
+`max_e_mwh` (1.0), `soc_percent` (state of charge, 50), `name`, `in_service`.
+An OpenDSS load flow holds a battery at 0 % idle however much it is asked to
+discharge; pandapower's ignores the state of charge.
 
 **switches** - `id`, **`bus`**, **`element`**, `et` (`line` default,
 `transformer`, `three_winding_transformer`, or `bus`), `closed` (true), `name`.
