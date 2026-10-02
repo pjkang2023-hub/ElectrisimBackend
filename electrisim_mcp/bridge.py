@@ -46,6 +46,8 @@ DEFAULT_ORIGINS = ('http://127.0.0.1:5501', 'http://localhost:5501')
 CONNECTED_WITHIN_S = 6.0
 #: An undelivered diagram older than this is dropped rather than drawn late.
 PENDING_TTL_S = 15 * 60.0
+# How many past diagrams bridge_status reports, newest last.
+RECENT_JOBS = 5
 #: A delivered diagram not acknowledged within this is given up on. It is not
 #: re-offered: the page may have drawn it and died before acknowledging, and a
 #: duplicate diagram is worse than a missing one the caller already knows about.
@@ -198,6 +200,9 @@ class Bridge:
             'unplaced': [str(b)[:200] for b in (payload.get('unplaced') or [])][:200],
             'error': payload.get('error'),
             'console_errors': [str(e)[:500] for e in (payload.get('errors') or [])][:20],
+            # Which diagram the page drew into - with several Electrisim tabs
+            # open, the one place to see where a diagram went.
+            'file': None if payload.get('file') is None else str(payload.get('file'))[:200],
         }
         job.finish('done' if ok else 'failed', result)
         return True
@@ -215,6 +220,9 @@ class Bridge:
             self._expire_locked()
             age = None if self._last_poll is None else time.monotonic() - self._last_poll
             pending = [j.id for j in self._jobs.values() if j.status == 'pending']
+            # A queued draw_diagram returns before the page draws; this is
+            # where its outcome can be read afterwards.
+            recent = [j.describe() for j in list(self._jobs.values())[-RECENT_JOBS:]]
             ready = self._page_ready
         connected = age is not None and age <= CONNECTED_WITHIN_S
         return {
@@ -227,6 +235,7 @@ class Bridge:
             'diagram_open': ready if connected else None,
             'seconds_since_last_poll': None if age is None else round(age, 1),
             'pending': pending,
+            'recent': recent,
         }
 
     # --- HTTP ------------------------------------------------------------

@@ -190,6 +190,8 @@ def create_server(backend=None, bridge=None):
         out = {'status': 'drawn', 'id': job.id,
                'layout': result.get('layout') or chosen,
                'cells_added': result.get('cells_added'), **report}
+        if result.get('file'):
+            out['drawn_into'] = result['file']
         unplaced = result.get('unplaced') or []
         if unplaced:
             # Drawn, but not faithfully: the radial layout stacked these in one
@@ -209,7 +211,9 @@ def create_server(backend=None, bridge=None):
     @server.tool(
         title='Bridge status',
         description='Whether an Electrisim page is connected to receive diagrams, '
-                    'which URL to open if not, and any diagrams waiting to be drawn.',
+                    'which URL to open if not, any diagrams waiting to be drawn, and the '
+                    'outcome of recent ones - including a queued diagram drawn after '
+                    'draw_diagram returned, and which diagram it went into.',
         annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True,
                                     open_world_hint=False),
     )

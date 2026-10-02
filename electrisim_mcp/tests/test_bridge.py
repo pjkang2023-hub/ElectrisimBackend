@@ -33,6 +33,22 @@ def test_acknowledgement_completes_the_job(bridge):
     assert len(job.result['console_errors'][0]) == 500
 
 
+def test_status_reports_where_a_queued_diagram_went(bridge):
+    """
+    draw_diagram returns 'queued' when no page is ready; the outcome, and which
+    diagram it was drawn into, is then read from the status.
+    """
+    job = bridge.submit('{}', 'auto', 'Reference grid')
+    request(bridge, 'GET', '/next')
+    request(bridge, 'POST', '/ack', {'id': job.id, 'ok': True, 'cellsAdded': 71,
+                                     'layout': 'vertical', 'file': 'Feeder study.drawio'})
+    assert job.wait(1)
+    (recent,) = bridge.status()['recent']
+    assert (recent['id'], recent['status'], recent['title']) == (job.id, 'done', 'Reference grid')
+    assert (recent['result']['cells_added'], recent['result']['file']) == (71, 'Feeder study.drawio')
+    assert 'model' not in recent
+
+
 def test_failed_drawing_is_recorded_as_failed(bridge):
     job = bridge.submit('{}', 'auto')
     request(bridge, 'GET', '/next')
