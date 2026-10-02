@@ -56,6 +56,7 @@ import grid_code_vq_electrisim
 import opendss_electrisim
 import electrisim_auth
 from electrisim_auth import require_auth, authenticated_email
+import electrisim_ops
 import opender_electrisim
 import arcflash_electrisim
 import andes_electrisim
@@ -103,6 +104,8 @@ CORS(app,
      supports_credentials=True)
 
 _console(electrisim_auth.startup_report())
+electrisim_ops.install(app)
+_console(electrisim_ops.startup_report(app))
 
 app.config['CORS_HEADERS'] = 'Content-Type'
 #app.config['CORS_ORIGINS'] = 'http://128.0.0.1:5500' #nie było tego

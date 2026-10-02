@@ -2,7 +2,7 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "gunicorn app:app"
+startCommand = "gunicorn -c gunicorn.conf.py app:app"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 10
 
