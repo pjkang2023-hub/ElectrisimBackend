@@ -2261,9 +2261,11 @@ def create_generator_element(dss, element_data, element_name, element_id, Busbar
             # Model=3 = constant kW / constant kV, matching pandapower gen (a PV bus).
             q_abs_sync = abs(float(q_kvar))
             maxkvar_sync = max(q_abs_sync * 2.0, 10000.0)
+            # Vpu is Model 3's voltage setpoint. Without it every generator held
+            # its bus at 1.0 pu whatever vm_pu the diagram gave.
             gen_cmd = (
                 f"New Generator.{element_name} Bus1={bus_name} kV={bus_voltage} "
-                f"kW={p_kw} kvar={q_kvar} Model=3 PF={cos_phi} "
+                f"kW={p_kw} kvar={q_kvar} Model=3 Vpu={vm_pu} PF={cos_phi} "
                 f"Vminpu=0.5 Vmaxpu=2.0 Maxkvar={maxkvar_sync:.3f} Minkvar={-maxkvar_sync:.3f}"
             )
             
