@@ -30,6 +30,17 @@ def _console(msg):
         pass
 
 
+def _as_frequency(value, default=50.0):
+    """Parse a frequency field from the request. Never eval() request data."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if not (1.0 <= f <= 1000.0):
+        raise ValueError(f'frequency out of range: {f}')
+    return f
+
+
 def _coerce_export_flag(value):
     """Normalize JSON export checkboxes from the Electrisim frontend."""
     if value is True or value == 1:
@@ -111,7 +122,9 @@ def _element_typ(item):
 def add_noindex_header(response):
     """API host is not a website — keep it out of Google Search index."""
     response.headers.setdefault('X-Robots-Tag', 'noindex, nofollow')
-    response.headers.setdefault('Access-Control-Allow-Private-Network', 'true')
+    # REMOVED: this header lets public websites reach this server on loopback/private
+    # IPs. With exec/eval endpoints below that is drive-by code execution.
+    # response.headers.setdefault('Access-Control-Allow-Private-Network', 'true')
     return response
 
 
@@ -370,7 +383,7 @@ def simulation():
                 # Extract OPF parameters
                 opf_params = {
                     'opf_type': in_data[x]['opf_type'],
-                    'frequency': eval(in_data[x]['frequency']),
+                    'frequency': _as_frequency(in_data[x]['frequency']),
                     'ac_algorithm': in_data[x]['ac_algorithm'],
                     'dc_algorithm': in_data[x]['dc_algorithm'],
                     'calculate_voltage_angles': in_data[x]['calculate_voltage_angles'],
@@ -411,7 +424,7 @@ def simulation():
                 user_email = in_data[x].get('user_email', 'unknown@user.com')
                 print(f"=== LOAD FLOW SIMULATION REQUESTED BY USER: {user_email} ===")
                 
-                frequency=eval(in_data[x]['frequency'])
+                frequency=_as_frequency(in_data[x]['frequency'])
                 algorithm=in_data[x]['algorithm']
                 calculate_voltage_angles = in_data[x]['calculate_voltage_angles']
                 init = in_data[x]['initialization']
@@ -1201,7 +1214,7 @@ def simulation():
                 
                 # Extract economic analysis parameters
                 economic_params = {
-                    'frequency': eval(in_data[x].get('frequency', '50')),
+                    'frequency': _as_frequency(in_data[x].get('frequency', '50')),
                     'currency': in_data[x].get('currency', 'EUR'),
                     'algorithm': in_data[x].get('algorithm', 'nr'),
                     'calculate_voltage_angles': in_data[x].get('calculate_voltage_angles', 'auto'),
@@ -1236,7 +1249,7 @@ def simulation():
                     'tap_control': in_data[x].get('tap_control', False),
                     'discrete_tap_control': in_data[x].get('discrete_tap_control', False),
                     'continuous_tap_control': in_data[x].get('continuous_tap_control', False),
-                    'frequency': eval(in_data[x].get('frequency', '50')),
+                    'frequency': _as_frequency(in_data[x].get('frequency', '50')),
                     'algorithm': in_data[x].get('algorithm', 'nr'),
                     'calculate_voltage_angles': in_data[x].get('calculate_voltage_angles', 'auto'),
                     'init': in_data[x].get('init', 'dc')
@@ -1262,7 +1275,7 @@ def simulation():
                     'generation_profile': in_data[x].get('generation_profile', 'constant'),
                     'profile_mode': in_data[x].get('profile_mode', 'preset'),
                     'element_profiles': in_data[x].get('element_profiles') or {},
-                    'frequency': eval(in_data[x].get('frequency', '50')),
+                    'frequency': _as_frequency(in_data[x].get('frequency', '50')),
                     'algorithm': in_data[x].get('algorithm', 'nr'),
                     'calculate_voltage_angles': in_data[x].get('calculate_voltage_angles', 'auto'),
                     'init': in_data[x].get('init') or in_data[x].get('initialization') or 'auto',
@@ -1823,6 +1836,11 @@ def import_pandapower():
     Accepts a Pandapower .py script, executes it to build `net`,
     and returns the network as JSON (the structure expected by insertComponentsForData).
     """
+    # Disabled: exec() of request-supplied Python on a public endpoint.
+    # Set ELECTRISIM_ALLOW_SCRIPT_IMPORT=1 only on a trusted, isolated host.
+    if os.getenv('ELECTRISIM_ALLOW_SCRIPT_IMPORT') != '1':
+        return jsonify({'error': 'Pandapower script import is disabled on this server.'}), 403
+
     payload = request.get_json(force=True)
     code = payload.get('content', '')
 
