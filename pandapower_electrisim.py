@@ -3392,8 +3392,10 @@ def create_other_elements(in_data,net,x, Busbars):
             if _xd > 0:
                 gen_kw['xdss_pu'] = _xd
             _rd = safe_float(in_data[x]['rdss_ohm'])
-            if _rd > 0:
-                gen_kw['rdss_ohm'] = _rd
+            # A machine given its reactance may well have zero resistance, and the
+            # short-circuit calculation needs the column either way.
+            if _rd > 0 or _xd > 0:
+                gen_kw['rdss_ohm'] = max(_rd, 0.0)
             _cos = safe_float(in_data[x]['cos_phi'])
             if 0 < _cos <= 1:
                 gen_kw['cos_phi'] = _cos
@@ -3471,7 +3473,8 @@ def create_other_elements(in_data,net,x, Busbars):
                 bool_keys=('controllable',),
             )
             pp.create_sgen(net, bus=bus_idx, name=in_data[x]['name'], id=in_data[x]['id'], p_mw=safe_float(in_data[x]['p_mw']), q_mvar=safe_float(in_data[x]['q_mvar']), sn_mva=safe_float(in_data[x]['sn_mva']), scaling=safe_float(in_data[x].get('scaling'), 1.0), type=in_data[x]['type'],
-                           k=1.1, rx=safe_float(in_data[x]['rx']), generator_type=in_data[x]['generator_type'], lrc_pu=safe_float(in_data[x]['lrc_pu']), max_ik_ka=safe_float(in_data[x]['max_ik_ka']), current_source=in_data[x]['current_source'], kappa = 1.5, in_service=in_service,
+                           k=safe_float(in_data[x].get('k'), 0.0) if safe_float(in_data[x].get('k'), 0.0) > 0 else 1.1,
+                           rx=safe_float(in_data[x]['rx']), generator_type=in_data[x]['generator_type'], lrc_pu=safe_float(in_data[x]['lrc_pu']), max_ik_ka=safe_float(in_data[x]['max_ik_ka']), current_source=in_data[x]['current_source'], kappa = 1.5, in_service=in_service,
                            **_sgen_opf)
             
             # Store user-friendly name for static generator
@@ -7597,6 +7600,42 @@ def analyze_shortcircuit_input_data(in_data):
     return recommendations
 
 
+def _sc_missing_machine_data(net):
+    """
+    In-service machines that lack what pandapower's short-circuit calculation
+    reads, one line each. Without this check the calculation stops on the first
+    missing column with "'DataFrame' object has no attribute 'vn_kv'", naming
+    neither the element nor the field.
+    """
+    out = []
+
+    def named(table, idx):
+        return get_element_display_name(net, table, idx)
+
+    def given(df, idx, column):
+        if column not in df.columns:
+            return False
+        try:
+            value = float(df.at[idx, column])
+        except (TypeError, ValueError):
+            return False
+        return value == value and value > 0
+
+    gen_fields = (('vn_kv', 'vn_kv (rated voltage)'),
+                  ('xdss_pu', 'xdss_pu (subtransient reactance, typically 0.15-0.25)'),
+                  ('cos_phi', 'cos_phi (rated power factor)'))
+    for idx in net.gen.index:
+        if not bool(net.gen.at[idx, 'in_service']):
+            continue
+        missing = [label for column, label in gen_fields if not given(net.gen, idx, column)]
+        if missing:
+            out.append(f"generator '{named('gen', idx)}' has no {', '.join(missing)}")
+    for idx in net.sgen.index:
+        if bool(net.sgen.at[idx, 'in_service']) and not given(net.sgen, idx, 'sn_mva'):
+            out.append(f"static generator '{named('sgen', idx)}' has no sn_mva (rated power)")
+    return out
+
+
 def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=None):
     
     # Add diagnostic prints
@@ -7604,7 +7643,11 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
     # print("\nBus Data:")
     # print(net.bus)
         
-    net.sgen["k"] = 1.1
+    # 1.1 where the diagram gives no ratio; a value set on the element is kept.
+    if 'k' not in net.sgen.columns:
+        net.sgen['k'] = 1.1
+    else:
+        net.sgen['k'] = net.sgen['k'].where(net.sgen['k'] > 0, 1.1)
     #print(net.sgen["k"])
     
     
@@ -7638,7 +7681,7 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
         raise ValueError(
             f"Isolated buses found: {', '.join(isolated_names)}. Check your network connectivity."
         )
-    
+
     pp.diagnostic(net)
     
     
@@ -7689,6 +7732,16 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
         # NOTE: return_all_currents=False (default) gives max/min per branch (simple index).
         #       return_all_currents=True gives results per (branch, fault_bus) combination (MultiIndex).
         #       For UI display, we want max/min per branch, so keep return_all_currents=False.
+        # Raised inside the try so it reaches the diagnostic dialog - the
+        # frontend drops a non-200 response without showing its message.
+        missing_machine_data = _sc_missing_machine_data(net)
+        if missing_machine_data:
+            raise ValueError(
+                'machine data is missing - '
+                + '; '.join(missing_machine_data)
+                + '. Enter it under the element\'s Short circuit parameters, '
+                  'or take the element out of service'
+            )
         ensure_ext_grid_zero_sequence_min(net)
         sc.calc_sc(
             net,
