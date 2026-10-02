@@ -94,7 +94,8 @@
   "tap_step_degree": "0",
   "tap_pos": "0",
   "tap_phase_shifter": "false",
-  "in_service": true
+  "in_service": true,
+  "userFriendlyName": "Main transformer"
  },
  "10": {
   "typ": "Transformer",
@@ -118,7 +119,8 @@
   "tap_step_degree": "0",
   "tap_pos": "0",
   "tap_phase_shifter": "false",
-  "in_service": true
+  "in_service": true,
+  "userFriendlyName": "TA"
  },
  "11": {
   "typ": "Line",
@@ -139,7 +141,8 @@
   "r0_ohm_per_km": "0.1",
   "x0_ohm_per_km": "0.1",
   "c0_nf_per_km": "0.1",
-  "endtemp_degree": "0"
+  "endtemp_degree": "0",
+  "userFriendlyName": "LA1"
  },
  "12": {
   "typ": "Line",
@@ -160,7 +163,8 @@
   "r0_ohm_per_km": "0.1",
   "x0_ohm_per_km": "0.1",
   "c0_nf_per_km": "0.1",
-  "endtemp_degree": "0"
+  "endtemp_degree": "0",
+  "userFriendlyName": "LA2"
  },
  "13": {
   "typ": "Line",
@@ -181,7 +185,8 @@
   "r0_ohm_per_km": "0.1",
   "x0_ohm_per_km": "0.1",
   "c0_nf_per_km": "0.1",
-  "endtemp_degree": "0"
+  "endtemp_degree": "0",
+  "userFriendlyName": "LB1"
  },
  "14": {
   "typ": "Line",
@@ -202,7 +207,8 @@
   "r0_ohm_per_km": "0.1",
   "x0_ohm_per_km": "0.1",
   "c0_nf_per_km": "0.1",
-  "endtemp_degree": "0"
+  "endtemp_degree": "0",
+  "userFriendlyName": "LB2"
  },
  "15": {
   "typ": "Line",
@@ -223,7 +229,8 @@
   "r0_ohm_per_km": "0.1",
   "x0_ohm_per_km": "0.1",
   "c0_nf_per_km": "0.1",
-  "endtemp_degree": "0"
+  "endtemp_degree": "0",
+  "userFriendlyName": "Wind farm cable"
  },
  "16": {
   "typ": "Switch",
@@ -282,7 +289,8 @@
   "x0x_min": 0,
   "in_service": true,
   "spectrum": "defaultvsource",
-  "spectrum_csv": ""
+  "spectrum_csv": "",
+  "userFriendlyName": "Grid"
  },
  "21": {
   "typ": "Generator",
@@ -309,7 +317,8 @@
   "spectrum": "defaultgen",
   "spectrum_csv": "",
   "Xdpp": "0.20",
-  "XRdp": "20"
+  "XRdp": "20",
+  "userFriendlyName": "Gas engine"
  },
  "22": {
   "typ": "Wind Turbine",
@@ -394,7 +403,8 @@
   "step_max": 1,
   "step_pos": 1,
   "step_phase_shifter": false,
-  "in_service": true
+  "in_service": true,
+  "userFriendlyName": "Capacitor bank"
  },
  "25": {
   "typ": "Load",
@@ -422,7 +432,8 @@
   "pctSeriesRL": "100",
   "conn": "wye",
   "puXharm": "0.0",
-  "XRharm": "6.0"
+  "XRharm": "6.0",
+  "userFriendlyName": "Village A"
  },
  "26": {
   "typ": "Load",
@@ -450,7 +461,8 @@
   "pctSeriesRL": "100",
   "conn": "wye",
   "puXharm": "0.0",
-  "XRharm": "6.0"
+  "XRharm": "6.0",
+  "userFriendlyName": "LD_LVA"
  },
  "27": {
   "typ": "Load",
@@ -478,7 +490,8 @@
   "pctSeriesRL": "100",
   "conn": "wye",
   "puXharm": "0.0",
-  "XRharm": "6.0"
+  "XRharm": "6.0",
+  "userFriendlyName": "Factory"
  },
  "28": {
   "typ": "Storage",
@@ -533,6 +546,7 @@
   "curve_style": "straightLineYValues",
   "q_capability_curve_json": "[{\"p_mw\":-0.5,\"q_min_mvar\":0,\"q_max_mvar\":0},{\"p_mw\":-0.46875,\"q_min_mvar\":-0.173993,\"q_max_mvar\":0.173993},{\"p_mw\":-0.4375,\"q_min_mvar\":-0.242061,\"q_max_mvar\":0.242061},{\"p_mw\":-0.40625,\"q_min_mvar\":-0.291481,\"q_max_mvar\":0.291481},{\"p_mw\":-0.375,\"q_min_mvar\":-0.330719,\"q_max_mvar\":0.330719},{\"p_mw\":-0.34375,\"q_min_mvar\":-0.363092,\"q_max_mvar\":0.363092},{\"p_mw\":-0.3125,\"q_min_mvar\":-0.390312,\"q_max_mvar\":0.390312},{\"p_mw\":-0.28125,\"q_min_mvar\":-0.413399,\"q_max_mvar\":0.413399},{\"p_mw\":-0.25,\"q_min_mvar\":-0.433013,\"q_max_mvar\":0.433013},{\"p_mw\":-0.21875,\"q_min_mvar\":-0.449609,\"q_max_mvar\":0.449609},{\"p_mw\":-0.1875,\"q_min_mvar\":-0.463512,\"q_max_mvar\":0.463512},{\"p_mw\":-0.15625,\"q_min_mvar\":-0.474959,\"q_max_mvar\":0.474959},{\"p_mw\":-0.125,\"q_min_mvar\":-0.484123,\"q_max_mvar\":0.484123},{\"p_mw\":-0.09375,\"q_min_mvar\":-0.491132,\"q_max_mvar\":0.491132},{\"p_mw\":-0.0625,\"q_min_mvar\":-0.496078,\"q_max_mvar\":0.496078},{\"p_mw\":-0.03125,\"q_min_mvar\":-0.499022,\"q_max_mvar\":0.499022},{\"p_mw\":0,\"q_min_mvar\":-0.5,\"q_max_mvar\":0.5},{\"p_mw\":0.03125,\"q_min_mvar\":-0.499022,\"q_max_mvar\":0.499022},{\"p_mw\":0.0625,\"q_min_mvar\":-0.496078,\"q_max_mvar\":0.496078},{\"p_mw\":0.09375,\"q_min_mvar\":-0.491132,\"q_max_mvar\":0.491132},{\"p_mw\":0.125,\"q_min_mvar\":-0.484123,\"q_max_mvar\":0.484123},{\"p_mw\":0.15625,\"q_min_mvar\":-0.474959,\"q_max_mvar\":0.474959},{\"p_mw\":0.1875,\"q_min_mvar\":-0.463512,\"q_max_mvar\":0.463512},{\"p_mw\":0.21875,\"q_min_mvar\":-0.449609,\"q_max_mvar\":0.449609},{\"p_mw\":0.25,\"q_min_mvar\":-0.433013,\"q_max_mvar\":0.433013},{\"p_mw\":0.28125,\"q_min_mvar\":-0.413399,\"q_max_mvar\":0.413399},{\"p_mw\":0.3125,\"q_min_mvar\":-0.390312,\"q_max_mvar\":0.390312},{\"p_mw\":0.34375,\"q_min_mvar\":-0.363092,\"q_max_mvar\":0.363092},{\"p_mw\":0.375,\"q_min_mvar\":-0.330719,\"q_max_mvar\":0.330719},{\"p_mw\":0.40625,\"q_min_mvar\":-0.291481,\"q_max_mvar\":0.291481},{\"p_mw\":0.4375,\"q_min_mvar\":-0.242061,\"q_max_mvar\":0.242061},{\"p_mw\":0.46875,\"q_min_mvar\":-0.173993,\"q_max_mvar\":0.173993},{\"p_mw\":0.5,\"q_min_mvar\":0,\"q_max_mvar\":0}]",
   "q_capability_preset": "pcs_circle",
-  "q_setpoint_mode": "manual"
+  "q_setpoint_mode": "manual",
+  "userFriendlyName": "Battery"
  }
 }

@@ -4979,6 +4979,7 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
 
             p_set_mw = None
             vm_pu = None
+            load_label = key
             if in_data:
                 for elem in in_data.values():
                     if not isinstance(elem, dict):
@@ -4987,6 +4988,8 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
                         continue
                     if _sanitize_opendss_name(elem.get('name', '')) != key:
                         continue
+                    # The diagram's label, not the canvas cell name.
+                    load_label = elem.get('userFriendlyName') or key
                     if elem.get('p_kw') not in (None, ''):
                         p_set_mw = float(elem.get('p_kw') or 0) / 1000.0
                     else:
@@ -5011,7 +5014,7 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
             ):
                 vm_txt = f'{vm_pu:.3f} pu' if vm_pu is not None else 'low'
                 _opendss_warn(
-                    f"Load '{key}' draws {abs(p_mw) * 1000:.1f} kW vs {abs(p_set_mw) * 1000:.1f} kW set - "
+                    f"Load '{load_label}' draws {abs(p_mw) * 1000:.1f} kW vs {abs(p_set_mw) * 1000:.1f} kW set - "
                     f"bus voltage {vm_txt}. Check line length, transformer kVA, or use constant-P load (%SeriesRL=0)."
                 )
 

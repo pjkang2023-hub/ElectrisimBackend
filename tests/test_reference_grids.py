@@ -674,3 +674,27 @@ def test_drawn_diagram_opendss_load_flow_matches_spec(client, quiet, opendss_scr
             abs(a - b) > OPENDSS_STORAGE_TOL for a, b in zip(drawn_storage, spec_storage)):
         differ.append(f'storage dispatch {drawn_storage} MW in OpenDSS, {spec_storage} in the spec')
     assert not differ, f'{grid}:\n  ' + '\n  '.join(differ)
+
+
+def test_opendss_warnings_name_elements_by_their_label(client, quiet, opendss_scratch):
+    """
+    OpenDSS warnings name the element the way the diagram does. The payload
+    used to carry no label for most elements, so a warning read "Load
+    'mxCell_214'" or "Storage 'mxCell_220'".
+    """
+    with open(os.path.join(REFERENCE_DIR, 'reference_radial.diagram_opendss_payload.json'),
+              encoding='utf-8') as handle:
+        payload = json.load(handle)
+    # An empty battery is held idle, and without LA2 the LV network is cut off:
+    # each draws a warning.
+    payload = {k: v for k, v in payload.items() if v.get('userFriendlyName') != 'LA2'}
+    for element in payload.values():
+        if str(element.get('typ', '')).startswith('Storage'):
+            element['soc_percent'] = '0'
+    with quiet():
+        response = client.post('/', json=payload)
+    result = json.loads(response.get_data(as_text=True))
+    warnings = ' | '.join(str(w) for w in (result.get('warnings') or []))
+    assert "Storage 'Battery'" in warnings, warnings
+    assert "Load 'LD_LVA'" in warnings, warnings
+    assert 'mxCell' not in warnings, warnings
