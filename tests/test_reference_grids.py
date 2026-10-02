@@ -44,6 +44,7 @@ new drawing still computes the spec's answers.
 import json
 import os
 
+import numpy as np
 import pandapower as pp
 import pandapower.shortcircuit as sc
 import pytest
@@ -782,15 +783,42 @@ def test_drawn_diagram_single_phase_short_circuit_matches_spec(client, quiet, gr
     label_of_cell = {v['name']: v.get('userFriendlyName') for v in payload.values()
                      if isinstance(v, dict) and 'name' in v}
     rows = {label_of_cell.get(r['name'], r['name']): r for r in drawn.get('busbars', [])}
+
+    # IEC 60909-0 peak and thermal current for an earth fault, from
+    # pandapower's own three-phase kappa and m at each bus:
+    # ip1 = kappa sqrt(2) Ik1'', ith1 = Ik1'' sqrt(m + 1).
+    kappa, m = iec_kappa_and_m(spec)
+
     differ = []
     for bus in spec['buses']:
         got = rows.get(str(bus.get('name') or bus['id']))
         if got is None:
             differ.append(f"bus {bus['id']}: not in the drawn short circuit")
-        elif abs(float(got['ikss_ka']) - want[bus['id']]['ikss_ka']) > DRAWN_TOL:
-            differ.append(f"bus {bus['id']}: spec {want[bus['id']]['ikss_ka']!r} kA, "
-                          f"drawn {got['ikss_ka']!r}")
+            continue
+        ikss = want[bus['id']]['ikss_ka']
+        for column, expected in (('ikss_ka', ikss),
+                                 ('ip_ka', kappa[bus['id']] * np.sqrt(2) * ikss),
+                                 ('ith_ka', ikss * np.sqrt(m[bus['id']] + 1))):
+            if abs(float(got[column]) - expected) > DRAWN_TOL:
+                differ.append(f"bus {bus['id']} {column}: expected {expected!r}, "
+                              f"drawn {got[column]!r}")
     assert not differ, f'{grid}: the drawn earth fault differs\n  ' + '\n  '.join(differ)
+
+
+def iec_kappa_and_m(spec):
+    """
+    Each bus's peak factor kappa and thermal factor m for a maximum
+    three-phase fault, read from pandapower's own result table - the backend
+    computes m itself, and pandapower assumes 50 Hz, as these grids are.
+    """
+    from pandapower.pypower.idx_bus_sc import KAPPA, M
+    net, _ = sld.build_network(spec)
+    run_sc(net)
+    rows = net['_pd2ppc_lookups']['bus']
+    table = net['_ppc']['bus']
+    ids = spec_ids(net)['bus']
+    return ({ident: float(table[rows[idx], KAPPA]) for ident, idx in ids.items()},
+            {ident: float(table[rows[idx], M]) for ident, idx in ids.items()})
 
 
 def test_single_phase_short_circuit_names_missing_zero_sequence(client, quiet):
