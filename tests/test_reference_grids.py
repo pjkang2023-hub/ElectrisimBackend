@@ -889,3 +889,57 @@ def test_minimum_case_names_missing_line_temperature(client, quiet):
     message = _post_short_circuit(client, quiet, payload).get('message', '')
     assert "line 'LA2' has no endtemp_degree" in message, message
     assert "external grid 'Grid' has no s_sc_min_mva" in message, message
+
+
+# --- optimal power flow ----------------------------------------------------------
+
+# Spec lists whose elements the OPF request must carry, by the request's type.
+OPF_ELEMENTS = {
+    'lines': 'Line', 'transformers': 'Transformer',
+    'three_winding_transformers': 'Three Winding Transformer', 'loads': 'Load',
+    'generators': 'Generator', 'static_generators': 'Static Generator',
+    'storage': 'Storage', 'switches': 'Switch', 'external_grids': 'External Grid',
+}
+
+
+@pytest.mark.parametrize('grid', GRIDS)
+def test_drawn_diagram_optimal_power_flow(client, quiet, grid):
+    """
+    The OPF request carries the whole drawn network and solves on it.
+
+    Its builder read a line's buses from the line's own ends and sent no
+    switches, so everything behind a breaker came back isolated and the OPF
+    failed; it also left out wind turbines, shunt reactors and capacitor
+    banks. An OPF optimum is not unique, so this checks the network rather
+    than the numbers: every element sent, every bus energised, every source
+    reported by its label.
+    """
+    with open(os.path.join(REFERENCE_DIR, f'{grid}.diagram_opf_payload.json'),
+              encoding='utf-8') as handle:
+        payload = json.load(handle)
+    spec = load_spec(grid)
+    sent = list(payload.values())
+
+    def sent_of(*types):
+        # Request types carry a running number: "Line0", "Shunt Reactor1".
+        return [e for e in sent if str(e.get('typ', '')).rstrip('0123456789') in types]
+
+    for key, typ in OPF_ELEMENTS.items():
+        assert len(sent_of(typ)) == len(spec.get(key, [])), f'{key}: not all sent'
+    assert len(sent_of('Shunt Reactor', 'Capacitor')) == len(spec.get('shunts', [])), \
+        'shunts: not all sent'
+    assert all(e.get('busFrom') and e.get('busTo') for e in sent_of('Line')), 'a line has no bus'
+
+    with quiet():
+        response = client.post('/', json=payload)
+    assert response.status_code == 200, response.get_data(as_text=True)[:400]
+    result = json.loads(response.get_data(as_text=True))
+    assert not result.get('error'), result.get('message') or result.get('error')
+    assert result['opf_converged'] is True
+    assert len(result['busbars']) == len(spec['buses'])
+    assert all(0.9 < float(b['vm_pu']) < 1.1 for b in result['busbars']), 'a bus is not energised'
+    reported = ' | '.join(str(r['name']) for key in ('generators', 'staticgenerators', 'externalgrids')
+                          for r in result.get(key, []))
+    for key in ('generators', 'static_generators', 'external_grids'):
+        for element in spec.get(key, []):
+            assert str(element.get('name') or element['id']) in reported, reported
