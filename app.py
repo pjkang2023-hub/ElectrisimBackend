@@ -1657,6 +1657,56 @@ def pandapower_net_to_json(net):
             ])
         return rows
 
+    def normalize_trafo3w_rows():
+        """
+        Rows in the fixed order insertComponentsForData destructures.
+
+        pandapower 3.x put shift_lv_degree straight after shift_mv_degree, and the
+        importer has no slot for it, so exporting the DataFrame as-is shifted
+        every later field by one: the tap settings stored on the drawn
+        transformer were each read from the column before (tap_side from
+        shift_lv_degree, tap_neutral from tap_side, ...). shift_lv_degree has no
+        place in the importer's row and is dropped here.
+        """
+        df = net.trafo3w
+        if df.empty:
+            return []
+
+        def col(r, name):
+            return _scalar(r[name]) if name in df.columns else None
+
+        rows = []
+        for idx in df.index:
+            r = df.loc[idx]
+            nm = r['name'] if 'name' in df.columns else None
+            if _is_blank_name(nm):
+                nm = f'Trafo3w_{idx}'
+            in_service = col(r, 'in_service')
+            rows.append([
+                nm,
+                col(r, 'std_type'),
+                _pos_bus(r['hv_bus']),
+                _pos_bus(r['mv_bus']),
+                _pos_bus(r['lv_bus']),
+                col(r, 'sn_hv_mva'), col(r, 'sn_mv_mva'), col(r, 'sn_lv_mva'),
+                col(r, 'vn_hv_kv'), col(r, 'vn_mv_kv'), col(r, 'vn_lv_kv'),
+                col(r, 'vk_hv_percent'), col(r, 'vk_mv_percent'), col(r, 'vk_lv_percent'),
+                col(r, 'vkr_hv_percent'), col(r, 'vkr_mv_percent'), col(r, 'vkr_lv_percent'),
+                col(r, 'pfe_kw'),
+                col(r, 'i0_percent'),
+                col(r, 'shift_mv_degree'),
+                col(r, 'tap_side'),
+                col(r, 'tap_neutral'),
+                col(r, 'tap_min'),
+                col(r, 'tap_max'),
+                col(r, 'tap_step_percent'),
+                col(r, 'tap_step_degree'),
+                col(r, 'tap_pos'),
+                bool(col(r, 'tap_at_star_point')),
+                bool(in_service) if in_service is not None else True,
+            ])
+        return rows
+
     line_cols = [
         'name', 'std_type', 'from_bus', 'to_bus', 'length_km', 'r_ohm_per_km',
         'x_ohm_per_km', 'c_nf_per_km', 'g_us_per_km', 'max_i_ka', 'df',
@@ -1763,7 +1813,7 @@ def pandapower_net_to_json(net):
             },
             "trafo3w": {
                 "_object": json.dumps({
-                    "data": export_element_rows(net.trafo3w) if hasattr(net, 'trafo3w') and not net.trafo3w.empty else []
+                    "data": normalize_trafo3w_rows() if hasattr(net, 'trafo3w') else []
                 })
             },
             "shunt": {
