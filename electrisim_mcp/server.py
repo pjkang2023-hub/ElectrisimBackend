@@ -168,8 +168,10 @@ def create_server(backend=None, bridge=None):
                 hint = (f'No Electrisim page is connected. Open {where} and open or create a '
                         f'diagram - the diagram is queued and will be drawn then.')
             elif status['diagram_open'] is False:
-                hint = ('Electrisim is open but no diagram is. Open or create one (File > New) '
-                        '- the diagram is queued and will be drawn as soon as one is open.')
+                # A page reports ready only with a diagram open in the tab in view.
+                hint = ('Electrisim is open but no diagram is in view. Open or create one '
+                        '(File > New), or switch to its tab - the diagram is queued and will '
+                        'be drawn into the diagram in view.')
             else:
                 hint = 'The page is connected but has not finished drawing yet.'
             return {'status': 'queued', 'id': job.id, 'layout': chosen,

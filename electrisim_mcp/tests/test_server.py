@@ -113,7 +113,7 @@ async def test_draw_with_no_diagram_open_queues_and_says_so(backend, bridge):
         result = await call(backend, bridge, 'draw_diagram', {'spec': SPEC, 'wait_seconds': 0.5})
     data = result.structured_content
     assert data['status'] == 'queued'
-    assert 'Electrisim is open but no diagram is' in data['hint']
+    assert 'Electrisim is open but no diagram is in view' in data['hint']
     assert page.drawn == []
     assert bridge.status()['pending'] == [data['id']]
 
