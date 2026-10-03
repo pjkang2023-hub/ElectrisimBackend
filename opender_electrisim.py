@@ -642,11 +642,33 @@ def bess_dispatch_reversal(in_data, params):
     imax = max(range(len(dv_event)), key=lambda i: dv_event[i])
     dv_overshoot = dv_event[imax]
     t_peak_s = time_s[imax]
+    # The POC as the diagram labels it; OpenDSS knows only the cell id.
+    poc_label = next(
+        (str(el['userFriendlyName']) for el in in_data.values()
+         if isinstance(el, dict) and el.get('userFriendlyName')
+         and str(el.get('typ', '')).startswith('Bus')
+         and str(el.get('name', '')).lower() == str(poc_bus_name).lower()),
+        poc_bus_name)
     if dv_overshoot < 5e-4:
-        warnings.append(
-            'POC voltage barely changed during the P ramp. The selected POC is likely the slack/source bus. '
-            'Choose the plant HV / POC bus (not the External Grid bus) and re-run.'
-        )
+        # Say why. Every small change was put down to the slack bus, also at
+        # a 110 kV bus with no External Grid that a 0.2 MW swing on a 0.4 kV
+        # feeder simply does not move.
+        source_buses = {
+            str(_resolve_bus_name(el.get('bus'), bus_map)).lower()
+            for el in clean.values()
+            if isinstance(el, dict) and str(el.get('typ', '')).startswith('External Grid')
+        }
+        if str(poc_bus_name).lower() in source_buses:
+            warnings.append(
+                f'POC voltage barely changed during the P ramp: {poc_label} holds the External Grid, '
+                'whose voltage is fixed. Choose the plant HV / POC bus and re-run.'
+            )
+        else:
+            warnings.append(
+                f'POC voltage changed by only {dv_overshoot:.6f} pu: a {abs(p_end_mw - p_start_mw):g} MW swing '
+                f'hardly moves the voltage at {poc_label}, where the grid is strong. '
+                'Choose a POC nearer the battery to see its effect.'
+            )
 
     curve_on = _storage_flag(opender_inv_settings.get('reactive_capability_curve'))
     volt_dep = _storage_flag(opender_inv_settings.get('q_cap_voltage_dependent'))
@@ -684,14 +706,6 @@ def bess_dispatch_reversal(in_data, params):
         'q_min_mvar': q_min_series,
         'q_max_mvar': q_max_series,
     })
-
-    # The POC as the diagram labels it; OpenDSS knows only the cell id.
-    poc_label = next(
-        (str(el['userFriendlyName']) for el in in_data.values()
-         if isinstance(el, dict) and el.get('userFriendlyName')
-         and str(el.get('typ', '')).startswith('Bus')
-         and str(el.get('name', '')).lower() == str(poc_bus_name).lower()),
-        poc_bus_name)
 
     result = {
         'error': False,

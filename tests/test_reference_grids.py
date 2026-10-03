@@ -1507,6 +1507,30 @@ def test_drawn_diagram_bess_dispatch_reversal(client, quiet, opendss_scratch, en
     assert abs((v[-1] - v[0]) - (vm(-size) - vm(size))) < 1e-4, 'the rise differs from pandapower'
 
 
+@pytest.mark.parametrize('poc, cause', [
+    ('110 kV busbar A', 'holds the External Grid'),
+    ('110 kV busbar B', 'where the grid is strong'),
+])
+def test_bess_dispatch_reversal_says_why_the_voltage_did_not_move(client, quiet, opendss_scratch, poc, cause):
+    """
+    A 0.2 MW swing on the 0.4 kV battery hardly moves a 110 kV bus. The
+    study put every such case down to the POC being the slack bus - also
+    busbar B, which has no External Grid.
+    """
+    request = _study_request('reference_transmission', {}, key='bess_dispatch_reversal_params')
+    cell = {v.get('userFriendlyName'): v for v in request.values() if isinstance(v, dict) and 'name' in v}
+    request['bess_dispatch_reversal_params'] = {
+        'typ': 'BessDispatchReversalOpenDss', 'storage_id': cell['Battery']['id'],
+        'poc_bus_id': cell[poc]['id'], 'p_start_mw': 0.1, 'p_end_mw': -0.1, 'pre_hold_s': 1,
+        'ramp_s': 5, 'post_hold_s': 2, 'dt': 0.1, 'vmin_pu': 0.98, 'vmax_pu': 1.02, 'olrt_s': 5,
+        'engine': 'opendss', 'q_source': 'inverter', 'frequency': 50}
+    result = _post_study(client, quiet, request)
+    (warning,) = [w for w in result['warnings'] if 'voltage' in w.lower()]
+    assert cause in warning and poc in warning, warning
+    if 'External Grid' not in cause:
+        assert 'External Grid' not in warning and 'slack' not in warning, warning
+
+
 @pytest.mark.parametrize('q_mode', ('from_sgen_curve', 'from_rating'))
 def test_grid_code_pq_holds_other_generators_to_their_limits(client, quiet, q_mode):
     """
