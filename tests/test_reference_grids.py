@@ -1793,3 +1793,64 @@ def test_arc_flash_uniform_equipment(client, quiet, grid):
                 _ieee1584(row, 25, 455, (508, 508, 508)), rel=1e-6), name
     if grid == 'reference_transmission':
         assert rows['20 kV busbar 1']['incident_energy_cal_cm2'] == pytest.approx(130.9, abs=0.1)
+
+
+# --- economic analysis -------------------------------------------------------------
+
+def _economic(client, quiet, **params):
+    request = _study_request('reference_transmission', {
+        'typ': 'EconomicAnalysisPandaPower Parameters', 'frequency': '50', 'currency': 'EUR',
+        'use_generation_profile': True, 'time_steps': 8760, 'lifetime_years': 30,
+        'calculation_mode': 'lookup_table', 'load_profile': 'constant',
+        'generation_profile': 'constant', 'energy_price_per_mwh': 100,
+        'energy_price_currency': 'EUR', **params})
+    return _post_study(client, quiet, request)
+
+
+def _losses_mw(net):
+    return float(net.res_line.pl_mw.sum() + net.res_trafo.pl_mw.sum() + net.res_trafo3w.pl_mw.sum())
+
+
+def test_economic_losses_constant_profiles(client, quiet):
+    """A year at the drawn operating point: pandapower's losses, × 8760 h, × 30 years."""
+    result = _economic(client, quiet)
+    net, _ = sld.build_network(load_spec('reference_transmission'))
+    loss = _losses_mw(run(net))
+    assert result['total_power_losses_mw'] == pytest.approx(loss, abs=1e-6)
+    assert result['total_energy_losses_annual_mwh'] == pytest.approx(loss * 8760, rel=1e-6)
+    assert result['total_energy_losses_mwh'] == pytest.approx(loss * 8760 * 30, rel=1e-6)
+    assert result['energy_loss_cost'] == pytest.approx(loss * 8760 * 30 * 100, rel=1e-6)
+    assert not result.get('warnings')
+
+
+def test_economic_losses_follow_the_profiles_hour_by_hour(client, quiet):
+    """
+    The lookup table stopped at load 1.2 and generation 1.0 and read 0 MW
+    beyond, though the residential profile reaches 1.3 and the wind one
+    1.15 - the heaviest hours of the year counted no losses (7.6 % short
+    over a year here). The lifetime multiplied the period, not a year, by
+    the years: a week was "30 years" of 30 weeks.
+    """
+    import pandapower_electrisim as pe
+    hours = 168  # the first week of January, beyond the old table in both
+    result = _economic(client, quiet, time_steps=hours, load_profile='daily',
+                       generation_profile='onshore_wind')
+    load_scale = np.asarray(result['load_profile_values'])
+    gen_scale = np.asarray(result['generation_profile_values'])
+    assert load_scale.max() > 1.2 and gen_scale.max() > 1.0
+
+    net, _ = sld.build_network(load_spec('reference_transmission'))
+    run(net)
+    base = {(t, c): net[t][c].copy() for t, c in (('load', 'p_mw'), ('load', 'q_mvar'), ('gen', 'p_mw'),
+                                              ('sgen', 'p_mw'), ('sgen', 'q_mvar'))}
+    energy = 0.0
+    for h in range(hours):
+        for t, c in base:
+            net[t][c] = base[(t, c)] * (load_scale[h] if t == 'load' else gen_scale[h])
+        pp.runpp(net, init='results', **pe._electrisim_enforce_q_lims_kw(net))
+        energy += _losses_mw(net)
+    assert result['total_energy_losses_period_mwh'] == pytest.approx(energy, rel=0.01)
+    annual = result['total_energy_losses_period_mwh'] * 8760 / hours
+    assert result['total_energy_losses_annual_mwh'] == pytest.approx(annual, rel=1e-6)
+    assert result['total_energy_losses_mwh'] == pytest.approx(annual * 30, rel=1e-6)
+    assert any('scaled to a full year' in w for w in result['warnings']), result.get('warnings')

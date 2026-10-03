@@ -11847,6 +11847,8 @@ def economic_analysis(net, in_data, params):
         
         total_energy_losses_mwh = None
         total_energy_losses_period_mwh = None
+        total_energy_losses_annual_mwh = None
+        energy_warnings = []
         energy_loss_cost = None
         energy_loss_period_hours = None
         
@@ -11859,15 +11861,23 @@ def economic_analysis(net, in_data, params):
             orig_sgen_p = net.sgen['p_mw'].copy() if len(net.sgen) > 0 else None
             orig_sgen_q = net.sgen['q_mvar'].copy() if len(net.sgen) > 0 and 'q_mvar' in net.sgen.columns else None
 
-            # Lookup table: precompute power flows for (load_scale, gen_scale) grid; interpolate per hour
-            use_1d = (load_profile == 'constant')
-            if use_1d:
-                gen_vals = np.linspace(0, 1, 21)
-                loss_vals = np.zeros(21)
-                for i, gs in enumerate(gen_vals):
+            # Lookup table: power flows on a grid of (load, generation) scales,
+            # interpolated per hour. The grid spans what the profiles reach:
+            # it stopped at load 1.2 and generation 1.0 while the residential
+            # profile reaches 1.3 and the wind ones 1.15, and every hour
+            # beyond read 0 MW - the heaviest hours, 7.6 % of a year's losses.
+            def _axis(values, n):
+                lo, hi = float(np.min(values)), float(np.max(values))
+                return np.array([lo]) if hi - lo < 1e-9 else np.linspace(lo, hi, n)
+
+            load_vals = _axis(load_scale, 11)
+            gen_vals = _axis(gen_scale, 21 if len(load_vals) == 1 else 11)
+            loss_grid = np.full((len(load_vals), len(gen_vals)), np.nan)
+            for i, ls in enumerate(load_vals):
+                for j, gs in enumerate(gen_vals):
                     if orig_load_p is not None:
-                        net.load['p_mw'] = orig_load_p
-                        net.load['q_mvar'] = orig_load_q
+                        net.load['p_mw'] = orig_load_p * ls
+                        net.load['q_mvar'] = orig_load_q * ls
                     if orig_gen_p is not None:
                         net.gen['p_mw'] = orig_gen_p * gs
                     if orig_sgen_p is not None:
@@ -11875,40 +11885,30 @@ def economic_analysis(net, in_data, params):
                         if orig_sgen_q is not None:
                             net.sgen['q_mvar'] = orig_sgen_q * gs
                     try:
-                        init_this = init if i == 0 else "results"
+                        init_this = init if (i == 0 and j == 0) else "results"
                         pp.runpp(net, algorithm=algorithm, calculate_voltage_angles=calculate_voltage_angles, init=init_this,
                                  **_electrisim_enforce_q_lims_kw(net))
-                        loss_vals[i] = _economic_get_loss_mw(net) if net.converged else 0.0
+                        if net.converged:
+                            loss_grid[i, j] = _economic_get_loss_mw(net)
                     except Exception:
-                        loss_vals[i] = 0.0
-                losses_per_hour = np.interp(gen_scale, gen_vals, loss_vals)
+                        pass  # left NaN: not counted, and said so below
+            if len(load_vals) == 1 and len(gen_vals) == 1:
+                losses_per_hour = np.full(time_steps, loss_grid[0, 0])
+            elif len(load_vals) == 1:
+                losses_per_hour = np.interp(gen_scale, gen_vals, loss_grid[0])
+            elif len(gen_vals) == 1:
+                losses_per_hour = np.interp(load_scale, load_vals, loss_grid[:, 0])
             else:
-                load_vals = np.linspace(0.1, 1.2, 11)
-                gen_vals = np.linspace(0, 1, 11)
-                loss_grid = np.zeros((11, 11))
-                for i, ls in enumerate(load_vals):
-                    for j, gs in enumerate(gen_vals):
-                        if orig_load_p is not None:
-                            net.load['p_mw'] = orig_load_p * ls
-                            net.load['q_mvar'] = orig_load_q * ls
-                        if orig_gen_p is not None:
-                            net.gen['p_mw'] = orig_gen_p * gs
-                        if orig_sgen_p is not None:
-                            net.sgen['p_mw'] = orig_sgen_p * gs
-                            if orig_sgen_q is not None:
-                                net.sgen['q_mvar'] = orig_sgen_q * gs
-                        try:
-                            init_this = init if (i == 0 and j == 0) else "results"
-                            pp.runpp(net, algorithm=algorithm, calculate_voltage_angles=calculate_voltage_angles, init=init_this,
-                                     **_electrisim_enforce_q_lims_kw(net))
-                            loss_grid[i, j] = _economic_get_loss_mw(net) if net.converged else 0.0
-                        except Exception:
-                            loss_grid[i, j] = 0.0
                 from scipy.interpolate import RegularGridInterpolator
-                interp = RegularGridInterpolator((load_vals, gen_vals), loss_grid, method='linear', bounds_error=False, fill_value=0.0)
-                pts = np.column_stack((load_scale, gen_scale))
-                losses_per_hour = interp(pts)
-            total_energy_period_mwh = float(np.sum(np.maximum(losses_per_hour, 0)))
+                interp = RegularGridInterpolator((load_vals, gen_vals), loss_grid, method='linear')
+                losses_per_hour = interp(np.column_stack((load_scale, gen_scale)))
+            uncounted = int(np.count_nonzero(~np.isfinite(losses_per_hour)))
+            if uncounted:
+                energy_warnings.append(
+                    f'{uncounted} of {time_steps} hours fall on operating points where the power flow '
+                    'did not converge; their losses are not counted.'
+                )
+            total_energy_period_mwh = float(np.nansum(np.maximum(losses_per_hour, 0)))
 
             if orig_load_p is not None:
                 net.load['p_mw'] = orig_load_p
@@ -11921,7 +11921,16 @@ def economic_analysis(net, in_data, params):
                     net.sgen['q_mvar'] = orig_sgen_q
             lifetime_years_econ = max(1, min(100, int(params.get('lifetime_years', 30))))
             total_energy_losses_period_mwh = round(total_energy_period_mwh, 4)
-            total_energy_losses_mwh = round(total_energy_period_mwh * lifetime_years_econ, 4)
+            # The lifetime is in years, so the period is scaled to one first:
+            # a 24-hour period gave "30 years" of losses equal to 30 days.
+            annual_mwh = total_energy_period_mwh * 8760.0 / time_steps
+            if time_steps < 8760:
+                energy_warnings.append(
+                    f'Losses over the first {time_steps} hours of the year (from 1 January) '
+                    'were scaled to a full year; simulate 8760 hours for the seasons.'
+                )
+            total_energy_losses_annual_mwh = round(annual_mwh, 4)
+            total_energy_losses_mwh = round(annual_mwh * lifetime_years_econ, 4)
             energy_loss_period_hours = time_steps
             if energy_price is not None and energy_price > 0:
                 energy_loss_cost = round(total_energy_losses_mwh * energy_price, 2)
@@ -11936,6 +11945,7 @@ def economic_analysis(net, in_data, params):
         if total_energy_losses_mwh is not None:
             lifetime_years = max(1, min(100, int(params.get('lifetime_years', 30))))
             result['total_energy_losses_period_mwh'] = total_energy_losses_period_mwh
+            result['total_energy_losses_annual_mwh'] = total_energy_losses_annual_mwh
             result['total_energy_losses_mwh'] = total_energy_losses_mwh
             result['energy_loss_cost'] = energy_loss_cost
             result['energy_loss_cost_currency'] = energy_price_currency
@@ -11947,6 +11957,8 @@ def economic_analysis(net, in_data, params):
             result['calculation_mode'] = calculation_mode
             result['load_profile_values'] = load_scale.tolist()
             result['generation_profile_values'] = gen_scale.tolist()
+            if energy_warnings:
+                result['warnings'] = energy_warnings
         return result
         
     except Exception as e:
