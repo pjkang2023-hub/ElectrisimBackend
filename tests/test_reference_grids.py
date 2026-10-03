@@ -1497,22 +1497,24 @@ def test_drawn_diagram_time_series_matches_spec(client, quiet, grid):
     assert not differ, '\n  '.join(differ[:10])
 
 
-def test_drawn_diagram_contingency_analysis_matches_spec(client, quiet):
+@pytest.mark.parametrize('grid', GRIDS)
+def test_drawn_diagram_contingency_analysis_matches_spec(client, quiet, grid):
     """
-    N-1 on the drawn transmission grid, every element: each outage must give
-    pandapower's voltages for the spec with that element out, a bus it cuts
-    off must count as lost supply - an islanded bus has no voltage, which no
-    limit caught - and the three-winding main transformer is an outage too.
+    N-1 on the drawn grid, every element: each outage must give pandapower's
+    voltages for the spec with that element out, a bus it cuts off must count
+    as lost supply - an islanded bus has no voltage, which no limit caught -
+    and the transmission grid's three-winding main transformer is an outage
+    too. On the radial grid nearly every outage cuts something off.
     """
     import math
 
-    with open(os.path.join(REFERENCE_DIR, 'reference_transmission.diagram_contingency_payload.json'),
+    with open(os.path.join(REFERENCE_DIR, f'{grid}.diagram_contingency_payload.json'),
               encoding='utf-8') as handle:
         request = json.load(handle)
     with quiet():
         response = client.post('/', json=request)
     result = json.loads(response.get_data(as_text=True))
-    spec = load_spec('reference_transmission')
+    spec = load_spec(grid)
     out_of = {'line': ('line',), 'transformer': ('trafo', 'trafo3w'), 'generator': ('gen',)}
 
     outages = []
@@ -1537,7 +1539,7 @@ def test_drawn_diagram_contingency_analysis_matches_spec(client, quiet):
 
     expected = ([('line', str(l.get('name') or l['id'])) for l in spec['lines']]
                 + [('trafo', str(t.get('name') or t['id'])) for t in spec['transformers']]
-                + [('trafo3w', str(t.get('name') or t['id'])) for t in spec['three_winding_transformers']]
+                + [('trafo3w', str(t.get('name') or t['id'])) for t in spec.get('three_winding_transformers', [])]
                 + [('gen', str(g.get('name') or g['id'])) for g in spec['generators']])
     assert sorted(outages) == sorted(expected)
     assert any(cut for case in result['contingency_results']
