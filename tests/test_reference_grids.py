@@ -1909,3 +1909,56 @@ def test_bess_preliminary_studies_the_plant_only(client, quiet, grid):
     warnings = result['pq_envelope']['warnings']
     assert 0 < len(warnings) <= 6, warnings
     assert all(' at ' in w for w in warnings), warnings
+
+
+# --- BESS sizing -------------------------------------------------------------------
+
+def test_bess_sizing_radial_finds_the_size_and_the_overload(client, quiet):
+    """
+    10 MW / 5 Mvar exported at the 110 kV supply from the radial grid's battery.
+
+    A battery drawn without an MVA rating took its 2 MWh as one, and the
+    sizing controller capped P and Q at that rating - the rating it is meant
+    to find - reporting 2 MW / 2 Mvar (2.8 MVA) as "required" while the
+    target needs 21.1 MVA. At that point the wind farm cable feeding the
+    battery is overloaded, which went unsaid.
+    """
+    spec = load_spec('reference_radial')
+    request = _study_request('reference_radial', {}, key='bess_sizing_params')
+    cell = {v.get('userFriendlyName'): v['id'] for v in request.values()
+            if isinstance(v, dict) and 'id' in v}
+    request['bess_sizing_params'] = {
+        'typ': 'BessSizingPandaPower', 'calculationMode': 'single',
+        'storageId': cell[spec['storage'][0]['name']],
+        'pocBusbarId': cell[_bus_label(spec, spec['external_grids'][0]['bus'])],
+        'targetP': 10, 'targetQ': 5, 'tolerance': 0.001, 'maxIterations': 50,
+        'frequency': 50, 'algorithm': 'nr'}
+    result = _post_study(client, quiet, request)
+    assert result['converged'] is True
+
+    # The same target solved directly on the spec's network.
+    net, _ = sld.build_network(spec)
+    st = net.storage.index[0]
+
+    def exchange(x):
+        net.storage.loc[st, ['p_mw', 'q_mvar']] = x
+        pp.runpp(net, calculate_voltage_angles=True)
+        return -np.array([net.res_ext_grid.p_mw.iloc[0], net.res_ext_grid.q_mvar.iloc[0]])
+
+    target, x = np.array([10.0, 5.0]), np.array([-10.0, -5.0])
+    for _ in range(20):
+        y = exchange(x)
+        if np.abs(y - target).max() < 1e-7:
+            break
+        jac = np.column_stack([(exchange(x + 1e-4 * e) - y) / 1e-4 for e in np.eye(2)])
+        x = x - np.linalg.solve(jac, y - target)
+    assert result['bess_p_mw'] == pytest.approx(x[0], abs=2e-3)
+    assert result['bess_q_mvar'] == pytest.approx(x[1], abs=2e-3)
+    assert result['bess_s_mva'] == pytest.approx(math.hypot(*x), abs=2e-3)
+    assert result['bess_s_mva'] > 20  # not the 2 MWh posing as 2 MVA
+
+    assert result['storage_rating_mva'] is None and result['within_rating'] is None
+    cable = net.res_line.loading_percent[net.line.name == 'Wind farm cable'].iloc[0]
+    assert cable > 100
+    assert {'kind': 'Line', 'name': 'Wind farm cable', 'value': round(float(cable), 1), 'unit': '%',
+            'limit': 100.0} in result['violations'], result['violations']

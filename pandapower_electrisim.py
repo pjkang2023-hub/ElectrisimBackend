@@ -4064,8 +4064,12 @@ def create_other_elements(in_data,net,x, Busbars):
             scaling = safe_float(in_data[x].get('scaling'), 1.0)
             if max_e_mwh <= 0:
                 max_e_mwh = sn_mva if sn_mva > 0 else max(abs(p_mw), 0.001)
+            # No MVA rating stays 0 = unrated, as every reader of sn_mva
+            # treats it. It was max(|P|, MWh): the energy capacity posing as
+            # a power rating, which capped BESS sizing at 2 MVA for a 2 MWh
+            # battery.
             if sn_mva <= 0:
-                sn_mva = max(abs(p_mw), max_e_mwh, 0.001)
+                sn_mva = 0.0
             storage_type = str(in_data[x].get('type', ''))
             # OPF parameters (optional)
             controllable_raw = in_data[x].get('controllable', False)
@@ -11205,376 +11209,168 @@ def time_series_simulation(net, timeseries_params):
         return diagnostic_response
 
 
-class BESSControlForTargetBus(control.basic_controller.Controller):
-    """
-    Controller that adjusts BESS power to achieve target P and Q at Point of Coupling (POC).
-    Uses iterative approach to converge to the target.
-    
-    EXACT implementation from BESS_sizing_tutorial.ipynb - DO NOT MODIFY SIGN CONVENTIONS!
-    """
-    def __init__(self, net, element_index, target_p_mw, target_q_mvar, poc_bus_idx,
-                 kp_p=0.5, kp_q=0.5, max_p_mw=28.0, max_q_mvar=28.0, tolerance=1e-3,
-                 in_service=True, recycle=False, order=0, level=0, **kwargs):
-        super().__init__(net, in_service=in_service, recycle=recycle, 
-                        order=order, level=level, initial_run=True)
-        
-        self.element_index = element_index
-        self.target_p_mw = target_p_mw
-        self.target_q_mvar = target_q_mvar
-        self.poc_bus_idx = poc_bus_idx
-        self.kp_p = kp_p
-        self.kp_q = kp_q
-        self.max_p_mw = max_p_mw
-        self.max_q_mvar = max_q_mvar
-        self.tolerance = tolerance
-        
-        # EXACT notebook algorithm - simple initial guess:
-        # Sign convention: 
-        # - If target P > 0 (consumption), BESS should DISCHARGE (negative P)
-        # - If target P < 0 (generation), BESS should CHARGE (positive P)
-        # Account for losses: need slightly more power than target
-        initial_p = -target_p_mw * 1.05  # Negative because BESS discharges to supply load
-        initial_q = -target_q_mvar * 1.05  # Negative to match sign convention
-        self.p_mw = np.clip(initial_p, -max_p_mw, max_p_mw)
-        self.q_mvar = np.clip(initial_q, -max_q_mvar, max_q_mvar)
-        self.applied = False
-        self.iteration = 0
-        self.converged = False
-        
-        print(f"Initial guess: P={self.p_mw:.3f} MW, Q={self.q_mvar:.3f} Mvar")
-        
-    def is_converged(self, net):
-        return self.applied
-    
-    def control_step(self, net):
-        # DEBUG: Check storage value BEFORE setting
-        if self.iteration == 0:
-            print(f"  DEBUG: Storage BEFORE setting: p_mw={net.storage.at[self.element_index, 'p_mw']}, q_mvar={net.storage.at[self.element_index, 'q_mvar']}")
-        
-        # First, set the current BESS power values
-        net.storage.at[self.element_index, 'p_mw'] = self.p_mw
-        net.storage.at[self.element_index, 'q_mvar'] = self.q_mvar
-        
-        # DEBUG: Check storage value AFTER setting
-        if self.iteration == 0:
-            print(f"  DEBUG: Storage AFTER setting: p_mw={net.storage.at[self.element_index, 'p_mw']}, q_mvar={net.storage.at[self.element_index, 'q_mvar']}")
-        
-        # Run power flow to get current state (with sufficient iterations)
-        try:
-            pp.runpp(net, algorithm='nr', calculate_voltage_angles=True, 
-                    init='auto', verbose=False)
-        except Exception as e:
-            # If power flow fails, don't update - keep current values
-            # This can happen if the network is infeasible
-            print(f"Power flow failed at iteration {self.iteration}: {str(e)}")
-            self.applied = True
-            return
-        
-        # DEBUG: Check full network power balance after power flow
-        if self.iteration == 0:
-            print(f"  DEBUG: res_storage after PF: p_mw={net.res_storage.at[self.element_index, 'p_mw']}, q_mvar={net.res_storage.at[self.element_index, 'q_mvar']}")
-            print(f"  DEBUG: res_ext_grid: p_mw={net.res_ext_grid.at[net.ext_grid.index[0], 'p_mw']}, q_mvar={net.res_ext_grid.at[net.ext_grid.index[0], 'q_mvar']}")
-            
-            # Show ALL generators, loads, and other elements
-            print(f"  DEBUG: Network elements count:")
-            print(f"    - Buses: {len(net.bus)}")
-            print(f"    - Ext grids: {len(net.ext_grid)}")
-            print(f"    - Storages: {len(net.storage)}")
-            print(f"    - Loads: {len(net.load) if hasattr(net, 'load') else 0}")
-            print(f"    - Generators: {len(net.gen) if hasattr(net, 'gen') else 0}")
-            print(f"    - Sgens: {len(net.sgen) if hasattr(net, 'sgen') else 0}")
-            print(f"    - Trafos: {len(net.trafo)}")
-            
-            # Show bus results
-            print(f"  DEBUG: Bus results:")
-            for bus_idx in net.bus.index:
-                bus_name = net.bus.at[bus_idx, 'name'] if 'name' in net.bus.columns else f"bus_{bus_idx}"
-                bus_vn = net.bus.at[bus_idx, 'vn_kv']
-                bus_vm = net.res_bus.at[bus_idx, 'vm_pu']
-                bus_p = net.res_bus.at[bus_idx, 'p_mw']
-                bus_q = net.res_bus.at[bus_idx, 'q_mvar']
-                print(f"    Bus {bus_idx} ({bus_name}, {bus_vn}kV): vm={bus_vm:.4f}pu, P={bus_p:.3f}MW, Q={bus_q:.3f}Mvar")
-            
-            # Show transformer results (losses)
-            print(f"  DEBUG: Transformer losses:")
-            for trafo_idx in net.trafo.index:
-                trafo_name = net.trafo.at[trafo_idx, 'name'] if 'name' in net.trafo.columns else f"trafo_{trafo_idx}"
-                p_loss = net.res_trafo.at[trafo_idx, 'pl_mw']
-                q_loss = net.res_trafo.at[trafo_idx, 'ql_mvar']
-                print(f"    Trafo {trafo_idx} ({trafo_name}): P_loss={p_loss:.4f}MW, Q_loss={q_loss:.4f}Mvar")
-            
-            # Show if there are any generators
-            if hasattr(net, 'gen') and len(net.gen) > 0:
-                print(f"  DEBUG: Generator results:")
-                for gen_idx in net.gen.index:
-                    print(f"    Gen {gen_idx}: P={net.res_gen.at[gen_idx, 'p_mw']:.3f}MW, Q={net.res_gen.at[gen_idx, 'q_mvar']:.3f}Mvar")
-            
-            # Show if there are any sgens (static generators)
-            if hasattr(net, 'sgen') and len(net.sgen) > 0:
-                print(f"  DEBUG: Static generator results:")
-                for sgen_idx in net.sgen.index:
-                    print(f"    Sgen {sgen_idx}: P={net.res_sgen.at[sgen_idx, 'p_mw']:.3f}MW, Q={net.res_sgen.at[sgen_idx, 'q_mvar']:.3f}Mvar")
-            
-            # Show if there are any loads
-            if hasattr(net, 'load') and len(net.load) > 0:
-                print(f"  DEBUG: Load results:")
-                for load_idx in net.load.index:
-                    print(f"    Load {load_idx}: P={net.res_load.at[load_idx, 'p_mw']:.3f}MW, Q={net.res_load.at[load_idx, 'q_mvar']:.3f}Mvar")
-        
-        # Get current P and Q at POC from external grid
-        ext_grid_idx = net.ext_grid.index[0]
-        current_p = -net.res_ext_grid.at[ext_grid_idx, 'p_mw']
-        current_q = -net.res_ext_grid.at[ext_grid_idx, 'q_mvar']
-        
-        # Calculate error
-        error_p = self.target_p_mw - current_p
-        error_q = self.target_q_mvar - current_q
-        
-        # Print diagnostic info every 10 iterations or at iteration 0
-        if self.iteration % 10 == 0:
-            print(f"Iteration {self.iteration}: BESS P={self.p_mw:.3f} MW, Q={self.q_mvar:.3f} Mvar")
-            print(f"  POC: P={current_p:.3f} MW (target {self.target_p_mw:.3f}), Q={current_q:.3f} Mvar (target {self.target_q_mvar:.3f})")
-            print(f"  Error: P={error_p:.3f} MW, Q={error_q:.3f} Mvar")
-        
-        # Check convergence - EXACT notebook tolerance
-        if abs(error_p) < self.tolerance and abs(error_q) < self.tolerance:
-            self.converged = True
-            print(f"CONVERGED at iteration {self.iteration}!")
-            print(f"  Final BESS: P={self.p_mw:.4f} MW, Q={self.q_mvar:.4f} Mvar")
-        else:
-            # EXACT notebook algorithm - simple damping, NO inversion
-            # Adjust BESS power proportionally to error (with damping to avoid oscillations)
-            # Sign convention: 
-            # - If error_p > 0 (need more consumption), decrease BESS P (more negative = more discharge)
-            # - If error_p < 0 (too much consumption), increase BESS P (less negative = less discharge)
-            damping = 0.5  # Damping factor to prevent oscillations
-            # Error correction: if we need more P at POC, BESS should discharge more (more negative)
-            delta_p = -self.kp_p * error_p * damping  # Negative because BESS P is opposite to POC P
-            delta_q = -self.kp_q * error_q * damping  # Same for Q
-            
-            self.p_mw += delta_p
-            self.q_mvar += delta_q
-            
-            # Apply limits
-            self.p_mw = np.clip(self.p_mw, -self.max_p_mw, self.max_p_mw)
-            self.q_mvar = np.clip(self.q_mvar, -self.max_q_mvar, self.max_q_mvar)
-        
-        self.iteration += 1
-        self.applied = True
+def _bess_sizing_failure(message):
+    return json.dumps({
+        'error': message,
+        'bess_p_mw': None, 'bess_q_mvar': None, 'bess_s_mva': None,
+        'achieved_p_mw': None, 'achieved_q_mvar': None,
+        'error_p_mw': None, 'error_q_mvar': None,
+        'converged': False, 'iterations': 0,
+    })
+
+
+def _bess_sizing_violations(net, vmin_pu, vmax_pu, max_loading_percent=100.0):
+    """Branches above their rating and buses outside the voltage band, by name."""
+    out = []
+    for table, results, kind in (('line', 'res_line', 'Line'), ('trafo', 'res_trafo', 'Transformer'),
+                                 ('trafo3w', 'res_trafo3w', 'Transformer')):
+        if table not in net or net[table].empty or results not in net or 'loading_percent' not in net[results]:
+            continue
+        for idx, loading in net[results]['loading_percent'].items():
+            if pd.notna(loading) and loading > max_loading_percent:
+                out.append({'kind': kind, 'name': _contingency_friendly_name(net, net[table].at[idx, 'name']),
+                            'value': round(float(loading), 1), 'unit': '%',
+                            'limit': max_loading_percent})
+    for idx, vm in net.res_bus['vm_pu'].items():
+        if pd.notna(vm) and not (vmin_pu <= vm <= vmax_pu):
+            out.append({'kind': 'Bus', 'name': _contingency_friendly_name(net, net.bus.at[idx, 'name']),
+                        'value': round(float(vm), 4), 'unit': 'pu',
+                        'limit': vmin_pu if vm < vmin_pu else vmax_pu})
+    return out
 
 
 def bess_sizing(net, bess_params):
     """
-    Calculate required BESS power using iterative controller approach.
-    
-    Uses pandapower's control framework with BESSControlForTargetBus controller
-    that iteratively adjusts BESS power until target P/Q at POC is achieved.
-    
-    Parameters:
-    -----------
-    net : pandapower network
-        The network object
-    bess_params : dict
-        Dictionary containing:
-        - storageId: ID of the storage element (from frontend)
-        - pocBusbarId: ID of the POC busbar (from frontend)
-        - targetP: Target active power at POC (MW)
-        - targetQ: Target reactive power at POC (Mvar)
-        - tolerance: Convergence tolerance (default: 0.001)
-        - maxIterations: Maximum control iterations (default: 50)
-        - kpP: Proportional gain for active power control (default: 0.5)
-        - kpQ: Proportional gain for reactive power control (default: 0.5)
-        - frequency: Network frequency (default: 50)
-        - algorithm: Power flow algorithm (default: 'nr')
-        
-    Returns:
-    --------
-    str : JSON string with results
+    The battery P and Q that put the target exchange at the POC, found by a
+    Newton solve on the load flow, and what that operating point does to the
+    battery's own rating and to the network.
+
+    The drawn battery's rating does not cap the answer - finding the rating is
+    the point. A proportional controller limited P and Q each to the drawn
+    sn_mva (which a battery without one took from its MWh), and reported the
+    clipped values as the required size: 2.8 MVA where the radial reference
+    grid needs 21.1 MVA, and a feeder cable at 126 % unmentioned.
+
+    bess_params: storageId, pocBusbarId (diagram cell ids), targetP / targetQ
+    (MW / Mvar exported at the POC), tolerance, maxIterations, algorithm,
+    vmin_pu / vmax_pu (default 0.9 / 1.1).
+
+    Returns a JSON string.
     """
     try:
-        # Extract parameters
         storage_id = bess_params.get('storageId')
         poc_busbar_id = bess_params.get('pocBusbarId')
-        target_p = float(bess_params.get('targetP', 0.0))
-        target_q = float(bess_params.get('targetQ', 0.0))
+        target = np.array([float(bess_params.get('targetP', 0.0)), float(bess_params.get('targetQ', 0.0))])
         tolerance = float(bess_params.get('tolerance', 0.001))
         max_iterations = int(bess_params.get('maxIterations', 50))
-        kp_p = float(bess_params.get('kpP', 0.5))
-        kp_q = float(bess_params.get('kpQ', 0.5))
-        
-        # Find storage element by ID (match with busbar name)
-        storage_idx = None
-        for idx in net.storage.index:
-            # Try to match by name or bus
-            storage_name = net.storage.at[idx, 'name'] if 'name' in net.storage.columns else None
-            storage_cell = net.storage.at[idx, 'id'] if 'id' in net.storage.columns else None
-            storage_bus = net.storage.at[idx, 'bus']
-            
-            # The dialog sends the diagram cell id; name and bus index are older forms.
-            if str(storage_id) in (str(storage_cell), str(storage_name), str(storage_bus)):
-                storage_idx = idx
-                break
-        
-        if storage_idx is None:
-            # Fallback: use first storage element
-            if len(net.storage) > 0:
-                storage_idx = net.storage.index[0]
-            else:
-                return json.dumps({
-                    'error': 'No storage element found in network',
-                    'bess_p_mw': None,
-                    'bess_q_mvar': None,
-                    'bess_s_mva': None,
-                    'achieved_p_mw': None,
-                    'achieved_q_mvar': None,
-                    'error_p_mw': None,
-                    'error_q_mvar': None,
-                    'converged': False,
-                    'iterations': 0
-                })
-        
-        # Find POC bus by ID (match with busbar name)
-        poc_bus_idx = None
-        for idx in net.bus.index:
-            bus_name = net.bus.at[idx, 'name'] if 'name' in net.bus.columns else None
-            bus_cell = net.bus.at[idx, 'id'] if 'id' in net.bus.columns else None
-            
-            # The dialog sends the diagram cell id; matching only the name fell
-            # back to the first bus whichever POC was chosen.
-            if str(poc_busbar_id) in (str(bus_cell), str(bus_name), str(idx)):
-                poc_bus_idx = idx
-                break
-        
+        algorithm = bess_params.get('algorithm', 'nr')
+        vmin_pu = float(bess_params.get('vmin_pu', 0.9))
+        vmax_pu = float(bess_params.get('vmax_pu', 1.1))
+
+        if net.storage.empty:
+            return _bess_sizing_failure('No storage element found in network')
+        # The dialog sends the diagram cell id; name and bus index are older forms.
+        storage_idx = next((idx for idx in net.storage.index
+                            if str(storage_id) in (str(net.storage.at[idx, 'id']) if 'id' in net.storage else '',
+                                                   str(net.storage.at[idx, 'name']),
+                                                   str(net.storage.at[idx, 'bus']))),
+                           net.storage.index[0])
+        poc_bus_idx = next((idx for idx in net.bus.index
+                            if str(poc_busbar_id) in (str(net.bus.at[idx, 'id']) if 'id' in net.bus else '',
+                                                      str(net.bus.at[idx, 'name']), str(idx))), None)
         if poc_bus_idx is None:
-            # Fallback: use first bus (usually external grid bus)
-            if len(net.bus) > 0:
-                poc_bus_idx = net.bus.index[0]
-            else:
-                return json.dumps({
-                    'error': 'No POC bus found in network',
-                    'bess_p_mw': None,
-                    'bess_q_mvar': None,
-                    'bess_s_mva': None,
-                    'achieved_p_mw': None,
-                    'achieved_q_mvar': None,
-                    'error_p_mw': None,
-                    'error_q_mvar': None,
-                    'converged': False,
-                    'iterations': 0
-                })
-        
-        # Get storage bus index
-        bess_bus_idx = net.storage.at[storage_idx, 'bus']
-        
-        # Validate network configuration
-        # Check if POC bus has an external grid
-        ext_grid_at_poc = False
-        for idx in net.ext_grid.index:
-            if net.ext_grid.at[idx, 'bus'] == poc_bus_idx:
-                ext_grid_at_poc = True
-                break
-        
-        if not ext_grid_at_poc:
-            # P and Q are measured at the external grid, so any other POC
-            # would report the grid's exchange as if it were the POC's.
+            return _bess_sizing_failure('No POC bus found in network')
+
+        # P and Q are measured at the External Grid on the POC bus (it was
+        # the first External Grid in the network, wherever it was).
+        ext_at_poc = [idx for idx in net.ext_grid.index if net.ext_grid.at[idx, 'bus'] == poc_bus_idx]
+        if not ext_at_poc:
             grid_buses = [net.bus.at[int(b), 'name'] for b in net.ext_grid['bus']]
             labels = getattr(net, 'user_friendly_names', None) or {}
-            return json.dumps({
-                'error': 'BESS sizing sets P and Q where the network meets the External Grid. '
-                         "Choose the External Grid's bus as the POC ("
-                         + ', '.join(str(labels.get(n, n)) for n in grid_buses) + ').',
-                'bess_p_mw': None, 'bess_q_mvar': None, 'bess_s_mva': None,
-                'achieved_p_mw': None, 'achieved_q_mvar': None,
-                'error_p_mw': None, 'error_q_mvar': None,
-                'converged': False, 'iterations': 0,
-            })
-        
-        # Get storage limits from network
-        max_p_mw = abs(net.storage.at[storage_idx, 'sn_mva']) if 'sn_mva' in net.storage.columns else 28.0
-        max_q_mvar = abs(net.storage.at[storage_idx, 'sn_mva']) if 'sn_mva' in net.storage.columns else 28.0
-        
-        print(f"=== BESS SIZING STARTED ===")
-        print(f"Storage: idx={storage_idx}, bus={bess_bus_idx}, max_P={max_p_mw:.1f} MW, max_Q={max_q_mvar:.1f} Mvar")
-        print(f"POC: bus_idx={poc_bus_idx}, has_ext_grid={ext_grid_at_poc}")
-        print(f"Target: P={target_p:.3f} MW, Q={target_q:.3f} Mvar")
-        print(f"Control gains: kp_P={kp_p}, kp_Q={kp_q}, max_iter={max_iterations}, tolerance={tolerance}")
-        
-        # Create a copy of the network
-        net_ctrl = deepcopy(net)
-        
-        # Create controller (using EXACT notebook algorithm)
-        bess_ctrl = BESSControlForTargetBus(
-            net_ctrl, storage_idx, target_p, target_q, poc_bus_idx,
-            kp_p=kp_p, kp_q=kp_q, max_p_mw=max_p_mw, max_q_mvar=max_q_mvar,
-            tolerance=tolerance
-        )
-        
-        # Run iterative control loop
-        for iteration in range(max_iterations):
-            bess_ctrl.applied = False
-            # Call control_step which will run power flow and adjust BESS power
-            bess_ctrl.control_step(net_ctrl)
-            if bess_ctrl.converged:
-                break
-        
-        # Get final results
-        ext_grid_idx = net_ctrl.ext_grid.index[0]
-        achieved_p = -net_ctrl.res_ext_grid.at[ext_grid_idx, 'p_mw']
-        achieved_q = -net_ctrl.res_ext_grid.at[ext_grid_idx, 'q_mvar']
-        
-        # Calculate apparent power
-        bess_s_mva = np.sqrt(bess_ctrl.p_mw**2 + bess_ctrl.q_mvar**2)
-        
-        error_p_final = achieved_p - target_p
-        error_q_final = achieved_q - target_q
-        
-        print(f"\n=== BESS SIZING RESULTS ===")
-        print(f"Converged: {'YES' if bess_ctrl.converged else 'NO'}")
-        print(f"Iterations: {bess_ctrl.iteration}")
-        print(f"Final BESS: P={bess_ctrl.p_mw:.3f} MW, Q={bess_ctrl.q_mvar:.3f} Mvar, S={bess_s_mva:.3f} MVA")
-        print(f"Achieved POC: P={achieved_p:.3f} MW, Q={achieved_q:.3f} Mvar")
-        print(f"Final errors: P={error_p_final:.6f} MW, Q={error_q_final:.6f} Mvar")
-        
-        if not bess_ctrl.converged:
-            print("\nPossible reasons for non-convergence:")
-            print("1. Network might be too complex or have numerical issues")
-            print("2. Target might be outside BESS capability")
-            print("3. POC bus might not be properly connected to external grid")
-            print("4. Try increasing maxIterations or adjusting gains (kpP, kpQ)")
-        
-        # Prepare response
-        result = {
-            'bess_p_mw': float(bess_ctrl.p_mw),
-            'bess_q_mvar': float(bess_ctrl.q_mvar),
-            'bess_s_mva': float(bess_s_mva),
-            'achieved_p_mw': float(achieved_p),
-            'achieved_q_mvar': float(achieved_q),
-            'error_p_mw': float(error_p_final),
-            'error_q_mvar': float(error_q_final),
-            'converged': bool(bess_ctrl.converged),
-            'iterations': int(bess_ctrl.iteration)
-        }
-        
-        return json.dumps(result)
-        
+            return _bess_sizing_failure(
+                'BESS sizing sets P and Q where the network meets the External Grid. '
+                "Choose the External Grid's bus as the POC ("
+                + ', '.join(str(labels.get(n, n)) for n in grid_buses) + ').')
+        ext_idx = ext_at_poc[0]
+
+        net_s = deepcopy(net)
+        solved = [False]
+
+        def poc_exchange(x):
+            """Export-positive P, Q at the POC with the battery at x (pandapower
+            storage sign: + charge)."""
+            net_s.storage.at[storage_idx, 'p_mw'] = float(x[0])
+            net_s.storage.at[storage_idx, 'q_mvar'] = float(x[1])
+            pp.runpp(net_s, algorithm=algorithm, calculate_voltage_angles=True,
+                     init='results' if solved[0] else 'auto')
+            solved[0] = True
+            return np.array([-float(net_s.res_ext_grid.at[ext_idx, 'p_mw']),
+                             -float(net_s.res_ext_grid.at[ext_idx, 'q_mvar'])])
+
+        warnings_out = []
+        # Exporting at the POC needs the battery to discharge: start from the
+        # target itself, the battery's sign.
+        x = -target.copy()
+        converged, iterations = False, 0
+        try:
+            y = poc_exchange(x)
+            x_good, y_good = x.copy(), y.copy()
+            while iterations < max_iterations:
+                err = y - target
+                if np.abs(err).max() < tolerance:
+                    converged = True
+                    break
+                iterations += 1
+                h = 1e-3
+                jac = np.column_stack([(poc_exchange(x + h * e) - y) / h for e in np.eye(2)])
+                x = x - np.linalg.solve(jac, err)
+                y = poc_exchange(x)
+                x_good, y_good = x.copy(), y.copy()
+        except (pp.LoadflowNotConverged, np.linalg.LinAlgError) as e:
+            x, y = x_good, y_good
+            poc_exchange(x)  # leave the results at the last operating point that solved
+            warnings_out.append(
+                'The load flow did not converge on the way to this target: the network '
+                f'cannot carry the power it needs ({e.__class__.__name__}).')
+        if not converged and not warnings_out:
+            warnings_out.append(f'The target was not reached within {max_iterations} iterations.')
+
+        bess_s_mva = float(np.hypot(*x))
+        rating = float(net.storage.at[storage_idx, 'sn_mva']) if 'sn_mva' in net.storage else 0.0
+        rating = rating if pd.notna(rating) and rating > 0 else None
+        within_rating = None if rating is None else bool(bess_s_mva <= rating + 1e-6)
+        storage_name = _contingency_friendly_name(net, net.storage.at[storage_idx, 'name'])
+        if rating is None:
+            warnings_out.append(f"'{storage_name}' has no MVA rating; it needs {bess_s_mva:.3f} MVA.")
+        elif not within_rating:
+            warnings_out.append(
+                f"'{storage_name}' is rated {rating:.3f} MVA; this target needs {bess_s_mva:.3f} MVA.")
+        violations = _bess_sizing_violations(net_s, vmin_pu, vmax_pu)
+        for v in violations:
+            warnings_out.append(
+                f"{v['kind']} {v['name']}: {v['value']} {v['unit']} (limit {v['limit']} {v['unit']}) "
+                'at this operating point.')
+
+        return json.dumps({
+            'bess_p_mw': float(x[0]),
+            'bess_q_mvar': float(x[1]),
+            'bess_s_mva': bess_s_mva,
+            'achieved_p_mw': float(y[0]),
+            'achieved_q_mvar': float(y[1]),
+            'error_p_mw': float(y[0] - target[0]),
+            'error_q_mvar': float(y[1] - target[1]),
+            'converged': bool(converged),
+            'iterations': int(iterations),
+            'storage_name': storage_name,
+            'storage_rating_mva': rating,
+            'within_rating': within_rating,
+            'violations': violations,
+            'warnings': warnings_out,
+        })
     except Exception as e:
         import traceback
-        error_msg = f"BESS sizing calculation failed: {str(e)}"
-        print(error_msg)
         print(traceback.format_exc())
-        
-        return json.dumps({
-            'error': error_msg,
-            'bess_p_mw': None,
-            'bess_q_mvar': None,
-            'bess_s_mva': None,
-            'achieved_p_mw': None,
-            'achieved_q_mvar': None,
-            'error_p_mw': None,
-            'error_q_mvar': None,
-            'converged': False,
-            'iterations': 0
-        })
+        return _bess_sizing_failure(f'BESS sizing calculation failed: {e}')
 
 
 def _economic_get_month_index(time_steps):
