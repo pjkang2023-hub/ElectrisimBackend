@@ -1277,6 +1277,87 @@ def test_classical_machine_swing_matches_hand_calculation(client, quiet, grid):
     assert swing['freq_hz'] == pytest.approx(f_hand, rel=0.05), (swing, f_hand)
 
 
+def _tds_request(grid, fault_bus, clear_after_s, tf=4.0, **machine):
+    """A bolted fault at fault_bus from 1.0 s, cleared clear_after_s later."""
+    request = _study_request(grid, {'typ': 'TransientStabilityAndes Parameters', **ANDES_PARAMS})
+    bus = {v.get('userFriendlyName') or v['name']: v['name'] for v in request.values()
+           if isinstance(v, dict) and str(v.get('typ', '')).startswith('Bus')}
+    generator = next(v for v in request.values() if str(v.get('typ', '')).startswith('Generator'))
+    generator.update(machine)
+    request['0'].update(fault_bus=bus[fault_bus], fault_enabled='true', fault_tf='1.0',
+                        fault_tc=str(1.0 + clear_after_s), tf=str(tf), poi_bus=bus[fault_bus])
+    return request
+
+
+@pytest.mark.parametrize('grid, fault_bus', [
+    ('reference_transmission', 'F1'),
+    ('reference_transmission', '20 kV busbar 2'),  # the CHP plant's own bus
+    ('reference_radial', 'A1'),
+])
+def test_transient_stability_fault_clears(client, quiet, grid, fault_bus):
+    """
+    ANDES restored the pre-fault voltages at clearance but not the bus angles,
+    which drift while a bolted fault holds an area near 0 V. The post-fault
+    solve fell back to 0 V and stayed there - the fault never cleared - or,
+    for a fault at the generator's bus, stopped at the clearing time.
+    """
+    result = _post_study(client, quiet, _tds_request(grid, fault_bus, 0.1))
+    assert result['converged'] is True
+    t = np.asarray(result['time'])
+    assert t[-1] == pytest.approx(4.0)
+    v = np.asarray(next(s['values'] for s in result['bus_voltage'] if s['name'] == fault_bus))
+    at = lambda x: v[np.searchsorted(t, x)]
+    assert at(1.05) < 0.01, 'bolted fault'
+    assert at(1.5) == pytest.approx(v[0], abs=0.01), 'recovered 0.4 s after clearing'
+    assert v[-1] == pytest.approx(v[0], abs=0.005)
+    # The POI is found from the bus's diagram name, as the dialog sends it.
+    assert result['poi_metrics']['v_min_pu'] < 0.01
+
+
+def test_transient_stability_critical_clearing_time_matches_equal_area(client, quiet):
+    """
+    A classical machine (H 6 s, X'd 0.3) faulted at its terminals against the
+    rest of the network reduced to a Thevenin source: the equal-area criterion
+    gives the critical clearing time (0.463 s for the CHP plant). Cleared 5 %
+    sooner it must hold, 5 % later it must slip a pole, and say so.
+    """
+    spec = load_spec('reference_transmission')
+    gen = spec['generators'][0]
+    net, _ = sld.build_network(spec)
+    run(net)
+    g = spec_ids(net)['gen'][gen['id']]
+    bus = int(net.gen.at[g, 'bus'])
+    sn, vn = float(gen['sn_mva']), float(net.bus.at[bus, 'vn_kv'])
+    v = float(net.res_bus.at[bus, 'vm_pu'])
+    pm = float(net.res_gen.at[g, 'p_mw']) / sn
+    i = complex(pm, -net.res_gen.at[g, 'q_mvar'] / sn) / v
+    net.gen.loc[g, 'in_service'] = False
+    sc.calc_sc(net, bus=bus, case='max', ip=False)
+    xe = 1.1 * vn / (math.sqrt(3) * net.res_bus_sc.at[bus, 'ikss_ka']) / (vn ** 2 / sn)
+    xd1, h = 0.3, 6.0
+    e, v_inf = v + 1j * xd1 * i, v - 1j * xe * i
+    delta0 = float(np.angle(e) - np.angle(v_inf))
+    # Same network before and after the fault, no output during it:
+    # cos(delta_c) = (pi - 2 delta0) sin(delta0) - cos(delta0), and the rotor
+    # accelerates as w0 Pm t^2 / 4H.
+    delta_c = math.acos((math.pi - 2 * delta0) * math.sin(delta0) - math.cos(delta0))
+    t_cr = math.sqrt(4 * h * (delta_c - delta0) / (2 * math.pi * 50 * pm))
+    assert t_cr == pytest.approx(0.463, abs=0.005)
+
+    classical = dict(dyn_machine_model='GENCLS', dyn_exciter_model='NONE', dyn_governor_model='NONE')
+    for clear, holds in ((0.95 * t_cr, True), (1.05 * t_cr, False)):
+        result = _post_study(client, quiet, _tds_request(
+            'reference_transmission', _bus_label(spec, gen['bus']), clear, **classical))
+        lost = any('lost synchronism' in w for w in result['warnings'])
+        assert lost is not holds, (clear, result['warnings'])
+
+
+def test_transient_stability_fault_at_the_external_grid_says_it_does_nothing(client, quiet):
+    """ANDES holds the External Grid's bus at its set voltage: a fault there changes nothing."""
+    result = _post_study(client, quiet, _tds_request('reference_transmission', '110 kV busbar A', 0.1))
+    assert any("holds the External Grid" in w for w in result['warnings']), result['warnings']
+
+
 @pytest.mark.parametrize('grid', GRIDS)
 def test_drawn_diagram_dg_screening(client, quiet, opendss_scratch, grid):
     """

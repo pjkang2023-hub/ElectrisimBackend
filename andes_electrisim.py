@@ -984,6 +984,12 @@ def build_system(
                     fbus = bidx
                     break
         if fbus is not None:
+            slack_buses = {str(b) for b in getattr(ss.Slack.bus, "v", [])}
+            if str(fbus) in slack_buses:
+                warnings.append(
+                    f"The fault is at '{friendly.get(fault_bus_name, fault_bus_name)}', which holds the "
+                    "External Grid: ANDES keeps that bus at its set voltage, so the fault has no effect. "
+                    "Choose another bus.")
             ss.add(
                 "Fault",
                 idx="Fault_1",
@@ -1088,6 +1094,46 @@ def _syn_names(ss) -> Tuple[List[str], List[str]]:
     return names, models
 
 
+def _restore_prefault_state_on_clearing(ss) -> None:
+    """
+    At fault clearance, restart the algebraic solution from the full pre-fault
+    state - bus angles included.
+
+    ANDES (2.0) restores the pre-fault voltages and other algebraic variables
+    but not the bus angles. During a bolted fault the buses it collapses sit
+    near 0 V, where an angle means nothing, and drift (F1 and its ring to
+    -30 deg on the transmission reference grid); restarted at full voltage on
+    those angles, the post-fault solve fell back to 0 V and stayed there, as
+    if the fault were never cleared, or failed outright ("time step reduced
+    to zero") for a fault at the generator's bus. Restored whole, a cleared
+    fault recovers, and the critical clearing time of a classical machine
+    agrees with the equal-area criterion (0.467 s against 0.463 s).
+
+    The callbacks are bound when the Fault model is built, so they are
+    replaced on the timer parameters, not the methods.
+    """
+    fault = getattr(ss, "Fault", None)
+    if fault is None or not getattr(fault, "n", 0):
+        return
+    apply_fault, clear_fault = fault.apply_fault, fault.clear_fault
+
+    def apply(is_time):
+        acted = apply_fault(is_time)
+        if acted:
+            fault._electrisim_prefault_y = np.array(ss.dae.y)
+        return acted
+
+    def clear(is_time):
+        acted = clear_fault(is_time)
+        stored = getattr(fault, "_electrisim_prefault_y", None)
+        if acted and stored is not None and len(stored) == len(ss.dae.y):
+            ss.dae.y[:] = stored
+        return acted
+
+    fault.tf.callback = apply
+    fault.tc.callback = clear
+
+
 def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
     """Run power flow + time-domain simulation; return JSON string."""
     try:
@@ -1126,8 +1172,15 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
                 pass
 
         _check_init(ss, meta["warnings"])
+        _restore_prefault_state_on_clearing(ss)
         tds_ok = bool(ss.TDS.run())
         t = np.asarray(ss.dae.ts.t, dtype=float)
+        if not tds_ok and len(t):
+            # The run used to end with converged=false and no word of why;
+            # the plots just stopped.
+            meta["warnings"].append(
+                f"The simulation stopped at t = {t[-1]:.3f} s of {tf:g} s: the solver did not "
+                "converge there (often a loss of synchronism or voltage collapse).")
         max_pts = int(_sf(params.get("max_points"), 800))
         t_ds = _downsample(t, max_pts)
         # indices for downsample of series
@@ -1190,12 +1243,25 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
             mean_w = np.mean([np.asarray(s["values"], dtype=float) for s in omega], axis=0)
             freq_hz = (mean_w * meta["frequency"]).tolist()
 
+        # Losing synchronism did not show in the result, only in the plots. A
+        # pole slip runs the rotor angle more than 180 degrees from where it
+        # started; an undamped but stable swing can span more than that from
+        # its peak to its back-swing.
+        for s in delta:
+            swing = np.asarray(s["values"], dtype=float)
+            if swing.size and np.nanmax(np.abs(swing - swing[0])) > math.pi:
+                meta["warnings"].append(
+                    f"'{s['name']}' lost synchronism: its rotor angle swung by more than 180 degrees.")
+
         poi_bus_key = params.get("poi_bus") or params.get("poi_bus_name") or ""
+        # The dialog sends the bus's diagram name; the series carry the ANDES
+        # bus idx and the display name, so the POI was never found.
+        poi_idx = str(meta.get("bus_map", {}).get(poi_bus_key, "")) if poi_bus_key else ""
         poi_v_min = None
         poi_v_series = None
         if poi_bus_key and bus_v:
             for s in bus_v:
-                if s.get("id") == poi_bus_key or s.get("name") == poi_bus_key:
+                if s.get("id") in (poi_bus_key, poi_idx) or s.get("name") == poi_bus_key:
                     poi_v_series = s.get("values") or []
                     if poi_v_series:
                         poi_v_min = min(poi_v_series)
