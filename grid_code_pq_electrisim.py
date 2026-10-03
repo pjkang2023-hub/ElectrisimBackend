@@ -113,26 +113,32 @@ def _pq_interp_q_in_span(p_target, p_list, q_list, p_tol=1e-3):
     return float(np.interp(pt_clip, np.array(px, dtype=float), np.array(qy, dtype=float)))
 
 
-def _pq_max_abs_p(arr):
+def _pq_max_export(arr, sign_out):
+    """Highest export (MW) among curve P values plotted as sign_out x export."""
     best = None
     for p in arr or []:
         try:
-            a = abs(float(p))
+            export = float(p) * sign_out
         except (TypeError, ValueError):
             continue
-        if best is None or a > best:
-            best = a
+        if export > 0 and (best is None or export > best):
+            best = export
     return best
 
 
-def _pq_pmax_pcc_for_req(curve):
+def _pq_pmax_pcc_for_req(curve, sign_out=1.0):
     """
-    Grid-code Pmax at the PCC: the highest |P| that both Qmax and Qmin
+    Grid-code Pmax at the PCC: the highest export that both Qmax and Qmin
     branches reach, so the required P = 1.0 p.u. point lies on the red
     envelope. Templates are Q/Pmax; this value replaces generator Pn.
+
+    Only export counts. Taking the largest |P| made a PCC that only imports
+    (a plant behind load) report its import - 7.5 MW on the transmission
+    grid, three times the plant - as the plant's Pmax. With no export, None:
+    the requirement stays at Pn.
     """
-    a = _pq_max_abs_p(curve.get('p_max_mw') or curve.get('p_mw'))
-    b = _pq_max_abs_p(curve.get('p_min_mw') or curve.get('p_mw'))
+    a = _pq_max_export(curve.get('p_max_mw') or curve.get('p_mw'), sign_out)
+    b = _pq_max_export(curve.get('p_min_mw') or curve.get('p_mw'), sign_out)
     if a is None:
         return b
     if b is None:
@@ -2023,7 +2029,7 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
                 'limit_max': limit_max_result,
                 'limit_min': limit_min_result,
             }
-            pmax_pcc = _pq_pmax_pcc_for_req(curves[v_key])
+            pmax_pcc = _pq_pmax_pcc_for_req(curves[v_key], sign_out)
             v_req = requirements.get(v_key) if requirements else None
             if (
                 scale_requirement_to_pcc
@@ -2111,7 +2117,7 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
         pmax_pcc_by_voltage = {}
         pmax_pcc_vals = []
         for vk, curve in (curves or {}).items():
-            pm = _pq_pmax_pcc_for_req(curve)
+            pm = _pq_pmax_pcc_for_req(curve, sign_out)
             pmax_pcc_by_voltage[vk] = None if pm is None else round(float(pm), 4)
             if pm:
                 pmax_pcc_vals.append(float(pm))

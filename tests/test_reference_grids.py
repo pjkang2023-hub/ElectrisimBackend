@@ -1415,6 +1415,9 @@ def test_grid_code_vq_wind_farm_at_its_own_connection(client, quiet):
     result = next(line for line in lines if line.get('type') == 'result')['data']['grid_code_vq_results']
     curve, need = result['uq_curve'], result['uq_requirements']
     assert result['p_pcc_mw'] == pytest.approx(2.0, abs=0.05)
+    # Sized for the 2.0 MW wind farm chosen, not the 2.3 MW of PV and wind the
+    # dialog first ticks: ENTSO-E's 0.3287 Q/Pmax x 2.0 MW.
+    assert max(need['q_req_max_mvar']) == pytest.approx(0.3287 * 2.0, abs=0.005)
     for u, q_max, q_min, need_max, need_min in zip(curve['u_pu'], curve['q_max_mvar'], curve['q_min_mvar'],
                                                     need['q_req_max_mvar'], need['q_req_min_mvar']):
         assert q_max >= need_max and q_min <= need_min, f'{u} pu: {q_min}..{q_max} Mvar'
@@ -1422,3 +1425,20 @@ def test_grid_code_vq_wind_farm_at_its_own_connection(client, quiet):
     at_pcc = [float(m.split('U_pcc=')[1].split()[0]) for m in
               (line['message'] for line in lines if line.get('type') == 'progress') if 'U_pcc=' in m]
     assert at_pcc and all(min(abs(v - u) for u in curve['u_pu']) <= _PQ_PCC_V_TOL + 1e-4 for v in at_pcc)
+
+
+def test_grid_code_pmax_at_the_pcc_counts_export_only():
+    """
+    "Pmax at the PCC" sizes the grid-code requirement. It was the largest |P|,
+    so a PCC that only imports - the transmission grid's 110 kV busbar, where
+    the plant sits behind the town's load - reported its 7.5 MW import as the
+    plant's Pmax and scaled the requirement to three times the plant.
+    """
+    from grid_code_pq_electrisim import _pq_pmax_pcc_for_req
+
+    imports_only = {'p_mw': [-7.54, -6.39, -5.24]}
+    assert _pq_pmax_pcc_for_req(imports_only) is None          # held at Pn instead
+    mixed = {'p_max_mw': [-2.1, 0.4, 0.98], 'p_min_mw': [-2.1, 0.4, 0.97]}
+    assert _pq_pmax_pcc_for_req(mixed) == pytest.approx(0.97)
+    # Load orientation plots export as negative P.
+    assert _pq_pmax_pcc_for_req({'p_mw': [0.0, -1.0, -2.0]}, sign_out=-1.0) == pytest.approx(2.0)
