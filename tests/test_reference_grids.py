@@ -1416,21 +1416,25 @@ def test_site_screening_counts_lost_supply(client, quiet):
     assert row['upgrade_likely'] is True
 
 
+@pytest.mark.parametrize('grid', GRIDS)
 @pytest.mark.parametrize('engine', ('opender', 'opendss'))
-def test_drawn_diagram_bess_dispatch_reversal(client, quiet, opendss_scratch, engine):
+def test_drawn_diagram_bess_dispatch_reversal(client, quiet, opendss_scratch, engine, grid):
     """
-    The transmission grid's battery ramped from charging 0.1 MW to
-    discharging 0.1 MW: the voltage at its bus must rise as pandapower says
-    it does, and the result names the bus as the diagram labels it.
+    The grid's battery ramped from charging to discharging its drawn power
+    (0.1 MW on the transmission grid, 0.5 MW on the radial one): the
+    voltage at its bus must rise as pandapower says it does, and the result
+    names the bus as the diagram labels it. The radial battery is drawn
+    discharging; the dialog ran it the other way round, unseen.
     """
-    spec = load_spec('reference_transmission')
+    spec = load_spec(grid)
     (battery,) = spec['storage']
-    request = _study_request('reference_transmission', {}, key='bess_dispatch_reversal_params')
+    size = abs(battery['p_mw'])
+    request = _study_request(grid, {}, key='bess_dispatch_reversal_params')
     cell = {v.get('userFriendlyName'): v for v in request.values() if isinstance(v, dict) and 'name' in v}
     request['bess_dispatch_reversal_params'] = {
         'typ': 'BessDispatchReversalOpenDss', 'storage_id': cell[battery['name']]['id'],
         'poc_bus_id': cell[_bus_label(spec, battery['bus'])]['id'],
-        'p_start_mw': 0.1, 'p_end_mw': -0.1, 'pre_hold_s': 1, 'ramp_s': 5, 'post_hold_s': 2,
+        'p_start_mw': size, 'p_end_mw': -size, 'pre_hold_s': 1, 'ramp_s': 5, 'post_hold_s': 2,
         'dt': 0.1, 'vmin_pu': 0.98, 'vmax_pu': 1.02, 'olrt_s': 5, 'engine': engine,
         'q_source': 'inverter', 'frequency': 50}
     result = _post_study(client, quiet, request)
@@ -1445,8 +1449,9 @@ def test_drawn_diagram_bess_dispatch_reversal(client, quiet, opendss_scratch, en
         return run(net).res_bus.at[ids['bus'][battery['bus']], 'vm_pu']
 
     v = result['bus_voltage'][0]['values']
-    assert abs(v[0] - vm(0.1)) < OPENDSS_LF_VM_TOL
-    assert abs((v[-1] - v[0]) - (vm(-0.1) - vm(0.1))) < 1e-4, 'the rise differs from pandapower'
+    assert abs(v[0] - vm(size)) < OPENDSS_LF_VM_TOL
+    assert v[-1] > v[0], 'discharging must raise the voltage at the battery'
+    assert abs((v[-1] - v[0]) - (vm(-size) - vm(size))) < 1e-4, 'the rise differs from pandapower'
 
 
 @pytest.mark.parametrize('q_mode', ('from_sgen_curve', 'from_rating'))
