@@ -1495,3 +1495,50 @@ def test_drawn_diagram_time_series_matches_spec(client, quiet, grid):
             if abs(loading[(t, name)] - net.res_line.at[idx, 'loading_percent']) > 1e-4:
                 differ.append(f'hour {t} line {name}: {loading[(t, name)]} % drawn')
     assert not differ, '\n  '.join(differ[:10])
+
+
+def test_drawn_diagram_contingency_analysis_matches_spec(client, quiet):
+    """
+    N-1 on the drawn transmission grid, every element: each outage must give
+    pandapower's voltages for the spec with that element out, a bus it cuts
+    off must count as lost supply - an islanded bus has no voltage, which no
+    limit caught - and the three-winding main transformer is an outage too.
+    """
+    import math
+
+    with open(os.path.join(REFERENCE_DIR, 'reference_transmission.diagram_contingency_payload.json'),
+              encoding='utf-8') as handle:
+        request = json.load(handle)
+    with quiet():
+        response = client.post('/', json=request)
+    result = json.loads(response.get_data(as_text=True))
+    spec = load_spec('reference_transmission')
+    out_of = {'line': ('line',), 'transformer': ('trafo', 'trafo3w'), 'generator': ('gen',)}
+
+    outages = []
+    for case in result['contingency_results']:
+        assert case['converged'], case['description']
+        kind, name = case['description'].replace('Outage of ', '').split(' ', 1)
+        net, _ = sld.build_network(spec)
+        (table, idx), = [(t, i) for t in out_of[kind] for i in net[t].index if net[t].at[i, 'name'] == name]
+        outages.append((table, name))
+        net[table].at[idx, 'in_service'] = False
+        pp.runpp(net, algorithm='nr', calculate_voltage_angles=True)
+        drawn = {b['name']: b['vm_pu'] for b in case['bus_results']}
+        cut_off = set()
+        for i in net.bus.index:
+            bus, want = net.bus.at[i, 'name'], net.res_bus.at[i, 'vm_pu']
+            if math.isnan(want):
+                cut_off.add(f'Bus_{bus}')
+            else:
+                assert drawn[bus] == pytest.approx(want, abs=DRAWN_TOL), (name, bus)
+        flagged = {v['element'] for v in case['violations'] if v['type'] == 'supply'}
+        assert flagged == cut_off, (name, flagged, cut_off)
+
+    expected = ([('line', str(l.get('name') or l['id'])) for l in spec['lines']]
+                + [('trafo', str(t.get('name') or t['id'])) for t in spec['transformers']]
+                + [('trafo3w', str(t.get('name') or t['id'])) for t in spec['three_winding_transformers']]
+                + [('gen', str(g.get('name') or g['id'])) for g in spec['generators']])
+    assert sorted(outages) == sorted(expected)
+    assert any(cut for case in result['contingency_results']
+               for cut in case['violations'] if cut['type'] == 'supply'), 'no outage cut a bus off'

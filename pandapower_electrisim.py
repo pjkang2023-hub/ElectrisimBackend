@@ -8362,6 +8362,17 @@ def contingency_analysis(net, contingency_params):
                         'element_idx': trafo_idx,
                         'description': f"Outage of transformer {trafo_name}"
                     })
+            # Three-winding units too: they were never taken out, though one
+            # may be a bus's only supply.
+            for trafo_idx in net.trafo3w.index:
+                if net.trafo3w.loc[trafo_idx, 'in_service']:
+                    trafo_name = _contingency_friendly_name(net, net.trafo3w.loc[trafo_idx, 'name'])
+                    contingency_cases.append({
+                        'name': f"Trafo3w_{trafo_name}",
+                        'type': 'trafo3w',
+                        'element_idx': trafo_idx,
+                        'description': f"Outage of transformer {trafo_name}"
+                    })
         
         if element_type == 'generator' or element_type == 'all':
             # Add generator contingencies
@@ -8399,6 +8410,8 @@ def contingency_analysis(net, contingency_params):
                     net_cont.line.loc[contingency_case['element_idx'], 'in_service'] = False
                 elif contingency_case['type'] == 'trafo':
                     net_cont.trafo.loc[contingency_case['element_idx'], 'in_service'] = False
+                elif contingency_case['type'] == 'trafo3w':
+                    net_cont.trafo3w.loc[contingency_case['element_idx'], 'in_service'] = False
                 elif contingency_case['type'] == 'gen':
                     net_cont.gen.loc[contingency_case['element_idx'], 'in_service'] = False
                 
@@ -8407,6 +8420,20 @@ def contingency_analysis(net, contingency_params):
                 
                 # Check for violations
                 case_violations = []
+
+                # Lost supply: buses the outage islands have no voltage (NaN),
+                # which no limit catches - cutting off a bus counted as no
+                # violation at all.
+                in_service = net_cont.bus.index[net_cont.bus.in_service]
+                dead = net_cont.res_bus.loc[net_cont.res_bus.index.intersection(in_service)]
+                for bus_idx in dead.index[dead.vm_pu.isna()]:
+                    bus_name = _contingency_friendly_name(net, net_cont.bus.loc[bus_idx, 'name'])
+                    case_violations.append({
+                        'type': 'supply',
+                        'element': f"Bus_{bus_name}",
+                        'description': 'Loss of supply: bus de-energised',
+                        'severity': 'high'
+                    })
                 
                 # Check voltage violations
                 if voltage_limits:
@@ -8452,6 +8479,19 @@ def contingency_analysis(net, contingency_params):
                                 'description': f"Transformer overload: {trafo_data.loading_percent:.1f}%",
                                 'severity': 'high' if trafo_data.loading_percent > 120 else 'medium'
                             })
+
+                    if not net_cont.res_trafo3w.empty:
+                        trafo3w_overloads = net_cont.res_trafo3w[
+                            net_cont.res_trafo3w.loading_percent > max_loading_percent
+                        ]
+                        for trafo_idx, trafo_data in trafo3w_overloads.iterrows():
+                            trafo_name = _contingency_friendly_name(net, net_cont.trafo3w.loc[trafo_idx, 'name'])
+                            case_violations.append({
+                                'type': 'thermal',
+                                'element': f"Trafo3w_{trafo_name}",
+                                'description': f"Transformer overload: {trafo_data.loading_percent:.1f}%",
+                                'severity': 'high' if trafo_data.loading_percent > 120 else 'medium'
+                            })
                 
                 # Store results for this contingency
                 contingency_result = {
@@ -8492,6 +8532,16 @@ def contingency_analysis(net, contingency_params):
                     contingency_result['trafo_results'].append({
                         'trafo_id': net_cont.trafo.loc[trafo_idx, 'id'],
                         'name': _contingency_friendly_name(net, net_cont.trafo.loc[trafo_idx, 'name']),
+                        'loading_percent': trafo_data.loading_percent,
+                        'p_hv_mw': trafo_data.p_hv_mw,
+                        'q_hv_mvar': trafo_data.q_hv_mvar,
+                        'p_lv_mw': trafo_data.p_lv_mw,
+                        'q_lv_mvar': trafo_data.q_lv_mvar
+                    })
+                for trafo_idx, trafo_data in net_cont.res_trafo3w.iterrows():
+                    contingency_result['trafo_results'].append({
+                        'trafo_id': net_cont.trafo3w.loc[trafo_idx, 'id'] if 'id' in net_cont.trafo3w.columns else str(trafo_idx),
+                        'name': _contingency_friendly_name(net, net_cont.trafo3w.loc[trafo_idx, 'name']),
                         'loading_percent': trafo_data.loading_percent,
                         'p_hv_mw': trafo_data.p_hv_mw,
                         'q_hv_mvar': trafo_data.q_hv_mvar,
