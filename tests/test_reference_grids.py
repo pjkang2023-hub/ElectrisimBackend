@@ -1862,20 +1862,26 @@ def test_economic_losses_follow_the_profiles_hour_by_hour(client, quiet):
 #
 # reference_transmission.diagram_bess_preliminary_payload.json is the request the
 # wizard sent after generating its default plant (50 MW, 4 PCS, 33 kV collection,
-# POC at 110 kV) on the drawn transmission grid. The plant has its own External
-# Grid, so the page holds two networks.
+# POC at 110 kV) on the drawn transmission grid; reference_radial's is a 5 MW
+# plant of 2 PCS connected straight at 20 kV (no HV/MV transformer, so no tap
+# changer) beside the drawn radial grid. Each plant has its own External Grid,
+# so the page holds two networks.
 
-def test_bess_preliminary_studies_the_plant_only(client, quiet):
+@pytest.mark.parametrize('grid', GRIDS)
+def test_bess_preliminary_studies_the_plant_only(client, quiet, grid):
     """
     The study took every network on the page: the transmission grid's 0.094 MW
     of losses counted as the plant's, its lines and buses filled the rating
     table and voltage profile, and its limits judged every case.
     """
-    with open(os.path.join(REFERENCE_DIR, 'reference_transmission.diagram_bess_preliminary_payload.json'),
+    with open(os.path.join(REFERENCE_DIR, f'{grid}.diagram_bess_preliminary_payload.json'),
               encoding='utf-8') as handle:
         request = json.load(handle)
     result = _post_study(client, quiet, request)['bess_preliminary_results']
-    spec = load_spec('reference_transmission')
+    spec = load_spec(grid)
+    units = len(request['bess_preliminary_params']['storageNames'])
+    hv_trafo = any(isinstance(v, dict) and v.get('userFriendlyName') == 'POC_Transformer'
+                   for v in request.values())
 
     assert result['params']['buses_not_connected'] == len(spec['buses'])
     assert result['summary']['passed_cases'] == result['summary']['total_cases'] == 18
@@ -1886,7 +1892,9 @@ def test_bess_preliminary_studies_the_plant_only(client, quiet):
                      for e in spec.get(t, [])})
     assert not grid_names & {row['name'] for row in result['rating_table']}
     assert not grid_names & {bus['name'] for bus in result['voltage_profile']}
-    assert len(result['voltage_profile']) == 10  # POC, MV collection, 4 string + 4 LV buses
+    # A string and an LV bus per unit, the MV collection bus, and the HV POC
+    # when there is a POC transformer.
+    assert len(result['voltage_profile']) == 2 * units + 1 + hv_trafo
 
     # Power balance at the POC: PCS output less losses and auxiliaries.
     aux = next(float(v['p_mw']) for v in request.values()
@@ -1894,7 +1902,7 @@ def test_bess_preliminary_studies_the_plant_only(client, quiet):
     for case in result['named_cases']:
         if 'pcs_p_each_mw' not in case:
             continue
-        delivered = -4 * case['pcs_p_each_mw'] - case['p_loss_mw'] - aux
+        delivered = -units * case['pcs_p_each_mw'] - case['p_loss_mw'] - aux
         assert delivered == pytest.approx(case['p_poc_mw'], abs=1e-4), case['name']
 
     # One warning per voltage and side, not one per P point (84 here).
