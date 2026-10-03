@@ -1444,14 +1444,16 @@ def test_grid_code_pmax_at_the_pcc_counts_export_only():
     assert _pq_pmax_pcc_for_req({'p_mw': [0.0, -1.0, -2.0]}, sign_out=-1.0) == pytest.approx(2.0)
 
 
-def test_drawn_diagram_time_series_matches_spec(client, quiet):
+@pytest.mark.parametrize('grid', GRIDS)
+def test_drawn_diagram_time_series_matches_spec(client, quiet, grid):
     """
-    The time series on the drawn transmission grid - 24 hours of the dialog's
-    default profiles for its five loads and three generators, in MW - must give
-    each hour the power flow pandapower gives the spec with the same P, Q kept
-    at each element's power factor.
+    The time series on the drawn grid - 24 hours of the dialog's default
+    profiles, in MW - must give each hour the power flow pandapower gives the
+    spec with the same P, Q kept at each element's power factor. Every load and
+    generator gets a profile: the dialog left out the radial grid's wind farm,
+    drawn as a Wind Turbine, so it ran at its drawn 3 MW all day.
     """
-    with open(os.path.join(REFERENCE_DIR, 'reference_transmission.diagram_timeseries_payload.json'),
+    with open(os.path.join(REFERENCE_DIR, f'{grid}.diagram_timeseries_payload.json'),
               encoding='utf-8') as handle:
         request = json.load(handle)
     with quiet():
@@ -1461,11 +1463,14 @@ def test_drawn_diagram_time_series_matches_spec(client, quiet):
     assert result['timeseries_converged'] is True
     steps = int(result['time_steps'])
     profiles = {p['display_name']: p['values'] for p in result['profiles_used'].values()}
-    assert len(profiles) == 8 and all(len(v) == steps for v in profiles.values())
+    spec = load_spec(grid)
+    expected = {str(e.get('name') or e['id'])
+                for key in ('loads', 'generators', 'static_generators') for e in spec[key]}
+    assert set(profiles) == expected
+    assert all(len(v) == steps for v in profiles.values())
 
     vm = {(b['time_step'], b['name']): b['vm_pu'] for b in result['busbars']}
     loading = {(l['time_step'], l['name']): l['loading_percent'] for l in result['lines']}
-    spec = load_spec('reference_transmission')
     net, _ = sld.build_network(spec)
     base = {table: net[table].copy() for table in ('load', 'sgen', 'gen')}
     differ = []
