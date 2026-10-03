@@ -415,6 +415,27 @@ def _strip_dc_for_ac_lf(net):
             pass
 
 
+def _keep_poc_island(net, params):
+    """
+    Drop every bus not connected to the POC. The wizard's plant has its own
+    external grid, so on a page that also holds another network the study
+    took that network along: its losses counted as the plant's (0.09 MW of
+    0.45 MW beside the transmission reference grid), its lines and buses
+    filled the rating table and voltage profile, and its overloads or low
+    voltages would have failed every case. Returns the number of buses dropped.
+    """
+    import pandapower.topology as top
+    poc = _find_bus_idx(net, params.get('pocBusName'))
+    if poc is None:
+        return 0
+    graph = top.create_nxgraph(net, respect_switches=True, include_out_of_service=False)
+    keep = set(top.connected_component(graph, poc))
+    drop = [b for b in net.bus.index if b not in keep]
+    if drop:
+        pp.drop_buses(net, drop, drop_elements=True)
+    return len(drop)
+
+
 def _apply_storage_p_limits(net, params):
     """Write wizard Pmax (including Battery DC Pmax) onto storage min/max P."""
     p_dis, p_chg = _unit_p_limits(params)
@@ -1440,6 +1461,9 @@ def bess_preliminary_study(net, params, in_data=None):
         params = dict(params or {})
         params['_dc_snapshot'] = _dc_rack_snapshot(net)
         _strip_dc_for_ac_lf(net)
+        dropped = _keep_poc_island(net, params)
+        if dropped and progress_cb:
+            progress_cb(f'Studying the plant only: {dropped} buses not connected to the POC left out.')
         _apply_storage_p_limits(net, params)
 
         case_defs = _build_named_cases(params)
@@ -1493,6 +1517,7 @@ def bess_preliminary_study(net, params, in_data=None):
                 'tap_sweep': tap_results,
                 'summary': summary,
                 'params': {
+                    'buses_not_connected': dropped,
                     'pocBusName': params.get('pocBusName'),
                     'storageNames': params.get('storageNames'),
                     'poc_convention': 'export_positive',

@@ -1856,3 +1856,48 @@ def test_economic_losses_follow_the_profiles_hour_by_hour(client, quiet):
     assert result['total_energy_losses_annual_mwh'] == pytest.approx(annual, rel=1e-6)
     assert result['total_energy_losses_mwh'] == pytest.approx(annual * 30, rel=1e-6)
     assert any('scaled to a full year' in w for w in result['warnings']), result.get('warnings')
+
+
+# --- BESS preliminary design -------------------------------------------------------
+#
+# reference_transmission.diagram_bess_preliminary_payload.json is the request the
+# wizard sent after generating its default plant (50 MW, 4 PCS, 33 kV collection,
+# POC at 110 kV) on the drawn transmission grid. The plant has its own External
+# Grid, so the page holds two networks.
+
+def test_bess_preliminary_studies_the_plant_only(client, quiet):
+    """
+    The study took every network on the page: the transmission grid's 0.094 MW
+    of losses counted as the plant's, its lines and buses filled the rating
+    table and voltage profile, and its limits judged every case.
+    """
+    with open(os.path.join(REFERENCE_DIR, 'reference_transmission.diagram_bess_preliminary_payload.json'),
+              encoding='utf-8') as handle:
+        request = json.load(handle)
+    result = _post_study(client, quiet, request)['bess_preliminary_results']
+    spec = load_spec('reference_transmission')
+
+    assert result['params']['buses_not_connected'] == len(spec['buses'])
+    assert result['summary']['passed_cases'] == result['summary']['total_cases'] == 18
+    assert result['summary']['target_met_cases'] == result['summary']['target_cases'] == 12
+
+    grid_names = ({_bus_label(spec, b['id']) for b in spec['buses']}
+                  | {e.get('name') or e['id'] for t in ('lines', 'transformers', 'three_winding_transformers')
+                     for e in spec.get(t, [])})
+    assert not grid_names & {row['name'] for row in result['rating_table']}
+    assert not grid_names & {bus['name'] for bus in result['voltage_profile']}
+    assert len(result['voltage_profile']) == 10  # POC, MV collection, 4 string + 4 LV buses
+
+    # Power balance at the POC: PCS output less losses and auxiliaries.
+    aux = next(float(v['p_mw']) for v in request.values()
+               if isinstance(v, dict) and v.get('userFriendlyName') == 'Aux_Load')
+    for case in result['named_cases']:
+        if 'pcs_p_each_mw' not in case:
+            continue
+        delivered = -4 * case['pcs_p_each_mw'] - case['p_loss_mw'] - aux
+        assert delivered == pytest.approx(case['p_poc_mw'], abs=1e-4), case['name']
+
+    # One warning per voltage and side, not one per P point (84 here).
+    warnings = result['pq_envelope']['warnings']
+    assert 0 < len(warnings) <= 6, warnings
+    assert all(' at ' in w for w in warnings), warnings

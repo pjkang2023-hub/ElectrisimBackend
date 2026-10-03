@@ -1701,6 +1701,7 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
             pcc_bus_friendly = net.user_friendly_names[pcc_bus_name]
 
         warnings_list = []
+        limited_at = {}
         extra_parks = []
         for park in pp_el._electrisim_collect_park_payloads(in_data or {}):
             if i_park and _pq_match_park(park, park_name, park_id):
@@ -1974,10 +1975,10 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
                 for rsn, side in ((reasons_max, 'max'), (reasons_min, 'min')):
                     uniq = [x for x in rsn if x]
                     if uniq:
-                        warnings_list.append(
-                            f"V={v_pu}pu, P={p_val:.1f}MW: Q_{side} limited "
-                            f"({', '.join(sorted(set(uniq)))})"
-                        )
+                        # Grouped below: one line per voltage, side and
+                        # reason. Listing every P point gave 84 lines.
+                        limited_at.setdefault(
+                            (v_pu, side, ', '.join(sorted(set(uniq)))), []).append(float(p_val))
 
                 p_disp_plot = sign_out * float(p_val)
                 p_plot_max = _pq_pcc_plot_from_net(snap_max, ctx, sign_out)
@@ -2122,6 +2123,11 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
             if pm:
                 pmax_pcc_vals.append(float(pm))
         pmax_pcc_mw = round(max(pmax_pcc_vals), 4) if pmax_pcc_vals else None
+
+        for (v_pu, side, why), p_vals in limited_at.items():
+            span = (f'P={p_vals[0]:.1f} MW' if len(p_vals) == 1 else
+                    f'{len(p_vals)} points, P={min(p_vals):.1f} to {max(p_vals):.1f} MW')
+            warnings_list.append(f'V={v_pu}pu: Q_{side} limited ({why}) at {span}')
 
         result = {
             'grid_code_pq_results': {
