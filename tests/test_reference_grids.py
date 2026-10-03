@@ -1164,6 +1164,57 @@ def test_drawn_diagram_eigenvalues(client, quiet, grid):
     assert result['verdict'] == 'stable'
     assert result['n_positive'] == 0
 
+    # One row per complex pair: the conjugate is the same mode.
+    modes = result['least_damped_modes']
+    assert modes and all(m['imag'] > 0 for m in modes)
+    # Participation was always empty (a numpy array in `or`, swallowed), and
+    # read ANDES's matrix the wrong way round: the machine's rotor swing must
+    # come out as its speed and rotor angle, under the machine's name.
+    machine = load_spec(grid)['generators'][0]['name']
+    swing = max(modes, key=lambda m: m['freq_hz'])
+    part = next(p for p in result['participation'] if p['mode_index'] == swing['index'])
+    top = [s['state'] for s in part['states'][:2]]
+    assert sorted(top) == sorted([f'{machine} (GENROU): speed ω', f'{machine} (GENROU): rotor angle δ']), part
+    for p in result['participation']:
+        factors = [s['factor'] for s in p['states']]
+        assert all(0 <= f <= 1 for f in factors) and sum(factors) <= 1 + 1e-9, p
+
+
+@pytest.mark.parametrize('grid', GRIDS)
+def test_classical_machine_swing_matches_hand_calculation(client, quiet, grid):
+    """
+    The classical machine against the rest of the network, reduced to its
+    Thevenin equivalent at the machine bus: f = sqrt(w0 Ks / 2H) / 2 pi with
+    Ks = E' V cos(delta) / (X'd + Xe). The classical model took the
+    subtransient xdss_pu as its X'd, so the machine was too stiff (1.94 Hz
+    against 1.53 Hz on the transmission grid).
+    """
+    request = _study_request(grid, {'typ': 'EigenvalueAndes Parameters', **ANDES_PARAMS,
+                                    'n_modes': '10'})
+    machine_el = next(v for v in request.values() if str(v.get('typ', '')).startswith('Generator'))
+    machine_el['dyn_machine_model'] = 'GENCLS'
+    result = _post_study(client, quiet, request)
+    swing = max(result['least_damped_modes'], key=lambda m: m['freq_hz'])
+
+    spec = load_spec(grid)
+    gen = spec['generators'][0]
+    net, _ = sld.build_network(spec)
+    run(net)
+    ids = spec_ids(net)
+    g = ids['gen'][gen['id']]
+    bus = int(net.gen.at[g, 'bus'])
+    sn, vn = float(machine_el['sn_mva']), float(net.bus.at[bus, 'vn_kv'])  # as drawn
+    v = float(net.res_bus.at[bus, 'vm_pu'])
+    i = complex(net.res_gen.at[g, 'p_mw'], -net.res_gen.at[g, 'q_mvar']) / sn / v
+    net.gen.loc[g, 'in_service'] = False
+    sc.calc_sc(net, bus=bus, case='max', ip=False)
+    xe = 1.1 * vn / (math.sqrt(3) * net.res_bus_sc.at[bus, 'ikss_ka']) / (vn ** 2 / sn)
+    xd1, h = 0.3, 6.0  # the defaults applied
+    e, v_inf = v + 1j * xd1 * i, v - 1j * xe * i
+    ks = abs(e) * abs(v_inf) * math.cos(np.angle(e) - np.angle(v_inf)) / (xd1 + xe)
+    f_hand = math.sqrt(2 * math.pi * 50 * ks / (2 * h)) / (2 * math.pi)
+    assert swing['freq_hz'] == pytest.approx(f_hand, rel=0.05), (swing, f_hand)
+
 
 @pytest.mark.parametrize('grid', GRIDS)
 def test_drawn_diagram_dg_screening(client, quiet, opendss_scratch, grid):

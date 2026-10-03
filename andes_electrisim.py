@@ -695,7 +695,10 @@ def build_system(
                 used_defaults = False
             D = _dyn("dyn_D", 0.0, ("D",))
             ra = _dyn("dyn_ra", 0.0, ("ra",))
-            xd1 = _dyn("dyn_xd1", 0.3, ("xd1", "xdss_pu"))
+            # The classical model's reactance is the transient X'd; xdss_pu is
+            # the subtransient X''d of the short-circuit data, and made the
+            # machine too stiff (1.94 Hz against 1.53 Hz on the reference grid).
+            xd1 = _dyn("dyn_xd1", 0.3, ("xd1",))
             ss.add(
                 "GENCLS",
                 idx=syn_idx,
@@ -1295,6 +1298,68 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
         })
 
 
+_STATE_MEANING = {
+    "delta": "rotor angle δ",
+    "omega": "speed ω",
+    "e1q": "E'q",
+    "e1d": "E'd",
+    "e2d": "ψ''d",
+    "e2q": "ψ''q",
+}
+
+
+def _state_labels(ss) -> Dict[str, str]:
+    """ANDES state name ('omega GENROU 1') -> 'CHP plant (GENROU): speed ω'."""
+    labels = {}
+    names = list(ss.dae.x_name)
+    for model_name, model in ss.models.items():
+        if not getattr(model, "n", 0) or not getattr(model, "states", None):
+            continue
+        devices = [str(v) for v in model.name.v]
+        for var_name, var in model.states.items():
+            for j, addr in enumerate(np.asarray(var.a).ravel()):
+                if int(addr) >= len(names) or j >= len(devices):
+                    continue
+                device = devices[j]
+                if device.startswith(f"{model_name}_"):
+                    device = device[len(model_name) + 1:]
+                meaning = _STATE_MEANING.get(var_name, var_name)
+                labels[str(names[int(addr)])] = f"{device} ({model_name}): {meaning}"
+    return labels
+
+
+def _participation(As, mu, x_names, mode_indices, labels, top=5):
+    """
+    Participation of each state in each mode (Kundur 12.2.4): p_ki = |l_ki r_ik|
+    for left and right eigenvectors l_k, r_k of the state matrix, normalised so
+    each mode's factors add up to 1.
+
+    ANDES's EIG.pfactors has modes as rows, not states as its docstring says,
+    and is not normalised per mode; read by column it credited the CHP
+    plant's 1.33 Hz rotor swing to E'd.
+    """
+    As = As.toarray() if hasattr(As, "toarray") else np.asarray(As, dtype=float)
+    lam, right = np.linalg.eig(As)
+    left = np.linalg.inv(right)
+    pf = np.abs(left * right.T)
+    pf = pf / pf.sum(axis=1, keepdims=True)
+    out = []
+    for mi in mode_indices:
+        k = int(np.argmin(np.abs(lam - mu[mi])))
+        order = np.argsort(pf[k])[::-1][:top]
+        out.append({
+            "mode_index": int(mi),
+            "states": [
+                {
+                    "state": labels.get(str(x_names[j]), str(x_names[j])),
+                    "factor": _clean_num(float(pf[k, j])),
+                }
+                for j in order if j < len(x_names)
+            ],
+        })
+    return out
+
+
 def run_eig(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
     """Run power flow + eigenvalue analysis; return JSON string."""
     try:
@@ -1344,8 +1409,9 @@ def run_eig(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
                 "damping_ratio": _clean_num(damp),
             })
 
-        # Sort oscillatory modes by least damping (ascending damping ratio among im!=0)
-        osc = [e for e in eigenvalues if abs(e["imag"] or 0) > 1e-6]
+        # Sort oscillatory modes by least damping (ascending damping ratio).
+        # One row per complex pair: its conjugate is the same mode.
+        osc = [e for e in eigenvalues if (e["imag"] or 0) > 1e-6]
         osc_sorted = sorted(
             osc,
             key=lambda e: (e["damping_ratio"] if e["damping_ratio"] is not None else -1e9),
@@ -1364,28 +1430,15 @@ def run_eig(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
         else:
             verdict = "stable"
 
-        # Participation factors for least-damped modes (optional)
-        participation = []
+        # Participation factors for the least-damped modes. `x_name or []` on
+        # ANDES's numpy array raised, and the bare except left this empty.
         try:
-            pf = np.asarray(ss.EIG.pfactors)
-            x_names = list(getattr(ss.EIG, "x_name", []) or [])
-            for mode in least_damped[:5]:
-                mi = mode["index"]
-                if pf.ndim == 2 and mi < pf.shape[1]:
-                    col = np.abs(pf[:, mi])
-                    order = np.argsort(col)[::-1][:5]
-                    participation.append({
-                        "mode_index": mi,
-                        "states": [
-                            {
-                                "state": x_names[j] if j < len(x_names) else str(j),
-                                "factor": _clean_num(float(col[j])),
-                            }
-                            for j in order
-                        ],
-                    })
-        except Exception:
+            participation = _participation(
+                ss.EIG.As, mu, list(ss.EIG.x_name), [m["index"] for m in least_damped[:5]],
+                _state_labels(ss))
+        except Exception as e:
             participation = []
+            meta["warnings"].append(f"Participation factors could not be computed: {e}")
 
         result = {
             "error": False,
