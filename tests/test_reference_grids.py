@@ -1294,3 +1294,36 @@ def test_site_screening_counts_lost_supply(client, quiet):
     lost = {v['name'] for v in row['n1_violation_details'] if v['text'] == 'de-energised'}
     assert 'B1' in lost, row['n1_violation_details']  # the Factory's own bus
     assert row['upgrade_likely'] is True
+
+
+@pytest.mark.parametrize('engine', ('opender', 'opendss'))
+def test_drawn_diagram_bess_dispatch_reversal(client, quiet, opendss_scratch, engine):
+    """
+    The transmission grid's battery ramped from charging 0.1 MW to
+    discharging 0.1 MW: the voltage at its bus must rise as pandapower says
+    it does, and the result names the bus as the diagram labels it.
+    """
+    spec = load_spec('reference_transmission')
+    (battery,) = spec['storage']
+    request = _study_request('reference_transmission', {}, key='bess_dispatch_reversal_params')
+    cell = {v.get('userFriendlyName'): v for v in request.values() if isinstance(v, dict) and 'name' in v}
+    request['bess_dispatch_reversal_params'] = {
+        'typ': 'BessDispatchReversalOpenDss', 'storage_id': cell[battery['name']]['id'],
+        'poc_bus_id': cell[_bus_label(spec, battery['bus'])]['id'],
+        'p_start_mw': 0.1, 'p_end_mw': -0.1, 'pre_hold_s': 1, 'ramp_s': 5, 'post_hold_s': 2,
+        'dt': 0.1, 'vmin_pu': 0.98, 'vmax_pu': 1.02, 'olrt_s': 5, 'engine': engine,
+        'q_source': 'inverter', 'frequency': 50}
+    result = _post_study(client, quiet, request)
+    assert result['converged'] is True and result['within_limits'] is True
+    assert result['poc_bus_label'] == _bus_label(spec, battery['bus'])
+    assert result['bus_voltage'][0]['name'] == result['poc_bus_label']
+
+    def vm(p_mw):
+        net, _ = sld.build_network(spec)
+        ids = spec_ids(net)
+        net.storage.at[ids['storage'][battery['id']], 'p_mw'] = p_mw
+        return run(net).res_bus.at[ids['bus'][battery['bus']], 'vm_pu']
+
+    v = result['bus_voltage'][0]['values']
+    assert abs(v[0] - vm(0.1)) < OPENDSS_LF_VM_TOL
+    assert abs((v[-1] - v[0]) - (vm(-0.1) - vm(0.1))) < 1e-4, 'the rise differs from pandapower'

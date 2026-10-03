@@ -685,12 +685,21 @@ def bess_dispatch_reversal(in_data, params):
         'q_max_mvar': q_max_series,
     })
 
+    # The POC as the diagram labels it; OpenDSS knows only the cell id.
+    poc_label = next(
+        (str(el['userFriendlyName']) for el in in_data.values()
+         if isinstance(el, dict) and el.get('userFriendlyName')
+         and str(el.get('typ', '')).startswith('Bus')
+         and str(el.get('name', '')).lower() == str(poc_bus_name).lower()),
+        poc_bus_name)
+
     result = {
         'error': False,
         'engine': engine,
         'converged': converged_all,
         'storage_name': storage_label,
         'poc_bus': poc_bus_name,
+        'poc_bus_label': poc_label,
         'p_start_mw': p_start_mw,
         'p_end_mw': p_end_mw,
         'pre_hold_s': pre_hold_s,
@@ -707,13 +716,7 @@ def bess_dispatch_reversal(in_data, params):
         't_peak_s': round(t_peak_s, 3),
         'within_limits': within_limits,
         'time': ds_time,
-        # The series is labelled as the diagram labels the bus, not by cell id.
-        'bus_voltage': [{'name': next(
-            (str(el['userFriendlyName']) for el in in_data.values()
-             if isinstance(el, dict) and el.get('userFriendlyName')
-             and str(el.get('typ', '')).startswith('Bus')
-             and str(el.get('name', '')).lower() == str(poc_bus_name).lower()),
-            poc_bus_name), 'values': ds['v_poc']}],
+        'bus_voltage': [{'name': poc_label, 'values': ds['v_poc']}],
         'p_mw': [{'name': storage_label, 'values': ds['p_mw']}],
         'q_mvar': [{'name': storage_label, 'values': ds['q_mvar']}],
         'q_min_mvar': [{'name': 'Qmin (envelope)', 'values': ds.get('q_min_mvar') or []}],
