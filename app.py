@@ -889,14 +889,12 @@ def simulation():
                 user_email = in_data[x].get('user_email', 'unknown@user.com')
                 print(f"=== MOTOR STARTING REQUESTED BY USER: {user_email} ===")
 
-                mode = str(in_data[x].get('mode', 'steady')).lower()
-                if mode in ('dynamic', 'transient', 'tds', 'andes'):
-                    response_data = motor_starting_electrisim.motor_starting(None, in_data[x], in_data)
-                else:
-                    net = pp.create_empty_network()
-                    Busbars = pandapower_electrisim.create_busbars(in_data, net)
-                    pandapower_electrisim.create_other_elements(in_data, net, x, Busbars)
-                    response_data = motor_starting_electrisim.motor_starting(net, in_data[x], in_data)
+                # Both modes get the pandapower network: the dynamic start's
+                # thermal check is a load flow at its moment of largest demand.
+                net = pp.create_empty_network()
+                Busbars = pandapower_electrisim.create_busbars(in_data, net)
+                pandapower_electrisim.create_other_elements(in_data, net, x, Busbars)
+                response_data = motor_starting_electrisim.motor_starting(net, in_data[x], in_data)
 
                 accept_encoding = request.headers.get('Accept-Encoding', '')
                 if 'gzip' in accept_encoding and len(response_data) > 1024:

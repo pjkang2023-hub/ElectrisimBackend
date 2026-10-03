@@ -118,6 +118,8 @@ def _method_factor(method: str, params: Dict[str, Any], lrc_pu: float) -> Tuple[
         return tap * tap, meta
 
     if method == "reactor":
+        # x_r is relative to the motor's locked-rotor impedance (both mostly
+        # reactive), so the motor sees 1 / (1 + x_r) of the bus voltage.
         x_r = _sf(params.get("reactor_x_pu"), 0.25)
         if x_r < 0:
             x_r = 0.25
@@ -230,6 +232,22 @@ def _branch_loadings(net) -> List[Dict[str, Any]]:
                 "max_i_ka": None,
                 "i_ka": _clean(_sf(net.res_trafo.at[idx, "i_lv_ka"] if "i_lv_ka" in net.res_trafo.columns else None, float("nan"))),
             })
+    # Three-winding units were left out: on the transmission reference grid
+    # the one feeding the motor's 10 kV winding, 55 % loaded during the start.
+    if hasattr(net, "trafo3w") and not net.trafo3w.empty and hasattr(net, "res_trafo3w") and not net.res_trafo3w.empty:
+        for idx, row in net.trafo3w.iterrows():
+            if idx not in net.res_trafo3w.index:
+                continue
+            loading = _sf(net.res_trafo3w.at[idx, "loading_percent"], float("nan"))
+            mid, name = _row_id_name(row, idx)
+            results.append({
+                "id": mid,
+                "name": name,
+                "element": "trafo3w",
+                "loading_during_percent": _clean(loading),
+                "max_i_ka": None,
+                "i_ka": _clean(_sf(net.res_trafo3w.at[idx, "i_hv_ka"] if "i_hv_ka" in net.res_trafo3w.columns else None, float("nan"))),
+            })
     return results
 
 
@@ -303,6 +321,14 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
         mid, name = _row_id_name(row, idx)
         if s_mva <= 0:
             warnings.append(f"Motor '{name}': zero starting power (check pn_mech_mw, vn_kv, lrc_pu).")
+        # A stalled motor is an impedance: it draws less as the voltage dips.
+        # As a constant-power load it overstated the dip (4.87 % for 4.63 %
+        # on the transmission reference grid) and the loadings. A soft
+        # starter regulates its current instead.
+        if method_meta.get("method", method) == "soft_start":
+            voltage_dependence = dict(const_i_p_percent=100, const_i_q_percent=100)
+        else:
+            voltage_dependence = dict(const_z_p_percent=100, const_z_q_percent=100)
         load_idx = pp.create_load(
             net,
             bus=bus,
@@ -310,6 +336,7 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
             q_mvar=q_mvar,
             name=f"__motor_start_lr_{name}",
             in_service=True,
+            **voltage_dependence,
         )
         lr_load_indices.append(load_idx)
         motor_results.append({
@@ -345,6 +372,17 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
         }
     vm_during = _snapshot_bus_vm(net)
     branches = _branch_loadings(net)
+    # The current and power the motor draws at the dipped voltage; the
+    # nominal-voltage figures were reported.
+    for result, li in zip(motor_results, lr_load_indices):
+        p_act = float(net.res_load.at[li, "p_mw"])
+        q_act = float(net.res_load.at[li, "q_mvar"])
+        v_act = float(net.res_bus.at[int(net.load.at[li, "bus"]), "vm_pu"])
+        result["i_start_nominal_ka"] = result["i_start_ka"]
+        result["p_start_mw"] = _clean(p_act)
+        result["q_start_mvar"] = _clean(q_act)
+        if result.get("vn_kv") and v_act > 0:
+            result["i_start_ka"] = _clean(math.hypot(p_act, q_act) / (math.sqrt(3.0) * result["vn_kv"] * v_act))
 
     # Remove LR loads
     for li in lr_load_indices:
@@ -685,6 +723,8 @@ def _dynamic_start_rebuild(
                 i_base_sys = sb / (math.sqrt(3) * vb)
                 i_scale = i_base_sys / info.get("i_base_ka", i_base_sys)
                 i_mag = np.hypot(_series("Id", i), _series("Iq", i)) * i_scale
+                p_mw = _series("p", i) * sb
+                q_mvar = _series("q", i) * sb
                 slip = _series("slip", i)
                 te = _series("te", i) * sb / info.get("sn_mva", sb)
 
@@ -703,6 +743,8 @@ def _dynamic_start_rebuild(
                     "i_pu": [_clean(x) for x in i_mag.tolist()],
                     "slip": [_clean(x) for x in slip.tolist()],
                     "te": [_clean(x) for x in te.tolist()],
+                    "p_mw": [_clean(x) for x in p_mw.tolist()],
+                    "q_mvar": [_clean(x) for x in q_mvar.tolist()],
                 }
                 motor_results.append({
                     "id": info["id"],
@@ -894,12 +936,70 @@ def _build_system_with_motors(
     return ss, meta, motor_map
 
 
+def _dynamic_branch_loadings(net, payload: Dict[str, Any], thermal_limit: float) -> None:
+    """
+    Thermal check for a dynamic start: a load flow with each starting motor
+    replaced by the power it drew at the moment of the largest total demand.
+    Dynamic mode returned no branches at all, so its thermal check could
+    never fail - with the radial grid's TA at 118 % during the start.
+    """
+    ts = payload.get("timeseries") or {}
+    t = np.asarray(ts.get("t") or [], dtype=float)
+    series = ts.get("motors") or {}
+    if not len(t) or not series or not hasattr(net, "motor") or net.motor.empty:
+        return
+    t_start = _sf((payload.get("parameters") or {}).get("t_start"), 0.0)
+    demand = np.zeros(len(t))
+    for ser in series.values():
+        p = np.asarray(ser.get("p_mw") or [np.nan] * len(t), dtype=float)
+        q = np.asarray(ser.get("q_mvar") or [np.nan] * len(t), dtype=float)
+        demand += np.nan_to_num(np.hypot(p, q))
+    demand[t < t_start] = -1.0
+    k = int(np.argmax(demand))
+    by_id = {str(_row_id_name(net.motor.loc[i], i)[0]): i for i in net.motor.index}
+    added, switched = [], []
+    for mid, ser in series.items():
+        idx = by_id.get(str(mid))
+        if idx is None or not ser.get("p_mw"):
+            continue
+        switched.append((idx, bool(net.motor.at[idx, "in_service"])))
+        net.motor.at[idx, "in_service"] = False
+        added.append(pp.create_load(net, bus=int(net.motor.at[idx, "bus"]),
+                                    p_mw=float(ser["p_mw"][k] or 0.0),
+                                    q_mvar=float(ser["q_mvar"][k] or 0.0),
+                                    name=f"__motor_start_dyn_{mid}"))
+    try:
+        if not added or _run_pp(net):
+            payload.setdefault("warnings", []).append(
+                "The thermal check of the dynamic start could not be run (load flow failed).")
+            return
+        branches = _branch_loadings(net)
+    finally:
+        net.load.drop([li for li in added if li in net.load.index], inplace=True)
+        for idx, state in switched:
+            net.motor.at[idx, "in_service"] = state
+    labels = getattr(net, "user_friendly_names", None) or {}
+    n_fail = 0
+    for br in branches:
+        loading = br.get("loading_during_percent")
+        br["pass"] = loading is None or float(loading) <= thermal_limit
+        br["thermal_limit_percent"] = thermal_limit
+        n_fail += 0 if br["pass"] else 1
+        if br.get("name") in labels:
+            br["name"] = labels[br["name"]]
+    payload["branches"] = branches
+    payload["summary"]["n_fail_thermal"] = n_fail
+    payload["summary"]["thermal_check_t_s"] = _clean(float(t[k]))
+
+
 def motor_starting(net, params: Dict[str, Any], in_data: Dict[str, Any]) -> str:
     """Entry point. Returns JSON string."""
     try:
         mode = str(params.get("mode") or "steady").lower().strip()
         if mode in ("dynamic", "transient", "tds", "andes"):
             payload = _dynamic_start(params, in_data)
+            if not payload.get("error") and net is not None:
+                _dynamic_branch_loadings(net, payload, _sf(params.get("thermal_limit_percent"), 100.0))
         else:
             payload = _steady_state_start(net, params, in_data)
         return json.dumps(payload, allow_nan=False)

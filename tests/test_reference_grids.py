@@ -1061,12 +1061,16 @@ def _bus_label(spec, ident):
 def test_drawn_diagram_motor_starting(client, quiet, grid):
     """
     Direct-on-line start of the drawn motor: before, during (the motor as its
-    locked-rotor load) and the dip at every bus, as pandapower gives them for
-    the spec.
+    locked-rotor impedance) and the dip at every bus, as pandapower gives them
+    for the spec, and the loading of every branch - three-winding transformers
+    included.
 
     The study's settings row ("MotorStartingPandaPower Parameters") matched
     the backend's Motor branch and failed on its missing bus, so no motor
-    start ever ran.
+    start ever ran. The locked rotor was then a constant-power load, which
+    overstated the dip (4.87 % for 4.63 % on the transmission grid), and the
+    transformer feeding the motor there, a three-winding one, was not
+    checked.
     """
     request = _study_request(grid, {
         'typ': 'MotorStartingPandaPower Parameters', 'mode': 'steady', 'motor_ids': 'all',
@@ -1083,7 +1087,7 @@ def test_drawn_diagram_motor_starting(client, quiet, grid):
     i_rated = motor['pn_mech_mw'] / (eff_n / 100) / cos_n / (np.sqrt(3) * vn)
     i_start = motor['lrc_pu'] * i_rated
     (started,) = result['motors']
-    assert started['i_start_ka'] == pytest.approx(i_start, rel=1e-9)
+    assert started['i_start_nominal_ka'] == pytest.approx(i_start, rel=1e-9)
     # Reported by the labels the diagram shows, not by cell id.
     assert started['name'] == motor['name']
     assert started['bus_name'] == _bus_label(spec, motor['bus'])
@@ -1096,8 +1100,16 @@ def test_drawn_diagram_motor_starting(client, quiet, grid):
     before = run(net).res_bus['vm_pu'].copy()
     s_mva = np.sqrt(3) * vn * i_start
     pp.create_load(net, ids['bus'][motor['bus']], p_mw=s_mva * rx / np.sqrt(1 + rx * rx),
-                   q_mvar=s_mva / np.sqrt(1 + rx * rx))
+                   q_mvar=s_mva / np.sqrt(1 + rx * rx), const_z_p_percent=100, const_z_q_percent=100)
     during = run(net).res_bus['vm_pu']
+    # The current the stalled motor draws at its dipped voltage.
+    v_motor = during[ids['bus'][motor['bus']]]
+    assert started['i_start_ka'] == pytest.approx(i_start * v_motor, rel=1e-6)
+    loading = {b['name']: b['loading_during_percent'] for b in result['branches']}
+    for table in ('line', 'trafo', 'trafo3w'):
+        for idx in net[table].index:
+            name = net[table].at[idx, 'name']
+            assert loading[name] == pytest.approx(net['res_' + table].at[idx, 'loading_percent'], abs=0.05), name
 
     drawn = {b['name']: b for b in result['buses']}
     differ = []
@@ -1162,6 +1174,17 @@ def test_drawn_diagram_dynamic_motor_starting(client, quiet, grid):
             differ.append(f"{bus['name']} did not recover: {bus['vm_before']:.5f} -> "
                           f"{bus['vm_after']:.5f}")
     assert not differ, f'{grid}:\n  ' + '\n  '.join(differ)
+
+    # The thermal check: dynamic mode returned no branches, so it could never
+    # fail - with the radial grid's TA overloaded during the start. At the
+    # moment of largest demand the motor draws about its locked-rotor power,
+    # so the loadings come close to the steady-state study's.
+    steady_loading = {b['name']: b['loading_during_percent'] for b in steady['branches']}
+    assert {b['name'] for b in dynamic['branches']} == set(steady_loading)
+    for branch in dynamic['branches']:
+        assert branch['loading_during_percent'] == pytest.approx(
+            steady_loading[branch['name']], rel=0.1, abs=1.0), branch['name']
+    assert dynamic['summary']['n_fail_thermal'] == steady['summary']['n_fail_thermal']
 
 
 ANDES_PARAMS = {'frequency': '50', 'sn_mva': '100'}
