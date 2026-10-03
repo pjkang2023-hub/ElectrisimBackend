@@ -547,6 +547,12 @@ def build_system(
             bus=bus, Vn=bus_vn.get(bus, 110.0),
             p0=p_mw / sn_base, q0=p_mw * math.tan(math.acos(cos_phi)) / sn_base,
         )
+        # Like a static generator without a plant model, the user should know
+        # the motor's own dynamics are not in the study.
+        warnings.append(
+            f"Motor '{el.get('userFriendlyName') or el.get('name')}' has no ANDES dynamic model here: "
+            "modelled as a constant P/Q load."
+        )
 
     # --- Shunts / capacitors ---
     sh_i = 0
