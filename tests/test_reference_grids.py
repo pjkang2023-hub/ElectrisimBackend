@@ -44,6 +44,7 @@ new drawing still computes the spec's answers.
 """
 
 import json
+import math
 import os
 
 import numpy as np
@@ -1642,3 +1643,81 @@ def test_site_screening_charges_the_site_only_what_it_adds(client, quiet):
     assert set(drawn) == set(over) and over
     for name, pct in over.items():
         assert drawn[name] == pytest.approx(pct, abs=0.05)
+
+
+# --- arc flash -------------------------------------------------------------------
+
+def _arc_flash(client, quiet, mode):
+    request = _study_request('reference_transmission', {
+        'typ': 'ArcFlashPandaPower Parameters', 'electrode_config': 'VCB', 'equipment_mode': mode,
+        'working_distance_mm': '455', 'conductor_gap_mm': '25', 'enclosure_height_mm': '508',
+        'enclosure_width_mm': '508', 'enclosure_depth_mm': '508',
+        'clearing_time_s': '0.2', 'clearing_time_min_s': '0.2'})
+    result = _post_study(client, quiet, request)
+    return {row['name']: row for row in result['arc_flash']}
+
+
+def _lee(row, distance_mm, t_s=0.2):
+    """IEEE 1584-2002 eq. 8, E in J/cm²; boundary at 5.0 J/cm²."""
+    k = 2.142e6 * row['vn_kv'] * row['ikss_ka'] * t_s
+    return k / distance_mm ** 2 / 4.184, math.sqrt(k / 5.0)
+
+
+def _ieee1584(row, gap, distance, enclosure, t_s=0.2):
+    from arcflash.ieee_1584.calculation import Calculation
+    from arcflash.ieee_1584.cubicle import Cubicle
+    from arcflash.ieee_1584.units import kA, kV, mm, ms, cal_per_sq_cm
+    cubicle = Cubicle(V_oc=row['vn_kv'] * kV, EC='VCB', G=gap * mm, D=distance * mm,
+                      height=enclosure[0] * mm, width=enclosure[1] * mm, depth=enclosure[2] * mm)
+    energies = []
+    for variation in ('full', 'reduced'):
+        calc = Calculation(cubicle, row['ikss_ka'] * kA, variation)
+        calc.calculate_I_arc()
+        calc.calculate_E_AFB(t_s * 1000 * ms)
+        energies.append(float(calc.E.to(cal_per_sq_cm).magnitude))
+    return max(energies)
+
+
+def test_arc_flash_by_voltage_class(client, quiet):
+    """
+    Every bus was studied as an LV panel (25 mm gap at 455 mm), 10 kV
+    switchgear included, and Ralph Lee's J/cm² was reported as cal/cm² with
+    its boundary solved for 1.2 J/cm²: 548 cal/cm² and 9.7 m on the 20 kV
+    busbar instead of 33 cal/cm² and 4.8 m. Each bus now gets the typical
+    equipment of its voltage class (IEEE 1584-2018 Table 8).
+    """
+    rows = _arc_flash(client, quiet, 'by_voltage')
+    assert {r['method'] for n, r in rows.items() if r['vn_kv'] > 15} == {'RalphLee'}
+    for name, row in rows.items():
+        if row['vn_kv'] > 15:
+            energy, boundary = _lee(row, 910)
+            assert row['working_distance_mm'] == 910 and row['conductor_gap_mm'] is None, name
+        else:
+            gap, distance, enclosure, equipment = (
+                (32, 610, (508, 508, 508), 'LV switchgear') if row['vn_kv'] <= 0.6
+                else (152, 910, (1143, 762, 762), '15 kV switchgear'))
+            assert row['equipment_class'] == equipment, name
+            assert (row['conductor_gap_mm'], row['working_distance_mm']) == (gap, distance), name
+            energy, boundary = _ieee1584(row, gap, distance, enclosure), None
+            assert row['method'] == 'IEEE1584-2018', name
+        assert row['incident_energy_cal_cm2'] == pytest.approx(energy, rel=1e-6), name
+        if boundary is not None:
+            assert row['arc_flash_boundary_mm'] == pytest.approx(boundary, rel=1e-6), name
+    assert rows['20 kV busbar 1']['incident_energy_cal_cm2'] == pytest.approx(32.7, abs=0.1)
+    assert rows['20 kV busbar 1']['ppe_category'] == '4'
+    assert rows['10 kV station supply']['equipment_class'] == '15 kV switchgear'
+
+
+def test_arc_flash_uniform_equipment(client, quiet):
+    """The values entered apply to every bus when asked for; Lee in cal/cm² still."""
+    rows = _arc_flash(client, quiet, 'uniform')
+    for name, row in rows.items():
+        assert row['working_distance_mm'] == 455, name
+        if row['vn_kv'] > 15:
+            energy, boundary = _lee(row, 455)
+            assert row['incident_energy_cal_cm2'] == pytest.approx(energy, rel=1e-6), name
+            assert row['arc_flash_boundary_mm'] == pytest.approx(boundary, rel=1e-6), name
+        else:
+            assert row['incident_energy_cal_cm2'] == pytest.approx(
+                _ieee1584(row, 25, 455, (508, 508, 508)), rel=1e-6), name
+    assert rows['20 kV busbar 1']['incident_energy_cal_cm2'] == pytest.approx(130.9, abs=0.1)

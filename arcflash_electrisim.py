@@ -29,6 +29,21 @@ except ImportError:
 
 VALID_ELECTRODE_CONFIGS = ("VCB", "VCBB", "HCB", "VOA", "HOA")
 
+# Typical equipment by bus voltage: IEEE 1584-2018 Table 8 (bus gap,
+# enclosure H x W x D) and the customary working distances. One set of LV
+# panel values (25 mm gap at 455 mm) was applied to every bus, 10 kV
+# switchgear included.
+_EQUIPMENT_BY_VOLTAGE = (
+    # (up to kV, class, gap mm, working distance mm, enclosure H, W, D mm)
+    (0.6, "LV switchgear", 32.0, 610.0, (508.0, 508.0, 508.0)),
+    (5.0, "5 kV switchgear", 104.0, 910.0, (914.4, 914.4, 914.4)),
+    (15.0, "15 kV switchgear", 152.0, 910.0, (1143.0, 762.0, 762.0)),
+)
+# Above 15 kV only Ralph Lee applies, which needs a working distance alone.
+_ABOVE_15KV = ("Above 15 kV", None, 910.0, (None, None, None))
+
+_J_PER_CAL = 4.184
+
 
 def _ppe_category(ie_cal: float) -> str:
     """Map incident energy (cal/cm²) to NFPA 70E PPE category label."""
@@ -77,15 +92,27 @@ def _clean(v: Any) -> Any:
 
 def _ralph_lee(ibf_ka: float, voc_kv: float, working_distance_mm: float, clearing_time_s: float) -> Tuple[float, float]:
     """
-    Ralph Lee method for systems above 15 kV.
-    E (cal/cm²) = 2.142e6 * V(kV) * Ibf(kA) * t(s) / D(mm)^2
-    AFB solved for E = 1.2 cal/cm².
+    Ralph Lee method for systems above 15 kV (IEEE 1584-2002, eq. 8):
+    E (J/cm²) = 2.142e6 * V(kV) * Ibf(kA) * t(s) / D(mm)^2.
+
+    Returns (E in cal/cm², arc-flash boundary in mm), the boundary being
+    where E falls to 5.0 J/cm² (1.2 cal/cm²). E was reported in J/cm² as
+    if cal/cm² (4.18 times too high), and the boundary solved for 1.2 J/cm².
     """
     if working_distance_mm <= 0 or clearing_time_s <= 0 or ibf_ka <= 0 or voc_kv <= 0:
         return float("nan"), float("nan")
-    ie = 2.142e6 * voc_kv * ibf_ka * clearing_time_s / (working_distance_mm ** 2)
-    afb = math.sqrt(2.142e6 * voc_kv * ibf_ka * clearing_time_s / 1.2)
+    k = 2.142e6 * voc_kv * ibf_ka * clearing_time_s
+    ie = k / (working_distance_mm ** 2) / _J_PER_CAL
+    afb = math.sqrt(k / 5.0)
     return ie, afb
+
+
+def _equipment_for(voc_kv: float):
+    """(class, gap mm, working distance mm, (H, W, D) mm) typical for the bus voltage."""
+    for top_kv, *equipment in _EQUIPMENT_BY_VOLTAGE:
+        if voc_kv <= top_kv:
+            return tuple(equipment)
+    return _ABOVE_15KV
 
 
 def _ieee1584_bus(
@@ -168,6 +195,9 @@ def arcflash(net, in_data, in_data_full=None):
       enclosure_height_mm / enclosure_width_mm / enclosure_depth_mm (default 508)
       clearing_time_s (default 0.2)
       clearing_time_min_s (optional; defaults to clearing_time_s)
+      equipment_mode: by_voltage (default) - typical gap, enclosure and working
+        distance for each bus voltage (IEEE 1584-2018 Table 8) - or uniform,
+        the values above for every bus
     """
     if not _HAS_ARCFLASH:
         return json.dumps({
@@ -198,6 +228,9 @@ def arcflash(net, in_data, in_data_full=None):
         clearing_time_s = 0.2
     if clearing_time_min_s <= 0:
         clearing_time_min_s = clearing_time_s
+    equipment_mode = str(in_data.get("equipment_mode", "by_voltage") or "by_voltage").strip().lower()
+    if equipment_mode not in ("by_voltage", "uniform"):
+        equipment_mode = "by_voltage"
 
     # Ensure SC parameter present on sgens
     if hasattr(net, "sgen") and not net.sgen.empty:
@@ -247,6 +280,12 @@ def arcflash(net, in_data, in_data_full=None):
         name = _bus_display_name(net, bus_row, bus_idx)
         bus_id = bus_row["id"] if "id" in bus_row.index else str(bus_idx)
 
+        if equipment_mode == "by_voltage":
+            equipment, gap_b, distance_b, (height_b, width_b, depth_b) = _equipment_for(voc_kv)
+        else:
+            equipment, gap_b, distance_b = "As entered", conductor_gap_mm, working_distance_mm
+            height_b, width_b, depth_b = height_mm, width_mm, depth_mm
+
         entry: Dict[str, Any] = {
             "name": _clean(name),
             "id": _clean(bus_id),
@@ -254,14 +293,21 @@ def arcflash(net, in_data, in_data_full=None):
             "vn_kv": _clean(voc_kv),
             "ikss_ka": _clean(float(ikss)),
             "electrode_config": electrode,
-            "working_distance_mm": working_distance_mm,
-            "conductor_gap_mm": conductor_gap_mm,
+            "equipment_class": equipment,
+            "working_distance_mm": distance_b,
+            "conductor_gap_mm": gap_b,
+            "enclosure_height_mm": height_b,
+            "enclosure_width_mm": width_b,
+            "enclosure_depth_mm": depth_b,
             "clearing_time_s": clearing_time_s,
         }
 
         # Outside IEEE 1584 range: Ralph Lee (>15 kV) or skip/warn (<0.208 kV)
         if voc_kv > 15.0:
-            ie, afb = _ralph_lee(float(ikss), voc_kv, working_distance_mm, clearing_time_s)
+            # Lee has no gap or enclosure.
+            entry.update({k: None for k in ("conductor_gap_mm", "enclosure_height_mm",
+                                            "enclosure_width_mm", "enclosure_depth_mm")})
+            ie, afb = _ralph_lee(float(ikss), voc_kv, distance_b, clearing_time_s)
             entry.update({
                 "ia_ka": _clean(float(ikss)),  # Ralph Lee uses bolted current
                 "incident_energy_cal_cm2": _clean(ie),
@@ -309,11 +355,11 @@ def arcflash(net, in_data, in_data_full=None):
                 ibf_ka=ibf,
                 voc_kv=voc_kv,
                 electrode=electrode,
-                gap_mm=conductor_gap_mm,
-                working_distance_mm=working_distance_mm,
-                height_mm=height_mm,
-                width_mm=width_mm,
-                depth_mm=depth_mm,
+                gap_mm=gap_b,
+                working_distance_mm=distance_b,
+                height_mm=height_b,
+                width_mm=width_b,
+                depth_mm=depth_b,
                 clearing_time_s=clearing_time_s,
                 clearing_time_min_s=clearing_time_min_s,
             )
@@ -334,6 +380,7 @@ def arcflash(net, in_data, in_data_full=None):
     payload = {
         "arc_flash": results,
         "parameters": {
+            "equipment_mode": equipment_mode,
             "electrode_config": electrode,
             "working_distance_mm": working_distance_mm,
             "conductor_gap_mm": conductor_gap_mm,
