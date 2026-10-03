@@ -132,10 +132,12 @@ def _count_violations(
                     "text": f"{ld:.1f}% loaded",
                     "limit": f"{max_loading_percent:.0f}%",
                 })
-        if hasattr(net, "res_trafo") and not net.res_trafo.empty:
-            ot = net.res_trafo[net.res_trafo.loading_percent > max_loading_percent]
+        for table, results in (("trafo", "res_trafo"), ("trafo3w", "res_trafo3w")):
+            if not hasattr(net, results) or net[results].empty:
+                continue
+            ot = net[results][net[results].loading_percent > max_loading_percent]
             for ti, row in ot.iterrows():
-                raw, nm = _named(net, net.trafo, ti)
+                raw, nm = _named(net, net[table], ti)
                 ld = float(row.loading_percent)
                 violations.append({
                     "kind": "Transformer",
@@ -229,6 +231,8 @@ def _apply_outage(net_cont, case: Dict[str, Any]) -> None:
         net_cont.line.loc[case["element_idx"], "in_service"] = False
     elif case["type"] == "trafo":
         net_cont.trafo.loc[case["element_idx"], "in_service"] = False
+    elif case["type"] == "trafo3w":
+        net_cont.trafo3w.loc[case["element_idx"], "in_service"] = False
     elif case["type"] == "gen":
         net_cont.gen.loc[case["element_idx"], "in_service"] = False
 
@@ -248,6 +252,14 @@ def _build_n1_cases(net, element_type: str) -> List[Dict[str, Any]]:
                 nm = _contingency_friendly_name(net, net.trafo.loc[trafo_idx, "name"])
                 cases.append(
                     {"name": f"Trafo_{nm}", "type": "trafo", "element_idx": trafo_idx, "tier": "N-1"}
+                )
+        # Three-winding units were never taken out, though one may be a
+        # bus's only supply.
+        for trafo_idx in net.trafo3w.index:
+            if net.trafo3w.loc[trafo_idx, "in_service"]:
+                nm = _contingency_friendly_name(net, net.trafo3w.loc[trafo_idx, "name"])
+                cases.append(
+                    {"name": f"Trafo_{nm}", "type": "trafo3w", "element_idx": trafo_idx, "tier": "N-1"}
                 )
     if element_type in ("generator", "all"):
         for gen_idx in net.gen.index:
@@ -342,13 +354,37 @@ def _headroom_mw(
     return round(best, 2)
 
 
+def _violation_key(v: Dict[str, Any]) -> Tuple[str, str, bool]:
+    return (v.get("kind"), v.get("id"), v.get("text") == "de-energised")
+
+
+def _contingency_violation_keys(net_template, cases, limits) -> Dict[str, set]:
+    """Per contingency, the violations present on this network (the site at 0 MW)."""
+    keys = {}
+    for case in cases:
+        net_c = deepcopy(net_template)
+        for typ, eidx in case.get("outages") or [(case["type"], case["element_idx"])]:
+            _apply_outage(net_c, {"type": typ, "element_idx": eidx})
+        if _run_pf(net_c):
+            keys[case.get("name", "")] = {_violation_key(v) for v in _count_violations(net_c, **limits)[1]}
+    return keys
+
+
 def _run_contingency_batch(
     net_template,
     cases: List[Dict[str, Any]],
     limits: Dict[str, Any],
     on_step=None,
     site_load: Optional[Dict[str, Any]] = None,
+    without_site: Optional[Dict[str, set]] = None,
+    site_bus: Optional[str] = None,
 ) -> Tuple[int, str, int, List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """
+    Worst contingency for the site. With without_site (violation keys per
+    contingency at 0 MW), only what the site adds counts: an outage that cut
+    off some unrelated spur flagged every site and size as needing an
+    upgrade. Losing the site's own bus (site_bus) always counts.
+    """
     worst = 0
     worst_name = ""
     worst_details: List[Dict[str, Any]] = []
@@ -368,6 +404,14 @@ def _run_contingency_batch(
             failed += 1
             continue
         n_v, details = _count_violations(net_c, **limits)
+        if without_site is not None:
+            there = without_site.get(case.get("name", ""), set())
+            details = [
+                v for v in details
+                if _violation_key(v) not in there
+                or (v.get("text") == "de-energised" and v.get("id") == site_bus)
+            ]
+            n_v = len(details)
         if n_v > worst:
             worst = n_v
             worst_name = case.get("name", "")
@@ -443,6 +487,12 @@ def site_screening_analysis(net, params: Dict[str, Any]) -> str:
             if _run_pf(net0):
                 base_violations, base_details = _count_violations(net0, **limits)
                 base_snap = _dashboard_snapshot(net0, f"{site_name} — intact system, 0 MW", _site_marker(net0, load_idx))
+            # What the contingencies do without the site, so only what it adds is
+            # charged to it.
+            _progress(params, f"{site_name} — contingencies without the site")
+            n1_without_site = _contingency_violation_keys(net0, n1_cases, limits)
+            n11_without_site = _contingency_violation_keys(net0, n11_cases, limits) if n11_cases else {}
+            site_bus = _named(net, net.bus, int(net.load.loc[load_idx, "bus"]))[0]
 
             for mw in mw_sizes:
                 label = f"{site_name} · {mw:g} MW"
@@ -491,13 +541,13 @@ def site_screening_analysis(net, params: Dict[str, Any]) -> str:
                 w_n1, n1_name, n1_fail, n1_details, n1_snap = _run_contingency_batch(
                     net_case, n1_cases, limits,
                     on_step=lambda i, n, label=label: _progress(params, f"{label} — N-1 {i}/{n}"),
-                    site_load=site_mark,
+                    site_load=site_mark, without_site=n1_without_site, site_bus=site_bus,
                 )
                 w_n11, n11_name, n11_fail, n11_details, n11_snap = (
                     _run_contingency_batch(
                         net_case, n11_cases, limits,
                         on_step=lambda i, n, label=label: _progress(params, f"{label} — N-1-1 {i}/{n}"),
-                        site_load=site_mark,
+                        site_load=site_mark, without_site=n11_without_site, site_bus=site_bus,
                     )
                     if n11_cases else (0, "", 0, [], None)
                 )

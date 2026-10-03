@@ -1544,3 +1544,45 @@ def test_drawn_diagram_contingency_analysis_matches_spec(client, quiet, grid):
     assert sorted(outages) == sorted(expected)
     assert any(cut for case in result['contingency_results']
                for cut in case['violations'] if cut['type'] == 'supply'), 'no outage cut a bus off'
+
+
+def test_site_screening_charges_the_site_only_what_it_adds(client, quiet):
+    """
+    The transmission grid's Industrial park as a data-centre site at 2, 5 and
+    10 MW. Losing the wind farm cable cuts off the wind farm's bus whatever
+    the site - that flagged every candidate as needing an upgrade. Only what
+    the site adds counts now (and its own loss of supply). The three-winding
+    main transformer is an N-1 outage too: at 10 MW losing it overloads two
+    ring cables, as pandapower gives.
+    """
+    import math
+
+    with open(os.path.join(REFERENCE_DIR, 'reference_transmission.diagram_site_screening_payload.json'),
+              encoding='utf-8') as handle:
+        request = json.load(handle)
+    with quiet():
+        response = client.post('/', json=request)
+    lines = [json.loads(line) for line in response.get_data(as_text=True).splitlines() if line.strip()]
+    result = next(line for line in lines if line.get('type') == 'result')['data']
+    spec = load_spec('reference_transmission')
+    n_elements = sum(len(spec[k]) for k in ('lines', 'transformers', 'three_winding_transformers', 'generators'))
+    assert result['summary']['n1_cases'] == n_elements
+
+    rows = {r['requested_mw']: r for r in result['screening_results']}
+    for mw in (2.0, 5.0):
+        assert rows[mw]['worst_n1_violations'] == 0, rows[mw]['n1_violation_details']
+    big = rows[10.0]
+    assert big['n1_worst_case'] == 'Trafo_Main transformer 110/20/10'
+    drawn = {v['name']: float(v['text'].split('%')[0]) for v in big['n1_violation_details']}
+
+    net, _ = sld.build_network(spec)
+    site = net.load.index[net.load.name == 'Industrial park'][0]
+    net.load.at[site, 'p_mw'] = 10.0
+    net.load.at[site, 'q_mvar'] = 10.0 * math.tan(math.acos(0.95))
+    net.trafo3w['in_service'] = False
+    pp.runpp(net, algorithm='nr', calculate_voltage_angles=True)
+    over = {net.line.at[i, 'name']: net.res_line.at[i, 'loading_percent']
+            for i in net.line.index if net.res_line.at[i, 'loading_percent'] > 100}
+    assert set(drawn) == set(over) and over
+    for name, pct in over.items():
+        assert drawn[name] == pytest.approx(pct, abs=0.05)
