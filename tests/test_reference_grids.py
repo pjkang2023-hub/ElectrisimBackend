@@ -1358,3 +1358,35 @@ def test_grid_code_pq_holds_other_generators_to_their_limits(client, quiet, q_mo
     units_off = next(m for m in progress if m.startswith('Units off'))
     q_off = float(units_off.split('Q=')[1].split()[0])
     assert abs(q_off) < 1.0, units_off
+
+
+def test_grid_code_pq_holds_the_pcc_at_each_voltage_level(client, quiet):
+    """
+    Each voltage level is set at the external grid. With the PCC at the wind
+    farm's own bus, behind the 20 kV substation and the wind farm cable, it
+    sat up to 1 % off the level it was reported under; the grid setpoint is
+    now corrected until the PCC is at the level.
+    """
+    import re
+    from grid_code_pq_electrisim import _PQ_PCC_V_TOL
+
+    with open(os.path.join(REFERENCE_DIR, 'reference_radial.diagram_grid_code_pq_payload.json'),
+              encoding='utf-8') as handle:
+        request = json.load(handle)
+    cell = {v.get('userFriendlyName'): v['name'] for v in request.values()
+            if isinstance(v, dict) and 'name' in v}
+    request['0']['pcc_bus_name'] = cell['Wind connection']
+    request['0']['generator_names'] = [cell['Wind farm C']]
+    with quiet():
+        response = client.post('/', json=request)
+    lines = [json.loads(line) for line in response.get_data(as_text=True).splitlines() if line.strip()]
+    level, off = None, []
+    for message in (line['message'] for line in lines if line.get('type') == 'progress'):
+        found = re.search(r'Voltage ([\d.]+) pu \(applied', message)
+        if found:
+            level = float(found.group(1))
+        at_pcc = re.search(r'U_pcc=([\d.]+) pu', message)
+        if at_pcc and abs(float(at_pcc.group(1)) - level) > _PQ_PCC_V_TOL + 1e-4:  # 4-decimal log
+            off.append(f'{level} pu level: PCC at {at_pcc.group(1)} pu')
+    assert level is not None
+    assert not off, off[:5]

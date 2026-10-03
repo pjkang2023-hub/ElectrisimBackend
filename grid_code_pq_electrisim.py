@@ -972,7 +972,52 @@ def _pq_run_pf(net_pf, verbose_iwamoto=False, rc2=False, rc3=False, rcs=False, f
     return False
 
 
+#: How closely the PCC is held at each voltage level, and how many load flows
+#: that may take per trial.
+_PQ_PCC_V_TOL = 5e-4
+_PQ_PCC_V_ITER = 6
+
+
+def _pq_at_pcc_voltage(ctx, run, net_of, direction=None):
+    """
+    Run a trial with the PCC at the voltage level (ctx['v_applied']).
+
+    The level is set where it can be set - the external grid's voltage - so a
+    PCC elsewhere (a plant behind its own cable or transformer) sat off the
+    level by the drop between the two, while results were labelled with the
+    level. Correct the grid setpoint by the PCC's error until it is within
+    _PQ_PCC_V_TOL. Each correction re-runs the trial from its base network;
+    the setpoint that worked at this level, for this direction of plant Q
+    (which moves the PCC voltage the most), starts the next trial.
+    """
+    target = float(ctx['v_applied'])
+    if ctx['pcc_bus_idx'] == ctx['ext_grid_bus_idx']:
+        return run(target)
+    known = ctx.setdefault('v_grid_by_level', {})
+    key = (target, direction)
+    v_grid = known.get(key, known.get((target, None), target))
+    result = None
+    for _ in range(_PQ_PCC_V_ITER):
+        result = run(v_grid)
+        net = net_of(result) if result is not None else None
+        if net is None:
+            return result
+        error = target - float(net.res_bus.at[ctx['pcc_bus_idx'], 'vm_pu'])
+        if abs(error) <= _PQ_PCC_V_TOL:
+            known[key] = v_grid
+            return result
+        v_grid += error
+    return result
+
+
 def _pq_settle_and_freeze_taps(base_net, ctx, p_val, tap_bound):
+    """_pq_settle_and_freeze_taps_at with the PCC held at the voltage level."""
+    return _pq_at_pcc_voltage(
+        ctx, lambda v_grid: _pq_settle_and_freeze_taps_at(base_net, ctx, p_val, tap_bound, v_grid),
+        lambda net: net)
+
+
+def _pq_settle_and_freeze_taps_at(base_net, ctx, p_val, tap_bound, v_grid):
     """Warm-start discrete tap_pos at Q = 0 for the lower/upper voltage target.
 
     Controllers are cleared on the returned net so the next trial can re-attach
@@ -984,7 +1029,7 @@ def _pq_settle_and_freeze_taps(base_net, ctx, p_val, tap_bound):
     _pq_apply_tap_family_filter(net_try, ctx)
     if tap_bound:
         _pq_pin_taps(net_try, tap_bound)
-    net_try.ext_grid.at[ctx['ext_grid_idx'], 'vm_pu'] = float(ctx['v_applied'])
+    net_try.ext_grid.at[ctx['ext_grid_idx'], 'vm_pu'] = float(v_grid)
     _pq_dispatch_p(net_try, ctx['gen_info'], p_val, ctx['exclude_names'])
     for g in ctx['gen_info']:
         try:
@@ -1027,6 +1072,16 @@ def _pq_apply_local_q(net, gen_info, p_val, q_mode, direction, frac, exclude_nam
 
 def _pq_eval_trial(base_net, ctx, p_val, direction, frac_or_q, tap_bound=None, use_park=False,
                   q_cap=None):
+    """_pq_eval_trial_at with the PCC held at the voltage level."""
+    return _pq_at_pcc_voltage(
+        ctx, lambda v_grid: _pq_eval_trial_at(
+            base_net, ctx, p_val, direction, frac_or_q, v_grid, tap_bound=tap_bound,
+            use_park=use_park, q_cap=q_cap),
+        lambda r: r.get('net') if r.get('converged') else None, direction)
+
+
+def _pq_eval_trial_at(base_net, ctx, p_val, direction, frac_or_q, v_grid, tap_bound=None,
+                      use_park=False, q_cap=None):
     """
     One load-flow trial. frac_or_q is capability fraction (local) or plant Q setpoint (park).
     Returns dict: converged, overloaded, volt_viol, q_pcc, p_pcc, net.
@@ -1036,7 +1091,7 @@ def _pq_eval_trial(base_net, ctx, p_val, direction, frac_or_q, tap_bound=None, u
     _pq_apply_tap_family_filter(net_try, ctx)
     if tap_bound:
         _pq_pin_taps(net_try, tap_bound)
-    net_try.ext_grid.at[ctx['ext_grid_idx'], 'vm_pu'] = float(ctx['v_applied'])
+    net_try.ext_grid.at[ctx['ext_grid_idx'], 'vm_pu'] = float(v_grid)
     _pq_dispatch_p(net_try, ctx['gen_info'], p_val, ctx['exclude_names'])
 
     force_ctrl = False
@@ -1759,6 +1814,7 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
             'pn_mw': pn,
             'iLDF': iLDF,
             'v_applied': 1.0,
+            'ext_grid_bus_idx': int(net.ext_grid.at[ext_grid_idx, 'bus']),
             'progress_cb': progress_cb,
             'cancel_event': pq_params.get('_cancel_event'),
             'tap_health': {'points': 0, 'out_points': 0, 'by_trafo': {}},
