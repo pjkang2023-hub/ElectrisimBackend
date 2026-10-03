@@ -12,7 +12,8 @@
     {"id": "F3", "vn_kv": 20, "name": "Ring node"},
     {"id": "TERT", "vn_kv": 10, "name": "10 kV station supply"},
     {"id": "LV1", "vn_kv": 0.4},
-    {"id": "LV2", "vn_kv": 0.4}
+    {"id": "LV2", "vn_kv": 0.4},
+    {"id": "WFC", "vn_kv": 20, "name": "Wind farm connection"}
   ],
   "external_grids": [
     {"id": "Grid", "bus": "HV", "vm_pu": 1.02, "s_sc_max_mva": 5000, "rx_max": 0.1,
@@ -42,7 +43,8 @@
      "name": "Cable with given impedance"},
     {"id": "L3", "from_bus": "F1", "to_bus": "F3", "length_km": 1.8,
      "std_type": "NA2XS2Y 1x185 RM/25 12/20 kV"},
-    {"id": "L4", "from_bus": "F2", "to_bus": "F3", "length_km": 2.2}
+    {"id": "L4", "from_bus": "F2", "to_bus": "F3", "length_km": 2.2},
+    {"id": "L_WF", "from_bus": "F3", "to_bus": "WFC", "length_km": 1.5, "name": "Wind farm cable"}
   ],
   "loads": [
     {"id": "LD_MV1", "bus": "MV1", "p_mw": 6.0, "q_mvar": 2.0, "name": "Town"},
@@ -57,7 +59,7 @@
   ],
   "static_generators": [
     {"id": "PV", "bus": "LV2", "p_mw": 0.3, "name": "Rooftop PV", "cost_per_mwh": 0},
-    {"id": "WF", "bus": "F3", "p_mw": 2.0, "q_mvar": -0.2, "kind": "wind", "name": "Wind farm",
+    {"id": "WF", "bus": "WFC", "p_mw": 2.0, "q_mvar": -0.2, "kind": "wind", "name": "Wind farm",
      "sn_mva": 2.5, "k": 1.2, "cost_per_mwh": 0}
   ],
   "shunts": [

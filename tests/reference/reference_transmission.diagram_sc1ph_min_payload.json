@@ -18,10 +18,10 @@
   "user_email": "unknown@user.com"
  },
  "1": {
-  "name": "mxCell_173",
-  "id": "FqD2qDj4ZxWUYv90XG4B-74",
+  "name": "mxCell_519",
+  "id": "RR02Mq7Vguv6dDNSlC_V-78",
   "userFriendlyName": "Utility 110 kV",
-  "bus": "mxCell_148",
+  "bus": "mxCell_492",
   "typ": "External Grid0",
   "vm_pu": "1.02",
   "va_degree": "0",
@@ -47,10 +47,10 @@
   "opf_cost_currency": "EUR"
  },
  "2": {
-  "name": "mxCell_175",
-  "id": "FqD2qDj4ZxWUYv90XG4B-78",
+  "name": "mxCell_521",
+  "id": "RR02Mq7Vguv6dDNSlC_V-82",
   "userFriendlyName": "CHP plant",
-  "bus": "mxCell_151",
+  "bus": "mxCell_495",
   "typ": "Generator",
   "p_mw": "4",
   "vm_pu": "1.025",
@@ -107,10 +107,10 @@
   "dyn_pss_A2": ""
  },
  "3": {
-  "name": "mxCell_177",
-  "id": "FqD2qDj4ZxWUYv90XG4B-82",
+  "name": "mxCell_523",
+  "id": "RR02Mq7Vguv6dDNSlC_V-86",
   "userFriendlyName": "Rooftop PV",
-  "bus": "mxCell_157",
+  "bus": "mxCell_501",
   "typ": "Static Generator",
   "p_mw": "0.3",
   "q_mvar": "0",
@@ -152,10 +152,10 @@
   "dyn_dg_Tg": ""
  },
  "4": {
-  "name": "mxCell_179",
-  "id": "FqD2qDj4ZxWUYv90XG4B-86",
+  "name": "mxCell_525",
+  "id": "RR02Mq7Vguv6dDNSlC_V-90",
   "userFriendlyName": "Wind farm",
-  "bus": "mxCell_154",
+  "bus": "mxCell_502",
   "typ": "Static Generator",
   "p_mw": "2",
   "q_mvar": "-0.2",
@@ -198,8 +198,8 @@
  },
  "5": {
   "typ": "Bus0",
-  "name": "mxCell_148",
-  "id": "FqD2qDj4ZxWUYv90XG4B-2",
+  "name": "mxCell_492",
+  "id": "RR02Mq7Vguv6dDNSlC_V-2",
   "vn_kv": "110",
   "userFriendlyName": "110 kV busbar A",
   "min_vm_pu": "0.9",
@@ -207,8 +207,8 @@
  },
  "6": {
   "typ": "Bus1",
-  "name": "mxCell_149",
-  "id": "FqD2qDj4ZxWUYv90XG4B-4",
+  "name": "mxCell_493",
+  "id": "RR02Mq7Vguv6dDNSlC_V-4",
   "vn_kv": "110",
   "userFriendlyName": "110 kV busbar B",
   "min_vm_pu": "0.9",
@@ -216,8 +216,8 @@
  },
  "7": {
   "typ": "Bus2",
-  "name": "mxCell_150",
-  "id": "FqD2qDj4ZxWUYv90XG4B-6",
+  "name": "mxCell_494",
+  "id": "RR02Mq7Vguv6dDNSlC_V-6",
   "vn_kv": "20",
   "userFriendlyName": "20 kV busbar 1",
   "min_vm_pu": "0.9",
@@ -225,8 +225,8 @@
  },
  "8": {
   "typ": "Bus3",
-  "name": "mxCell_151",
-  "id": "FqD2qDj4ZxWUYv90XG4B-8",
+  "name": "mxCell_495",
+  "id": "RR02Mq7Vguv6dDNSlC_V-8",
   "vn_kv": "20",
   "userFriendlyName": "20 kV busbar 2",
   "min_vm_pu": "0.9",
@@ -234,8 +234,8 @@
  },
  "9": {
   "typ": "Bus4",
-  "name": "mxCell_152",
-  "id": "FqD2qDj4ZxWUYv90XG4B-10",
+  "name": "mxCell_496",
+  "id": "RR02Mq7Vguv6dDNSlC_V-10",
   "vn_kv": "20",
   "userFriendlyName": "F1",
   "min_vm_pu": "0.9",
@@ -243,8 +243,8 @@
  },
  "10": {
   "typ": "Bus5",
-  "name": "mxCell_153",
-  "id": "FqD2qDj4ZxWUYv90XG4B-12",
+  "name": "mxCell_497",
+  "id": "RR02Mq7Vguv6dDNSlC_V-12",
   "vn_kv": "20",
   "userFriendlyName": "F2",
   "min_vm_pu": "0.9",
@@ -252,8 +252,8 @@
  },
  "11": {
   "typ": "Bus6",
-  "name": "mxCell_154",
-  "id": "FqD2qDj4ZxWUYv90XG4B-14",
+  "name": "mxCell_498",
+  "id": "RR02Mq7Vguv6dDNSlC_V-14",
   "vn_kv": "20",
   "userFriendlyName": "Ring node",
   "min_vm_pu": "0.9",
@@ -261,8 +261,8 @@
  },
  "12": {
   "typ": "Bus7",
-  "name": "mxCell_155",
-  "id": "FqD2qDj4ZxWUYv90XG4B-16",
+  "name": "mxCell_499",
+  "id": "RR02Mq7Vguv6dDNSlC_V-16",
   "vn_kv": "10",
   "userFriendlyName": "10 kV station supply",
   "min_vm_pu": "0.9",
@@ -270,8 +270,8 @@
  },
  "13": {
   "typ": "Bus8",
-  "name": "mxCell_156",
-  "id": "FqD2qDj4ZxWUYv90XG4B-18",
+  "name": "mxCell_500",
+  "id": "RR02Mq7Vguv6dDNSlC_V-18",
   "vn_kv": "0.4",
   "userFriendlyName": "LV1",
   "min_vm_pu": "0.9",
@@ -279,20 +279,29 @@
  },
  "14": {
   "typ": "Bus9",
-  "name": "mxCell_157",
-  "id": "FqD2qDj4ZxWUYv90XG4B-20",
+  "name": "mxCell_501",
+  "id": "RR02Mq7Vguv6dDNSlC_V-20",
   "vn_kv": "0.4",
   "userFriendlyName": "LV2",
   "min_vm_pu": "0.9",
   "max_vm_pu": "1.1"
  },
  "15": {
+  "typ": "Bus10",
+  "name": "mxCell_502",
+  "id": "RR02Mq7Vguv6dDNSlC_V-22",
+  "vn_kv": "20",
+  "userFriendlyName": "Wind farm connection",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "16": {
   "typ": "Transformer0",
-  "name": "mxCell_220",
-  "id": "FqD2qDj4ZxWUYv90XG4B-22",
+  "name": "mxCell_567",
+  "id": "RR02Mq7Vguv6dDNSlC_V-24",
   "userFriendlyName": "Transformer B 110/20",
-  "hv_bus": "mxCell_149",
-  "lv_bus": "mxCell_151",
+  "hv_bus": "mxCell_493",
+  "lv_bus": "mxCell_495",
   "sn_mva": "25",
   "vn_hv_kv": "110",
   "vn_lv_kv": "20",
@@ -322,13 +331,13 @@
   "cost_per_unit_by_currency": "{}",
   "max_loading_percent": "0"
  },
- "16": {
+ "17": {
   "typ": "Transformer1",
-  "name": "mxCell_222",
-  "id": "FqD2qDj4ZxWUYv90XG4B-26",
+  "name": "mxCell_569",
+  "id": "RR02Mq7Vguv6dDNSlC_V-28",
   "userFriendlyName": "T_LV1",
-  "hv_bus": "mxCell_152",
-  "lv_bus": "mxCell_156",
+  "hv_bus": "mxCell_496",
+  "lv_bus": "mxCell_500",
   "sn_mva": "0.63",
   "vn_hv_kv": "20",
   "vn_lv_kv": "0.4",
@@ -358,13 +367,13 @@
   "cost_per_unit_by_currency": "{}",
   "max_loading_percent": "0"
  },
- "17": {
+ "18": {
   "typ": "Transformer2",
-  "name": "mxCell_225",
-  "id": "FqD2qDj4ZxWUYv90XG4B-30",
+  "name": "mxCell_572",
+  "id": "RR02Mq7Vguv6dDNSlC_V-32",
   "userFriendlyName": "Substation LV2",
-  "hv_bus": "mxCell_153",
-  "lv_bus": "mxCell_157",
+  "hv_bus": "mxCell_497",
+  "lv_bus": "mxCell_501",
   "sn_mva": "1",
   "vn_hv_kv": "20",
   "vn_lv_kv": "0.4",
@@ -394,14 +403,14 @@
   "cost_per_unit_by_currency": "{}",
   "max_loading_percent": "0"
  },
- "18": {
+ "19": {
   "typ": "Three Winding Transformer0",
-  "name": "mxCell_257",
-  "id": "FqD2qDj4ZxWUYv90XG4B-90",
+  "name": "mxCell_605",
+  "id": "RR02Mq7Vguv6dDNSlC_V-94",
   "userFriendlyName": "Main transformer 110/20/10",
-  "hv_bus": "mxCell_148",
-  "mv_bus": "mxCell_150",
-  "lv_bus": "mxCell_155",
+  "hv_bus": "mxCell_492",
+  "mv_bus": "mxCell_494",
+  "lv_bus": "mxCell_499",
   "sn_hv_mva": "40",
   "sn_mv_mva": "40",
   "sn_lv_mva": "15",
@@ -435,12 +444,12 @@
   "tap_changer_type": "Ratio",
   "in_service": "true"
  },
- "19": {
+ "20": {
   "typ": "Shunt Reactor0",
-  "name": "mxCell_260",
-  "id": "FqD2qDj4ZxWUYv90XG4B-95",
+  "name": "mxCell_608",
+  "id": "RR02Mq7Vguv6dDNSlC_V-99",
   "userFriendlyName": "Station reactor",
-  "bus": "mxCell_155",
+  "bus": "mxCell_499",
   "p_mw": "0",
   "q_mvar": "2",
   "vn_kv": "10",
@@ -456,12 +465,12 @@
   "line_flow_p_use_abs": "true",
   "line_flow_p_reference": "p_from_mw"
  },
- "20": {
+ "21": {
   "typ": "Capacitor0",
-  "name": "mxCell_262",
-  "id": "FqD2qDj4ZxWUYv90XG4B-98",
+  "name": "mxCell_610",
+  "id": "RR02Mq7Vguv6dDNSlC_V-102",
   "userFriendlyName": "Capacitor bank",
-  "bus": "mxCell_152",
+  "bus": "mxCell_496",
   "q_mvar": "1.5",
   "loss_factor": "0",
   "vn_kv": "20",
@@ -470,12 +479,12 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "21": {
+ "22": {
   "typ": "Load0",
-  "name": "mxCell_184",
-  "id": "FqD2qDj4ZxWUYv90XG4B-101",
+  "name": "mxCell_530",
+  "id": "RR02Mq7Vguv6dDNSlC_V-105",
   "userFriendlyName": "Town",
-  "bus": "mxCell_150",
+  "bus": "mxCell_494",
   "p_mw": "6",
   "q_mvar": "2",
   "const_z_percent": "0",
@@ -504,12 +513,12 @@
   "dc_ups_hold_s": "0",
   "dc_ride_through_csv": "0,0.9\n10,0.9\n20,0.9"
  },
- "22": {
+ "23": {
   "typ": "Load1",
-  "name": "mxCell_186",
-  "id": "FqD2qDj4ZxWUYv90XG4B-106",
+  "name": "mxCell_532",
+  "id": "RR02Mq7Vguv6dDNSlC_V-110",
   "userFriendlyName": "Industrial park",
-  "bus": "mxCell_154",
+  "bus": "mxCell_498",
   "p_mw": "3",
   "q_mvar": "1",
   "const_z_percent": "0",
@@ -538,12 +547,12 @@
   "dc_ups_hold_s": "0",
   "dc_ride_through_csv": "0,0.9\n10,0.9\n20,0.9"
  },
- "23": {
+ "24": {
   "typ": "Load2",
-  "name": "mxCell_188",
-  "id": "FqD2qDj4ZxWUYv90XG4B-111",
+  "name": "mxCell_534",
+  "id": "RR02Mq7Vguv6dDNSlC_V-115",
   "userFriendlyName": "LD_LV1",
-  "bus": "mxCell_156",
+  "bus": "mxCell_500",
   "p_mw": "0.4",
   "q_mvar": "0.132",
   "const_z_percent": "0",
@@ -572,12 +581,12 @@
   "dc_ups_hold_s": "0",
   "dc_ride_through_csv": "0,0.9\n10,0.9\n20,0.9"
  },
- "24": {
+ "25": {
   "typ": "Load3",
-  "name": "mxCell_190",
-  "id": "FqD2qDj4ZxWUYv90XG4B-116",
+  "name": "mxCell_536",
+  "id": "RR02Mq7Vguv6dDNSlC_V-120",
   "userFriendlyName": "LD_LV2",
-  "bus": "mxCell_157",
+  "bus": "mxCell_501",
   "p_mw": "0.6",
   "q_mvar": "0.15",
   "const_z_percent": "0",
@@ -606,12 +615,12 @@
   "dc_ups_hold_s": "0",
   "dc_ride_through_csv": "0,0.9\n10,0.9\n20,0.9"
  },
- "25": {
+ "26": {
   "typ": "Load4",
-  "name": "mxCell_192",
-  "id": "FqD2qDj4ZxWUYv90XG4B-121",
+  "name": "mxCell_538",
+  "id": "RR02Mq7Vguv6dDNSlC_V-125",
   "userFriendlyName": "Station auxiliaries",
-  "bus": "mxCell_155",
+  "bus": "mxCell_499",
   "p_mw": "0.5",
   "q_mvar": "0.2",
   "const_z_percent": "0",
@@ -640,12 +649,12 @@
   "dc_ups_hold_s": "0",
   "dc_ride_through_csv": "0,0.9\n10,0.9\n20,0.9"
  },
- "26": {
+ "27": {
   "typ": "Motor0",
-  "name": "mxCell_194",
-  "id": "FqD2qDj4ZxWUYv90XG4B-126",
+  "name": "mxCell_540",
+  "id": "RR02Mq7Vguv6dDNSlC_V-130",
   "userFriendlyName": "Cooling water pump",
-  "bus": "mxCell_155",
+  "bus": "mxCell_499",
   "pn_mech_mw": "0.8",
   "cos_phi": "0.88",
   "efficiency_percent": "96",
@@ -663,12 +672,12 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "27": {
+ "28": {
   "typ": "Storage0",
-  "name": "mxCell_196",
-  "id": "FqD2qDj4ZxWUYv90XG4B-130",
+  "name": "mxCell_542",
+  "id": "RR02Mq7Vguv6dDNSlC_V-134",
   "userFriendlyName": "Battery",
-  "bus": "mxCell_156",
+  "bus": "mxCell_500",
   "p_mw": "0.1",
   "q_mvar": "0",
   "max_e_mwh": "0.5",
@@ -727,13 +736,13 @@
   "rx": "0.1",
   "current_source": "false"
  },
- "28": {
+ "29": {
   "typ": "Line0",
-  "name": "mxCell_228",
-  "id": "FqD2qDj4ZxWUYv90XG4B-34",
+  "name": "mxCell_575",
+  "id": "RR02Mq7Vguv6dDNSlC_V-36",
   "userFriendlyName": "110 kV overhead line",
-  "busFrom": "mxCell_148",
-  "busTo": "mxCell_149",
+  "busFrom": "mxCell_492",
+  "busTo": "mxCell_493",
   "length_km": "12",
   "parallel": "1",
   "df": "1",
@@ -751,13 +760,13 @@
   "cost_per_unit_by_currency": "0",
   "max_loading_percent": "0"
  },
- "29": {
+ "30": {
   "typ": "Line1",
-  "name": "mxCell_230",
-  "id": "FqD2qDj4ZxWUYv90XG4B-38",
+  "name": "mxCell_577",
+  "id": "RR02Mq7Vguv6dDNSlC_V-40",
   "userFriendlyName": "L1",
-  "busFrom": "mxCell_150",
-  "busTo": "mxCell_152",
+  "busFrom": "mxCell_494",
+  "busTo": "mxCell_496",
   "length_km": "3",
   "parallel": "1",
   "df": "1",
@@ -775,13 +784,13 @@
   "cost_per_unit_by_currency": "0",
   "max_loading_percent": "0"
  },
- "30": {
+ "31": {
   "typ": "Line2",
-  "name": "mxCell_163",
-  "id": "FqD2qDj4ZxWUYv90XG4B-42",
+  "name": "mxCell_508",
+  "id": "RR02Mq7Vguv6dDNSlC_V-44",
   "userFriendlyName": "Cable with given impedance",
-  "busFrom": "mxCell_151",
-  "busTo": "mxCell_153",
+  "busFrom": "mxCell_495",
+  "busTo": "mxCell_497",
   "length_km": "2.5",
   "parallel": "1",
   "df": "1",
@@ -799,13 +808,13 @@
   "cost_per_unit_by_currency": "0",
   "max_loading_percent": "0"
  },
- "31": {
+ "32": {
   "typ": "Line3",
-  "name": "mxCell_164",
-  "id": "FqD2qDj4ZxWUYv90XG4B-44",
+  "name": "mxCell_509",
+  "id": "RR02Mq7Vguv6dDNSlC_V-46",
   "userFriendlyName": "L3",
-  "busFrom": "mxCell_152",
-  "busTo": "mxCell_154",
+  "busFrom": "mxCell_496",
+  "busTo": "mxCell_498",
   "length_km": "1.8",
   "parallel": "1",
   "df": "1",
@@ -823,13 +832,13 @@
   "cost_per_unit_by_currency": "0",
   "max_loading_percent": "0"
  },
- "32": {
+ "33": {
   "typ": "Line4",
-  "name": "mxCell_234",
-  "id": "FqD2qDj4ZxWUYv90XG4B-46",
+  "name": "mxCell_581",
+  "id": "RR02Mq7Vguv6dDNSlC_V-48",
   "userFriendlyName": "L4",
-  "busFrom": "mxCell_154",
-  "busTo": "mxCell_153",
+  "busFrom": "mxCell_498",
+  "busTo": "mxCell_497",
   "length_km": "2.2",
   "parallel": "1",
   "df": "1",
@@ -847,9 +856,33 @@
   "cost_per_unit_by_currency": "0",
   "max_loading_percent": "0"
  },
- "33": {
+ "34": {
+  "typ": "Line5",
+  "name": "mxCell_511",
+  "id": "RR02Mq7Vguv6dDNSlC_V-52",
+  "userFriendlyName": "Wind farm cable",
+  "busFrom": "mxCell_498",
+  "busTo": "mxCell_502",
+  "length_km": "1.5",
+  "parallel": "1",
+  "df": "1",
+  "in_service": "true",
+  "r_ohm_per_km": "0.122",
+  "x_ohm_per_km": "0.112",
+  "c_nf_per_km": "304",
+  "g_us_per_km": "0",
+  "max_i_ka": "0.421",
+  "type": "cs",
+  "r0_ohm_per_km": "0.488",
+  "x0_ohm_per_km": "0.336",
+  "c0_nf_per_km": "304",
+  "endtemp_degree": "80",
+  "cost_per_unit_by_currency": "0",
+  "max_loading_percent": "0"
+ },
+ "35": {
   "typ": "Switch0",
-  "id": "FqD2qDj4ZxWUYv90XG4B-50",
+  "id": "RR02Mq7Vguv6dDNSlC_V-54",
   "userFriendlyName": "CB_LHV",
   "name": "CB_LHV",
   "et": "l",
@@ -864,12 +897,12 @@
   "rated_voltage_kv": "0",
   "contact_parting_cycles": "3",
   "generator_cb": "false",
-  "bus": "mxCell_148",
-  "element": "mxCell_228"
+  "bus": "mxCell_492",
+  "element": "mxCell_575"
  },
- "34": {
+ "36": {
   "typ": "Switch1",
-  "id": "FqD2qDj4ZxWUYv90XG4B-54",
+  "id": "RR02Mq7Vguv6dDNSlC_V-58",
   "userFriendlyName": "CB_T3W",
   "name": "CB_T3W",
   "et": "t3",
@@ -884,12 +917,12 @@
   "rated_voltage_kv": "0",
   "contact_parting_cycles": "3",
   "generator_cb": "false",
-  "bus": "mxCell_148",
-  "element": "mxCell_257"
+  "bus": "mxCell_492",
+  "element": "mxCell_605"
  },
- "35": {
+ "37": {
   "typ": "Switch2",
-  "id": "FqD2qDj4ZxWUYv90XG4B-57",
+  "id": "RR02Mq7Vguv6dDNSlC_V-61",
   "userFriendlyName": "CB_T2",
   "name": "CB_T2",
   "et": "t",
@@ -904,12 +937,12 @@
   "rated_voltage_kv": "0",
   "contact_parting_cycles": "3",
   "generator_cb": "false",
-  "bus": "mxCell_149",
-  "element": "mxCell_220"
+  "bus": "mxCell_493",
+  "element": "mxCell_567"
  },
- "36": {
+ "38": {
   "typ": "Switch3",
-  "id": "FqD2qDj4ZxWUYv90XG4B-61",
+  "id": "RR02Mq7Vguv6dDNSlC_V-65",
   "userFriendlyName": "CB_L1",
   "name": "CB_L1",
   "et": "l",
@@ -924,12 +957,12 @@
   "rated_voltage_kv": "0",
   "contact_parting_cycles": "3",
   "generator_cb": "false",
-  "bus": "mxCell_150",
-  "element": "mxCell_230"
+  "bus": "mxCell_494",
+  "element": "mxCell_577"
  },
- "37": {
+ "39": {
   "typ": "Switch4",
-  "id": "FqD2qDj4ZxWUYv90XG4B-65",
+  "id": "RR02Mq7Vguv6dDNSlC_V-69",
   "userFriendlyName": "CB_L4",
   "name": "CB_L4",
   "et": "l",
@@ -944,12 +977,12 @@
   "rated_voltage_kv": "0",
   "contact_parting_cycles": "3",
   "generator_cb": "false",
-  "bus": "mxCell_154",
-  "element": "mxCell_234"
+  "bus": "mxCell_498",
+  "element": "mxCell_581"
  },
- "38": {
+ "40": {
   "typ": "Switch5",
-  "id": "FqD2qDj4ZxWUYv90XG4B-69",
+  "id": "RR02Mq7Vguv6dDNSlC_V-73",
   "userFriendlyName": "Bus tie (normally open)",
   "name": "Bus tie (normally open)",
   "et": "b",
@@ -964,7 +997,7 @@
   "rated_voltage_kv": "0",
   "contact_parting_cycles": "3",
   "generator_cb": "false",
-  "bus": "mxCell_150",
-  "element": "mxCell_151"
+  "bus": "mxCell_494",
+  "element": "mxCell_495"
  }
 }

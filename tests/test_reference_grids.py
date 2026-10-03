@@ -172,7 +172,8 @@ def hand_built_transmission():
     """reference_transmission.spec.json, with the documented defaults written out."""
     h = _Builder(50.0)
     for ident, kv in (('HV', 110), ('HV2', 110), ('MV1', 20), ('MV2', 20), ('F1', 20),
-                      ('F2', 20), ('F3', 20), ('TERT', 10), ('LV1', 0.4), ('LV2', 0.4)):
+                      ('F2', 20), ('F3', 20), ('TERT', 10), ('LV1', 0.4), ('LV2', 0.4),
+                      ('WFC', 20)):
         h.bus(ident, kv)
     net, b = h.net, h.b
 
@@ -214,6 +215,9 @@ def hand_built_transmission():
                                        std_type='NA2XS2Y 1x185 RM/25 12/20 kV'))
     h.add('line', 'L4', pp.create_line(net, b('F2'), b('F3'), 2.2,
                                        std_type='NA2XS2Y 1x240 RM/25 12/20 kV'))
+    # The wind farm's own connection, so grid-code studies have a plant PCC.
+    h.add('line', 'L_WF', pp.create_line(net, b('F3'), b('WFC'), 1.5,
+                                         std_type='NA2XS2Y 1x240 RM/25 12/20 kV'))
 
     for ident, bus, p, q in (('LD_MV1', 'MV1', 6.0, 2.0), ('LD_F3', 'F3', 3.0, 1.0),
                              ('LD_LV1', 'LV1', 0.4, 0.4 * 0.33),  # unstated q: 0.33 x p
@@ -223,7 +227,7 @@ def hand_built_transmission():
                                      vn_kv=20, xdss_pu=0.18, rdss_ohm=0.02, cos_phi=0.8))
     # Unstated sgen rating: 1.1 x p_mw, at least 0.1 MVA; k defaults to 1.1.
     h.add('sgen', 'PV', pp.create_sgen(net, b('LV2'), p_mw=0.3, q_mvar=0.0, sn_mva=0.33, k=1.1))
-    h.add('sgen', 'WF', pp.create_sgen(net, b('F3'), p_mw=2.0, q_mvar=-0.2, sn_mva=2.5, k=1.2))
+    h.add('sgen', 'WF', pp.create_sgen(net, b('WFC'), p_mw=2.0, q_mvar=-0.2, sn_mva=2.5, k=1.2))
     h.add('shunt', 'SR', pp.create_shunt(net, b('TERT'), q_mvar=2.0, p_mw=0.0))
     h.add('shunt', 'CAP', pp.create_shunt(net, b('F1'), q_mvar=-1.5, p_mw=0.0))
     h.add('storage', 'BESS', pp.create_storage(net, b('LV1'), p_mw=0.1, max_e_mwh=0.5))
@@ -1390,3 +1394,31 @@ def test_grid_code_pq_holds_the_pcc_at_each_voltage_level(client, quiet):
             off.append(f'{level} pu level: PCC at {at_pcc.group(1)} pu')
     assert level is not None
     assert not off, off[:5]
+
+
+def test_grid_code_vq_wind_farm_at_its_own_connection(client, quiet):
+    """
+    The transmission grid's wind farm has its own connection bus, so the V-Q
+    study can be run on the plant alone: at Pmax it must cover the ENTSO-E
+    U-Q/Pmax range at every voltage level, with the PCC held at the level.
+    (On the Ring node, the Industrial park's load shared its bus and shifted
+    the whole range by 1 Mvar.)
+    """
+    from grid_code_pq_electrisim import _PQ_PCC_V_TOL
+
+    with open(os.path.join(REFERENCE_DIR, 'reference_transmission.diagram_grid_code_vq_payload.json'),
+              encoding='utf-8') as handle:
+        request = json.load(handle)
+    with quiet():
+        response = client.post('/', json=request)
+    lines = [json.loads(line) for line in response.get_data(as_text=True).splitlines() if line.strip()]
+    result = next(line for line in lines if line.get('type') == 'result')['data']['grid_code_vq_results']
+    curve, need = result['uq_curve'], result['uq_requirements']
+    assert result['p_pcc_mw'] == pytest.approx(2.0, abs=0.05)
+    for u, q_max, q_min, need_max, need_min in zip(curve['u_pu'], curve['q_max_mvar'], curve['q_min_mvar'],
+                                                    need['q_req_max_mvar'], need['q_req_min_mvar']):
+        assert q_max >= need_max and q_min <= need_min, f'{u} pu: {q_min}..{q_max} Mvar'
+    assert result['uq_compliance'] is True
+    at_pcc = [float(m.split('U_pcc=')[1].split()[0]) for m in
+              (line['message'] for line in lines if line.get('type') == 'progress') if 'U_pcc=' in m]
+    assert at_pcc and all(min(abs(v - u) for u in curve['u_pu']) <= _PQ_PCC_V_TOL + 1e-4 for v in at_pcc)
