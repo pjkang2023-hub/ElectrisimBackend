@@ -11308,30 +11308,47 @@ def bess_sizing(net, bess_params):
                              -float(net_s.res_ext_grid.at[ext_idx, 'q_mvar'])])
 
         warnings_out = []
-        # Exporting at the POC needs the battery to discharge: start from the
-        # target itself, the battery's sign.
-        x = -target.copy()
-        converged, iterations = False, 0
+        # Start from the battery as drawn. Starting from minus the whole POC
+        # target put 4.9 MW of charge on a 0.4 kV battery behind a 0.63 MVA
+        # transformer when the target was the grid's own 5 MW import less
+        # 0.3 MW; that load flow failed before any point had solved.
+        x = np.array([float(net_s.storage.at[storage_idx, 'p_mw']),
+                      float(net_s.storage.at[storage_idx, 'q_mvar'])])
         try:
             y = poc_exchange(x)
-            x_good, y_good = x.copy(), y.copy()
-            while iterations < max_iterations:
-                err = y - target
-                if np.abs(err).max() < tolerance:
-                    converged = True
-                    break
-                iterations += 1
+        except pp.LoadflowNotConverged:
+            return _bess_sizing_failure('The load flow does not converge with the battery as drawn.')
+        converged, iterations = False, 0
+        while iterations < max_iterations:
+            err = y - target
+            if np.abs(err).max() < tolerance:
+                converged = True
+                break
+            iterations += 1
+            try:
                 h = 1e-3
                 jac = np.column_stack([(poc_exchange(x + h * e) - y) / h for e in np.eye(2)])
-                x = x - np.linalg.solve(jac, err)
-                y = poc_exchange(x)
-                x_good, y_good = x.copy(), y.copy()
-        except (pp.LoadflowNotConverged, np.linalg.LinAlgError) as e:
-            x, y = x_good, y_good
-            poc_exchange(x)  # leave the results at the last operating point that solved
-            warnings_out.append(
-                'The load flow did not converge on the way to this target: the network '
-                f'cannot carry the power it needs ({e.__class__.__name__}).')
+                step = np.linalg.solve(jac, err)
+            except (pp.LoadflowNotConverged, np.linalg.LinAlgError) as e:
+                poc_exchange(x)
+                warnings_out.append(
+                    f'The solve stopped at the last operating point that converged ({e.__class__.__name__}).')
+                break
+            # Halve a step whose load flow fails; the network may not carry it.
+            for _ in range(8):
+                try:
+                    x_try = x - step
+                    y_try = poc_exchange(x_try)
+                    x, y = x_try, y_try
+                    break
+                except pp.LoadflowNotConverged:
+                    step = step / 2
+            else:
+                poc_exchange(x)  # leave the results at the last operating point that solved
+                warnings_out.append(
+                    'The load flow did not converge on the way to this target: the network '
+                    'cannot carry the power it needs.')
+                break
         if not converged and not warnings_out:
             warnings_out.append(f'The target was not reached within {max_iterations} iterations.')
 

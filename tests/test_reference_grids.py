@@ -1111,6 +1111,59 @@ def test_drawn_diagram_motor_starting(client, quiet, grid):
     assert result['summary']['worst_dip_percent'] > 0.5, 'the start barely moved the voltage'
 
 
+@pytest.mark.parametrize('grid', GRIDS)
+def test_drawn_diagram_dynamic_motor_starting(client, quiet, grid):
+    """
+    The ANDES direct-on-line start of the drawn motor, from standstill: it
+    draws about its locked-rotor current, dips the voltage at its bus about
+    as far as the steady-state study's locked-rotor load does, and runs up to
+    its running slip, every bus voltage recovering to where the steady-state
+    study puts it with the motor running.
+
+    It took the c3 = 1 load torque as 1 pu of the 100 MVA system base and
+    toggled the motor in at synchronous speed from a 100 MVA current guess:
+    the motor's bus fell to 0 V, the 20 kV buses dipped 5.5% and stayed
+    there, and the slip sat at 0.5.
+    """
+    t_start, t_end = 0.1, 5.0
+    settings = {'typ': 'MotorStartingPandaPower Parameters', 'motor_ids': 'all',
+                'starting_method': 'dol', 'voltage_limit_percent': '15',
+                'thermal_limit_percent': '100', 't_start': str(t_start), 't_end': str(t_end),
+                **ANDES_PARAMS}
+    steady = _post_study(client, quiet, _study_request(grid, dict(settings, mode='steady')))
+    dynamic = _post_study(client, quiet, _study_request(grid, dict(settings, mode='dynamic')))
+
+    spec = load_spec(grid)
+    (motor,) = spec['motors']
+    label = _bus_label(spec, motor['bus'])
+    at_steady = {b['name']: b for b in steady['buses']}
+    at_motor = {b['name']: b for b in dynamic['buses']}[label]
+    assert at_motor['dip_percent'] == pytest.approx(at_steady[label]['dip_percent'], rel=0.2)
+
+    (started,) = dynamic['motors']
+    assert started['name'] == motor['name']
+    assert started['i_start_pu'] == pytest.approx(motor['lrc_pu'], rel=0.15)
+    assert started['start_time_s'] is not None, 'the motor never ran up'
+    assert 0.1 < started['start_time_s'] < (t_end - t_start) / 2
+    assert 0 < started['slip_final'] < 0.05
+    slip = dynamic['timeseries']['motors'][started['id']]['slip']
+    t = dynamic['timeseries']['t']
+    first = next(i for i, ti in enumerate(t) if ti > t_start)
+    assert slip[first] > 0.9, 'the motor did not start from standstill'
+
+    differ = []
+    for bus in dynamic['buses']:
+        want = at_steady[bus['name']]
+        for column in ('vm_before', 'vm_after'):
+            if abs(bus[column] - want[column]) > 2e-3:
+                differ.append(f"{bus['name']} {column}: {bus[column]:.5f} ANDES, "
+                              f"{want[column]:.5f} steady state")
+        if abs(bus['vm_after'] - bus['vm_before']) > 5e-3:
+            differ.append(f"{bus['name']} did not recover: {bus['vm_before']:.5f} -> "
+                          f"{bus['vm_after']:.5f}")
+    assert not differ, f'{grid}:\n  ' + '\n  '.join(differ)
+
+
 ANDES_PARAMS = {'frequency': '50', 'sn_mva': '100'}
 
 
@@ -1918,25 +1971,35 @@ def test_bess_preliminary_studies_the_plant_only(client, quiet, grid):
 
 # --- BESS sizing -------------------------------------------------------------------
 
-def test_bess_sizing_radial_finds_the_size_and_the_overload(client, quiet):
+@pytest.mark.parametrize('grid, target, overloaded', [
+    # 10 MW / 5 Mvar exported at the radial grid's 110 kV supply.
+    ('reference_radial', (10.0, 5.0), 'Wind farm cable'),
+    # The transmission grid's own import (5.23 MW / 2.32 Mvar with the
+    # battery as drawn) less 0.3 MW / 0.1 Mvar.
+    ('reference_transmission', (-4.93, -2.22), None),
+])
+def test_bess_sizing_finds_the_size_and_the_limits(client, quiet, grid, target, overloaded):
     """
-    10 MW / 5 Mvar exported at the 110 kV supply from the radial grid's battery.
-
     A battery drawn without an MVA rating took its 2 MWh as one, and the
     sizing controller capped P and Q at that rating - the rating it is meant
-    to find - reporting 2 MW / 2 Mvar (2.8 MVA) as "required" while the
-    target needs 21.1 MVA. At that point the wind farm cable feeding the
-    battery is overloaded, which went unsaid.
+    to find - reporting 2 MW / 2 Mvar (2.8 MVA) as "required" on the radial
+    grid while the target needs 21.1 MVA, at which the wind farm cable
+    feeding the battery is overloaded, unsaid.
+
+    The solve then started from minus the whole POC target: on the
+    transmission grid 4.9 MW of charge on a 0.4 kV battery behind a
+    0.63 MVA transformer, whose load flow failed before any point had
+    solved, and the study crashed. It needs 0.32 MVA.
     """
-    spec = load_spec('reference_radial')
-    request = _study_request('reference_radial', {}, key='bess_sizing_params')
+    spec = load_spec(grid)
+    request = _study_request(grid, {}, key='bess_sizing_params')
     cell = {v.get('userFriendlyName'): v['id'] for v in request.values()
             if isinstance(v, dict) and 'id' in v}
     request['bess_sizing_params'] = {
         'typ': 'BessSizingPandaPower', 'calculationMode': 'single',
         'storageId': cell[spec['storage'][0]['name']],
         'pocBusbarId': cell[_bus_label(spec, spec['external_grids'][0]['bus'])],
-        'targetP': 10, 'targetQ': 5, 'tolerance': 0.001, 'maxIterations': 50,
+        'targetP': target[0], 'targetQ': target[1], 'tolerance': 0.001, 'maxIterations': 50,
         'frequency': 50, 'algorithm': 'nr'}
     result = _post_study(client, quiet, request)
     assert result['converged'] is True
@@ -1950,7 +2013,8 @@ def test_bess_sizing_radial_finds_the_size_and_the_overload(client, quiet):
         pp.runpp(net, calculate_voltage_angles=True)
         return -np.array([net.res_ext_grid.p_mw.iloc[0], net.res_ext_grid.q_mvar.iloc[0]])
 
-    target, x = np.array([10.0, 5.0]), np.array([-10.0, -5.0])
+    target = np.array(target)
+    x = np.array([float(net.storage.at[st, 'p_mw']), 0.0])
     for _ in range(20):
         y = exchange(x)
         if np.abs(y - target).max() < 1e-7:
@@ -1960,10 +2024,12 @@ def test_bess_sizing_radial_finds_the_size_and_the_overload(client, quiet):
     assert result['bess_p_mw'] == pytest.approx(x[0], abs=2e-3)
     assert result['bess_q_mvar'] == pytest.approx(x[1], abs=2e-3)
     assert result['bess_s_mva'] == pytest.approx(math.hypot(*x), abs=2e-3)
-    assert result['bess_s_mva'] > 20  # not the 2 MWh posing as 2 MVA
 
     assert result['storage_rating_mva'] is None and result['within_rating'] is None
-    cable = net.res_line.loading_percent[net.line.name == 'Wind farm cable'].iloc[0]
-    assert cable > 100
-    assert {'kind': 'Line', 'name': 'Wind farm cable', 'value': round(float(cable), 1), 'unit': '%',
-            'limit': 100.0} in result['violations'], result['violations']
+    if overloaded is None:
+        assert result['violations'] == []
+    else:
+        loading = net.res_line.loading_percent[net.line.name == overloaded].iloc[0]
+        assert loading > 100
+        assert {'kind': 'Line', 'name': overloaded, 'value': round(float(loading), 1), 'unit': '%',
+                'limit': 100.0} in result['violations'], result['violations']
