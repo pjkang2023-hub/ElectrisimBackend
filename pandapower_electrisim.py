@@ -13961,12 +13961,11 @@ def _attach_protection_devices(net, specs, grading_mode='auto'):
                     'custom_evaluator': 'oc_electrisim',
                     'not_computed': False,
                     'settings': dict(spec),
-                    'reason': (
-                        f'pandapower OCRelay could not be built ({type(e).__name__}: {e}); '
-                        'trip times and the TCC curve were evaluated by ElectriSim from the '
-                        'Switch dialog settings. pandapower topological grading requires every '
-                        'closed switch to sit on a line.'
-                    ),
+                    # No 'reason': pandapower's OCRelay grades only networks of
+                    # lines, and with pickups set by hand it is not needed. Its
+                    # exception (kept in the traceback) filled the evaluation
+                    # notes for every relay; the settings table already names
+                    # the ElectriSim evaluator.
                     'traceback': tb_text,
                 })
 
@@ -14377,6 +14376,19 @@ def _prot_fault_bus_label(net, fault_bus_idx):
     except Exception:
         pass
     return str(fault_bus_idx)
+
+
+def _prot_fault_label(net, scenario):
+    """'L1, 50 %' for a line fault, the bus name for a busbar fault."""
+    try:
+        if scenario.get('sc_line_id') is not None and scenario.get('fault_location_mode') != 'bus':
+            idx = int(scenario['sc_line_id'])
+            name = _contingency_friendly_name(net, net.line.at[idx, 'name']) if idx in net.line.index else f'line {idx}'
+            return f"{name}, {100 * float(scenario.get('sc_fraction') or 0):.0f} %"
+        idx = int(scenario['fault_bus_idx'])
+        return _contingency_friendly_name(net, net.bus.at[idx, 'name']) if idx in net.bus.index else str(idx)
+    except (KeyError, TypeError, ValueError):
+        return scenario.get('fault_bus')
 
 
 def _prot_clean_scalar(v):
@@ -14808,89 +14820,214 @@ def _prot_run_scenario(base_net, sc_line_id, sc_fraction, fault_type, case, atta
     return out
 
 
-def _prot_bus_distances(net, starts):
-    """Unweighted bus distances through in-service lines and transformers."""
+def _prot_element_graph(net, fault_line_id=None):
+    """
+    Buses and branch elements as graph nodes. A branch is a node of its own,
+    joined to each of its buses, so a relay - a switch at one bus of one
+    element - is the edge between the two. A faulted line becomes the fault
+    node 'F'. Open switches cut their edge.
+    """
     adjacency = {}
+
     def connect(a, b):
-        adjacency.setdefault(int(a), set()).add(int(b))
-        adjacency.setdefault(int(b), set()).add(int(a))
-    for table, cols in (('line', ('from_bus', 'to_bus')), ('trafo', ('hv_bus', 'lv_bus'))):
+        adjacency.setdefault(a, set()).add(b)
+        adjacency.setdefault(b, set()).add(a)
+
+    for b in net.bus.index:
+        adjacency.setdefault(('bus', int(b)), set())
+    tables = (('line', 'l', ('from_bus', 'to_bus')), ('trafo', 't', ('hv_bus', 'lv_bus')),
+              ('trafo3w', 't3', ('hv_bus', 'mv_bus', 'lv_bus')), ('impedance', 'i', ('from_bus', 'to_bus')))
+    for table, et, cols in tables:
         data = getattr(net, table, None)
-        if data is None:
+        if data is None or data.empty:
             continue
-        for _, row in data.iterrows():
-            if bool(row.get('in_service', True)):
-                connect(row[cols[0]], row[cols[1]])
-    distance, queue = {}, [int(x) for x in starts if x is not None]
-    for x in queue:
-        distance[x] = 0
-    for bus in queue:
-        for adjacent in adjacency.get(bus, ()):
-            if adjacent not in distance:
-                distance[adjacent] = distance[bus] + 1
-                queue.append(adjacent)
-    return distance
+        for idx, row in data.iterrows():
+            if not bool(row.get('in_service', True)):
+                continue
+            node = 'F' if (et == 'l' and fault_line_id is not None and int(idx) == int(fault_line_id)) else (et, int(idx))
+            for col in cols:
+                connect(('bus', int(row[col])), node)
+    if fault_line_id is not None:
+        adjacency.setdefault('F', set())
+
+    def element_node(et, element):
+        if et == 'l' and fault_line_id is not None and int(element) == int(fault_line_id):
+            return 'F'
+        return ('bus', int(element)) if et == 'b' else (et, int(element))
+
+    for _, sw in net.switch.iterrows():
+        a, b = ('bus', int(sw['bus'])), element_node(sw['et'], sw['element'])
+        if sw['et'] == 'b':
+            if bool(sw['closed']):
+                connect(a, b)
+        elif not bool(sw['closed']) and b in adjacency.get(a, ()):
+            adjacency[a].discard(b)
+            adjacency[b].discard(a)
+    return adjacency, element_node
 
 
-def _prot_scenario_fault_buses(net, scenario):
-    if scenario.get('fault_bus_idx') in net.bus.index:
-        return [scenario['fault_bus_idx']]
-    line_id = scenario.get('sc_line_id')
-    if line_id in getattr(net, 'line', pd.DataFrame()).index:
-        row = net.line.loc[line_id]
-        return [int(row['from_bus']), int(row['to_bus'])]
-    return []
+def _prot_zone(adjacency, starts, relay_at_edge, blocked=()):
+    """Nodes reachable from starts without crossing a relay, and the relays met (relay -> far node)."""
+    seen = set(starts) | set(blocked)
+    zone, boundary, queue = set(starts), {}, list(starts)
+    for node in queue:
+        for nxt in adjacency.get(node, ()):
+            relay = relay_at_edge.get(frozenset((node, nxt)))
+            if relay is not None:
+                boundary.setdefault(relay, nxt)
+                continue
+            if nxt not in seen:
+                seen.add(nxt)
+                zone.add(nxt)
+                queue.append(nxt)
+    return zone, boundary
+
+
+def _prot_reaches_source(adjacency, start, sources, blocked):
+    seen, queue = set(blocked) | {start}, [start]
+    for node in queue:
+        if node in sources:
+            return True
+        for nxt in adjacency.get(node, ()):
+            if nxt not in seen:
+                seen.add(nxt)
+                queue.append(nxt)
+    return False
 
 
 def _prot_check_miscoordination(net, scenarios, t_diff):
-    """Check only primary/backup devices that lie on a source-to-fault path."""
-    miscoord = []
-    sources = list(getattr(net, 'ext_grid', pd.DataFrame()).get('bus', []))
-    source_distance = _prot_bus_distances(net, sources)
+    """
+    Grade the relays of each fault by protection zone. The zone is what the
+    fault reaches without passing a relay; the relays on its edge that lead
+    to a source must clear it (primaries). Behind each primary, the next
+    relays towards a source are its backups and must be t_diff slower. Any
+    other relay that trips before the fault is cleared (plus t_diff) trips
+    needlessly - on a meshed network, fault current flows round the healthy
+    side too.
+
+    Ordering relays by their hop distance from the external grid paired
+    unrelated relays: a three-winding transformer was not a path, so the
+    parallel transformer feeds were graded as primary and backup.
+
+    Returns (miscoordination, unwanted_trips); each scenario gets
+    primary_switches, clearing_time_s and unprotected_sources.
+    """
+    miscoord, unwanted = [], []
+    sources = set()
+    for table in ('ext_grid', 'gen'):
+        data = getattr(net, table, None)
+        if data is None or data.empty:
+            continue
+        for _, row in data.iterrows():
+            if bool(row.get('in_service', True)):
+                sources.add(('bus', int(row['bus'])))
+    source_names = {}
+    for table in ('gen', 'ext_grid'):
+        data = getattr(net, table, None)
+        if data is not None and not data.empty:
+            for idx, row in data.iterrows():
+                source_names.setdefault(('bus', int(row['bus'])), []).append(
+                    _contingency_friendly_name(net, row.get('name') if pd.notna(row.get('name')) else f'{table} {idx}'))
+
     for scenario in scenarios:
-        fault_buses = _prot_scenario_fault_buses(net, scenario)
-        fault_distance = _prot_bus_distances(net, fault_buses)
-        trips = [t for t in scenario.get('trip', []) if t.get('tripped') and t.get('t_trip_s') is not None]
-        on_path = []
-        source_to_fault = min((source_distance.get(b, float('inf')) for b in fault_buses), default=float('inf'))
-        for trip in trips:
+        if scenario.get('error'):
+            continue
+        line_id = scenario.get('sc_line_id')
+        if scenario.get('fault_location_mode') == 'bus' or line_id is None:
+            fault_line = None
+            fault_node = ('bus', int(scenario['fault_bus_idx']))
+        else:
+            fault_line = int(line_id)
+            fault_node = 'F'
+        adjacency, element_node = _prot_element_graph(net, fault_line)
+        rows = {}
+        relay_at_edge = {}
+        for row in scenario.get('trip', []):
             try:
-                sw = net.switch.loc[int(trip['switch_idx'])]
-                bus = int(sw['bus'])
-                ds, df = source_distance.get(bus), fault_distance.get(bus)
-                # A protection point is on a shortest supplied path when its
-                # source/fault distances add up to the path length (allow one
-                # hop because a switch is attached to a line terminal).
-                if ds is not None and df is not None and ds + df <= source_to_fault + 1:
-                    trip['_fault_distance'] = df
-                    on_path.append(trip)
-            except Exception:
+                sw = net.switch.loc[int(row['switch_idx'])]
+            except (KeyError, TypeError, ValueError):
                 continue
-        # Closer-to-fault relay is primary; only its immediate upstream relay is
-        # a valid backup. Devices on other feeders are deliberately excluded.
-        trips = sorted(on_path, key=lambda r: (r['_fault_distance'], r['t_trip_s']))
-        for i in range(len(trips) - 1):
-            primary = trips[i]
-            backup = trips[i + 1]
-            if primary['_fault_distance'] == backup['_fault_distance']:
+            if not bool(sw['closed']):
                 continue
-            delta_t = float(backup['t_trip_s']) - float(primary['t_trip_s'])
-            if delta_t < t_diff:
+            key = int(row['switch_idx'])
+            rows[key] = row
+            relay_at_edge[frozenset((('bus', int(sw['bus'])), element_node(sw['et'], sw['element'])))] = key
+
+        def trip_time(key):
+            row = rows.get(key) or {}
+            return float(row['t_trip_s']) if row.get('tripped') and row.get('t_trip_s') is not None else None
+
+        def label(key):
+            row = rows[key]
+            return row.get('user_friendly_name') or row.get('switch_name') or str(key)
+
+        zone, boundary = _prot_zone(adjacency, [fault_node], relay_at_edge)
+        primaries = {k: far for k, far in boundary.items()
+                     if _prot_reaches_source(adjacency, far, sources, zone)}
+        scenario['unprotected_sources'] = sorted({n for b in zone & sources for n in source_names.get(b, [])})
+        scenario['primary_switches'] = [label(k) for k in primaries]
+
+        backups = {}
+        for key, far in primaries.items():
+            zone2, boundary2 = _prot_zone(adjacency, [far], relay_at_edge, blocked=zone)
+            if zone2 & sources:
+                continue  # a source right behind the relay: nothing can back it up
+            backups[key] = [b for b, far2 in boundary2.items()
+                            if b != key and b not in primaries
+                            and _prot_reaches_source(adjacency, far2, sources, zone | zone2)]
+
+        clearing = []
+        for key in primaries:
+            t = trip_time(key)
+            if t is None:
+                t_backup = [trip_time(b) for b in backups.get(key, []) if trip_time(b) is not None]
+                t = min(t_backup) if t_backup else None
+            clearing.append(t)
+        t_clear = max(clearing) if clearing and None not in clearing else None
+        scenario['clearing_time_s'] = t_clear
+
+        common = {
+            'sc_line_id': scenario.get('sc_line_id'),
+            'sc_fraction': scenario.get('sc_fraction'),
+            'fault_bus': scenario.get('fault_bus'),
+            'fault_label': scenario.get('fault_label'),
+        }
+        for key in primaries:
+            t_p = trip_time(key)
+            if t_p is None:
+                continue
+            for b in backups.get(key, []):
+                t_b = trip_time(b)
+                if t_b is None or t_b - t_p >= t_diff - 1e-9:
+                    continue
                 miscoord.append({
-                    'sc_line_id': scenario.get('sc_line_id'),
-                    'sc_fraction': scenario.get('sc_fraction'),
-                    'fault_bus': scenario.get('fault_bus'),
-                    'primary_switch_id': primary.get('switch_id'),
-                    'primary_user_friendly_name': primary.get('user_friendly_name'),
-                    'primary_t_s': primary.get('t_trip_s'),
-                    'backup_switch_id': backup.get('switch_id'),
-                    'backup_user_friendly_name': backup.get('user_friendly_name'),
-                    'backup_t_s': backup.get('t_trip_s'),
-                    'delta_t_s': delta_t,
+                    **common,
+                    'primary_switch_id': rows[key].get('switch_id'),
+                    'primary_user_friendly_name': label(key),
+                    'primary_t_s': t_p,
+                    'backup_switch_id': rows[b].get('switch_id'),
+                    'backup_user_friendly_name': label(b),
+                    'backup_t_s': t_b,
+                    'delta_t_s': t_b - t_p,
                     'required_t_diff_s': float(t_diff),
                     'topology_path': True,
                 })
-    return miscoord
+        graded = set(primaries) | {b for bs in backups.values() for b in bs}
+        if t_clear is not None:
+            for key in rows:
+                t = trip_time(key)
+                if key in graded or t is None or t >= t_clear + t_diff - 1e-9:
+                    continue
+                unwanted.append({
+                    **common,
+                    'switch_id': rows[key].get('switch_id'),
+                    'user_friendly_name': label(key),
+                    't_trip_s': t,
+                    'clearing_time_s': t_clear,
+                    'required_t_diff_s': float(t_diff),
+                    'primary_switches': scenario['primary_switches'],
+                })
+    return miscoord, unwanted
 
 
 def protection_coordination(net, prot_params, in_data):
@@ -15017,7 +15154,9 @@ def protection_coordination(net, prot_params, in_data):
         devices = _prot_extract_devices_for_ui(net, attach_summaries)
         _prot_append_custom_devices(devices, attach_summaries)
 
-        miscoord = _prot_check_miscoordination(net, scenarios, t_diff)
+        for scenario in scenarios:
+            scenario['fault_label'] = _prot_fault_label(net, scenario)
+        miscoord, unwanted = _prot_check_miscoordination(net, scenarios, t_diff)
 
         n_tripped = sum(1 for sc_res in scenarios for trip in sc_res.get('trip', []) if trip.get('tripped'))
         response = {
@@ -15033,6 +15172,7 @@ def protection_coordination(net, prot_params, in_data):
                 'n_scenarios': len(scenarios),
                 'n_tripped': n_tripped,
                 'n_miscoordination': len(miscoord),
+                'n_unwanted_trips': len(unwanted),
                 'fault_type': fault_type,
                 'case': case,
                 'grading_mode': grading_mode,
@@ -15041,6 +15181,7 @@ def protection_coordination(net, prot_params, in_data):
                 **({'scenario_warning': scenario_warning} if scenario_warning else {}),
             },
             'miscoordination': miscoord,
+            'unwanted_trips': unwanted,
             'output': {
                 'show_curves': bool(prot_params.get('show_curves', True)),
                 'show_table': bool(prot_params.get('show_table', True)),

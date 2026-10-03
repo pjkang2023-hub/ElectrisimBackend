@@ -1209,9 +1209,14 @@ def test_drawn_diagram_dg_screening(client, quiet, opendss_scratch, grid):
 # (automatic pickup) on every breaker: CB_T1 on the transformer's 20 kV side,
 # CB_A, CB_B and the wind feeder breaker on the feeders. Faults are placed at
 # the middle of every line.
+#
+# reference_transmission.diagram_protection_payload.json has definite-time
+# relays with pickups set by hand on every closed breaker: CB_LHV (110 kV
+# line), CB_T3W and CB_T2 (110 kV side of both transformers), CB_L1 and CB_L4
+# on the 20 kV ring, which both transformers feed.
 
-def _protection_request(settings=None):
-    with open(os.path.join(REFERENCE_DIR, 'reference_radial.diagram_protection_payload.json'),
+def _protection_request(settings=None, grid='reference_radial'):
+    with open(os.path.join(REFERENCE_DIR, f'{grid}.diagram_protection_payload.json'),
               encoding='utf-8') as handle:
         payload = json.load(handle)
     for element in payload.values():
@@ -1276,6 +1281,57 @@ def test_protection_manual_settings_grade(client, quiet):
         assert trips['CB_T1']['ikss_ka'] > 0.9 * trips[own]['ikss_ka'] - 0.3, (line, trips)
         if 'CB_T1' in tripped:
             assert trips['CB_T1']['t_trip_s'] == pytest.approx(0.8)
+        # The feeder breaker clears its own fault; CB_T1 is its graded backup.
+        assert scenario['fault_label'] == f'{line}, 50 %'
+        assert scenario['primary_switches'] == [own]
+        assert scenario['clearing_time_s'] == pytest.approx(0.07)
+        # The gas engine on feeder B has no breaker of its own.
+        assert scenario['unprotected_sources'] == (['Gas engine'] if own == 'CB_B' else [])
+    assert result['unwanted_trips'] == []
+    # Pickups set by hand need no note about pandapower's OCRelay.
+    assert not any(a.get('reason') for a in result['attach_summaries'])
+
+
+def test_protection_meshed_grading(client, quiet):
+    """
+    The 20 kV ring is fed by both transformers. Relays were graded by hop
+    distance from the external grid, and a three-winding transformer was no
+    path, so the two parallel transformer feeds (CB_T2, CB_T3W) were reported
+    as primary and backup for five faults. Grading is by protection zone: the
+    relays round the fault that lead to a source clear it, the next ones out
+    back them up, and any other relay tripping before the fault is cleared is
+    an unwanted trip - here the ring breakers for a 110 kV line fault.
+    """
+    with quiet():
+        response = client.post('/', json=_protection_request(grid='reference_transmission'))
+    result = json.loads(response.get_data(as_text=True))
+    assert not result.get('error'), result.get('message')
+    scenarios = {s['fault_label']: s for s in result['scenarios']}
+    expected = {
+        '110 kV overhead line, 50 %': ({'CB_LHV', 'CB_T2'}, 1.0, []),
+        'L1, 50 %': ({'CB_L1', 'CB_L4'}, 0.7, []),
+        'Cable with given impedance, 50 %': ({'CB_T2', 'CB_L4'}, 1.0, ['CHP plant']),
+        'L3, 50 %': ({'CB_L1', 'CB_L4'}, 0.7, []),
+        'L4, 50 %': ({'CB_L4', 'CB_T2'}, 1.0, ['CHP plant']),
+        'Wind farm cable, 50 %': ({'CB_L1', 'CB_L4'}, 0.7, []),
+    }
+    assert set(scenarios) == set(expected)
+    for label, (primaries, t_clear, unprotected) in expected.items():
+        scenario = scenarios[label]
+        assert set(scenario['primary_switches']) == primaries, label
+        assert scenario['clearing_time_s'] == pytest.approx(t_clear), label
+        assert scenario['unprotected_sources'] == unprotected, label
+
+    # CB_L1 backs up CB_L4 from the far side of the ring, at the same 0.7 s.
+    miscoord = {(m['fault_label'], m['primary_user_friendly_name'], m['backup_user_friendly_name'])
+                for m in result['miscoordination']}
+    assert miscoord == {('Cable with given impedance, 50 %', 'CB_L4', 'CB_L1'),
+                        ('L4, 50 %', 'CB_L4', 'CB_L1')}
+    unwanted = {(u['fault_label'], u['user_friendly_name']) for u in result['unwanted_trips']}
+    assert unwanted == {('110 kV overhead line, 50 %', 'CB_L1'), ('110 kV overhead line, 50 %', 'CB_L4'),
+                        ('Cable with given impedance, 50 %', 'CB_T3W'), ('L4, 50 %', 'CB_T3W')}
+    assert result['summary']['n_miscoordination'] == 2
+    assert result['summary']['n_unwanted_trips'] == 4
 
 
 def test_site_screening_counts_lost_supply(client, quiet):
