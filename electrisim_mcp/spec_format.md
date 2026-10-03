@@ -13,7 +13,7 @@ Units: kV, MW, MVAr, MVA, km, per-unit (`_pu`), percent (`_percent`), degrees.
 | `name` | network name |
 | `frequency_hz` | 50 (default) or 60 |
 | `layout` | `transmission`, `radial` or `auto` - see Layout below |
-| `buses`, `external_grids`, `transformers`, `three_winding_transformers`, `lines`, `loads`, `generators`, `static_generators`, `shunts`, `storage`, `switches` | lists of elements |
+| `buses`, `external_grids`, `transformers`, `three_winding_transformers`, `lines`, `loads`, `generators`, `static_generators`, `shunts`, `storage`, `motors`, `switches` | lists of elements |
 
 Any other top-level key is rejected.
 
@@ -111,6 +111,14 @@ negative injects - a capacitor bank), `p_mw` (0), `name`, `in_service`.
 An OpenDSS load flow holds a battery at 0 % idle however much it is asked to
 discharge; pandapower's ignores the state of charge.
 
+**motors** - `id`, **`bus`**, **`pn_mech_mw`** (rated shaft power), `cos_phi`
+(0.86), `efficiency_percent` (95), `loading_percent` (100), `lrc_pu`
+(locked-rotor to rated current, 6), `rx` (locked-rotor R/X, 0.15), `vn_kv`
+(the bus voltage), `cos_phi_n` / `efficiency_n_percent` (rated values, default
+the operating ones), `name`, `in_service`. A load in the power flow, drawing
+`pn_mech_mw` x `loading_percent` / `efficiency_percent`; short circuit adds its
+locked-rotor contribution, and motor starting starts it.
+
 **switches** - `id`, **`bus`**, **`element`**, `et` (`line` default,
 `transformer`, `three_winding_transformer`, or `bus`), `closed` (true), `name`.
 - `et: line` / `transformer` / `three_winding_transformer`: `element` is that
@@ -129,6 +137,7 @@ minimises total cost:
 | `generators` | `min_p_mw` (0) to `max_p_mw` (`sn_mva`); `min_q_mvar` / `max_q_mvar` (what the rated power factor allows); `controllable` (true) |
 | `static_generators` | priced ones are curtailable: `min_p_mw` (0) to `max_p_mw` (`p_mw`, the output available), reactive power up to power factor 0.9 at `sn_mva`; unpriced ones run at `p_mw` |
 | `storage` | runs at `p_mw` |
+| `motors` | run at their load, like `loads` |
 | `buses` | voltage held to `min_vm_pu` (0.9) - `max_vm_pu` (1.1) |
 
 Without a price Electrisim assumes 20 per MWh for generators and static

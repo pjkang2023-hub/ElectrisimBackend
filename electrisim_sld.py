@@ -69,7 +69,7 @@ _LAYOUTS = ('transmission', 'radial', 'auto')
 
 _ELEMENT_TABLES = (
     'buses', 'external_grids', 'transformers', 'three_winding_transformers', 'lines', 'loads',
-    'generators', 'static_generators', 'shunts', 'storage', 'switches',
+    'generators', 'static_generators', 'shunts', 'storage', 'motors', 'switches',
 )
 
 
@@ -232,7 +232,7 @@ def build_network(spec):
     # through it, and results are reported back under the ids the caller wrote.
     ids = {table: {} for table in
            ('bus', 'ext_grid', 'trafo', 'trafo3w', 'line', 'load', 'gen', 'sgen', 'shunt',
-            'storage', 'switch')}
+            'storage', 'motor', 'switch')}
 
     def record(table, idx, ident):
         ids[table][int(idx)] = ident
@@ -631,6 +631,39 @@ def build_network(spec):
         # Optimal power flow: storage runs at its p_mw.
         net.storage.at[idx, 'controllable'] = False
 
+    for i, row in enumerate(_as_list(spec, 'motors', problems)):
+        ident = _ident(row, i, 'M', problems, used_ids)
+        where = f'motors[{i}] ({ident})'
+        bus = bus_of(row, 'bus', where)
+        if bus is None:
+            continue
+        pn = _num(row.get('pn_mech_mw'), 'pn_mech_mw', where, problems, positive=True)
+        if pn is None:
+            problems.append(f'{where}: pn_mech_mw (rated shaft power) is required')
+            continue
+        cos_phi = _num(row.get('cos_phi'), 'cos_phi', where, problems, default=0.86, positive=True)
+        eff = _num(row.get('efficiency_percent'), 'efficiency_percent', where, problems,
+                   default=95.0, positive=True)
+        if cos_phi is not None and cos_phi > 1:
+            problems.append(f'{where}: cos_phi={cos_phi} must be at most 1')
+        # Short circuit and motor starting read the locked-rotor current and
+        # its R/X; the rated values default to the operating ones.
+        idx = pp.create_motor(
+            net, bus=bus_index[bus], name=str(row.get('name') or ident),
+            pn_mech_mw=pn, cos_phi=cos_phi, efficiency_percent=eff,
+            loading_percent=_num(row.get('loading_percent'), 'loading_percent', where, problems,
+                                 default=100.0),
+            lrc_pu=_num(row.get('lrc_pu'), 'lrc_pu', where, problems, default=6.0, positive=True),
+            rx=_num(row.get('rx'), 'rx', where, problems, default=0.15),
+            vn_kv=_num(row.get('vn_kv'), 'vn_kv', where, problems, default=bus_kv[bus],
+                       positive=True),
+            cos_phi_n=_num(row.get('cos_phi_n'), 'cos_phi_n', where, problems, default=cos_phi),
+            efficiency_n_percent=_num(row.get('efficiency_n_percent'), 'efficiency_n_percent',
+                                      where, problems, default=eff),
+            in_service=bool(row.get('in_service', True)),
+        )
+        record('motor', idx, ident)
+
     # --- switches --------------------------------------------------------
     # The element is named by its spec id, never by its display name - a line
     # with id "L1" and name "Feeder cable" is switched as "L1".
@@ -723,7 +756,7 @@ def build_network(spec):
         'trafo3w': len(net.trafo3w),
         'load': len(net.load), 'gen': len(net.gen), 'sgen': len(net.sgen),
         'ext_grid': len(net.ext_grid), 'shunt': len(net.shunt),
-        'storage': len(net.storage), 'switch': len(net.switch),
+        'storage': len(net.storage), 'motor': len(net.motor), 'switch': len(net.switch),
     }
     return net, report.as_dict()
 
@@ -823,6 +856,7 @@ def solve(net, vm_min_pu=0.95, vm_max_pu=1.05, max_loading_percent=100.0):
     ]
 
     load_mw = float(net.res_load['p_mw'].sum()) if len(net.res_load) else 0.0
+    load_mw += float(net.res_motor['p_mw'].sum()) if len(net.res_motor) else 0.0
     losses_mw = float(net.res_line['pl_mw'].sum() + net.res_trafo['pl_mw'].sum()
                       + net.res_trafo3w['pl_mw'].sum())
     vms = [b['vm_pu'] for b in buses if b['vm_pu'] is not None]

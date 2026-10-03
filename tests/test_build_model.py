@@ -49,7 +49,7 @@ def test_minimal_statement_builds_with_defaults():
     net, report = sld.build_network(substation())
     assert report['counts'] == {
         'bus': 4, 'line': 2, 'trafo': 1, 'trafo3w': 0, 'load': 1, 'gen': 0, 'sgen': 1,
-        'ext_grid': 1, 'shunt': 0, 'storage': 0, 'switch': 1,
+        'ext_grid': 1, 'shunt': 0, 'storage': 0, 'motor': 0, 'switch': 1,
     }
     assert report['warnings'] == []
 
