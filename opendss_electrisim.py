@@ -6304,22 +6304,16 @@ def _dg_collect_metrics(dss, BusbarsDictConnectionToName, LinesDict, LinesDictId
     except Exception:
         pass
 
+    # Power the grid supplies: positive importing, negative exporting.
+    # OpenDSS reports a source's terminal power as negative while it supplies,
+    # and the source is Vsource.source, not the External Grid's cell name -
+    # activating that name failed silently and read whatever element was
+    # active last, so every screening flagged reverse power.
     source_p_kw = 0.0
     try:
-        for src_name in (ExternalGridsDict or {}):
-            try:
-                dss.Circuit.SetActiveElement(f'Vsource.{src_name}')
-                powers = dss.CktElement.Powers()
-                if powers:
-                    # Sum P across phases at terminal 1
-                    n = max(1, int(len(powers) / 2))
-                    source_p_kw += sum(powers[i * 2] for i in range(min(n, 3)))
-            except Exception:
-                continue
-        if not ExternalGridsDict:
-            total = dss.Circuit.TotalPower()
-            if total:
-                source_p_kw = float(total[0])
+        total = dss.Circuit.TotalPower()
+        if total:
+            source_p_kw = -float(total[0])
     except Exception:
         pass
 
@@ -6456,36 +6450,40 @@ def _dg_build_and_solve(in_data, frequency, controlmode='Time'):
         dss.Text.Command(command)
         opendss_commands.append(command)
 
-    try:
-        dss.Basic.ClearAll()
-    except Exception:
-        pass
-
     f = float(frequency or 50)
-    ext_scan = None
-    for _k, el in work.items():
-        if isinstance(el, dict) and str(el.get('typ', '')).startswith('External Grid'):
-            ext_scan = el
-            break
+    # The circuit source as the load flow builds it. The raw External Grid
+    # element lacks basekv/pu/angle, so every screening failed with 'basekv'.
+    ext_scan = _prescan_external_grid(
+        {k: el for k, el in work.items() if isinstance(el, dict)})
     try:
-        execute_dss_command(_new_circuit_command(ext_scan) if ext_scan else 'New Circuit.ElectrisimDG basefreq={}'.format(f))
-        execute_dss_command(f'set DefaultBaseFrequency={f}')
-        BusbarsDictVoltage, BusbarsDictConnectionToName = create_busbars(work, dss, False, opendss_commands)
-        element_dicts = create_other_elements(
-            work, dss, BusbarsDictVoltage, BusbarsDictConnectionToName, False, opendss_commands, execute_dss_command)
-        (LinesDict, LinesDictId, LoadsDict, LoadsDictId, TransformersDict, TransformersDictId,
-         Transformers3WDict, Transformers3WDictId,
-         ShuntsDict, ShuntsDictId, CapacitorsDict, CapacitorsDictId, GeneratorsDict, GeneratorsDictId,
-         StoragesDict, StoragesDictId, PVSystemsDict, PVSystemsDictId, ExternalGridsDict, ExternalGridsDictId,
-         circuit_source_element_name) = element_dicts
-        execute_dss_command('set Mode=Snapshot')
-        execute_dss_command('set Algorithm=Normal')
-        ctrl = 'Time' if (_in_data_needs_time_control(work) or str(controlmode).lower() == 'time') else str(controlmode or 'Static')
-        execute_dss_command(f'set ControlMode={ctrl}')
-        execute_dss_command('set MaxIterations=100')
-        execute_dss_command('set tolerance=0.0001')
-        execute_dss_command('solve')
-        converged = bool(dss.Solution.Converged())
+        # The load flow's ladder of attempts: a diverged solve leaves NaN that
+        # only a rebuild clears, and the first (Normal) one diverges on some
+        # networks Newton solves - this screening used to stop there, all NaN.
+        for plan in _opendss_snapshot_solve_plans('Normal', 100):
+            work = copy.deepcopy(in_data)
+            try:
+                dss.Basic.ClearAll()
+            except Exception:
+                pass
+            execute_dss_command(_new_circuit_command(ext_scan) if ext_scan else 'New Circuit.ElectrisimDG basefreq={}'.format(f))
+            execute_dss_command(f'set DefaultBaseFrequency={f}')
+            BusbarsDictVoltage, BusbarsDictConnectionToName = create_busbars(work, dss, False, opendss_commands)
+            element_dicts = create_other_elements(
+                work, dss, BusbarsDictVoltage, BusbarsDictConnectionToName, False, opendss_commands, execute_dss_command)
+            (LinesDict, LinesDictId, LoadsDict, LoadsDictId, TransformersDict, TransformersDictId,
+             Transformers3WDict, Transformers3WDictId,
+             ShuntsDict, ShuntsDictId, CapacitorsDict, CapacitorsDictId, GeneratorsDict, GeneratorsDictId,
+             StoragesDict, StoragesDictId, PVSystemsDict, PVSystemsDictId, ExternalGridsDict, ExternalGridsDictId,
+             circuit_source_element_name) = element_dicts
+            execute_dss_command('set Mode=Snapshot')
+            execute_dss_command(f"set Algorithm={plan['algorithm']}")
+            ctrl = 'Time' if (_in_data_needs_time_control(work) or str(controlmode).lower() == 'time') else str(controlmode or 'Static')
+            execute_dss_command(f'set ControlMode={ctrl}')
+            execute_dss_command(f"set MaxIterations={plan['max_iterations']}")
+            execute_dss_command('set tolerance=0.0001')
+            converged = _opendss_solve_snapshot_plan(dss, execute_dss_command, plan, GeneratorsDict)
+            if converged and _opendss_circuit_has_usable_solution(dss):
+                break
         bus_metrics, line_metrics, source_p_kw = _dg_collect_metrics(
             dss, BusbarsDictConnectionToName, LinesDict, LinesDictId, ExternalGridsDict)
         return {
@@ -6642,6 +6640,24 @@ def dg_interconnection_screening(in_data, params):
             'limiting_constraint_at_upper': last_lim,
         }
 
+    # Name places as the diagram labels them; OpenDSS knows only cell ids
+    # (bus names lower-cased), which the user cannot find on the drawing.
+    labels = {str(el.get('name')).lower(): str(el['userFriendlyName'])
+              for el in clean.values() if isinstance(el, dict) and el.get('userFriendlyName')}
+
+    def label(text):
+        if text is None:
+            return None
+        return re.sub(r'mxcell_\d+', lambda m: labels.get(m.group(0).lower(), m.group(0)),
+                      str(text), flags=re.IGNORECASE)
+
+    for check in list(checks or []) + list((inv_compare or {}).get('checks') or []):
+        check['location'] = label(check.get('location'))
+    if inv_compare and inv_compare.get('limiting_constraint'):
+        inv_compare['limiting_constraint'] = label(inv_compare['limiting_constraint'])
+    if hosting and hosting.get('limiting_constraint_at_upper'):
+        hosting['limiting_constraint_at_upper'] = label(hosting['limiting_constraint_at_upper'])
+
     # Restore note about original inv mode
     out = {
         'error': False,
@@ -6649,10 +6665,12 @@ def dg_interconnection_screening(in_data, params):
             'overall': overall,
             'proposed_kw': proposed_kw,
             'der_id': der_id,
+            'der_label': label(der_id),
             'der_type': der_type,
             'poc_bus_id': poc_bus_id,
+            'poc_bus_label': label(poc_bus_id),
             'converged': result_base.get('converged'),
-            'limiting_constraint': limiting,
+            'limiting_constraint': label(limiting),
             'original_inv_control_mode': original_inv,
         },
         'checks': checks,

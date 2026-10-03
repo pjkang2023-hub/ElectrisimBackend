@@ -3042,7 +3042,11 @@ def create_other_elements(in_data,net,x, Busbars):
     for x in _ordered_keys:
         if not isinstance(in_data[x], dict) or not isinstance(in_data[x].get('typ'), str):
             continue
-      
+        # Study settings ride in the same payload ("MotorStartingPandaPower
+        # Parameters" matched the Motor branch below and failed on 'bus').
+        if in_data[x]['typ'].endswith(' Parameters'):
+            continue
+
         #eval - rozwiazuje problem z wartosciami NaN
         if (in_data[x]['typ'].startswith("Line")):
             try:
@@ -3980,8 +3984,7 @@ def create_other_elements(in_data,net,x, Busbars):
             if 'in_service' in in_data[x]:
                 in_service = bool(in_data[x]['in_service']) if isinstance(in_data[x]['in_service'], bool) else (in_data[x]['in_service'] == 'true' or in_data[x]['in_service'] == True)
             
-            # Handle Irc_pu / lrc_pu - frontend sends Irc_pu, Pandapower expects lrc_pu
-            # Try both key names, handle None values
+            # The diagram's attribute is lrc_pu; older payloads spelt it Irc_pu.
             lrc_pu_value = in_data[x].get('lrc_pu') or in_data[x].get('Irc_pu')
             if lrc_pu_value is None or lrc_pu_value == 'None' or lrc_pu_value == '':
                 lrc_pu_value = None
@@ -3991,6 +3994,10 @@ def create_other_elements(in_data,net,x, Busbars):
             pp.create_motor(net, bus=bus_idx, name=in_data[x]['name'], id=in_data[x]['id'], 
                             pn_mech_mw=safe_float_local(in_data[x].get('pn_mech_mw'), 0.0),
                             cos_phi=safe_float_local(in_data[x].get('cos_phi'), 0.85),
+                            # The short circuit needs the rated power factor; it
+                            # was never passed, so any motor failed every max case.
+                            cos_phi_n=safe_float_local(in_data[x].get('cos_phi_n'), None)
+                            or safe_float_local(in_data[x].get('cos_phi'), 0.85),
                             efficiency_n_percent=safe_float_local(in_data[x].get('efficiency_n_percent'), 90.0),
                             lrc_pu=lrc_pu_value,
                             rx=safe_float_local(in_data[x].get('rx'), 0.0),
@@ -3998,9 +4005,12 @@ def create_other_elements(in_data,net,x, Busbars):
                             efficiency_percent=safe_float_local(in_data[x].get('efficiency_percent'), 90.0),
                             loading_percent=safe_float_local(in_data[x].get('loading_percent'), 100.0),
                             scaling=safe_float_local(in_data[x].get('scaling'), 1.0),
-                            in_service=in_service)         
-   
-        
+                            in_service=in_service)
+            if in_data[x].get('userFriendlyName'):
+                if not hasattr(net, 'user_friendly_names'):
+                    net.user_friendly_names = {}
+                net.user_friendly_names[in_data[x]['name']] = in_data[x]['userFriendlyName']
+
         if (in_data[x]['typ'].startswith("SVC")):
             bus_idx = Busbars.get(in_data[x]['bus'])
             if bus_idx is None:
@@ -11347,10 +11357,11 @@ def bess_sizing(net, bess_params):
         for idx in net.storage.index:
             # Try to match by name or bus
             storage_name = net.storage.at[idx, 'name'] if 'name' in net.storage.columns else None
+            storage_cell = net.storage.at[idx, 'id'] if 'id' in net.storage.columns else None
             storage_bus = net.storage.at[idx, 'bus']
             
-            # Match by storage ID (could be name or bus index)
-            if str(storage_id) == str(storage_name) or str(storage_id) == str(storage_bus):
+            # The dialog sends the diagram cell id; name and bus index are older forms.
+            if str(storage_id) in (str(storage_cell), str(storage_name), str(storage_bus)):
                 storage_idx = idx
                 break
         
@@ -11376,9 +11387,11 @@ def bess_sizing(net, bess_params):
         poc_bus_idx = None
         for idx in net.bus.index:
             bus_name = net.bus.at[idx, 'name'] if 'name' in net.bus.columns else None
+            bus_cell = net.bus.at[idx, 'id'] if 'id' in net.bus.columns else None
             
-            # Match by POC busbar ID
-            if str(poc_busbar_id) == str(bus_name) or str(poc_busbar_id) == str(idx):
+            # The dialog sends the diagram cell id; matching only the name fell
+            # back to the first bus whichever POC was chosen.
+            if str(poc_busbar_id) in (str(bus_cell), str(bus_name), str(idx)):
                 poc_bus_idx = idx
                 break
         
@@ -11412,8 +11425,19 @@ def bess_sizing(net, bess_params):
                 break
         
         if not ext_grid_at_poc:
-            print(f"WARNING: POC bus {poc_bus_idx} does not have an external grid!")
-            print(f"External grid is at bus {net.ext_grid.at[net.ext_grid.index[0], 'bus']}")
+            # P and Q are measured at the external grid, so any other POC
+            # would report the grid's exchange as if it were the POC's.
+            grid_buses = [net.bus.at[int(b), 'name'] for b in net.ext_grid['bus']]
+            labels = getattr(net, 'user_friendly_names', None) or {}
+            return json.dumps({
+                'error': 'BESS sizing sets P and Q where the network meets the External Grid. '
+                         "Choose the External Grid's bus as the POC ("
+                         + ', '.join(str(labels.get(n, n)) for n in grid_buses) + ').',
+                'bess_p_mw': None, 'bess_q_mvar': None, 'bess_s_mva': None,
+                'achieved_p_mw': None, 'achieved_q_mvar': None,
+                'error_p_mw': None, 'error_q_mvar': None,
+                'converged': False, 'iterations': 0,
+            })
         
         # Get storage limits from network
         max_p_mw = abs(net.storage.at[storage_idx, 'sn_mva']) if 'sn_mva' in net.storage.columns else 28.0
@@ -11522,6 +11546,10 @@ def _economic_get_load_profile(load_profile, time_steps):
         'industrial': np.array([0.1, 0.05, 0.05, 0.05, 0.1, 0.2, 0.6, 0.9, 1.0, 1.0, 1.0, 1.0,
                                1.0, 1.0, 1.0, 1.0, 1.0, 0.9, 0.7, 0.5, 0.3, 0.2, 0.1, 0.05]),
     }
+    if load_profile == 'constant':
+        # As the generation profile has it: the diagram's load every hour.
+        # The random variation below used to apply here too.
+        return np.ones(time_steps, dtype=float)
     t_arr = np.arange(time_steps)
     hour_arr = t_arr % 24
     month_idx = _economic_get_month_index(time_steps)
@@ -13315,9 +13343,9 @@ def _prot_apply_ocrelay_overrides(device, spec, grading_mode):
 
 def _prot_eval_oc_trip(spec, subtype, current_a, evaluator="oc_electrisim"):
     """Trip time for an ElectriSim-side OCR (IEEE curves or native-OCRelay fallback)."""
-    I_s = spec.get("I_s_a")
-    I_g = spec.get("I_g_a")
-    I_gg = spec.get("I_gg_a")
+    # A pickup of 0 A is unset, not "trip on any current".
+    I_s, I_g, I_gg = (v if v is not None and v > 0 else None
+                      for v in (spec.get("I_s_a"), spec.get("I_g_a"), spec.get("I_gg_a")))
     tms = spec.get("tms", 1.0)
     t_grade = spec.get("t_grade", 0.5)
     t_g = spec.get("t_g", 0.5)
@@ -13848,6 +13876,27 @@ def _attach_protection_devices(net, specs, grading_mode='auto'):
                 # OCRelay registered itself before it failed; unregister it so the
                 # relay is reported once, by the ElectriSim evaluator below.
                 _prot_drop_new_protection_rows(net, protection_index_before)
+                if spec.get('pickup_mode') != 'manual':
+                    # Automatic pickups come from OCRelay. Evaluating the
+                    # dialog's unset (zero) pickups instead tripped every relay
+                    # instantly for every fault, anywhere in the network.
+                    summaries.append({
+                        'switch_id': sw_id,
+                        'switch_name': spec.get('sw_name'),
+                        'user_friendly_name': spec.get('user_friendly_name'),
+                        'sw_idx': int(sw_idx),
+                        'kind': 'OCR', 'subtype': subtype, 'curve_type': curve_type,
+                        'pickup_mode': spec.get('pickup_mode'),
+                        'attached': False, 'not_computed': True,
+                        'reason': (
+                            f"Automatic pickup needs pandapower's OCRelay, which could not be built "
+                            f'({type(e).__name__}: {e}). Its topological grading requires every '
+                            "closed switch to sit on a line. Set this relay's pickup currents "
+                            'by hand (pickup mode Manual) to evaluate it.'
+                        ),
+                        'traceback': tb_text,
+                    })
+                    continue
                 summaries.append({
                     'switch_id': sw_id,
                     'switch_name': spec.get('sw_name'),
@@ -14402,8 +14451,19 @@ def _prot_switch_current_ka(net_sc, sw_idx, fault_bus_idx=None):
             result = getattr(net_sc, table)
             if element in result.index:
                 row = result.loc[element]
-                for col in ('ikss_ka', 'ikss_from_ka', 'ikss_to_ka',
-                            'ikss_hv_ka', 'ikss_lv_ka', 'ikss_mv_ka'):
+                # The current on the switch's own side: a transformer's HV
+                # current is its LV current scaled by the ratio, so taking
+                # whichever column came first made an LV-side breaker see
+                # 20/110 of its fault current.
+                sides = {'l': (('from_bus', 'ikss_from_ka'), ('to_bus', 'ikss_to_ka')),
+                         't': (('hv_bus', 'ikss_hv_ka'), ('lv_bus', 'ikss_lv_ka')),
+                         't3': (('hv_bus', 'ikss_hv_ka'), ('mv_bus', 'ikss_mv_ka'),
+                                ('lv_bus', 'ikss_lv_ka'))}[et]
+                elements = {'l': net_sc.line, 't': net_sc.trafo, 't3': net_sc.trafo3w}[et]
+                own = [col for bus_col, col in sides
+                       if element in elements.index
+                       and int(elements.at[element, bus_col]) == int(sw.get('bus'))]
+                for col in own + ['ikss_ka'] + [col for _, col in sides]:
                     if col in row.index and pd.notna(row[col]):
                         return abs(float(row[col]))
     except Exception:
@@ -14651,6 +14711,11 @@ def _prot_run_scenario(base_net, sc_line_id, sc_fraction, fault_type, case, atta
 
     try:
         net_sc = create_sc_bus(deepcopy(base_net), sc_line_id=int(sc_line_id), sc_fraction=float(sc_fraction))
+        # pandapower (3.3) moves every switch whose element number is the
+        # line's onto the new line half - transformer and bus switches too, so
+        # a transformer switch then named a transformer that does not exist.
+        not_line = base_net.switch.index[base_net.switch['et'] != 'l']
+        net_sc.switch.loc[not_line, 'element'] = base_net.switch.loc[not_line, 'element']
     except Exception as e:
         return {
             'sc_line_id': int(sc_line_id),

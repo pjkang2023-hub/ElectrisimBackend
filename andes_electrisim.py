@@ -155,6 +155,37 @@ def _model_kwargs(
     }
 
 
+def tds_values(ss, var) -> np.ndarray:
+    """Recorded time-domain values of an ANDES variable, one column per element.
+
+    States and algebraic variables are numbered separately, so their addresses
+    index ``dae.ts.x`` and ``dae.ts.y`` respectively. (``TDS.plt`` is None
+    under a server in ANDES 2, and its columns are offset by time and by the
+    states, so raw addresses read the wrong variables there.)
+    """
+    data = ss.dae.ts.x if var.v_code == "x" else ss.dae.ts.y
+    return np.asarray(data, dtype=float)[:, list(var.a)]
+
+
+def _check_init(ss, warnings: List[str]) -> None:
+    """Warn when the dynamic models do not start in steady state.
+
+    ANDES marks the system initialised even when its own residual check
+    fails, so results then begin with a spurious transient.
+    """
+    if not ss.TDS.initialized:
+        ss.TDS.init()
+    fg = np.asarray(ss.dae.fg, dtype=float)
+    mismatch = float(np.max(np.abs(fg))) if fg.size else 0.0
+    if mismatch > 1e-3:
+        warnings.append(
+            f"The dynamic models could not be initialised from the power flow "
+            f"(largest mismatch {mismatch:.3g} pu), so the results start with a "
+            "transient that is not caused by any event. Check generator setpoints "
+            "and reactive limits, and the machine and exciter data."
+        )
+
+
 def _clean_num(v: Any) -> Any:
     if v is None:
         return None
@@ -198,9 +229,15 @@ def _iter_elements(in_data: Dict[str, Any]):
 def build_system(
     in_data: Dict[str, Any],
     params: Optional[Dict[str, Any]] = None,
+    exclude_motors: Optional[set] = None,
+    setup: bool = True,
 ) -> Tuple[Any, Dict[str, Any]]:
     """
     Build an ANDES System from Electrisim JSON.
+
+    Motors are static loads; exclude_motors names the ones a caller models
+    itself (dynamic motor starting), so they are not counted twice. With
+    setup=False the caller can add devices before calling ss.setup().
 
     Returns (ss, meta) where meta includes bus_map, line_map, gen_map, defaults_applied, warnings.
     """
@@ -380,12 +417,73 @@ def build_system(
         )
         line_map[name] = line_idx
 
+    # --- Three-winding transformers as a star of three trans=1 Lines ---
+    # Same equivalent as pandapower: a star-point bus at HV voltage, the pair
+    # short-circuit impedances (each on the smaller rating of its pair) split
+    # into branch impedances, resistive and reactive parts separately.
     for _, el, typ in _iter_elements(in_data):
-        if typ.startswith("Three Winding Transformer"):
-            warnings.append(
-                f"Skipped Three Winding Transformer '{el.get('userFriendlyName', el.get('name'))}' "
-                "(simplified mapping not included in MVP)."
+        if not typ.startswith("Three Winding Transformer"):
+            continue
+        name = el.get("name")
+        label = str(el.get("userFriendlyName") or name)
+        ends = [bus_map.get(el.get(k)) for k in ("hv_bus", "mv_bus", "lv_bus")]
+        if any(b is None for b in ends):
+            warnings.append(f"Skipped Three Winding Transformer '{label}': missing HV/MV/LV bus.")
+            continue
+        sn = [_sf(el.get(f"sn_{w}_mva"), 0.0) for w in ("hv", "mv", "lv")]
+        if min(sn) <= 0:
+            warnings.append(f"Skipped Three Winding Transformer '{label}': missing winding ratings.")
+            continue
+        vn = [_sf(el.get(f"vn_{w}_kv"), bus_vn.get(b, 0.0)) for w, b in zip(("hv", "mv", "lv"), ends)]
+
+        def _pair(w: str, a: int, b: int) -> complex:
+            vk = _sf(el.get(f"vk_{w}_percent"), 0.0)
+            vkr = _sf(el.get(f"vkr_{w}_percent"), 0.0)
+            scale = sn_base / min(sn[a], sn[b]) / 100.0
+            return complex(vkr, math.sqrt(max(vk ** 2 - vkr ** 2, 0.0))) * scale
+
+        # pandapower naming: vk_hv = HV-MV, vk_mv = MV-LV, vk_lv = HV-LV.
+        z_hm, z_ml, z_hl = _pair("hv", 0, 1), _pair("mv", 1, 2), _pair("lv", 0, 2)
+        z_star = [0.5 * (z_hm + z_hl - z_ml), 0.5 * (z_hm + z_ml - z_hl), 0.5 * (z_hl + z_ml - z_hm)]
+        if any(abs(z) == 0 for z in z_star):
+            defaults_applied.append(f"Three Winding Transformer '{label}': zero branch impedance, used x=0.001 pu.")
+
+        star = bus_counter
+        bus_counter += 1
+        u = 1 if _sb(el.get("in_service"), True) else 0
+        # Kept out of bus_name_by_idx, so results never list it.
+        ss.add("Bus", idx=star, name=f"{label} star point", Vn=vn[0], u=u, v0=1.0, a0=0.0)
+        bus_vn[star] = vn[0]
+
+        tap = {"hv": 1.0, "mv": 1.0, "lv": 1.0}
+        tap_step = _sf(el.get("tap_step_percent"), 0.0)
+        side = str(el.get("tap_side") or "hv").lower()
+        if tap_step != 0 and side in tap:
+            tap[side] = 1.0 + (_sf(el.get("tap_pos"), 0.0) - _sf(el.get("tap_neutral"), 0.0)) * tap_step / 100.0
+
+        for w, bus, v, z in zip(("hv", "mv", "lv"), ends, vn, z_star):
+            # The HV branch runs bus -> star; MV and LV run star -> bus.
+            bus1, bus2, vn1, vn2 = (bus, star, v, vn[0]) if w == "hv" else (star, bus, vn[0], v)
+            ss.add(
+                "Line",
+                idx=f"Trafo3w_{name}_{w}",
+                name=f"{label} ({w.upper()})",
+                bus1=bus1,
+                bus2=bus2,
+                r=z.real,
+                x=z.imag if abs(z) > 0 else 0.001,
+                b=0.0,
+                g=0.0,
+                Vn1=vn1,
+                Vn2=vn2,
+                Sn=sn_base,
+                fn=freq,
+                trans=1,
+                tap=tap[w],
+                phi=0.0,
+                u=u,
             )
+        line_map[name] = f"Trafo3w_{name}_hv"
 
     # --- Loads (PQ) ---
     pq_i = 0
@@ -412,6 +510,42 @@ def build_system(
             q0=q_mvar / sn_base,
             Vn=bus_vn.get(bus, 110.0),
             u=u,
+        )
+
+    # --- Storage: a fixed P/Q, positive while charging (pandapower's sign) ---
+    for _, el, typ in _iter_elements(in_data):
+        if not typ.startswith("Storage"):
+            continue
+        bus = bus_map.get(el.get("bus"))
+        if bus is None or not _sb(el.get("in_service"), True):
+            continue
+        pq_i += 1
+        scaling = _sf(el.get("scaling"), 1.0)
+        ss.add(
+            "PQ", idx=f"PQ_{pq_i}", name=str(el.get("userFriendlyName") or el.get("name")),
+            bus=bus, Vn=bus_vn.get(bus, 110.0),
+            p0=_sf(el.get("p_mw")) * scaling / sn_base,
+            q0=_sf(el.get("q_mvar")) * scaling / sn_base,
+        )
+
+    # --- Motors: the load pandapower gives them in a power flow ---
+    for _, el, typ in _iter_elements(in_data):
+        if not typ.startswith("Motor") or "Parameters" in typ:
+            continue
+        if exclude_motors and str(el.get("name")) in exclude_motors:
+            continue
+        bus = bus_map.get(el.get("bus"))
+        if bus is None or not _sb(el.get("in_service"), True):
+            continue
+        eff = _sf(el.get("efficiency_percent"), 100.0) or 100.0
+        p_mw = (_sf(el.get("pn_mech_mw")) * _sf(el.get("loading_percent"), 100.0) / eff
+                * _sf(el.get("scaling"), 1.0))
+        cos_phi = min(max(_sf(el.get("cos_phi"), 0.85), 1e-3), 1.0)
+        pq_i += 1
+        ss.add(
+            "PQ", idx=f"PQ_{pq_i}", name=str(el.get("userFriendlyName") or el.get("name")),
+            bus=bus, Vn=bus_vn.get(bus, 110.0),
+            p0=p_mw / sn_base, q0=p_mw * math.tan(math.acos(cos_phi)) / sn_base,
         )
 
     # --- Shunts / capacitors ---
@@ -598,12 +732,21 @@ def build_system(
                 xd1=_dyn("dyn_xd1", _DEFAULT_GENROU["xd1"], ("xd1",)),
                 xq1=_dyn("dyn_xq1", _DEFAULT_GENROU["xq1"], ("xq1",)),
                 xd2=_dyn("dyn_xd2", _DEFAULT_GENROU["xd2"], ("xd2", "xdss_pu")),
-                xq2=_dyn("dyn_xq2", _DEFAULT_GENROU["xq2"], ("xq2",)),
                 Td10=_dyn("dyn_Td10", _DEFAULT_GENROU["Td10"], ("Td10",)),
                 Td20=_dyn("dyn_Td20", _DEFAULT_GENROU["Td20"], ("Td20",)),
                 Tq10=_dyn("dyn_Tq10", _DEFAULT_GENROU["Tq10"], ("Tq10",)),
                 Tq20=_dyn("dyn_Tq20", _DEFAULT_GENROU["Tq20"], ("Tq20",)),
             )
+            # ANDES's GENROU has no subtransient saliency: with xq2 != xd2 it
+            # cannot initialise. xd2 can come from the short-circuit xdss_pu,
+            # so a fixed xq2 default broke every generator that had one.
+            xq2_given = _sf(el.get("dyn_xq2", el.get("xq2")), 0.0)
+            if xq2_given > 0 and abs(xq2_given - kw["xd2"]) > 1e-9:
+                defaults_applied.append(
+                    f"Generator '{ufname}': GENROU needs xq'' = xd'', so xq2={xq2_given:g} "
+                    f"was replaced by xd2={kw['xd2']:g}."
+                )
+            kw["xq2"] = kw["xd2"]
             ss.add("GENROU", **kw)
 
         if used_defaults:
@@ -706,9 +849,19 @@ def build_system(
                     pass
         plant_kind = (el.get("dyn_plant_kind") or "NONE").strip().upper()
         if plant_kind in ("", "NONE", "OFF"):
+            # Still part of the power flow, as pandapower has it: a fixed P/Q
+            # injection. Dropping it took its output out of the network.
+            ufname = str(el.get("userFriendlyName") or el.get("name"))
+            scaling = _sf(el.get("scaling"), 1.0)
+            pq_i += 1
+            ss.add(
+                "PQ", idx=f"PQ_{pq_i}", name=ufname, bus=bus, Vn=bus_vn.get(bus, 110.0),
+                p0=-_sf(el.get("p_mw")) * scaling / sn_base,
+                q0=-_sf(el.get("q_mvar")) * scaling / sn_base,
+            )
             warnings.append(
-                f"Static Generator '{el.get('userFriendlyName', el.get('name'))}' "
-                "has no ANDES dynamic plant model (omitted from dynamic models)."
+                f"Static Generator '{ufname}' has no ANDES dynamic plant model: "
+                "modelled as a fixed P/Q injection."
             )
             continue
         if plant_kind not in ("IBR", "WIND", "PVD1", "ESD1"):
@@ -865,7 +1018,8 @@ def build_system(
         else:
             warnings.append(f"Generator trip target '{toggle_gen}' not found; no Toggle applied.")
 
-    ss.setup()
+    if setup:
+        ss.setup()
 
     meta = {
         "bus_map": bus_map,
@@ -894,7 +1048,7 @@ def _extract_syn_series(ss, model_name: str, var_name: str, names: List[str]) ->
     if not addrs:
         return []
     try:
-        values = np.asarray(ss.TDS.plt.get_values(addrs), dtype=float)
+        values = tds_values(ss, var)
     except Exception:
         return []
     series = []
@@ -962,6 +1116,7 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
             except Exception:
                 pass
 
+        _check_init(ss, meta["warnings"])
         tds_ok = bool(ss.TDS.run())
         t = np.asarray(ss.dae.ts.t, dtype=float)
         max_pts = int(_sf(params.get("max_points"), 800))
@@ -981,7 +1136,7 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
             addrs = list(getattr(model, var_name).a)
             if not addrs:
                 return []
-            values = np.asarray(ss.TDS.plt.get_values(addrs), dtype=float)
+            values = tds_values(ss, getattr(model, var_name))
             out = []
             for i in range(len(addrs)):
                 col = values[:, i] if values.ndim == 2 else values
@@ -1007,11 +1162,13 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
         bus_v = []
         if ss.Bus.n > 0 and hasattr(ss.Bus, "v"):
             addrs = list(ss.Bus.v.a)
-            values = np.asarray(ss.TDS.plt.get_values(addrs), dtype=float)
+            values = tds_values(ss, ss.Bus.v)
             for i in range(len(addrs)):
                 col = values[:, i] if values.ndim == 2 else values
                 col = col[idx]
                 bidx = ss.Bus.idx.v[i]
+                if str(bidx) not in meta["bus_name_by_idx"]:
+                    continue  # a three-winding transformer's star point
                 bus_v.append({
                     "id": str(bidx),
                     "name": meta["bus_name_by_idx"].get(str(bidx), str(ss.Bus.name.v[i])),
@@ -1167,6 +1324,7 @@ def run_eig(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
                 "warnings": meta["warnings"],
             })
 
+        _check_init(ss, meta["warnings"])
         eig_ok = bool(ss.EIG.run())
         mu = np.asarray(ss.EIG.mu, dtype=complex)
 

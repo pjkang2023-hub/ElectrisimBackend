@@ -406,6 +406,14 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
         br["pass"] = ok
         br["thermal_limit_percent"] = thermal_limit
 
+    # Report elements by their diagram labels; the pandapower names are cell
+    # ids ("mxCell_918"). Result boxes find their cells by id.
+    labels = getattr(net, "user_friendly_names", None) or {}
+    for row in bus_results + motor_results + branches:
+        for key in ("name", "bus_name"):
+            if row.get(key) in labels:
+                row[key] = labels[row[key]]
+
     return {
         "mode": "steady",
         "buses": bus_results,
@@ -440,7 +448,8 @@ def _motor_el_from_in_data(in_data: Dict[str, Any], motor_ids: Optional[Set[str]
         if not isinstance(el, dict):
             continue
         typ = str(el.get("typ", ""))
-        if not typ.startswith("Motor"):
+        # "MotorStartingPandaPower Parameters" is the study's settings row.
+        if not typ.startswith("Motor") or "Parameters" in typ:
             continue
         mid = str(el.get("id") or el.get("name") or "")
         name = str(el.get("name") or mid)
@@ -563,13 +572,6 @@ def _dynamic_start_rebuild(
 
     try:
         andes.config_logger(stream_level=40)
-        # Monkey-patch: build_system always setups. Rebuild by copying approach —
-        # call build_system then create a NEW system... Better: use andes_electrisim.build_system
-        # but we need motors before setup. Implement local build using andes_electrisim internals
-        # by temporarily injecting motors into in_data as a side channel.
-
-        # Practical approach: modify build_system usage — build, then create fresh System
-        # from the same in_data by calling a helper that adds motors before setup.
         ss, meta, motor_map = _build_system_with_motors(in_data, dyn_params, motors, method, t_start, warnings)
         warnings.extend(meta.get("warnings") or [])
     except Exception as e:
@@ -619,10 +621,12 @@ def _dynamic_start_rebuild(
         if hasattr(ss, "Bus") and ss.Bus.n > 0:
             vvar = ss.Bus.v
             addrs = list(vvar.a)
-            values = np.asarray(ss.TDS.plt.get_values(addrs), dtype=float)
+            values = andes_electrisim.tds_values(ss, vvar)
             for i, addr in enumerate(addrs):
                 col = values[:, i] if values.ndim == 2 else values
                 bidx = ss.Bus.idx.v[i]
+                if bus_name_by_idx and str(bidx) not in bus_name_by_idx:
+                    continue  # a three-winding transformer's star point
                 electrisim_name = bus_name_by_idx.get(str(bidx), str(ss.Bus.name.v[i]))
                 # Prefer electrisim id from bus_map reverse via name
                 eid = electrisim_name
@@ -651,7 +655,7 @@ def _dynamic_start_rebuild(
                     return None
                 var = getattr(m, var_name)
                 addrs = list(var.a)
-                vals = np.asarray(ss.TDS.plt.get_values(addrs), dtype=float)
+                vals = andes_electrisim.tds_values(ss, var)
                 return vals
 
             id_vals = _series("Id")
@@ -795,29 +799,13 @@ def _build_system_with_motors(
     Build ANDES system like andes_electrisim.build_system but insert Motor3 + Toggle
     before ss.setup().
     """
-    # Strategy: temporarily wrap andes.System.add / use build then reconstruct.
-    # Cleanest reliable way: copy build_system source flow by calling it after
-    # monkeypatching System.setup to no-op, add motors, then setup.
-
-    real_setup = None
-    setup_calls = []
-
-    class _SystemProxy:
-        pass
-
-    # Use andes_electrisim.build_system with patched setup
-    original_system = andes.System
-
-    class SystemNoSetup(original_system):
-        def setup(self, *args, **kwargs):
-            setup_calls.append(self)
-            return self
-
-    andes.System = SystemNoSetup
-    try:
-        ss, meta = andes_electrisim.build_system(in_data, params)
-    finally:
-        andes.System = original_system
+    # Motor3 and Toggle must exist before setup. (This used to swap in an
+    # andes.System subclass whose setup() did nothing - and the final
+    # ss.setup() below was that same no-op, so the system was never set up
+    # and every dynamic start failed.) The started motors are Motor3
+    # machines, not loads.
+    ss, meta = andes_electrisim.build_system(
+        in_data, params, exclude_motors={str(el.get("name")) for el in motors}, setup=False)
 
     bus_map = meta["bus_map"]
     motor_map: Dict[str, Dict[str, Any]] = {}

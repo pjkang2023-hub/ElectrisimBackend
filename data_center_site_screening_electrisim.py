@@ -92,6 +92,21 @@ def _count_violations(
     max_loading_percent: float,
 ) -> Tuple[int, List[Dict[str, Any]]]:
     violations = []
+    # An outage that islands buses leaves them without a voltage (NaN), which
+    # no limit catches - losing a radial feeder's supply counted as no
+    # violation at all. Loss of supply is a violation whatever is checked.
+    if hasattr(net, "res_bus") and not net.res_bus.empty:
+        in_service = net.bus.index[net.bus.in_service]
+        dead = net.res_bus.loc[net.res_bus.index.intersection(in_service)]
+        for bus_idx, row in dead[dead.vm_pu.isna()].iterrows():
+            raw, nm = _named(net, net.bus, bus_idx)
+            violations.append({
+                "kind": "Bus",
+                "id": raw,
+                "name": nm,
+                "text": "de-energised",
+                "limit": "supplied",
+            })
     if voltage_limits and hasattr(net, "res_bus") and not net.res_bus.empty:
         bad = net.res_bus[(net.res_bus.vm_pu < min_vm_pu) | (net.res_bus.vm_pu > max_vm_pu)]
         for bus_idx, row in bad.iterrows():
