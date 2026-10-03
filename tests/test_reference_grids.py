@@ -1647,14 +1647,18 @@ def test_site_screening_charges_the_site_only_what_it_adds(client, quiet):
 
 # --- arc flash -------------------------------------------------------------------
 
-def _arc_flash(client, quiet, mode):
-    request = _study_request('reference_transmission', {
+def _arc_flash(client, quiet, mode, grid):
+    request = _study_request(grid, {
         'typ': 'ArcFlashPandaPower Parameters', 'electrode_config': 'VCB', 'equipment_mode': mode,
         'working_distance_mm': '455', 'conductor_gap_mm': '25', 'enclosure_height_mm': '508',
         'enclosure_width_mm': '508', 'enclosure_depth_mm': '508',
         'clearing_time_s': '0.2', 'clearing_time_min_s': '0.2'})
     result = _post_study(client, quiet, request)
-    return {row['name']: row for row in result['arc_flash']}
+    rows = {row['name']: row for row in result['arc_flash']}
+    with open(os.path.join(REFERENCE_DIR, f'{grid}.spec.json'), encoding='utf-8') as handle:
+        spec = json.load(handle)
+    assert set(rows) == {_bus_label(spec, b['id']) for b in spec['buses']}, 'every bus is studied'
+    return rows
 
 
 def _lee(row, distance_mm, t_s=0.2):
@@ -1678,7 +1682,8 @@ def _ieee1584(row, gap, distance, enclosure, t_s=0.2):
     return max(energies)
 
 
-def test_arc_flash_by_voltage_class(client, quiet):
+@pytest.mark.parametrize('grid', GRIDS)
+def test_arc_flash_by_voltage_class(client, quiet, grid):
     """
     Every bus was studied as an LV panel (25 mm gap at 455 mm), 10 kV
     switchgear included, and Ralph Lee's J/cm² was reported as cal/cm² with
@@ -1686,7 +1691,7 @@ def test_arc_flash_by_voltage_class(client, quiet):
     busbar instead of 33 cal/cm² and 4.8 m. Each bus now gets the typical
     equipment of its voltage class (IEEE 1584-2018 Table 8).
     """
-    rows = _arc_flash(client, quiet, 'by_voltage')
+    rows = _arc_flash(client, quiet, 'by_voltage', grid)
     assert {r['method'] for n, r in rows.items() if r['vn_kv'] > 15} == {'RalphLee'}
     for name, row in rows.items():
         if row['vn_kv'] > 15:
@@ -1703,14 +1708,21 @@ def test_arc_flash_by_voltage_class(client, quiet):
         assert row['incident_energy_cal_cm2'] == pytest.approx(energy, rel=1e-6), name
         if boundary is not None:
             assert row['arc_flash_boundary_mm'] == pytest.approx(boundary, rel=1e-6), name
-    assert rows['20 kV busbar 1']['incident_energy_cal_cm2'] == pytest.approx(32.7, abs=0.1)
-    assert rows['20 kV busbar 1']['ppe_category'] == '4'
-    assert rows['10 kV station supply']['equipment_class'] == '15 kV switchgear'
+    if grid == 'reference_transmission':
+        assert rows['20 kV busbar 1']['incident_energy_cal_cm2'] == pytest.approx(32.7, abs=0.1)
+        assert rows['20 kV busbar 1']['ppe_category'] == '4'
+        assert rows['10 kV station supply']['equipment_class'] == '15 kV switchgear'
+    else:
+        assert rows['20 kV substation']['incident_energy_cal_cm2'] == pytest.approx(24.93, abs=0.01)
+        assert rows['20 kV substation']['ppe_category'] == '3'
+        assert rows['LV network A']['incident_energy_cal_cm2'] == pytest.approx(6.50, abs=0.01)
+        assert rows['110 kV supply']['ppe_category'] == 'Dangerous'
 
 
-def test_arc_flash_uniform_equipment(client, quiet):
+@pytest.mark.parametrize('grid', GRIDS)
+def test_arc_flash_uniform_equipment(client, quiet, grid):
     """The values entered apply to every bus when asked for; Lee in cal/cm² still."""
-    rows = _arc_flash(client, quiet, 'uniform')
+    rows = _arc_flash(client, quiet, 'uniform', grid)
     for name, row in rows.items():
         assert row['working_distance_mm'] == 455, name
         if row['vn_kv'] > 15:
@@ -1720,4 +1732,5 @@ def test_arc_flash_uniform_equipment(client, quiet):
         else:
             assert row['incident_energy_cal_cm2'] == pytest.approx(
                 _ieee1584(row, 25, 455, (508, 508, 508)), rel=1e-6), name
-    assert rows['20 kV busbar 1']['incident_energy_cal_cm2'] == pytest.approx(130.9, abs=0.1)
+    if grid == 'reference_transmission':
+        assert rows['20 kV busbar 1']['incident_energy_cal_cm2'] == pytest.approx(130.9, abs=0.1)
