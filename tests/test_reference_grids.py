@@ -137,6 +137,37 @@ def _zero_sequence(net, trafos, trafo3w=None, lines=None, endtemps=None):
         net.line.loc[idx, ['endtemp_degree']] = (endtemps or {}).get(idx, 80.0)
 
 
+def _opf_data(net, prices):
+    """
+    What the spec reference documents for the optimal power flow, written out:
+    buses held to 0.9-1.1 pu; the grid free to import or export; generators
+    dispatchable from nothing to their rating, with the reactive power their
+    rated power factor allows; priced static generators curtailable from their
+    p_mw down, with reactive power up to power factor 0.9 at their rating;
+    storage fixed. prices maps
+    (table, index) -> cost per MWh.
+    """
+    import math
+    net.bus['min_vm_pu'] = 0.9
+    net.bus['max_vm_pu'] = 1.1
+    net.ext_grid['min_p_mw'] = -1e6
+    net.ext_grid['max_p_mw'] = 1e6
+    for idx in net.gen.index:
+        sn = float(net.gen.at[idx, 'sn_mva'])
+        q = round(sn * math.sin(math.acos(float(net.gen.at[idx, 'cos_phi']))), 6)
+        net.gen.loc[idx, ['controllable', 'min_p_mw', 'max_p_mw', 'min_q_mvar', 'max_q_mvar']] =             (True, 0.0, sn, -q, q)
+    for idx in net.sgen.index:
+        controllable = ('sgen', idx) in prices
+        net.sgen.loc[idx, ['controllable']] = controllable
+        if controllable:
+            p = float(net.sgen.at[idx, 'p_mw'])
+            q = round(float(net.sgen.at[idx, 'sn_mva']) * math.sin(math.acos(0.9)), 6)
+            net.sgen.loc[idx, ['min_p_mw', 'max_p_mw', 'min_q_mvar', 'max_q_mvar']] = (0.0, p, -q, q)
+    net.storage['controllable'] = False
+    for (table, idx), cost in prices.items():
+        pp.create_poly_cost(net, idx, table, cp1_eur_per_mw=cost)
+
+
 def hand_built_transmission():
     """reference_transmission.spec.json, with the documented defaults written out."""
     h = _Builder(50.0)
@@ -204,6 +235,8 @@ def hand_built_transmission():
                    trafo3w={ids['trafo3w']['T3W']: 'YNynd'},
                    lines={ids['line']['L_HV']: (0.35, 1.25, 5.0)},
                    endtemps={ids['line']['L_HV']: 70.0})
+    _opf_data(net, {('ext_grid', ids['ext_grid']['Grid']): 60.0, ('gen', ids['gen']['G1']): 45.0,
+                    ('sgen', ids['sgen']['PV']): 0.0, ('sgen', ids['sgen']['WF']): 0.0})
     for ident, bus, element, et, closed in (
             ('CB_LHV', 'HV', ids['line']['L_HV'], 'l', True),
             ('CB_T3W', 'HV', ids['trafo3w']['T3W'], 't3', True),
@@ -259,6 +292,8 @@ def hand_built_radial():
 
     ids = h.ids
     _zero_sequence(net, {ids['trafo']['T1']: 'Dyn', ids['trafo']['TA']: 'Dyn'})
+    _opf_data(net, {('ext_grid', ids['ext_grid']['Grid']): 50.0, ('gen', ids['gen']['GE']): 80.0,
+                    ('sgen', ids['sgen']['WF']): 0.0, ('sgen', ids['sgen']['PV']): 0.0})
     for ident, element, et in (('CB_T1', ids['trafo']['T1'], 't'),
                                ('CB_A', ids['line']['LA1'], 'l'),
                                ('CB_B', ids['line']['LB1'], 'l'),
@@ -477,8 +512,10 @@ SPEC_LISTS = {
     'trafo3w': 'three_winding_transformers', 'ext_grid': 'external_grids', 'gen': 'generators',
 }
 # The diagram carries every value as text and the backend rebuilds the network
-# from it, so this allows for rounding only.
-DRAWN_TOL = 1e-8
+# from it, so this allows for rounding and solver tolerance only: pandapower's
+# load flow converges to a 1e-8 MVA mismatch, and a column the solver does not
+# use - a generator's reactive limits - moves its last digits by about 5e-8.
+DRAWN_TOL = 1e-6
 
 
 @pytest.mark.parametrize('grid', GRIDS)
@@ -893,6 +930,11 @@ def test_minimum_case_names_missing_line_temperature(client, quiet):
 
 # --- optimal power flow ----------------------------------------------------------
 
+# The interior-point solver stops within its own tolerance; the backend and a
+# plain runopp land this close on the same network.
+OPF_P_TOL = 1e-3      # MW
+OPF_COST_TOL = 1e-2   # per hour
+
 # Spec lists whose elements the OPF request must carry, by the request's type.
 OPF_ELEMENTS = {
     'lines': 'Line', 'transformers': 'Transformer',
@@ -905,14 +947,13 @@ OPF_ELEMENTS = {
 @pytest.mark.parametrize('grid', GRIDS)
 def test_drawn_diagram_optimal_power_flow(client, quiet, grid):
     """
-    The OPF request carries the whole drawn network and solves on it.
+    The minimum-cost OPF on the drawn network: the whole network is sent and
+    every source is dispatched as pandapower dispatches the spec.
 
     Its builder read a line's buses from the line's own ends and sent no
     switches, so everything behind a breaker came back isolated and the OPF
     failed; it also left out wind turbines, shunt reactors and capacitor
-    banks. An OPF optimum is not unique, so this checks the network rather
-    than the numbers: every element sent, every bus energised, every source
-    reported by its label.
+    banks. And the spec's prices and limits had no way onto the drawing.
     """
     with open(os.path.join(REFERENCE_DIR, f'{grid}.diagram_opf_payload.json'),
               encoding='utf-8') as handle:
@@ -943,3 +984,27 @@ def test_drawn_diagram_optimal_power_flow(client, quiet, grid):
     for key in ('generators', 'static_generators', 'external_grids'):
         for element in spec.get(key, []):
             assert str(element.get('name') or element['id']) in reported, reported
+
+    # The minimum-cost dispatch: the request carries the spec's prices, so each
+    # source must be dispatched as pandapower dispatches the spec. Only active
+    # power is priced, so reactive power has many equally cheap optima and is
+    # not compared.
+    params = next(v for v in sent if 'Parameters' in str(v.get('typ')))
+    assert params['cost_function'] == 'polynomial'
+    net, _ = sld.build_network(spec)
+    pp.runopp(net, calculate_voltage_angles='auto', init='pf', delta=1e-16, trafo_model='t',
+              trafo_loading='current', ac_line_model='pi')
+    ids = spec_ids(net)
+    drawn = {str(r['name']).rsplit(' (', 1)[0]: float(r['p_mw'])
+             for key in ('generators', 'staticgenerators', 'externalgrids') for r in result.get(key, [])}
+    differ = []
+    for key, table in (('external_grids', 'ext_grid'), ('generators', 'gen'),
+                       ('static_generators', 'sgen')):
+        for element in spec.get(key, []):
+            want = float(net[f'res_{table}'].at[ids[table][element['id']], 'p_mw'])
+            got = drawn[str(element.get('name') or element['id'])]
+            if abs(got - want) > OPF_P_TOL:
+                differ.append(f"{key} {element['id']}: {got} MW drawn, {want} MW for the spec")
+    if abs(float(result['total_cost']) - float(net.res_cost)) > OPF_COST_TOL:
+        differ.append(f"total cost {result['total_cost']} drawn, {net.res_cost} for the spec")
+    assert not differ, f'{grid}:\n  ' + '\n  '.join(differ)

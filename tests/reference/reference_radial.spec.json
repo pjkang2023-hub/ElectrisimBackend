@@ -13,7 +13,8 @@
     {"id": "C1", "vn_kv": 20, "name": "Wind connection"}
   ],
   "external_grids": [
-    {"id": "Grid", "bus": "GRID", "vm_pu": 1.0, "s_sc_max_mva": 3000, "rx_max": 0.1}
+    {"id": "Grid", "bus": "GRID", "vm_pu": 1.0, "s_sc_max_mva": 3000, "rx_max": 0.1,
+     "cost_per_mwh": 50}
   ],
   "transformers": [
     {"id": "T1", "hv_bus": "GRID", "lv_bus": "SUB", "sn_mva": 40, "name": "Main transformer"},
@@ -34,11 +35,13 @@
     {"id": "LD_B1", "bus": "B1", "p_mw": 2.0, "q_mvar": 0.8, "name": "Factory"}
   ],
   "generators": [
-    {"id": "GE", "bus": "B2", "p_mw": 1.5, "vm_pu": 1.0, "name": "Gas engine"}
+    {"id": "GE", "bus": "B2", "p_mw": 1.5, "vm_pu": 1.0, "name": "Gas engine",
+     "cost_per_mwh": 80}
   ],
   "static_generators": [
-    {"id": "WF", "bus": "C1", "p_mw": 3.0, "kind": "wind", "name": "Wind farm C", "k": 1.3},
-    {"id": "PV", "bus": "LVA", "p_mw": 0.1, "name": "Rooftop PV"}
+    {"id": "WF", "bus": "C1", "p_mw": 3.0, "kind": "wind", "name": "Wind farm C", "k": 1.3,
+     "cost_per_mwh": 0},
+    {"id": "PV", "bus": "LVA", "p_mw": 0.1, "name": "Rooftop PV", "cost_per_mwh": 0}
   ],
   "shunts": [
     {"id": "CAP", "bus": "B1", "q_mvar": -0.6, "name": "Capacitor bank"}

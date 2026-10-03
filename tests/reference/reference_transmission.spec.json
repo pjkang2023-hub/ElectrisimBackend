@@ -16,7 +16,7 @@
   ],
   "external_grids": [
     {"id": "Grid", "bus": "HV", "vm_pu": 1.02, "s_sc_max_mva": 5000, "rx_max": 0.1,
-     "x0x_max": 2.5, "r0x0_max": 0.2,
+     "x0x_max": 2.5, "r0x0_max": 0.2, "cost_per_mwh": 60,
      "name": "Utility 110 kV"}
   ],
   "three_winding_transformers": [
@@ -53,12 +53,12 @@
   ],
   "generators": [
     {"id": "G1", "bus": "MV2", "p_mw": 4.0, "vm_pu": 1.01, "sn_mva": 6.0, "name": "CHP plant",
-     "xdss_pu": 0.18, "rdss_ohm": 0.02, "cos_phi": 0.8}
+     "xdss_pu": 0.18, "rdss_ohm": 0.02, "cos_phi": 0.8, "cost_per_mwh": 45}
   ],
   "static_generators": [
-    {"id": "PV", "bus": "LV2", "p_mw": 0.3, "name": "Rooftop PV"},
+    {"id": "PV", "bus": "LV2", "p_mw": 0.3, "name": "Rooftop PV", "cost_per_mwh": 0},
     {"id": "WF", "bus": "F3", "p_mw": 2.0, "q_mvar": -0.2, "kind": "wind", "name": "Wind farm",
-     "sn_mva": 2.5, "k": 1.2}
+     "sn_mva": 2.5, "k": 1.2, "cost_per_mwh": 0}
   ],
   "shunts": [
     {"id": "SR", "bus": "TERT", "q_mvar": 2.0, "name": "Station reactor"},
