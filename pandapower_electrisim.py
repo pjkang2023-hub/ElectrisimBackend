@@ -3420,6 +3420,14 @@ def create_other_elements(in_data,net,x, Busbars):
                 gen_kw['min_p_mw'] = safe_float(in_data[x]['min_p_mw'], 0.0)
             if in_data[x].get('max_p_mw') is not None and str(in_data[x].get('max_p_mw')).lower() not in ('null', 'none', ''):
                 gen_kw['max_p_mw'] = safe_float(in_data[x]['max_p_mw'], safe_float(in_data[x]['p_mw']) * 1.2)
+            # Reactive limits for the OPF, when they form a range: the canvas
+            # stores 0 / 0 for a generator nobody gave limits, and passing that
+            # on would pin it at zero reactive power instead of leaving it free.
+            _q = _electrisim_opf_optional_fields_from_payload(
+                in_data[x], float_keys=('min_q_mvar', 'max_q_mvar'))
+            if 'min_q_mvar' in _q and 'max_q_mvar' in _q and _q['max_q_mvar'] > _q['min_q_mvar']:
+                gen_kw['min_q_mvar'] = _q['min_q_mvar']
+                gen_kw['max_q_mvar'] = _q['max_q_mvar']
             pp.create_gen(net, **gen_kw)
             gen_idx = net.gen.index[-1]
             ansi_mt = in_data[x].get('ansi_machine_type')
