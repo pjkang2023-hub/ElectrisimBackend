@@ -26,7 +26,7 @@
   ],
   "transformers": [
     {"id": "T2", "hv_bus": "HV2", "lv_bus": "MV2", "sn_mva": 25,
-     "vk_percent": 12, "vkr_percent": 0.41, "vector_group": "YNd5",
+     "vk_percent": 12, "vkr_percent": 0.41, "vector_group": "YNyn0",
      "name": "Transformer B 110/20"},
     {"id": "T_LV1", "hv_bus": "F1", "lv_bus": "LV1", "sn_mva": 0.63},
     {"id": "T_LV2", "hv_bus": "F2", "lv_bus": "LV2", "sn_mva": 1.0, "vk_percent": 6,
@@ -52,7 +52,7 @@
     {"id": "LD_AUX", "bus": "TERT", "p_mw": 0.5, "q_mvar": 0.2, "name": "Station auxiliaries"}
   ],
   "generators": [
-    {"id": "G1", "bus": "MV2", "p_mw": 4.0, "vm_pu": 1.01, "sn_mva": 6.0, "name": "CHP plant",
+    {"id": "G1", "bus": "MV2", "p_mw": 4.0, "vm_pu": 1.025, "sn_mva": 6.0, "name": "CHP plant",
      "xdss_pu": 0.18, "rdss_ohm": 0.02, "cos_phi": 0.8, "cost_per_mwh": 45}
   ],
   "static_generators": [
@@ -66,6 +66,10 @@
   ],
   "storage": [
     {"id": "BESS", "bus": "LV1", "p_mw": 0.1, "max_e_mwh": 0.5, "name": "Battery"}
+  ],
+  "motors": [
+    {"id": "M1", "bus": "TERT", "pn_mech_mw": 0.8, "cos_phi": 0.88, "efficiency_percent": 96,
+     "lrc_pu": 6.5, "rx": 0.1, "name": "Cooling water pump"}
   ],
   "switches": [
     {"id": "CB_LHV", "bus": "HV", "element": "L_HV"},

@@ -49,6 +49,10 @@
   "storage": [
     {"id": "BESS", "bus": "C1", "p_mw": -0.5, "max_e_mwh": 2.0, "soc_percent": 80, "name": "Battery"}
   ],
+  "motors": [
+    {"id": "M1", "bus": "LVA", "pn_mech_mw": 0.075, "cos_phi": 0.85, "efficiency_percent": 93,
+     "lrc_pu": 7.2, "name": "Pump motor"}
+  ],
   "switches": [
     {"id": "CB_T1", "bus": "SUB", "element": "T1", "et": "transformer"},
     {"id": "CB_A", "bus": "SUB", "element": "LA1"},

@@ -68,7 +68,7 @@ FLOW_TOL = 1e-6
 
 # Every element type the spec accepts, and every kind of switch.
 SPEC_TABLES = ('bus', 'ext_grid', 'trafo', 'trafo3w', 'line', 'load', 'gen', 'sgen',
-               'shunt', 'storage', 'switch')
+               'shunt', 'storage', 'motor', 'switch')
 SWITCH_KINDS = {'l', 't', 't3', 'b'}
 
 
@@ -219,7 +219,7 @@ def hand_built_transmission():
                              ('LD_LV1', 'LV1', 0.4, 0.4 * 0.33),  # unstated q: 0.33 x p
                              ('LD_LV2', 'LV2', 0.6, 0.15), ('LD_AUX', 'TERT', 0.5, 0.2)):
         h.add('load', ident, pp.create_load(net, b(bus), p_mw=p, q_mvar=q))
-    h.add('gen', 'G1', pp.create_gen(net, b('MV2'), p_mw=4.0, vm_pu=1.01, sn_mva=6.0,
+    h.add('gen', 'G1', pp.create_gen(net, b('MV2'), p_mw=4.0, vm_pu=1.025, sn_mva=6.0,
                                      vn_kv=20, xdss_pu=0.18, rdss_ohm=0.02, cos_phi=0.8))
     # Unstated sgen rating: 1.1 x p_mw, at least 0.1 MVA; k defaults to 1.1.
     h.add('sgen', 'PV', pp.create_sgen(net, b('LV2'), p_mw=0.3, q_mvar=0.0, sn_mva=0.33, k=1.1))
@@ -227,10 +227,16 @@ def hand_built_transmission():
     h.add('shunt', 'SR', pp.create_shunt(net, b('TERT'), q_mvar=2.0, p_mw=0.0))
     h.add('shunt', 'CAP', pp.create_shunt(net, b('F1'), q_mvar=-1.5, p_mw=0.0))
     h.add('storage', 'BESS', pp.create_storage(net, b('LV1'), p_mw=0.1, max_e_mwh=0.5))
+    # Rated values default to the operating ones; vn_kv to the bus.
+    h.add('motor', 'M1', pp.create_motor(net, b('TERT'), pn_mech_mw=0.8, cos_phi=0.88,
+                                         efficiency_percent=96, lrc_pu=6.5, rx=0.1, vn_kv=10,
+                                         cos_phi_n=0.88, efficiency_n_percent=96))
 
     ids = h.ids
-    # T2 is given as YNd5; the rest take Dyn, the three-winding unit YNynd.
-    _zero_sequence(net, {ids['trafo']['T2']: 'YNd', ids['trafo']['T_LV1']: 'Dyn',
+    # T2 is given as YNyn0 - it runs in parallel with the three-winding unit's
+    # YNyn HV-MV path, so the phase shifts must match; the rest take Dyn, the
+    # three-winding unit YNynd.
+    _zero_sequence(net, {ids['trafo']['T2']: 'YNyn', ids['trafo']['T_LV1']: 'Dyn',
                          ids['trafo']['T_LV2']: 'Dyn'},
                    trafo3w={ids['trafo3w']['T3W']: 'YNynd'},
                    lines={ids['line']['L_HV']: (0.35, 1.25, 5.0)},
@@ -289,6 +295,10 @@ def hand_built_radial():
     h.add('sgen', 'PV', pp.create_sgen(net, b('LVA'), p_mw=0.1, q_mvar=0.0, sn_mva=0.11, k=1.1))
     h.add('shunt', 'CAP', pp.create_shunt(net, b('B1'), q_mvar=-0.6, p_mw=0.0))
     h.add('storage', 'BESS', pp.create_storage(net, b('C1'), p_mw=-0.5, max_e_mwh=2.0))
+    # R/X 0.15 by default.
+    h.add('motor', 'M1', pp.create_motor(net, b('LVA'), pn_mech_mw=0.075, cos_phi=0.85,
+                                         efficiency_percent=93, lrc_pu=7.2, rx=0.15, vn_kv=0.4,
+                                         cos_phi_n=0.85, efficiency_n_percent=93))
 
     ids = h.ids
     _zero_sequence(net, {ids['trafo']['T1']: 'Dyn', ids['trafo']['TA']: 'Dyn'})
@@ -472,7 +482,7 @@ MODEL_TABLES = {
     'bus': 'buses', 'ext_grid': 'external_grids', 'trafo': 'transformers',
     'trafo3w': 'three_winding_transformers', 'line': 'lines', 'load': 'loads',
     'gen': 'generators', 'sgen': 'static_generators', 'shunt': 'shunts',
-    'storage': 'storage', 'switch': 'switches',
+    'storage': 'storage', 'motor': 'motors', 'switch': 'switches',
 }
 NAME_FIELD = {'shunt': 1}
 
@@ -941,6 +951,7 @@ OPF_ELEMENTS = {
     'three_winding_transformers': 'Three Winding Transformer', 'loads': 'Load',
     'generators': 'Generator', 'static_generators': 'Static Generator',
     'storage': 'Storage', 'switches': 'Switch', 'external_grids': 'External Grid',
+    'motors': 'Motor',
 }
 
 
@@ -1008,3 +1019,276 @@ def test_drawn_diagram_optimal_power_flow(client, quiet, grid):
     if abs(float(result['total_cost']) - float(net.res_cost)) > OPF_COST_TOL:
         differ.append(f"total cost {result['total_cost']} drawn, {net.res_cost} for the spec")
     assert not differ, f'{grid}:\n  ' + '\n  '.join(differ)
+
+
+# --- studies sent from the shared network builder ----------------------------
+#
+# Motor starting, the ANDES studies and DG screening are built by the same
+# frontend code as the short circuit, so the drawn short-circuit request is
+# their network too; each test swaps in its own study settings.
+
+def _study_request(grid, params, key='0'):
+    payload = _sc_fixture(grid, '3ph', 'max')
+    network = {k: v for k, v in payload.items() if 'Parameters' not in str(v.get('typ'))}
+    return {key: params, **network}
+
+
+def _post_study(client, quiet, request):
+    with quiet():
+        response = client.post('/', json=request)
+    assert response.status_code == 200, response.get_data(as_text=True)[:400]
+    result = json.loads(response.get_data(as_text=True))
+    assert not result.get('error'), result.get('message') or result.get('error')
+    return result
+
+
+def _label_of_cell(request):
+    return {v['name']: v.get('userFriendlyName') for v in request.values()
+            if isinstance(v, dict) and 'name' in v}
+
+
+def _bus_label(spec, ident):
+    row = next(b for b in spec['buses'] if b['id'] == ident)
+    return str(row.get('name') or ident)
+
+
+@pytest.mark.parametrize('grid', GRIDS)
+def test_drawn_diagram_motor_starting(client, quiet, grid):
+    """
+    Direct-on-line start of the drawn motor: before, during (the motor as its
+    locked-rotor load) and the dip at every bus, as pandapower gives them for
+    the spec.
+
+    The study's settings row ("MotorStartingPandaPower Parameters") matched
+    the backend's Motor branch and failed on its missing bus, so no motor
+    start ever ran.
+    """
+    request = _study_request(grid, {
+        'typ': 'MotorStartingPandaPower Parameters', 'mode': 'steady', 'motor_ids': 'all',
+        'starting_method': 'dol', 'voltage_limit_percent': '15', 'thermal_limit_percent': '100',
+        'frequency': '50'})
+    result = _post_study(client, quiet, request)
+
+    spec = load_spec(grid)
+    (motor,) = spec['motors']
+    rx = motor.get('rx', 0.15)
+    cos_n = motor.get('cos_phi_n', motor['cos_phi'])
+    eff_n = motor.get('efficiency_n_percent', motor['efficiency_percent'])
+    vn = next(b['vn_kv'] for b in spec['buses'] if b['id'] == motor['bus'])
+    i_rated = motor['pn_mech_mw'] / (eff_n / 100) / cos_n / (np.sqrt(3) * vn)
+    i_start = motor['lrc_pu'] * i_rated
+    (started,) = result['motors']
+    assert started['i_start_ka'] == pytest.approx(i_start, rel=1e-9)
+    # Reported by the labels the diagram shows, not by cell id.
+    assert started['name'] == motor['name']
+    assert started['bus_name'] == _bus_label(spec, motor['bus'])
+
+    # The oracle: the motor off, then its locked-rotor power at rated voltage.
+    net, _ = sld.build_network(spec)
+    ids = spec_ids(net)
+    m = ids['motor'][motor['id']]
+    net.motor.at[m, 'in_service'] = False
+    before = run(net).res_bus['vm_pu'].copy()
+    s_mva = np.sqrt(3) * vn * i_start
+    pp.create_load(net, ids['bus'][motor['bus']], p_mw=s_mva * rx / np.sqrt(1 + rx * rx),
+                   q_mvar=s_mva / np.sqrt(1 + rx * rx))
+    during = run(net).res_bus['vm_pu']
+
+    drawn = {b['name']: b for b in result['buses']}
+    differ = []
+    for bus in spec['buses']:
+        got = drawn[_bus_label(spec, bus['id'])]
+        idx = ids['bus'][bus['id']]
+        for column, want in (('vm_before', before[idx]), ('vm_during', during[idx])):
+            if abs(float(got[column]) - want) > 1e-4:  # reported to 4 decimals
+                differ.append(f"{bus['id']} {column}: {got[column]} drawn, {want:.6f} spec")
+    assert not differ, f'{grid}:\n  ' + '\n  '.join(differ)
+    assert result['summary']['worst_dip_percent'] > 0.5, 'the start barely moved the voltage'
+
+
+ANDES_PARAMS = {'frequency': '50', 'sn_mva': '100'}
+
+
+def _assert_steady_start(result):
+    assert not any('could not be initialised' in w for w in result.get('warnings', [])), \
+        result['warnings']
+
+
+@pytest.mark.parametrize('grid', GRIDS)
+def test_drawn_diagram_transient_stability_starts_in_steady_state(client, quiet, grid):
+    """
+    With no event the ANDES run must stay where the power flow put it, and
+    that power flow must be pandapower's.
+
+    It crashed reading results (ANDES 2 has no plotter under a server), then
+    read the wrong variables; it dropped the three-winding transformer,
+    static generators without a plant model and storage; and xq'' defaulting
+    apart from xd'' kept every generator with short-circuit data from
+    initialising.
+    """
+    request = _study_request(grid, {
+        'typ': 'TransientStabilityAndes Parameters', **ANDES_PARAMS, 'tf': '5', 'tstep': '0',
+        'fault_enabled': 'false', 'fault_bus': '', 'toggle_line': '', 'toggle_gen': ''})
+    result = _post_study(client, quiet, request)
+    _assert_steady_start(result)
+    assert result['converged'] is True
+    freq = np.asarray(result['frequency_hz'], dtype=float)
+    assert np.abs(freq - 50.0).max() < 1e-4, f'frequency drifted to {freq.min()}..{freq.max()} Hz'
+
+    spec = load_spec(grid)
+    net, _ = sld.build_network(spec)
+    run(net)
+    ids = spec_ids(net)
+    drawn = {b['name']: b['values'][0] for b in result['bus_voltage']}
+    assert len(drawn) == len(spec['buses']), sorted(drawn)
+    differ = [f"{bus['id']}: {drawn[_bus_label(spec, bus['id'])]:.5f} in ANDES, "
+              f"{net.res_bus.at[ids['bus'][bus['id']], 'vm_pu']:.5f} in pandapower"
+              for bus in spec['buses']
+              if abs(drawn[_bus_label(spec, bus['id'])]
+                     - net.res_bus.at[ids['bus'][bus['id']], 'vm_pu']) > 1e-3]
+    assert not differ, f'{grid}:\n  ' + '\n  '.join(differ)
+
+
+@pytest.mark.parametrize('grid', GRIDS)
+def test_drawn_diagram_eigenvalues(client, quiet, grid):
+    """Small-signal analysis of the drawn network, linearised at a steady state."""
+    request = _study_request(grid, {'typ': 'EigenvalueAndes Parameters', **ANDES_PARAMS,
+                                    'n_modes': '10'})
+    result = _post_study(client, quiet, request)
+    _assert_steady_start(result)
+    assert result['verdict'] == 'stable'
+    assert result['n_positive'] == 0
+
+
+@pytest.mark.parametrize('grid', GRIDS)
+def test_drawn_diagram_dg_screening(client, quiet, opendss_scratch, grid):
+    """
+    DG interconnection screening of the drawn rooftop PV raised to 500 kW: the
+    grid's import must be pandapower's for the same change.
+
+    The screening built its circuit from the raw External Grid element (no
+    basekv) and failed; it never fell back from the solver that diverges here,
+    and it read the grid's power from whichever element was active last, with
+    the wrong sign - so every case showed reverse power.
+    """
+    spec = load_spec(grid)
+    pv = next(g for g in spec['static_generators'] if g['id'] == 'PV')
+    request = _study_request(grid, {}, key='dg_interconnection_params')
+    cell = {v.get('userFriendlyName'): v['name'] for v in request.values()
+            if isinstance(v, dict) and 'name' in v}
+    request['dg_interconnection_params'] = {
+        'typ': 'DgInterconnectionOpenDss', 'poc_bus_id': cell[_bus_label(spec, pv['bus'])],
+        'der_id': cell[pv['name']], 'der_type': 'Generator', 'proposed_kw': 500,
+        'vmin_pu': 0.95, 'vmax_pu': 1.05, 'max_loading_percent': 100,
+        'run_hosting_capacity': False, 'compare_invcontrol': False, 'frequency': 50}
+    result = _post_study(client, quiet, request)
+    assert result['summary']['converged'] is True
+    assert result['summary']['der_label'] == pv['name']
+    checks = {c['id']: c for c in result['checks']}
+    labels = {b.get('name') or b['id'] for b in spec['buses']}
+    assert {checks['voltage_min']['location'], checks['voltage_max']['location']} <= labels,         'voltage checks must name buses as the diagram labels them'
+    assert all(np.isfinite(float(c['value'])) for c in checks.values()), checks
+
+    pv['p_mw'] = 0.5
+    net, _ = sld.build_network(spec)
+    grid_p = float(run(net).res_ext_grid['p_mw'].sum())
+    drawn_p = checks['reverse_power']['value'] / 1000.0
+    assert abs(drawn_p - grid_p) < OPENDSS_LF_P_TOL, \
+        f'{grid}: grid supplies {drawn_p:.4f} MW in the screening, {grid_p:.4f} MW in pandapower'
+    assert checks['reverse_power']['status'] == ('fail' if grid_p < -0.001 else 'pass')
+
+
+# --- protection coordination ---------------------------------------------------
+#
+# reference_radial.diagram_protection_payload.json is the request the frontend
+# sent for the drawn radial grid with a definite-time overcurrent relay
+# (automatic pickup) on every breaker: CB_T1 on the transformer's 20 kV side,
+# CB_A, CB_B and the wind feeder breaker on the feeders. Faults are placed at
+# the middle of every line.
+
+def _protection_request(settings=None):
+    with open(os.path.join(REFERENCE_DIR, 'reference_radial.diagram_protection_payload.json'),
+              encoding='utf-8') as handle:
+        payload = json.load(handle)
+    for element in payload.values():
+        if str(element.get('typ', '')).startswith('Switch') and settings:
+            element.update(settings(element.get('userFriendlyName')))
+    return payload
+
+
+def test_protection_automatic_pickup_it_cannot_build_is_not_computed(client, quiet):
+    """
+    pandapower's OCRelay grades only networks whose closed switches all sit on
+    lines, and this one has a transformer breaker. Its fallback then read the
+    dialog's unset pickups as 0 A, so every relay tripped instantly for every
+    fault anywhere; the relays must be reported as not computed instead.
+    """
+    with quiet():
+        response = client.post('/', json=_protection_request())
+    result = json.loads(response.get_data(as_text=True))
+    assert result['summary']['n_not_computed'] == 4
+    assert not any(row.get('tripped') for s in result.get('scenarios', []) for row in s['trip'])
+    reasons = [a['reason'] for a in result['attach_summaries']]
+    assert all('pickup mode Manual' in r for r in reasons), reasons
+
+
+def test_protection_manual_settings_grade(client, quiet):
+    """
+    With pickups set by hand, a fault on a feeder trips that feeder's breaker
+    instantaneously and the transformer breaker as time-graded backup; the
+    other feeders stay in. The transformer breaker sits on the 20 kV side, so
+    it sees the 20 kV fault current - it was read from the 110 kV side - and a
+    fault on the first line, whose index a transformer switch shares, must be
+    evaluated too (pandapower re-pointed that switch at a line half).
+    """
+    def settings(name):
+        if name == 'CB_T1':
+            return dict(pickup_mode='manual', I_g_a='1500', I_gg_a='12000', t_g='0.8', t_gg='0.3')
+        return dict(pickup_mode='manual', I_g_a='400', I_gg_a='3000', t_g='0.5', t_gg='0.07')
+
+    request = _protection_request(settings)
+    with quiet():
+        response = client.post('/', json=request)
+    result = json.loads(response.get_data(as_text=True))
+    assert not result.get('error'), result.get('message')
+    assert result['summary']['n_miscoordination'] == 0
+
+    lines = [v for v in request.values() if str(v.get('typ', '')).startswith('Line')]
+    feeder_breaker = {'LA1': 'CB_A', 'LA2': 'CB_A', 'LB1': 'CB_B', 'LB2': 'CB_B',
+                      'Wind farm cable': 'Wind feeder breaker'}
+    scenarios = result['scenarios']
+    assert len(scenarios) == len(lines)
+    for scenario in scenarios:
+        assert not scenario.get('error'), scenario['error']
+        line = lines[int(scenario['sc_line_id'])]['userFriendlyName']
+        trips = {row['switch_name']: row for row in scenario['trip']}
+        tripped = {name for name, row in trips.items() if row['tripped']}
+        own = feeder_breaker[line]
+        assert own in tripped and trips[own]['t_trip_s'] == pytest.approx(0.07), (line, trips)
+        assert tripped <= {own, 'CB_T1'}, f'{line}: {sorted(tripped)} tripped'
+        # The 20 kV-side breaker carries (nearly) the feeder's fault current.
+        assert trips['CB_T1']['ikss_ka'] > 0.9 * trips[own]['ikss_ka'] - 0.3, (line, trips)
+        if 'CB_T1' in tripped:
+            assert trips['CB_T1']['t_trip_s'] == pytest.approx(0.8)
+
+
+def test_site_screening_counts_lost_supply(client, quiet):
+    """
+    The radial grid hangs off one transformer, so N-1 can cut the data-centre
+    site off. The islanded buses have no voltage (NaN), which no limit
+    caught, so every site passed N-1; they must count as violations.
+    """
+    request = _study_request('reference_radial', {
+        'typ': 'DataCenterSiteScreeningPandaPower Parameters', 'site_load_ids': 'Factory',
+        'mw_sizes': '2', 'power_factor': '0.95', 'include_n11': 'false', 'element_type': 'all',
+        'voltage_limits': 'true', 'thermal_limits': 'true', 'min_vm_pu': '0.95',
+        'max_vm_pu': '1.05', 'max_loading_percent': '100'})
+    with quiet():
+        response = client.post('/', json=request)
+    assert response.status_code == 200
+    result = json.loads(response.get_data(as_text=True))
+    (row,) = result['screening_results']
+    assert row['base_violations'] == 0
+    lost = {v['name'] for v in row['n1_violation_details'] if v['text'] == 'de-energised'}
+    assert 'B1' in lost, row['n1_violation_details']  # the Factory's own bus
+    assert row['upgrade_likely'] is True
