@@ -714,6 +714,16 @@ def _pq_gen_p(net, g):
     return 0.0 if pd.isna(val) else float(val)
 
 
+def _pq_gens_have_q_limits(net):
+    """Whether any in-service generator carries a usable reactive range."""
+    if net.gen.empty or not {'min_q_mvar', 'max_q_mvar'} <= set(net.gen.columns):
+        return False
+    gen = net.gen[net.gen['in_service']]
+    q_min = pd.to_numeric(gen['min_q_mvar'], errors='coerce')
+    q_max = pd.to_numeric(gen['max_q_mvar'], errors='coerce')
+    return bool((q_max > q_min).any())
+
+
 def _pq_set_gen_pq(net, g, p_gen, q_mvar):
     """p_gen and q_mvar are in generator convention (positive = injected into
     the grid). Electrisim storage uses p_mw > 0 for charging and q_mvar > 0 for
@@ -1528,6 +1538,13 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
                 break
         if pcc_bus_idx is None:
             return json.dumps({'error': f'PCC bus "{pcc_bus_name}" not found in network'}, separators=(',', ':'))
+
+        # The sweep drives the grid to 0.9-1.1 pu. A voltage-controlled
+        # generator outside the plant then held its own bus with no limit -
+        # a 1.8 MVA gas engine took 23 Mvar, overloading feeders and swamping
+        # the exchange at the PCC. Hold every generator to its reactive limits.
+        if _pq_gens_have_q_limits(net):
+            net._electrisim_enforce_q_lims = True
 
         ext_grid_idx = None
         for idx in net.ext_grid.index:

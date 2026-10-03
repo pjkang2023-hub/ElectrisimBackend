@@ -1327,3 +1327,34 @@ def test_drawn_diagram_bess_dispatch_reversal(client, quiet, opendss_scratch, en
     v = result['bus_voltage'][0]['values']
     assert abs(v[0] - vm(0.1)) < OPENDSS_LF_VM_TOL
     assert abs((v[-1] - v[0]) - (vm(-0.1) - vm(0.1))) < 1e-4, 'the rise differs from pandapower'
+
+
+@pytest.mark.parametrize('q_mode', ('from_sgen_curve', 'from_rating'))
+def test_grid_code_pq_holds_other_generators_to_their_limits(client, quiet, q_mode):
+    """
+    The P-Q sweep drives the grid to 0.9-1.1 pu. The radial grid's gas engine
+    (outside the plant) held its bus at 1.0 pu with no reactive limit, taking
+    some 23 Mvar on a 1.8 MVA machine: feeders overloaded to 160 %, the PCC
+    exchanged 20 Mvar with the plant off, and 44 points were "unphysical".
+    The drawing never sent the limits; and with the plant's Q taken from its
+    rating, no curve turned limit enforcement on.
+    """
+    with open(os.path.join(REFERENCE_DIR, 'reference_radial.diagram_grid_code_pq_payload.json'),
+              encoding='utf-8') as handle:
+        request = json.load(handle)
+    request['0']['q_capability_mode'] = q_mode
+    gas_engine = next(v for v in request.values() if v.get('typ') == 'Generator')
+    assert float(gas_engine['max_q_mvar']) > float(gas_engine['min_q_mvar']), \
+        "the drawn generator's reactive limits must reach the study"
+    with quiet():
+        response = client.post('/', json=request)
+    assert response.status_code == 200
+    lines = [json.loads(line) for line in response.get_data(as_text=True).splitlines() if line.strip()]
+    progress = [line['message'] for line in lines if line.get('type') == 'progress']
+    result = next(line for line in lines if line.get('type') == 'result')['data']['grid_code_pq_results']
+
+    assert not [m for m in progress if 'unphysical' in m], 'unphysical points'
+    assert result['summary']['maxloading_cbl'] < 100, result['summary']
+    units_off = next(m for m in progress if m.startswith('Units off'))
+    q_off = float(units_off.split('Q=')[1].split()[0])
+    assert abs(q_off) < 1.0, units_off
