@@ -1442,3 +1442,51 @@ def test_grid_code_pmax_at_the_pcc_counts_export_only():
     assert _pq_pmax_pcc_for_req(mixed) == pytest.approx(0.97)
     # Load orientation plots export as negative P.
     assert _pq_pmax_pcc_for_req({'p_mw': [0.0, -1.0, -2.0]}, sign_out=-1.0) == pytest.approx(2.0)
+
+
+def test_drawn_diagram_time_series_matches_spec(client, quiet):
+    """
+    The time series on the drawn transmission grid - 24 hours of the dialog's
+    default profiles for its five loads and three generators, in MW - must give
+    each hour the power flow pandapower gives the spec with the same P, Q kept
+    at each element's power factor.
+    """
+    with open(os.path.join(REFERENCE_DIR, 'reference_transmission.diagram_timeseries_payload.json'),
+              encoding='utf-8') as handle:
+        request = json.load(handle)
+    with quiet():
+        response = client.post('/', json=request)
+    assert response.status_code == 200
+    result = json.loads(response.get_data(as_text=True))
+    assert result['timeseries_converged'] is True
+    steps = int(result['time_steps'])
+    profiles = {p['display_name']: p['values'] for p in result['profiles_used'].values()}
+    assert len(profiles) == 8 and all(len(v) == steps for v in profiles.values())
+
+    vm = {(b['time_step'], b['name']): b['vm_pu'] for b in result['busbars']}
+    loading = {(l['time_step'], l['name']): l['loading_percent'] for l in result['lines']}
+    spec = load_spec('reference_transmission')
+    net, _ = sld.build_network(spec)
+    base = {table: net[table].copy() for table in ('load', 'sgen', 'gen')}
+    differ = []
+    for t in range(steps):
+        for table in ('load', 'sgen', 'gen'):
+            for idx in net[table].index:
+                name = net[table].at[idx, 'name']
+                if name not in profiles:
+                    continue
+                p0, p = base[table].at[idx, 'p_mw'], profiles[name][t]
+                net[table].at[idx, 'p_mw'] = p
+                if 'q_mvar' in net[table] and p0:
+                    net[table].at[idx, 'q_mvar'] = base[table].at[idx, 'q_mvar'] * p / p0
+        pp.runpp(net, algorithm='nr', calculate_voltage_angles='auto')
+        for idx in net.bus.index:
+            name = net.bus.at[idx, 'name']
+            if abs(vm[(t, name)] - net.res_bus.at[idx, 'vm_pu']) > DRAWN_TOL:
+                differ.append(f'hour {t} bus {name}: {vm[(t, name)]} drawn, '
+                              f'{net.res_bus.at[idx, "vm_pu"]} spec')
+        for idx in net.line.index:
+            name = net.line.at[idx, 'name']
+            if abs(loading[(t, name)] - net.res_line.at[idx, 'loading_percent']) > 1e-4:
+                differ.append(f'hour {t} line {name}: {loading[(t, name)]} % drawn')
+    assert not differ, '\n  '.join(differ[:10])
