@@ -226,6 +226,62 @@ def _iter_elements(in_data: Dict[str, Any]):
         yield key, el, typ
 
 
+def _deenergise_island(ss, out_line, t: float) -> Tuple[List[Any], List[str]]:
+    """
+    Switch off, at time t, everything a line outage cuts off from the
+    External Grid.
+
+    On a radial network every line outage islands what lies beyond it. ANDES
+    cannot simulate a dead island - its loads at 0 V leave the bus angles
+    undetermined - and the run stopped at the outage; nor an island run by a
+    generator alone (its connectivity check then fails). A generator cut off
+    from the grid is tripped by its loss-of-mains protection, so the island's
+    generators are tripped with the line, and its loads, shunts, static
+    generators and inner lines switched off; its buses keep no devices and
+    are reported at 0 V - as pandapower reports an island without an External
+    Grid. Returns the islanded bus idx and the generators tripped.
+    """
+    lines = list(zip(ss.Line.idx.v, ss.Line.bus1.v, ss.Line.bus2.v, ss.Line.u.v))
+    sources = set(ss.Slack.bus.v)
+    adjacency: Dict[Any, set] = {}
+    for idx, a, b, u in lines:
+        if idx == out_line or not u:
+            continue
+        adjacency.setdefault(a, set()).add(b)
+        adjacency.setdefault(b, set()).add(a)
+    reached, queue = set(sources), list(sources)
+    for bus in queue:
+        for nxt in adjacency.get(bus, ()):
+            if nxt not in reached:
+                reached.add(nxt)
+                queue.append(nxt)
+    island = [b for b in ss.Bus.idx.v if b not in reached]
+    if not island:
+        return [], []
+    n = 0
+    tripped, machine_buses = [], set()
+    for model in ("GENROU", "GENCLS"):
+        mdl = getattr(ss, model)
+        for k in range(mdl.n):
+            if mdl.bus.v[k] in island:
+                n += 1
+                ss.add("Toggle", idx=f"Toggle_Island_{n}", model="SynGen", dev=mdl.idx.v[k], t=t)
+                tripped.append(str(mdl.name.v[k]))
+                machine_buses.add(mdl.bus.v[k])
+    for model in ("PQ", "Shunt", "PV"):
+        mdl = getattr(ss, model)
+        for k in range(mdl.n):
+            # A PV a machine replaces goes with the machine.
+            if mdl.bus.v[k] in island and not (model == "PV" and mdl.bus.v[k] in machine_buses):
+                n += 1
+                ss.add("Toggle", idx=f"Toggle_Island_{n}", model=model, dev=mdl.idx.v[k], t=t)
+    for idx, a, b, u in lines:
+        if idx != out_line and u and a in island and b in island:
+            n += 1
+            ss.add("Toggle", idx=f"Toggle_Island_{n}", model="Line", dev=idx, t=t)
+    return island, tripped
+
+
 def build_system(
     in_data: Dict[str, Any],
     params: Optional[Dict[str, Any]] = None,
@@ -1002,6 +1058,7 @@ def build_system(
         else:
             warnings.append(f"Fault bus '{fault_bus_name}' not found; no Fault applied.")
 
+    islanded_after = None
     toggle_line = params.get("toggle_line") or params.get("line_outage") or ""
     toggle_t = _sf(params.get("toggle_t"), 2.0)
     if toggle_line:
@@ -1013,6 +1070,16 @@ def build_system(
                     break
         if lidx is not None:
             ss.add("Toggle", idx="Toggle_1", model="Line", dev=lidx, t=toggle_t)
+            island, tripped = _deenergise_island(ss, lidx, toggle_t)
+            if island:
+                names = [str(bus_name_by_idx.get(b, b)) for b in island]
+                line_label = str(ss.Line.name.v[list(ss.Line.idx.v).index(lidx)])
+                warnings.append(
+                    f"Taking '{line_label}' out at {toggle_t:g} s cuts {', '.join(names)} off from the "
+                    "External Grid: de-energised from then on"
+                    + (f", {', '.join(tripped)} tripped (loss of mains)." if tripped else "."))
+                syn_total = sum(getattr(ss, m).n for m in ("GENROU", "GENCLS"))
+                islanded_after = (toggle_t, [str(b) for b in island], len(tripped) == syn_total)
         else:
             warnings.append(f"Line outage target '{toggle_line}' not found; no Toggle applied.")
 
@@ -1048,6 +1115,7 @@ def build_system(
         "n_generators": gen_count,
         "n_renewable_plants": renewable_count,
         "n_buses": len(bus_name_by_idx),
+        "islanded_after": islanded_after,
     }
     return ss, meta
 
@@ -1173,6 +1241,12 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
 
         _check_init(ss, meta["warnings"])
         _restore_prefault_state_on_clearing(ss)
+        islanded = meta.get("islanded_after")
+        if islanded and islanded[2]:
+            # ANDES's rotor-angle stop criterion looks for machines in the
+            # largest island and fails when none is left there; losing
+            # synchronism is reported below instead.
+            ss.TDS.config.criteria = 0
         tds_ok = bool(ss.TDS.run())
         t = np.asarray(ss.dae.ts.t, dtype=float)
         if not tds_ok and len(t):
@@ -1231,6 +1305,11 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
                 bidx = ss.Bus.idx.v[i]
                 if str(bidx) not in meta["bus_name_by_idx"]:
                     continue  # a three-winding transformer's star point
+                islanded = meta.get("islanded_after")
+                if islanded and str(bidx) in islanded[1]:
+                    # A bus with nothing left on it keeps its last voltage in
+                    # ANDES; it is dead.
+                    col = np.where(t[idx] >= islanded[0], 0.0, col)
                 bus_v.append({
                     "id": str(bidx),
                     "name": meta["bus_name_by_idx"].get(str(bidx), str(ss.Bus.name.v[i])),
@@ -1259,9 +1338,11 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
         poi_idx = str(meta.get("bus_map", {}).get(poi_bus_key, "")) if poi_bus_key else ""
         poi_v_min = None
         poi_v_series = None
+        poi_label = None
         if poi_bus_key and bus_v:
             for s in bus_v:
                 if s.get("id") in (poi_bus_key, poi_idx) or s.get("name") == poi_bus_key:
+                    poi_label = s.get("name")
                     poi_v_series = s.get("values") or []
                     if poi_v_series:
                         poi_v_min = min(poi_v_series)
@@ -1349,6 +1430,7 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
             },
             "poi_metrics": {
                 "poi_bus": poi_bus_key or None,
+                "poi_bus_label": poi_label,
                 "v_min_pu": _clean_num(poi_v_min) if poi_v_min is not None else None,
                 "frequency_nadir_hz": _clean_num(freq_nadir) if freq_nadir is not None else None,
                 "frequency_final_hz": _clean_num(freq_settling) if freq_settling is not None else None,

@@ -1314,20 +1314,26 @@ def test_transient_stability_fault_clears(client, quiet, grid, fault_bus):
     assert result['poi_metrics']['v_min_pu'] < 0.01
 
 
-def test_transient_stability_critical_clearing_time_matches_equal_area(client, quiet):
+@pytest.mark.parametrize('grid, t_cr_hand', [
+    ('reference_transmission', 0.463),  # the CHP plant
+    ('reference_radial', 0.389),        # the gas engine
+])
+def test_transient_stability_critical_clearing_time_matches_equal_area(client, quiet, grid, t_cr_hand):
     """
     A classical machine (H 6 s, X'd 0.3) faulted at its terminals against the
     rest of the network reduced to a Thevenin source: the equal-area criterion
-    gives the critical clearing time (0.463 s for the CHP plant). Cleared 5 %
-    sooner it must hold, 5 % later it must slip a pole, and say so.
+    gives the critical clearing time. Cleared 5 % sooner it must hold, 5 %
+    later it must slip a pole, and say so.
     """
-    spec = load_spec('reference_transmission')
+    spec = load_spec(grid)
     gen = spec['generators'][0]
+    drawn = next(v for v in _study_request(grid, {}).values()
+                 if str(v.get('typ', '')).startswith('Generator'))
     net, _ = sld.build_network(spec)
     run(net)
     g = spec_ids(net)['gen'][gen['id']]
     bus = int(net.gen.at[g, 'bus'])
-    sn, vn = float(gen['sn_mva']), float(net.bus.at[bus, 'vn_kv'])
+    sn, vn = float(drawn['sn_mva']), float(net.bus.at[bus, 'vn_kv'])  # as drawn
     v = float(net.res_bus.at[bus, 'vm_pu'])
     pm = float(net.res_gen.at[g, 'p_mw']) / sn
     i = complex(pm, -net.res_gen.at[g, 'q_mvar'] / sn) / v
@@ -1342,14 +1348,64 @@ def test_transient_stability_critical_clearing_time_matches_equal_area(client, q
     # accelerates as w0 Pm t^2 / 4H.
     delta_c = math.acos((math.pi - 2 * delta0) * math.sin(delta0) - math.cos(delta0))
     t_cr = math.sqrt(4 * h * (delta_c - delta0) / (2 * math.pi * 50 * pm))
-    assert t_cr == pytest.approx(0.463, abs=0.005)
+    assert t_cr == pytest.approx(t_cr_hand, abs=0.005)
 
     classical = dict(dyn_machine_model='GENCLS', dyn_exciter_model='NONE', dyn_governor_model='NONE')
     for clear, holds in ((0.95 * t_cr, True), (1.05 * t_cr, False)):
         result = _post_study(client, quiet, _tds_request(
-            'reference_transmission', _bus_label(spec, gen['bus']), clear, **classical))
+            grid, _bus_label(spec, gen['bus']), clear, **classical))
         lost = any('lost synchronism' in w for w in result['warnings'])
         assert lost is not holds, (clear, result['warnings'])
+
+
+@pytest.mark.parametrize('event, value, cut_off, tripped', [
+    ('toggle_gen', 'Gas engine', [], None),
+    ('toggle_line', 'LA2', ['A2', 'LV network A'], None),          # loads cut off
+    ('toggle_line', 'LB1', ['B1', 'B2'], 'Gas engine'),           # the generator cut off
+])
+def test_transient_stability_switching_settles_as_pandapower(client, quiet, event, value, cut_off, tripped):
+    """
+    A generator trip or a line outage at 2 s on the radial grid: the voltages
+    it settles to are pandapower's for the same change. Every line outage
+    there cuts part of the grid off, which ANDES could not simulate - the
+    run stopped at the outage, blaming a loss of synchronism - and with the
+    gas engine in the part cut off, failed outright. The part cut off is now
+    de-energised, its generator tripped (loss of mains), its buses at 0 V,
+    as pandapower has an island without an External Grid.
+    """
+    spec = load_spec('reference_radial')
+    request = _study_request('reference_radial', {'typ': 'TransientStabilityAndes Parameters', **ANDES_PARAMS})
+    name = {v.get('userFriendlyName') or v['name']: v['name'] for v in request.values()
+            if isinstance(v, dict) and 'name' in v}
+    request['0'].update({event: name[value], event.replace('toggle_gen', 'toggle_gen_t').replace(
+        'toggle_line', 'toggle_t'): '2.0', 'tf': '6', 'fault_enabled': 'false', 'fault_bus': ''})
+    result = _post_study(client, quiet, request)
+    assert result['converged'] is True and result['time'][-1] == pytest.approx(6.0)
+
+    net, _ = sld.build_network(spec)
+    ids = spec_ids(net)
+    if event == 'toggle_gen':
+        net.gen['in_service'] = False
+    else:
+        net.line.loc[net.line.name == value, 'in_service'] = False
+    run(net)
+    t = np.asarray(result['time'])
+    for series in result['bus_voltage']:
+        bus = next(b for b in spec['buses'] if _bus_label(spec, b['id']) == series['name'])
+        expected = net.res_bus.at[ids['bus'][bus['id']], 'vm_pu']
+        v = np.asarray(series['values'])
+        if series['name'] in cut_off:
+            assert np.isnan(expected), series['name']
+            assert (v[t >= 2.0] == 0).all() and v[0] > 0.9, series['name']
+        else:
+            # ANDES holds loads at constant impedance through the run.
+            assert v[-1] == pytest.approx(expected, abs=1e-3), series['name']
+    notes = ' '.join(result['warnings'])
+    assert 'lost synchronism' not in notes and 'stopped' not in notes, notes
+    if cut_off:
+        assert all(b in notes for b in cut_off), notes
+    if tripped:
+        assert f'{tripped} tripped' in notes, notes
 
 
 def test_transient_stability_fault_at_the_external_grid_says_it_does_nothing(client, quiet):
