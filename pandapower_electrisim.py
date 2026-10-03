@@ -14911,7 +14911,11 @@ def protection_coordination(net, prot_params, in_data):
         if attached_count == 0:
             return json.dumps({
                 'error': True,
-                'message': 'No protection device could be attached to the network. See `attach_summaries` for details.',
+                # The alert is all the user sees, so it carries each reason.
+                'message': 'No protection device could be evaluated:\n' + '\n'.join(
+                    f"- {s.get('user_friendly_name') or s.get('switch_name') or s.get('switch_id')}: "
+                    f"{s.get('reason') or 'not attached'}"
+                    for s in attach_summaries),
                 'attach_summaries': attach_summaries,
                 'scenarios': [],
                 'devices': [],

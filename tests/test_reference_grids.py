@@ -1230,6 +1230,8 @@ def test_protection_automatic_pickup_it_cannot_build_is_not_computed(client, qui
     assert not any(row.get('tripped') for s in result.get('scenarios', []) for row in s['trip'])
     reasons = [a['reason'] for a in result['attach_summaries']]
     assert all('pickup mode Manual' in r for r in reasons), reasons
+    # The alert is all the user sees: it must say what to do, per relay.
+    assert result['message'].count('pickup mode Manual') == 4, result['message']
 
 
 def test_protection_manual_settings_grade(client, quiet):
