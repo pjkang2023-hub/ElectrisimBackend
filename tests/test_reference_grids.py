@@ -1797,8 +1797,8 @@ def test_arc_flash_uniform_equipment(client, quiet, grid):
 
 # --- economic analysis -------------------------------------------------------------
 
-def _economic(client, quiet, **params):
-    request = _study_request('reference_transmission', {
+def _economic(client, quiet, grid='reference_transmission', **params):
+    request = _study_request(grid, {
         'typ': 'EconomicAnalysisPandaPower Parameters', 'frequency': '50', 'currency': 'EUR',
         'use_generation_profile': True, 'time_steps': 8760, 'lifetime_years': 30,
         'calculation_mode': 'lookup_table', 'load_profile': 'constant',
@@ -1808,13 +1808,15 @@ def _economic(client, quiet, **params):
 
 
 def _losses_mw(net):
-    return float(net.res_line.pl_mw.sum() + net.res_trafo.pl_mw.sum() + net.res_trafo3w.pl_mw.sum())
+    return float(sum(net[t].pl_mw.sum() for t in ('res_line', 'res_trafo', 'res_trafo3w')
+                     if 'pl_mw' in net[t]))
 
 
-def test_economic_losses_constant_profiles(client, quiet):
+@pytest.mark.parametrize('grid', GRIDS)
+def test_economic_losses_constant_profiles(client, quiet, grid):
     """A year at the drawn operating point: pandapower's losses, × 8760 h, × 30 years."""
-    result = _economic(client, quiet)
-    net, _ = sld.build_network(load_spec('reference_transmission'))
+    result = _economic(client, quiet, grid)
+    net, _ = sld.build_network(load_spec(grid))
     loss = _losses_mw(run(net))
     assert result['total_power_losses_mw'] == pytest.approx(loss, abs=1e-6)
     assert result['total_energy_losses_annual_mwh'] == pytest.approx(loss * 8760, rel=1e-6)
