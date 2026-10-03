@@ -117,6 +117,23 @@ discharge; pandapower's ignores the state of charge.
   element's id, and `bus` must be one of its terminals.
 - `et: bus`: a bus coupler; `element` is the other bus's id.
 
+## Optimal power flow
+
+For Electrisim's OPF with the polynomial cost function, give each source a
+price, `cost_per_mwh` (marginal cost per MWh of active power), and the OPF
+minimises total cost:
+
+| element | dispatch limits (defaults) |
+|---|---|
+| `external_grids` | `min_p_mw` (-1e6: may export) and `max_p_mw` (1e6) |
+| `generators` | `min_p_mw` (0) to `max_p_mw` (`sn_mva`); `min_q_mvar` / `max_q_mvar` (what the rated power factor allows); `controllable` (true) |
+| `static_generators` | priced ones are curtailable: `min_p_mw` (0) to `max_p_mw` (`p_mw`, the output available), reactive power up to power factor 0.9 at `sn_mva`; unpriced ones run at `p_mw` |
+| `storage` | runs at `p_mw` |
+| `buses` | voltage held to `min_vm_pu` (0.9) - `max_vm_pu` (1.1) |
+
+Without a price Electrisim assumes 20 per MWh for generators and static
+generators and nothing for the grid - which makes grid power free.
+
 ## Layout
 
 - `transmission` - meshed networks, IEEE-style test cases, anything with loops.

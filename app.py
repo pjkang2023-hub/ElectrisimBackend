@@ -1570,6 +1570,29 @@ def pandapower_net_to_json(net):
             ])
         return rows
 
+    def normalize_storage_rows():
+        # Importer order: name, bus, p_mw, q_mvar, sn_mva, soc_percent,
+        # min_e_mwh, max_e_mwh, scaling, in_service, type. pandapower's own
+        # matched it until a column was added (controllable, for the OPF),
+        # which shifted in_service and type onto the wrong fields.
+        df = net.storage
+        if df.empty:
+            return []
+        rows = []
+        for idx in df.index:
+            r = df.loc[idx]
+            nm = r['name'] if 'name' in df.columns else None
+            if _is_blank_name(nm):
+                nm = f'Storage_{idx}'
+            rows.append([
+                nm, _pos_bus(r['bus']),
+                *[_scalar(r.get(c)) for c in ('p_mw', 'q_mvar', 'sn_mva', 'soc_percent',
+                                              'min_e_mwh', 'max_e_mwh', 'scaling')],
+                bool(_scalar(r['in_service'])) if r.get('in_service') is not None else True,
+                _scalar(r.get('type')),
+            ])
+        return rows
+
     def normalize_shunt_rows():
         # Importer order: bus, name, q_mvar, p_mw, vn_kv, step, max_step,
         # in_service. pandapower 3.x puts its characteristic-table columns
@@ -1598,7 +1621,23 @@ def pandapower_net_to_json(net):
     def build_electrisim_import_sidecar():
         """Extra SC / breaker fields keyed by element name for frontend import."""
         sidecar = {'switch': {}, 'gen': {}, 'sgen': {}, 'storage': {}, 'trafo': {},
-                   'trafo3w': {}, 'line': {}}
+                   'trafo3w': {}, 'line': {}, 'ext_grid': {}, 'bus': {}}
+
+        def opf_fields(table, idx, r, columns):
+            # What an optimal power flow reads beyond the load-flow rows: the
+            # dispatch limits, and the price as the canvas names it.
+            out = {c: _scalar(r.get(c)) for c in columns}
+            if 'controllable' in out and out['controllable'] is not None:
+                out['controllable'] = 'true' if bool(out['controllable']) else 'false'
+            pc = getattr(net, 'poly_cost', None)
+            if pc is not None and not pc.empty:
+                rows = pc[(pc['et'] == table) & (pc['element'] == idx)]
+                if len(rows):
+                    out['opf_marginal_cost_eur_per_mwh'] = _scalar(rows.iloc[0]['cp1_eur_per_mw'])
+                    out['opf_cp2_eur_per_mw2'] = _scalar(rows.iloc[0]['cp2_eur_per_mw2'])
+            return out
+
+        opf_pq = ('controllable', 'min_p_mw', 'max_p_mw', 'min_q_mvar', 'max_q_mvar')
         if hasattr(net, 'switch') and net.switch is not None and not net.switch.empty:
             for idx, r in net.switch.iterrows():
                 nm = r.get('name', f'Switch_{idx}')
@@ -1622,8 +1661,7 @@ def pandapower_net_to_json(net):
                     'rdss_ohm': _scalar(r.get('rdss_ohm')),
                     'rdss_pu': _scalar(r.get('rdss_pu')),
                     'cos_phi': _scalar(r.get('cos_phi')),
-                    'min_p_mw': _scalar(r.get('min_p_mw')),
-                    'max_p_mw': _scalar(r.get('max_p_mw')),
+                    **opf_fields('gen', idx, r, opf_pq),
                 }
         if hasattr(net, 'sgen') and not net.sgen.empty:
             for idx, r in net.sgen.iterrows():
@@ -1637,6 +1675,7 @@ def pandapower_net_to_json(net):
                     'k': _scalar(r.get('k')),
                     'current_source': _scalar(r.get('current_source')),
                     'lrc_pu': _scalar(r.get('lrc_pu')),
+                    **opf_fields('sgen', idx, r, opf_pq),
                 }
         if hasattr(net, 'storage') and not net.storage.empty:
             for idx, r in net.storage.iterrows():
@@ -1647,6 +1686,18 @@ def pandapower_net_to_json(net):
                     'max_ik_ka': _scalar(r.get('max_ik_ka')),
                     'rx': _scalar(r.get('rx')),
                     'current_source': _scalar(r.get('current_source')),
+                    **opf_fields('storage', idx, r, ('controllable',)),
+                }
+        if hasattr(net, 'ext_grid') and not net.ext_grid.empty:
+            for idx, r in net.ext_grid.iterrows():
+                nm = r.get('name', f'ExtGrid_{idx}')
+                if _is_blank_name(nm):
+                    nm = f'ExtGrid_{idx}'
+                sidecar['ext_grid'][str(nm)] = opf_fields('ext_grid', idx, r, ('min_p_mw', 'max_p_mw'))
+        if not net.bus.empty:
+            for idx, r in net.bus.iterrows():
+                sidecar['bus'][str(bus_export_name.get(int(idx), f'Bus_{idx}'))] = {
+                    k: _scalar(r.get(k)) for k in ('min_vm_pu', 'max_vm_pu')
                 }
         if hasattr(net, 'trafo') and not net.trafo.empty:
             for idx, r in net.trafo.iterrows():
@@ -1955,7 +2006,7 @@ def pandapower_net_to_json(net):
             },
             "storage": {
                 "_object": json.dumps({
-                    "data": export_element_rows(net.storage) if hasattr(net, 'storage') and not net.storage.empty else []
+                    "data": normalize_storage_rows() if hasattr(net, 'storage') else []
                 })
             },
             "svc": {

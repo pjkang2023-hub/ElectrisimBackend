@@ -116,6 +116,17 @@ def _line_std_type_for(vn_kv):
     return _LINE_STD_TYPE_BY_KV[-1][1]
 
 
+def _opf_cost(net, row, where, problems, idx, et):
+    """
+    The element's price for an optimal power flow, per MWh of active power
+    (a pandapower polynomial cost, cp1). Without one Electrisim's OPF assumes
+    20 per MWh for generators and static generators and nothing for the grid.
+    """
+    cost = _num(row.get('cost_per_mwh'), 'cost_per_mwh', where, problems, default=None)
+    if cost is not None:
+        pp.create_poly_cost(net, idx, et, cp1_eur_per_mw=cost)
+
+
 def _vector_group(value, default):
     """A vector group as pandapower's short circuit names it: "Dyn5" -> "Dyn"."""
     return re.sub(r'\d+', '', str(value or default)) or default
@@ -239,7 +250,13 @@ def build_network(spec):
             continue
         name = str(row.get('name') or ident)
         idx = pp.create_bus(net, vn_kv=vn_kv, name=name,
-                            in_service=bool(row.get('in_service', True)))
+                            in_service=bool(row.get('in_service', True)),
+                            # The optimal power flow keeps voltages within these;
+                            # 0.9-1.1 pu is the canvas default.
+                            min_vm_pu=_num(row.get('min_vm_pu'), 'min_vm_pu', where, problems,
+                                           default=0.9, positive=True),
+                            max_vm_pu=_num(row.get('max_vm_pu'), 'max_vm_pu', where, problems,
+                                           default=1.1, positive=True))
         record('bus', idx, ident)
         bus_index[ident] = idx
         bus_kv[ident] = vn_kv
@@ -291,6 +308,13 @@ def build_network(spec):
             r0x0_min=_num(row.get('r0x0_min'), 'r0x0_min', where, problems, default=r0x0_max),
         )
         record('ext_grid', idx, ident)
+        # Optimal power flow: what the grid may import (+) or export (-), and
+        # its price. The canvas default allows no export.
+        net.ext_grid.at[idx, 'min_p_mw'] = _num(row.get('min_p_mw'), 'min_p_mw', where, problems,
+                                                default=-1e6)
+        net.ext_grid.at[idx, 'max_p_mw'] = _num(row.get('max_p_mw'), 'max_p_mw', where, problems,
+                                                default=1e6)
+        _opf_cost(net, row, where, problems, idx, 'ext_grid')
 
     # --- transformers ----------------------------------------------------
     for i, row in enumerate(_as_list(spec, 'transformers', problems)):
@@ -509,6 +533,16 @@ def build_network(spec):
             in_service=bool(row.get('in_service', True)),
         )
         record('gen', idx, ident)
+        # Optimal power flow: dispatchable between these limits - by default
+        # from nothing to its rating, and the reactive power its rated power
+        # factor allows.
+        sn = float(net.gen.at[idx, 'sn_mva'])
+        q_cap = round(sn * math.sin(math.acos(min(max(cos_phi or 0.85, 0.01), 1.0))), 6)
+        net.gen.at[idx, 'controllable'] = bool(row.get('controllable', True))
+        for field, default in (('min_p_mw', 0.0), ('max_p_mw', sn),
+                               ('min_q_mvar', -q_cap), ('max_q_mvar', q_cap)):
+            net.gen.at[idx, field] = _num(row.get(field), field, where, problems, default=default)
+        _opf_cost(net, row, where, problems, idx, 'gen')
 
     for i, row in enumerate(_as_list(spec, 'static_generators', problems)):
         ident = _ident(row, i, 'SGen', problems, used_ids)
@@ -534,6 +568,20 @@ def build_network(spec):
             in_service=bool(row.get('in_service', True)),
         )
         record('sgen', idx, ident)
+        # Optimal power flow: a static generator given a price may be
+        # curtailed - from nothing to its p_mw, the output available - and
+        # give or take reactive power up to power factor 0.9 at its rating.
+        # (A fixed reactive power, min = max, is read by the backend as the
+        # canvas placeholder and widened to unlimited.) Without a price it
+        # runs at p_mw.
+        controllable = bool(row.get('controllable', row.get('cost_per_mwh') is not None))
+        net.sgen.at[idx, 'controllable'] = controllable
+        if controllable:
+            q_cap = round(float(net.sgen.at[idx, 'sn_mva']) * math.sin(math.acos(0.9)), 6)
+            for field, default in (('min_p_mw', 0.0), ('max_p_mw', p_mw or 0.0),
+                                   ('min_q_mvar', -q_cap), ('max_q_mvar', q_cap)):
+                net.sgen.at[idx, field] = _num(row.get(field), field, where, problems, default=default)
+        _opf_cost(net, row, where, problems, idx, 'sgen')
         # A radial import draws turbine symbols for a machine whose name says
         # "wind" or "turbine". Say so rather than editing the label behind the
         # user's back - the name is what the diagram shows.
@@ -580,6 +628,8 @@ def build_network(spec):
             in_service=bool(row.get('in_service', True)),
         )
         record('storage', idx, ident)
+        # Optimal power flow: storage runs at its p_mw.
+        net.storage.at[idx, 'controllable'] = False
 
     # --- switches --------------------------------------------------------
     # The element is named by its spec id, never by its display name - a line
