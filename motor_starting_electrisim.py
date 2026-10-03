@@ -498,12 +498,16 @@ def _derive_motor3_params(el: Dict[str, Any], warnings: List[str]) -> Dict[str, 
     hm = _sf(el.get("Hm") or el.get("hm"), 0.5)
     if hm <= 0:
         hm = 0.5
+    # Load torque Tm(w) = c1 + c2*w + c3*w^2 in pu of the rated mechanical
+    # torque at the drawn loading (c3 = 1: a pump or fan at rated load).
     c1 = _sf(el.get("tm_c1") or el.get("c1"), 0.0)
     c2 = _sf(el.get("tm_c2") or el.get("c2"), 0.0)
     c3 = _sf(el.get("tm_c3") or el.get("c3"), 1.0)
-    # ANDES uses aa, bb, c2 for tm = aa + bb*slip + c2*slip^2 in some docs;
-    # Motor3 params: c1, c2, c3 for Tm(w)
+    loading = _sf(el.get("loading_percent"), 100.0)
+    if loading <= 0:
+        loading = 100.0
     return {
+        "pn_mech_mw": (pn if pn > 0 else sn * cos_n * eff / 100.0) * loading / 100.0,
         "Sn": sn,
         "Vn": vn,
         "rs": rs_use,
@@ -562,7 +566,7 @@ def _dynamic_start_rebuild(
     t_end: float,
     warnings: List[str],
 ) -> Dict[str, Any]:
-    """Build ANDES system, add Motor3 devices BEFORE setup by patching build flow."""
+    """Build the ANDES system with the started motors, run it and report the start."""
     dyn_params = dict(params)
     dyn_params["fault_enabled"] = False
     dyn_params["fault_bus"] = ""
@@ -589,6 +593,9 @@ def _dynamic_start_rebuild(
         except Exception:
             pass
         ss.TDS.config.tf = t_end
+        # The rotor flux turns at slip * 2*pi*f - 314 rad/s at standstill -
+        # which ANDES's default 33 ms step aliases, overshooting the dip.
+        ss.TDS.config.tstep = _sf(params.get("tstep"), 0.01)
         # Power flow
         ss.PFlow.run()
         if not ss.PFlow.converged:
@@ -598,6 +605,17 @@ def _dynamic_start_rebuild(
                 "exception": "PFlow not converged",
                 "warnings": warnings,
             }
+        ss.TDS.init()
+        # ANDES initialises an out-of-service motor at synchronous speed
+        # (slip 0) with Id = 1 pu on the system base: toggled in from there,
+        # the Newton step started from a 100 MVA load on a 0.4 kV bus and
+        # settled on the bus's V = 0 solution. Start it from standstill and
+        # without current instead.
+        m = ss.Motor3
+        off = np.asarray(m.u.v) == 0
+        ss.dae.x[np.asarray(m.slip.a)[off]] = 1.0
+        ss.dae.y[np.asarray(m.Id.a)[off]] = 0.0
+        ss.dae.y[np.asarray(m.Iq.a)[off]] = 0.0
         ss.TDS.run()
     except Exception as e:
         return {
@@ -645,68 +663,46 @@ def _dynamic_start_rebuild(
     motor_series: Dict[str, Any] = {}
     motor_results: List[Dict[str, Any]] = []
     slip_thresh = _sf(params.get("slip_threshold"), 0.02)
+    # A motor still above this slip at t_end has stalled or not run up.
+    stall_slip = _sf(params.get("stall_slip"), 0.1)
+    sb = float(ss.config.mva)
+    after = np.asarray(t, dtype=float) > t_start
 
     try:
         if hasattr(ss, "Motor3") and ss.Motor3.n > 0:
             m = ss.Motor3
-            # currents
-            def _series(var_name):
-                if not hasattr(m, var_name):
-                    return None
-                var = getattr(m, var_name)
-                addrs = list(var.a)
-                vals = andes_electrisim.tds_values(ss, var)
-                return vals
 
-            id_vals = _series("Id")
-            iq_vals = _series("Iq")
-            slip_vals = _series("slip")
-            te_vals = _series("te")
-            tm_vals = _series("tm")
-            p_vals = _series("p")
-            q_vals = _series("q")
+            def _series(var_name, i):
+                vals = andes_electrisim.tds_values(ss, getattr(m, var_name))
+                return np.asarray(vals[:, i] if vals.ndim == 2 else vals, dtype=float)
 
             for i in range(m.n):
                 midx = str(m.idx.v[i])
                 info = motor_map.get(midx, {"id": midx, "name": str(m.name.v[i])})
-                i_mag = None
-                if id_vals is not None and iq_vals is not None:
-                    idi = id_vals[:, i] if id_vals.ndim == 2 else id_vals
-                    iqi = iq_vals[:, i] if iq_vals.ndim == 2 else iq_vals
-                    i_mag = np.sqrt(np.asarray(idi, dtype=float) ** 2 + np.asarray(iqi, dtype=float) ** 2)
+                # ANDES gives the current and torque on the system base;
+                # report them on the motor's rating, as lrc_pu is.
+                vb = float(ss.Bus.get(src="Vn", idx=m.bus.v[i], attr="v"))
+                i_base_sys = sb / (math.sqrt(3) * vb)
+                i_scale = i_base_sys / info.get("i_base_ka", i_base_sys)
+                i_mag = np.hypot(_series("Id", i), _series("Iq", i)) * i_scale
+                slip = _series("slip", i)
+                te = _series("te", i) * sb / info.get("sn_mva", sb)
 
-                slip_list = None
-                if slip_vals is not None:
-                    sli = slip_vals[:, i] if slip_vals.ndim == 2 else slip_vals
-                    slip_list = [_clean(x) for x in np.asarray(sli, dtype=float).tolist()]
-
+                # Run-up ends when the slip first reaches its running value
+                # (within 20%, or slip_threshold, whichever is larger).
                 start_time_s = None
-                if slip_list and t:
-                    for ti, s in zip(t, slip_list):
-                        if s is not None and abs(s) <= slip_thresh and ti >= t_start:
-                            start_time_s = float(ti) - t_start
-                            break
-
-                i_list = [_clean(x) for x in i_mag.tolist()] if i_mag is not None else None
-                i_start_pu = None
-                if i_list:
-                    # first sample after t_start
-                    for ti, iv in zip(t, i_list):
-                        if ti >= t_start and iv is not None:
-                            i_start_pu = iv
-                            break
-
-                te_list = None
-                if te_vals is not None:
-                    tei = te_vals[:, i] if te_vals.ndim == 2 else te_vals
-                    te_list = [_clean(x) for x in np.asarray(tei, dtype=float).tolist()]
+                if t and slip.size and slip[-1] <= stall_slip:
+                    done = after & (slip <= max(slip_thresh, 1.2 * slip[-1]))
+                    if done.any():
+                        start_time_s = float(np.asarray(t)[done][0]) - t_start
+                i_start_pu = float(i_mag[after].max()) if after.any() else None
 
                 motor_series[info["id"]] = {
                     "id": info["id"],
                     "name": info.get("name"),
-                    "i_pu": i_list,
-                    "slip": slip_list,
-                    "te": te_list,
+                    "i_pu": [_clean(x) for x in i_mag.tolist()],
+                    "slip": [_clean(x) for x in slip.tolist()],
+                    "te": [_clean(x) for x in te.tolist()],
                 }
                 motor_results.append({
                     "id": info["id"],
@@ -714,6 +710,7 @@ def _dynamic_start_rebuild(
                     "method": info.get("method", method),
                     "start_time_s": _clean(start_time_s),
                     "i_start_pu": _clean(i_start_pu),
+                    "slip_final": _clean(float(slip[-1])) if slip.size else None,
                     "note": info.get("note"),
                     "pass": start_time_s is not None,
                 })
@@ -808,6 +805,7 @@ def _build_system_with_motors(
         in_data, params, exclude_motors={str(el.get("name")) for el in motors}, setup=False)
 
     bus_map = meta["bus_map"]
+    sb = float(ss.config.mva)
     motor_map: Dict[str, Dict[str, Any]] = {}
     toggle_i = 0
 
@@ -827,6 +825,17 @@ def _build_system_with_motors(
         mid = str(el.get("id") or el.get("name"))
         mname = mparams.pop("name")
         lrc = mparams.pop("lrc_pu")
+        sn_rated = mparams["Sn"]
+        # ANDES puts Motor3's impedances and Hm on the system base but not
+        # c1..c3, which act directly on the system-base torque balance - and
+        # its Tm(slip) = (c1+c2+c3) - (c2+2*c3)*slip + c2*slip^2 has c2 where
+        # the expansion of c1 + c2*w + c3*w^2 in w = 1 - slip has c3. Pass the
+        # coefficients that give the drawn curve, in pu of the system base.
+        tm_scale = mparams.pop("pn_mech_mw") / sb
+        c1, c2, c3 = mparams["c1"], mparams["c2"], mparams["c3"]
+        mparams["c1"] = (c1 + (c2 - c3) / 2.0) * tm_scale
+        mparams["c2"] = c3 * tm_scale
+        mparams["c3"] = (c2 + c3) / 2.0 * tm_scale
         note = None
         applied_method = "dol"
         if method == "soft_start":
@@ -850,6 +859,7 @@ def _build_system_with_motors(
             u=0,
             Sn=mparams["Sn"],
             Vn=mparams["Vn"],
+            fn=meta["frequency"],
             rs=mparams["rs"],
             xs=mparams["xs"],
             rr1=mparams["rr1"],
@@ -875,6 +885,9 @@ def _build_system_with_motors(
             "method": applied_method,
             "note": note,
             "lrc_pu": lrc,
+            # The rating, for reporting current and torque in pu of it.
+            "sn_mva": sn_rated,
+            "i_base_ka": sn_rated / (math.sqrt(3) * mparams["Vn"]),
         }
 
     ss.setup()
