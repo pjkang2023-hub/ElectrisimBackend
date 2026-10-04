@@ -2939,6 +2939,10 @@ def test_economic_losses_follow_the_profiles_hour_by_hour(client, quiet):
     1.15 - the heaviest hours of the year counted no losses (7.6 % short
     over a year here). The lifetime multiplied the period, not a year, by
     the years: a week was "30 years" of 30 weeks.
+
+    The generation profile drives static generators and wind turbines only:
+    it made the 4 MW CHP plant follow the onshore wind, averaging 1.7 MW over
+    a year, and the year's losses came out 12 % low. It holds its drawn P.
     """
     import pandapower_electrisim as pe
     hours = 168  # the first week of January, beyond the old table in both
@@ -2950,7 +2954,7 @@ def test_economic_losses_follow_the_profiles_hour_by_hour(client, quiet):
 
     net, _ = sld.build_network(load_spec('reference_transmission'))
     run(net)
-    base = {(t, c): net[t][c].copy() for t, c in (('load', 'p_mw'), ('load', 'q_mvar'), ('gen', 'p_mw'),
+    base = {(t, c): net[t][c].copy() for t, c in (('load', 'p_mw'), ('load', 'q_mvar'),
                                               ('sgen', 'p_mw'), ('sgen', 'q_mvar'))}
     energy = 0.0
     for h in range(hours):
@@ -2959,9 +2963,11 @@ def test_economic_losses_follow_the_profiles_hour_by_hour(client, quiet):
         pp.runpp(net, init='results', **pe._electrisim_enforce_q_lims_kw(net))
         energy += _losses_mw(net)
     assert result['total_energy_losses_period_mwh'] == pytest.approx(energy, rel=0.01)
+    # Rebuilt from the period total, which is rounded to 0.1 kWh: x 8760 / 168
+    # puts that rounding at up to 5 kWh a year.
     annual = result['total_energy_losses_period_mwh'] * 8760 / hours
-    assert result['total_energy_losses_annual_mwh'] == pytest.approx(annual, rel=1e-6)
-    assert result['total_energy_losses_mwh'] == pytest.approx(annual * 30, rel=1e-6)
+    assert result['total_energy_losses_annual_mwh'] == pytest.approx(annual, rel=1e-5)
+    assert result['total_energy_losses_mwh'] == pytest.approx(annual * 30, rel=1e-5)
     assert any('scaled to a full year' in w for w in result['warnings']), result.get('warnings')
 
 
