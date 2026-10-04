@@ -2086,6 +2086,29 @@ def _protection_request(settings=None, grid='reference_radial'):
     return payload
 
 
+@pytest.mark.parametrize('line, cut_off', (('LA1', ('A1', 'A2', 'LV network A')),
+                                           ('LA2', ('A2', 'LV network A'))))
+def test_protection_names_isolated_buses(client, quiet, line, cut_off):
+    """
+    A drawn grid with buses already cut off was refused with pandapower's
+    indices: "Isolated buses found: [np.int64(5), np.int64(6), np.int64(7)]".
+    It must name them as the diagram does, keeping its advice.
+    """
+    with open(os.path.join(REFERENCE_DIR, 'reference_radial.diagram_protection_payload.json'),
+              encoding='utf-8') as handle:
+        payload = json.load(handle)
+    for element in payload.values():
+        if isinstance(element, dict) and element.get('userFriendlyName') == line:
+            element['in_service'] = False
+    with quiet():
+        response = client.post('/', json=payload)
+    # The frontend alerts the message.
+    result = json.loads(response.get_data(as_text=True))
+    assert result.get('error') is True
+    assert result['message'] == ('Isolated buses found: ' + ', '.join(sorted(cut_off)) + '. Connect every '
+                                 'component to a supplied bus before running protection coordination.')
+
+
 def test_protection_automatic_pickup_it_cannot_build_is_not_computed(client, quiet):
     """
     pandapower's OCRelay grades only networks whose closed switches all sit on

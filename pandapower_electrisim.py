@@ -130,15 +130,15 @@ def ensure_sgen_k(net):
         net.sgen['k'] = net.sgen['k'].where(net.sgen['k'] > 0, 1.1)
 
 
-def isolated_buses_message(net):
-    """The short-circuit studies' refusal of buses no source supplies, naming
-    them as the diagram does; None when every bus is supplied."""
+def isolated_buses_message(net, advice="Check your network connectivity."):
+    """The studies' refusal of buses no source supplies, naming them as the
+    diagram does, then the advice; None when every bus is supplied."""
     isolated_buses = top.unsupplied_buses(net)
     if len(isolated_buses) == 0:
         return None
     isolated_refs = resolve_element_refs(net, 'bus', isolated_buses)
     isolated_names = [r.get('name') or r.get('id') or str(r.get('index')) for r in isolated_refs]
-    return f"Isolated buses found: {', '.join(isolated_names)}. Check your network connectivity."
+    return f"Isolated buses found: {', '.join(isolated_names)}. {advice}"
 
 
 def ensure_ext_grid_zero_sequence_min(net):
@@ -15203,12 +15203,15 @@ def protection_coordination(net, prot_params, in_data):
         if grading_mode not in ('auto', 'manual'):
             grading_mode = 'auto'
 
-        # Validate connectivity early so we surface a clear message before sc.calc_sc.
-        isolated_buses = top.unsupplied_buses(net)
-        if len(isolated_buses) > 0:
+        # Validate connectivity early so we surface a clear message before
+        # sc.calc_sc - naming the buses: the indices read
+        # "[np.int64(5), np.int64(6), np.int64(7)]".
+        isolated = isolated_buses_message(
+            net, 'Connect every component to a supplied bus before running protection coordination.')
+        if isolated:
             return json.dumps({
                 'error': True,
-                'message': f'Isolated buses found: {sorted(isolated_buses)}. Connect every component to a supplied bus before running protection coordination.',
+                'message': isolated,
                 'scenarios': [],
                 'devices': [],
                 'summary': {'converged': False},
