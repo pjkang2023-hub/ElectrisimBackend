@@ -750,6 +750,28 @@ def test_exported_short_circuit_script_reproduces_the_study(client, quiet, grid,
         assert got[row['name']] == pytest.approx(float(row['ikss_ka']), rel=1e-9, abs=1e-9), row['name']
 
 
+@pytest.mark.parametrize('fault', ('3ph', '1ph'))
+@pytest.mark.parametrize('grid', GRIDS)
+def test_short_circuit_does_not_need_the_diagnostic(client, quiet, monkeypatch, grid, fault):
+    """
+    calc_sc ran with check_connectivity=False, which only worked because
+    pp.diagnostic had run first and left net._is_elements_final behind -
+    without it every study failed in pandapower's gen lookup. The study must
+    give the same currents with the diagnostic doing nothing.
+    """
+    want = _post_short_circuit(client, quiet, _sc_fixture(grid, fault, 'max'))
+    assert not want.get('error'), want.get('message') or want.get('exception')
+    monkeypatch.setattr(pp, 'diagnostic', lambda *args, **kwargs: None)
+    got = _post_short_circuit(client, quiet, _sc_fixture(grid, fault, 'max'))
+    assert not got.get('error'), got.get('message') or got.get('exception')
+    rows = {r['name']: r for r in got['busbars']}
+    assert len(rows) == len(want['busbars'])
+    for row in want['busbars']:
+        for column in SC_COLUMNS:
+            assert float(rows[row['name']][column]) == pytest.approx(float(row[column]), rel=1e-9, abs=1e-9), \
+                (row['name'], column)
+
+
 # --- harmonics (OpenDSS) -------------------------------------------------------------
 
 # OpenDSS models the grid behind its short-circuit impedance where pandapower's

@@ -1617,10 +1617,8 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
         lines.append("    kappa_method='C',")
         lines.append(f"    r_fault_ohm={r_fault_ohm},")
         lines.append(f"    x_fault_ohm={x_fault_ohm},")
-        # The backend runs with False, but only after pp.diagnostic has left
-        # net._is_elements_final behind; a fresh net with False fails in
-        # pandapower's gen lookup. The backend refuses isolated buses, so the
-        # connectivity check changes nothing else.
+        # As the backend runs it: with False a fresh net fails in pandapower's
+        # gen lookup (net._is_elements_final is never set).
         lines.append("    check_connectivity=True,")
         lines.append("    branch_results=True,")
         lines.append("    return_all_currents=False,")
@@ -7698,7 +7696,7 @@ def _three_phase_kappa(net, case, bus, tk_s, r_fault_ohm, x_fault_ohm, iec_optio
     net3 = copy.deepcopy(net)
     sc.calc_sc(net3, fault='3ph', case=case, bus=bus, ip=True, ith=False, tk_s=tk_s,
                kappa_method='C', r_fault_ohm=r_fault_ohm, x_fault_ohm=x_fault_ohm,
-               check_connectivity=False, branch_results=False, **(iec_options or {}))
+               check_connectivity=True, branch_results=False, **(iec_options or {}))
     index = net.res_bus_sc.index
     rows = net3['_pd2ppc_lookups']['bus'][index.values]
     return pd.Series(net3['_ppc']['bus'][rows, KAPPA], index=index)
@@ -7938,7 +7936,11 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
             kappa_method='C',
             r_fault_ohm=r_fault_ohm,
             x_fault_ohm=x_fault_ohm,
-            check_connectivity=False,
+            # False ran only because pp.diagnostic above had left
+            # net._is_elements_final behind; without it pandapower's gen
+            # lookup fails. Isolated buses are refused above, so the check
+            # changes nothing else.
+            check_connectivity=True,
             branch_results=True,
             return_all_currents=False,  # Changed: False gives max/min per branch with simple index
             **iec_options,
