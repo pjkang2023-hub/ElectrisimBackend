@@ -232,12 +232,11 @@ def arcflash(net, in_data, in_data_full=None):
     if equipment_mode not in ("by_voltage", "uniform"):
         equipment_mode = "by_voltage"
 
-    # Ensure SC parameter present on sgens
-    if hasattr(net, "sgen") and not net.sgen.empty:
-        if "k" not in net.sgen.columns:
-            net.sgen["k"] = 1.1
-        else:
-            net.sgen["k"] = net.sgen["k"].fillna(1.1)
+    # The short-circuit study's rule: 1.1 where none is given, so a k of 0
+    # no longer drops the sgen from the arcing current.
+    from pandapower_electrisim import ensure_sgen_k
+
+    ensure_sgen_k(net)
 
     try:
         sc.calc_sc(

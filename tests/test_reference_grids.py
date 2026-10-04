@@ -2861,6 +2861,30 @@ def test_arc_flash_by_voltage_class(client, quiet, grid):
         assert rows['110 kV supply']['ppe_category'] == 'Dangerous'
 
 
+def test_arc_flash_takes_the_short_circuit_studys_sgen_k(quiet):
+    """
+    Arc flash filled only a missing k with 1.1, so a k of 0 dropped the sgen
+    from the bolted-fault current the short-circuit study counts it in.
+    """
+    import arcflash_electrisim
+    params = {'electrode_config': 'VCB', 'equipment_mode': 'by_voltage'}
+
+    def ikss(k):
+        net, _ = sld.build_network(load_spec('reference_transmission'))
+        if k is not None:
+            net.sgen['k'] = k
+        with quiet():
+            result = json.loads(arcflash_electrisim.arcflash(net, dict(params)))
+        assert not result.get('error'), result.get('exception')
+        return {row['name']: row['ikss_ka'] for row in result['arc_flash']}
+
+    want = ikss(1.1)
+    for k in (0.0, -1.0, float('nan')):
+        got = ikss(k)
+        for name, value in want.items():
+            assert got[name] == pytest.approx(value, rel=1e-9), (k, name)
+
+
 @pytest.mark.parametrize('grid', GRIDS)
 def test_arc_flash_uniform_equipment(client, quiet, grid):
     """The values entered apply to every bus when asked for; Lee in cal/cm² still."""
