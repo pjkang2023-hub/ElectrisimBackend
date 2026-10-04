@@ -720,6 +720,36 @@ def test_short_circuit_names_missing_machine_data(client, quiet):
     assert 'DataFrame' not in message
 
 
+@pytest.mark.parametrize('fault, case', sorted(SC_FIXTURE))
+@pytest.mark.parametrize('grid', GRIDS)
+def test_exported_short_circuit_script_reproduces_the_study(client, quiet, grid, fault, case):
+    """
+    "Export Pandapower Python Code" must give a script that runs and gets the
+    study's own currents. Its create_motor had no cos_phi_n, so calc_sc refused
+    any grid with a motor; behind that the generators' subtransient data, the
+    sgens' k and kappa and the lines' end temperature and zero sequence were
+    missing too, and calc_sc with check_connectivity=False only ran in the
+    backend because pp.diagnostic had run first.
+    """
+    payload = _sc_fixture(grid, fault, case)
+    params = next(v for v in payload.values() if 'Parameters' in str(v.get('typ')))
+    params['exportPython'] = True
+    drawn = _post_short_circuit(client, quiet, payload)
+    assert not drawn.get('error'), drawn.get('message') or drawn.get('exception')
+    code = drawn.get('pandapower_python')
+    assert code, drawn.get('pandapower_python_error')
+    assert 'pp.create_motor(' in code and 'cos_phi_n=' in code
+
+    namespace = {}
+    with quiet():
+        exec(compile(code, f'{grid}_sc_export.py', 'exec'), namespace)
+    net = namespace['net']
+    got = dict(zip(net.bus.loc[net.res_bus_sc.index, 'name'], net.res_bus_sc['ikss_ka']))
+    assert len(drawn['busbars']) == len(net.bus)
+    for row in drawn['busbars']:
+        assert got[row['name']] == pytest.approx(float(row['ikss_ka']), rel=1e-9, abs=1e-9), row['name']
+
+
 # --- harmonics (OpenDSS) -------------------------------------------------------------
 
 # OpenDSS models the grid behind its short-circuit impedance where pandapower's

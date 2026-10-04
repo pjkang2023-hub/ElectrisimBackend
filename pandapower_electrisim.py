@@ -912,6 +912,35 @@ _EXT_GRID_SC_EXPORT_COLS = (
     'r0x0_min', 'x0x_min',
 )
 
+# Columns the exported create_* calls carry beyond their fixed arguments:
+# whatever pandapower's short circuit reads (motor cos_phi_n, generator
+# subtransient data, sgen k / kappa, line end temperature and zero sequence,
+# trafo neutral and power-station data) and in_service. Each was left out, so
+# the script either failed in calc_sc or ran a different network.
+_EXPORT_EXTRA_COLS = {
+    'motor': ('pn_mech_mw', 'cos_phi', 'cos_phi_n', 'efficiency_n_percent', 'lrc_pu', 'rx', 'vn_kv',
+              'efficiency_percent', 'loading_percent', 'scaling', 'in_service'),
+    'line': ('in_service', 'r0_ohm_per_km', 'x0_ohm_per_km', 'c0_nf_per_km', 'g0_us_per_km',
+             'endtemp_degree'),
+    'trafo': ('in_service', 'xn_ohm', 'rn_ohm', 'pt_percent', 'oltc', 'power_station_unit'),
+    'trafo3w': ('in_service',),
+    'gen': ('in_service', 'sn_mva', 'vn_kv', 'xdss_pu', 'rdss_ohm', 'cos_phi', 'pg_percent',
+            'power_station_trafo'),
+    'sgen': ('in_service', 'k', 'rx', 'generator_type', 'kappa', 'lrc_pu', 'max_ik_ka',
+             'current_source'),
+    'load': ('in_service',),
+    'shunt': ('in_service', 'vn_kv', 'step', 'max_step'),
+    'ext_grid': ('in_service',),
+}
+
+
+def _export_extra_kwargs(table, row):
+    """', col=value' for each of the table's extra columns the live row sets.
+    A null column is skipped so pandapower keeps its own NaN default."""
+    return ''.join(
+        f", {col}={_export_py_literal(row[col])}" for col in _EXPORT_EXTRA_COLS[table]
+        if col in row.index and not pd.isnull(row[col]))
+
 
 def _export_float_from_payload(val):
     if val is None or val == '' or str(val).lower() in ('null', 'none'):
@@ -1007,7 +1036,7 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
             sc_kwargs = _ext_grid_sc_kwargs_for_export(row, in_elem)
             lines.append(
                 f"pp.create_ext_grid(net, bus=bus_{bus}, vm_pu={vm_pu}, va_degree={va_degree}, "
-                f"name='{name}'{sc_kwargs})"
+                f"name='{name}'{sc_kwargs}{_export_extra_kwargs('ext_grid', row)})"
             )
         lines.append("")
     
@@ -1039,7 +1068,8 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
             line_code = (f"pp.create_line_from_parameters(net, from_bus=bus_{from_bus}, to_bus=bus_{to_bus}, "
                         f"length_km={length_km}, r_ohm_per_km={r_ohm_per_km}, x_ohm_per_km={x_ohm_per_km}, "
                         f"c_nf_per_km={c_nf_per_km}, g_us_per_km={g_us_per_km}, max_i_ka={max_i_ka}, "
-                        f"type='{line_type}', parallel={parallel}, df={df}, name='{name}')")
+                        f"type='{line_type}', parallel={parallel}, df={df}, name='{name}'"
+                        f"{_export_extra_kwargs('line', row)})")
             lines.append(line_code)
         lines.append("")
     
@@ -1099,7 +1129,8 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
                          f"vector_group='{vector_group}', "
                          f"vk0_percent={vk0_percent}, vkr0_percent={vkr0_percent}, "
                          f"mag0_percent={mag0_percent}, mag0_rx={mag0_rx}, "
-                         f"si0_hv_partial={si0_hv_partial}, name='{name}')")
+                         f"si0_hv_partial={si0_hv_partial}, name='{name}'"
+                         f"{_export_extra_kwargs('trafo', row)})")
             lines.append(trafo_code)
         lines.append("")
     
@@ -1169,7 +1200,7 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
                            f"vector_group='{vector_group}', "
                            f"vk0_hv_percent={vk0_hv_percent}, vk0_mv_percent={vk0_mv_percent}, vk0_lv_percent={vk0_lv_percent}, "
                            f"vkr0_hv_percent={vkr0_hv_percent}, vkr0_mv_percent={vkr0_mv_percent}, vkr0_lv_percent={vkr0_lv_percent}, "
-                           f"name='{name}')")
+                           f"name='{name}'{_export_extra_kwargs('trafo3w', row)})")
             lines.append(trafo3w_code)
         lines.append("")
     
@@ -1181,7 +1212,8 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
             p_mw = row['p_mw']
             q_mvar = row['q_mvar']
             name = row['name'] if 'name' in row else f"Load_{idx}"
-            lines.append(f"pp.create_load(net, bus=bus_{bus}, p_mw={p_mw}, q_mvar={q_mvar}, name='{name}')")
+            lines.append(f"pp.create_load(net, bus=bus_{bus}, p_mw={p_mw}, q_mvar={q_mvar}, name='{name}'"
+                         f"{_export_extra_kwargs('load', row)})")
         lines.append("")
     
     # Create static generators
@@ -1217,7 +1249,7 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
                     type_part = f", type={str(st)!r}"
             lines.append(
                 f"pp.create_sgen(net, bus=bus_{bus}, p_mw={p_mw}, q_mvar={q_mvar}, name='{name}'"
-                f"{sn_part}{scale_part}{type_part})"
+                f"{sn_part}{scale_part}{type_part}{_export_extra_kwargs('sgen', row)})"
             )
         lines.append("")
     
@@ -1229,7 +1261,8 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
             p_mw = row['p_mw']
             vm_pu = row['vm_pu']
             name = row['name'] if 'name' in row else f"Gen_{idx}"
-            lines.append(f"pp.create_gen(net, bus=bus_{bus}, p_mw={p_mw}, vm_pu={vm_pu}, name='{name}')")
+            lines.append(f"pp.create_gen(net, bus=bus_{bus}, p_mw={p_mw}, vm_pu={vm_pu}, name='{name}'"
+                         f"{_export_extra_kwargs('gen', row)})")
         lines.append("")
     
     # Create shunts
@@ -1240,7 +1273,8 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
             q_mvar = row['q_mvar']
             p_mw = row['p_mw']
             name = row['name'] if 'name' in row else f"Shunt_{idx}"
-            lines.append(f"pp.create_shunt(net, bus=bus_{bus}, q_mvar={q_mvar}, p_mw={p_mw}, name='{name}')")
+            lines.append(f"pp.create_shunt(net, bus=bus_{bus}, q_mvar={q_mvar}, p_mw={p_mw}, name='{name}'"
+                         f"{_export_extra_kwargs('shunt', row)})")
         lines.append("")
     
     # Create storage elements
@@ -1393,21 +1427,8 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
         for idx, row in net.motor.iterrows():
             bus = row['bus']
             name = row['name'] if 'name' in row else f"Motor_{idx}"
-            pn_mech_mw = row.get('pn_mech_mw', 0.0)
-            cos_phi = row.get('cos_phi', 0.85)
-            efficiency_n_percent = row.get('efficiency_n_percent', 90.0)
-            lrc_pu = row.get('lrc_pu')
-            rx = row.get('rx', 0.0)
-            vn_kv = row.get('vn_kv', 0.4)
-            efficiency_percent = row.get('efficiency_percent', 90.0)
-            loading_percent = row.get('loading_percent', 100.0)
-            scaling = row.get('scaling', 1.0)
-            in_service = row.get('in_service', True)
-            lrc_param = f"lrc_pu={lrc_pu}" if lrc_pu is not None else "lrc_pu=None"
-            lines.append(f"pp.create_motor(net, bus=bus_{bus}, name='{name}', "
-                        f"pn_mech_mw={pn_mech_mw}, cos_phi={cos_phi}, efficiency_n_percent={efficiency_n_percent}, "
-                        f"{lrc_param}, rx={rx}, vn_kv={vn_kv}, efficiency_percent={efficiency_percent}, "
-                        f"loading_percent={loading_percent}, scaling={scaling}, in_service={in_service})")
+            lines.append(f"pp.create_motor(net, bus=bus_{bus}, name='{name}'"
+                         f"{_export_extra_kwargs('motor', row)})")
         lines.append("")
     
     # Create SVC elements
@@ -1582,8 +1603,8 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
         if sc_bus is not None and len(sc_bus) == 1:
             sc_bus = sc_bus[0]
         lines.append("# Short-circuit calculation (matches Electrisim IEC 60909 run)")
-        if not net.sgen.empty:
-            lines.append('net.sgen["k"] = 1.1')
+        # Each sgen's k is written on its create_sgen line: the 1.1 set here
+        # for all of them overrode a ratio set on the element.
         lines.append("")
         lines.append("sc.calc_sc(")
         lines.append("    net,")
@@ -1596,7 +1617,11 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
         lines.append("    kappa_method='C',")
         lines.append(f"    r_fault_ohm={r_fault_ohm},")
         lines.append(f"    x_fault_ohm={x_fault_ohm},")
-        lines.append("    check_connectivity=False,")
+        # The backend runs with False, but only after pp.diagnostic has left
+        # net._is_elements_final behind; a fresh net with False fails in
+        # pandapower's gen lookup. The backend refuses isolated buses, so the
+        # connectivity check changes nothing else.
+        lines.append("    check_connectivity=True,")
         lines.append("    branch_results=True,")
         lines.append("    return_all_currents=False,")
         for key, value in _sc_iec_options(sc).items():
