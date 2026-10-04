@@ -977,6 +977,13 @@ def _merge_pre_post_ansi(pre: dict, post: dict) -> dict:
 
 
 def shortcircuit_with_optional_pre_post(net, in_data, in_data_full=None) -> str:
+    # As the IEC study does: a bus no source supplies made Ybus singular
+    # ("singular matrix"), or was solved from local machines alone.
+    from pandapower_electrisim import isolated_buses_message
+
+    isolated = isolated_buses_message(net)
+    if isolated:
+        return json.dumps({"error": True, "message": isolated})
     compare = str(in_data.get("compare_pre_post", "false")).lower() in ("true", "1", "yes")
     project_ids = in_data.get("project_element_ids", "")
     if compare and _parse_id_list(project_ids):

@@ -130,6 +130,17 @@ def ensure_sgen_k(net):
         net.sgen['k'] = net.sgen['k'].where(net.sgen['k'] > 0, 1.1)
 
 
+def isolated_buses_message(net):
+    """The short-circuit studies' refusal of buses no source supplies, naming
+    them as the diagram does; None when every bus is supplied."""
+    isolated_buses = top.unsupplied_buses(net)
+    if len(isolated_buses) == 0:
+        return None
+    isolated_refs = resolve_element_refs(net, 'bus', isolated_buses)
+    isolated_names = [r.get('name') or r.get('id') or str(r.get('index')) for r in isolated_refs]
+    return f"Isolated buses found: {', '.join(isolated_names)}. Check your network connectivity."
+
+
 def ensure_ext_grid_zero_sequence_min(net):
     """
     pandapower single-phase min short-circuit reads ext_grid['x0x_min'] and
@@ -7856,13 +7867,9 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
   
     #print(net.line[net.line.isna().any(axis=1)])
     
-    isolated_buses = top.unsupplied_buses(net)
-    if len(isolated_buses) > 0:
-        isolated_refs = resolve_element_refs(net, 'bus', isolated_buses)
-        isolated_names = [r.get('name') or r.get('id') or str(r.get('index')) for r in isolated_refs]
-        raise ValueError(
-            f"Isolated buses found: {', '.join(isolated_names)}. Check your network connectivity."
-        )
+    isolated = isolated_buses_message(net)
+    if isolated:
+        raise ValueError(isolated)
 
     pp.diagnostic(net)
     
