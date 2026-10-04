@@ -46,6 +46,8 @@ new drawing still computes the spec's answers.
 import json
 import math
 import os
+import subprocess
+import sys
 
 import numpy as np
 import pandapower as pp
@@ -851,6 +853,110 @@ def test_drawn_diagram_opendss_load_flow_matches_spec(client, quiet, opendss_scr
             differ.append(f'line {name}: {i_a:.1f} A ({loading:.1f} %) in OpenDSS, '
                           f'{want_i:.1f} A ({want_loading:.1f} %) in pandapower')
     assert not differ, f'{grid}:\n  ' + '\n  '.join(differ)
+
+
+def _monte_carlo_payload(number):
+    with open(os.path.join(REFERENCE_DIR, 'reference_transmission.diagram_opendss_payload.json'),
+              encoding='utf-8') as handle:
+        payload = json.load(handle)
+    payload['0'].update(mode='M1', monteCarloNumber=str(number), monteCarloRandom='Uniform')
+    return payload
+
+
+# Run in a backend of its own: what OpenDSS keeps from one study to the next
+# is what hid the failure.
+_FRESH_MONTE_CARLO = """
+import os, sys
+import opendssdirect as dss
+import app as flask_app
+dss.Basic.DataPath(sys.argv[1])
+with open(os.path.join(sys.argv[1], 'request.json'), encoding='utf-8') as handle:
+    request = handle.read()
+response = flask_app.app.test_client().post('/', data=request, content_type='application/json')
+with open(os.path.join(sys.argv[1], 'response.json'), 'w', encoding='utf-8') as handle:
+    handle.write(response.get_data(as_text=True))
+"""
+
+
+def test_monte_carlo_in_a_fresh_backend(tmp_path):
+    """
+    Monte Carlo sampling started from whatever voltages OpenDSS held, and
+    nothing set them: in a fresh backend every sample failed to converge
+    (the transmission grid needs Newton from a flat start, and Monte Carlo
+    had no fallback), and after other studies the statistics moved with
+    whatever those left - the 20 kV busbar's maximum from 1.017 to 1.024 pu
+    against 1.0197 pu with no load at all. It now starts from a converged
+    snapshot. The results also gave the study's mode as "NONE" - a storage's
+    inverter-control mode overwrote it - named buses and lines by their cell
+    ids, and warned that every load drew less than set "at a low voltage",
+    which in Monte Carlo is just its random share.
+    """
+    number = 20
+    (tmp_path / 'request.json').write_text(json.dumps(_monte_carlo_payload(number)), encoding='utf-8')
+    run = subprocess.run(
+        [sys.executable, '-c', _FRESH_MONTE_CARLO, str(tmp_path)], capture_output=True,
+        text=True, encoding='utf-8', errors='replace', cwd=os.path.dirname(HERE), timeout=600)
+    assert run.returncode == 0, run.stderr[-2000:]
+    result = json.loads((tmp_path / 'response.json').read_text(encoding='utf-8'))
+    assert not result.get('error'), result.get('error')
+    mc = result['monte_carlo']
+    assert mc['mode'] == 'M1'
+    assert mc['summary']['converged_count'] == number, mc['summary']
+    spec = load_spec('reference_transmission')
+    assert {b['name'] for b in mc['bus_stats']} == {str(b.get('name') or b['id']) for b in spec['buses']}
+    assert {l['name'] for l in mc['line_stats']} == {str(l.get('name') or l['id']) for l in spec['lines']}
+    # Loads only ever fall (multipliers 0..1), so no bus rises above its
+    # no-load voltage: 1.0197 pu at the 20 kV busbar.
+    busbar = next(b for b in mc['bus_stats'] if b['name'] == '20 kV busbar 1')
+    assert busbar['vmax'] <= 1.0198, busbar
+    assert not [w for w in result.get('warnings') or [] if 'kW set' in str(w)], result['warnings']
+
+
+def test_monte_carlo_samples_are_snapshots_with_the_same_loads(client, quiet, opendss_scratch):
+    """
+    Each Monte Carlo sample is the load flow of the circuit with its loads
+    drawn: re-solved as an ordinary snapshot with each load's sampled power,
+    every bus comes out at the sample's voltage. Samples that started from
+    a stale solution missed it by up to 0.004 pu on the LV buses.
+    """
+    import opendssdirect as dss
+    import opendss_electrisim as ode
+
+    capture = ode._capture_monte_carlo_sample
+    samples = []
+
+    def record(*args):
+        # Only read the circuit here: changing a load between samples moves
+        # the next one, so the snapshots are solved after the run.
+        buses, lines = capture(*args)
+        sampled = {}
+        for name in dss.Loads.AllNames():
+            dss.Circuit.SetActiveElement('Load.' + name)
+            powers = dss.CktElement.Powers()
+            sampled[name] = (sum(powers[0::2]), sum(powers[1::2]))
+        samples.append((args, buses, sampled))
+        return buses, lines
+
+    ode._capture_monte_carlo_sample = record
+    try:
+        result = _post_harmonics(client, quiet, _monte_carlo_payload(10))
+    finally:
+        ode._capture_monte_carlo_sample = capture
+    assert result['monte_carlo']['summary']['converged_count'] == len(samples) == 10
+
+    dss.Text.Command('set Mode=Snapshot')
+    differ = []
+    for index, (args, buses, sampled) in enumerate(samples, 1):
+        for name, (kw, kvar) in sampled.items():
+            dss.Text.Command(f'Load.{name}.kW={kw} kvar={kvar}')
+        dss.Text.Command('solve')
+        assert dss.Solution.Converged(), f'sample {index}: the snapshot did not converge'
+        snapshot = capture(*args)[0]
+        for bus_id, bus in buses.items():
+            if abs(bus['vm_pu'] - snapshot[bus_id]['vm_pu']) > 1e-4:
+                differ.append(f"sample {index}, {bus['name']}: {bus['vm_pu']:.5f} pu in the sample, "
+                              f"{snapshot[bus_id]['vm_pu']:.5f} pu as a snapshot")
+    assert not differ, '\n  '.join(differ)
 
 
 def test_opendss_warnings_name_elements_by_their_label(client, quiet, opendss_scratch):

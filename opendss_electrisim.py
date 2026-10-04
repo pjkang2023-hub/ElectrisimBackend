@@ -4336,10 +4336,26 @@ def _monte_carlo_percentile(values, percentile):
     return values[lower] + (values[upper] - values[lower]) * (position - lower)
 
 
+def _monte_carlo_labels(in_data):
+    """Element name (as OpenDSS knows it, lower case) -> the diagram's label."""
+    labels = {}
+    for element in in_data.values():
+        if isinstance(element, dict) and element.get('name') and element.get('userFriendlyName'):
+            labels[_sanitize_opendss_name(element['name']).lower()] = str(element['userFriendlyName'])
+            labels[str(element['name']).lower()] = str(element['userFriendlyName'])
+    return labels
+
+
+class _MonteCarloSnapshotFailed(Exception):
+    """The snapshot Monte Carlo sampling starts from did not converge; try the next plan."""
+
+
 def _capture_monte_carlo_sample(BusbarsDictConnectionToName, LinesDict, LinesDictId, in_data):
     """Capture one native OpenDSS Monte Carlo solve result."""
     buses = {}
     lines = {}
+    # Reported by the diagram's labels; they read "mxCell_426".
+    labels = _monte_carlo_labels(in_data)
     try:
         for bus_name in dss.Circuit.AllBusNames():
             dss.Circuit.SetActiveBus(bus_name)
@@ -4352,9 +4368,10 @@ def _capture_monte_carlo_sample(BusbarsDictConnectionToName, LinesDict, LinesDic
             magnitudes = [float(pu_values[index]) for index in range(0, len(pu_values), 2)
                           if math.isfinite(float(pu_values[index]))]
             if magnitudes:
+                cell = BusbarsDictConnectionToName[bus_id]
                 buses[bus_id] = {
                     'id': bus_id,
-                    'name': BusbarsDictConnectionToName[bus_id],
+                    'name': labels.get(str(cell).lower(), cell),
                     'vm_pu': sum(magnitudes) / len(magnitudes),
                 }
     except Exception as error:
@@ -4374,7 +4391,7 @@ def _capture_monte_carlo_sample(BusbarsDictConnectionToName, LinesDict, LinesDic
             rating_ka = float(line_ratings.get(key) or 0)
             lines[key] = {
                 'id': LinesDictId.get(key, key),
-                'name': key,
+                'name': labels.get(str(key).lower(), key),
                 'loading_percent': (current_ka / rating_ka * 100.0) if rating_ka > 0 else 0.0,
                 'current_ka': current_ka,
             }
@@ -4483,11 +4500,11 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
     ext_scan = _prescan_external_grid(in_data)
     
     element_dicts = None
-    if monte_carlo_mode:
-        plan_queue = [{'label': str(mode), 'algorithm': algorithm,
-                       'max_iterations': max_iterations, 'gen_vminpu': None}]
-    else:
-        plan_queue = _opendss_snapshot_solve_plans(algorithm, max_iterations)
+    # Monte Carlo too: its sampling starts from a snapshot of the circuit, which
+    # needs the same fallbacks - the transmission grid's does not converge with
+    # Normal from a flat start, only with Newton.
+    plan_queue = _opendss_snapshot_solve_plans(algorithm, max_iterations)
+    monte_carlo_snapshot_failed = False
     build_attempt = 0
     zero_power_rebuild_done = False
     usable_plan = None
@@ -4537,6 +4554,20 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
             print("[OpenDSS] solve")
             gens_for_solve = element_dicts[12] if element_dicts and len(element_dicts) > 12 else {}
             if monte_carlo_mode:
+                # A snapshot first: Monte Carlo solves start from the voltages
+                # OpenDSS holds, and nothing initialised them - all zero in a
+                # fresh backend, where every sample failed to converge, and
+                # whatever the previous study left otherwise, which moved the
+                # statistics with it.
+                execute_dss_command('set Mode=Snapshot')
+                monte_carlo_snapshot_failed = not _opendss_solve_snapshot_plan(
+                    dss, execute_dss_command, plan, gens_for_solve)
+                if monte_carlo_snapshot_failed and build_attempt + 1 < len(plan_queue):
+                    raise _MonteCarloSnapshotFailed()
+                execute_dss_command(f'set Mode={mode}')
+                execute_dss_command(f'set Random={monte_carlo_random}')
+                if mode.upper() == 'M3' and monte_carlo_hour not in (None, ''):
+                    execute_dss_command(f'set Hour={monte_carlo_hour}')
                 # Retain the requested Number setting in the exported model, then
                 # use one solve at a time to preserve each random realization.
                 execute_dss_command('set Number=1')
@@ -4558,6 +4589,8 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
                         entry['values'].append(sample['loading_percent'])
             else:
                 _opendss_solve_snapshot_plan(dss, execute_dss_command, plan, gens_for_solve)
+        except _MonteCarloSnapshotFailed:
+            print(f"[OpenDSS] Monte Carlo initial snapshot did not converge: {plan['label']}")
         except Exception as e:
             print(f"[OpenDSS] Solve EXCEPTION: {e}")
 
@@ -4590,6 +4623,9 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
                 continue
 
             if monte_carlo_mode:
+                if monte_carlo_snapshot_failed and build_attempt + 1 < len(plan_queue):
+                    build_attempt += 1
+                    continue
                 break
 
             solution_usable = _opendss_circuit_has_usable_solution(dss)
@@ -4690,11 +4726,13 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
             eid = _elem.get('id')
             if not eid:
                 continue
-            mode = str(_elem.get('inv_control_mode', 'NONE')).upper()
+            # Not "mode": that is the study's (M1 ...), which this overwrote -
+            # the Monte Carlo results came back as mode "NONE".
+            inv_mode = str(_elem.get('inv_control_mode', 'NONE')).upper()
             if typ.startswith('Storage'):
-                storage_inv_mode_by_id[str(eid)] = mode
+                storage_inv_mode_by_id[str(eid)] = inv_mode
             elif typ.startswith('PVSystem'):
-                pv_inv_mode_by_id[str(eid)] = mode
+                pv_inv_mode_by_id[str(eid)] = inv_mode
         except Exception:
             pass
     
@@ -5048,8 +5086,11 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
                             break
             except Exception:
                 pass
+            # Not in Monte Carlo: there a load draws its random share of the
+            # set power, and every load was said to be at a low voltage.
             if (
-                p_set_mw is not None and p_set_mw > 0.001
+                not monte_carlo_mode
+                and p_set_mw is not None and p_set_mw > 0.001
                 and is_enabled and abs(p_mw) < 0.9 * abs(p_set_mw)
             ):
                 vm_txt = f'{vm_pu:.3f} pu' if vm_pu is not None else 'low'
