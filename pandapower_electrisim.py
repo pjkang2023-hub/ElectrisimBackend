@@ -10857,18 +10857,11 @@ def _ts_orig_p_for_element(net, elem_name, element_type):
 
 def _ts_resolve_profile_mode(mode, values, orig_p):
     """
-    Detect notebook-style absolute MW profiles sent with mode='scale'.
-    Scale factors are dimensionless (typically 0–2); values in [0, orig_p] are absolute MW.
+    The profile's mode as the user set it. Scale factors peaking between 20 %
+    and 105 % of an element's base P used to be taken for MW: the dialog's own
+    Constant preset (1.0) ran a 3 MW load at 1 MW.
     """
-    if mode != 'scale' or not values:
-        return mode
-    op = abs(float(orig_p)) if orig_p else 0.0
-    vmax = max(abs(float(v)) for v in values)
-    if vmax > 3.0:
-        return 'absolute'
-    if op > 1.0 and vmax >= op * 0.2 and vmax <= op * 1.05:
-        return 'absolute'
-    return mode
+    return mode if mode in ('scale', 'absolute') else 'scale'
 
 
 def _ts_set_pq(table, idx, orig_p, orig_q, value, mode):
@@ -10970,10 +10963,13 @@ def time_series_simulation(net, timeseries_params):
                     'id': str(elem_name),
                 }
 
+        preset_used = set()
+
         def _element_profile(name, element_type, t, global_values):
             spec = resolved_profiles.get(str(name))
             if spec and spec.get('element_type') == element_type:
                 return spec['values'][t], spec.get('mode', 'scale')
+            preset_used.add('load' if element_type == 'load' else 'gen')
             return global_values[t % len(global_values)], 'scale'
 
         all_results = []
@@ -11008,6 +11004,9 @@ def time_series_simulation(net, timeseries_params):
                 'gen_results': net.res_gen.copy() if len(net.gen) > 0 else None,
                 'sgen_results': net.res_sgen.copy() if len(net.sgen) > 0 else None,
                 'load_results': net.res_load.copy() if len(net.load) > 0 else None,
+                'trafo_results': net.res_trafo.copy() if len(net.trafo) > 0 else None,
+                'trafo3w_results': net.res_trafo3w.copy() if len(net.trafo3w) > 0 else None,
+                'ext_grid_results': net.res_ext_grid.copy() if len(net.ext_grid) > 0 else None,
             })
 
         # Prepare results
@@ -11051,6 +11050,27 @@ def time_series_simulation(net, timeseries_params):
         all_lines = []
         all_loads = []
         all_sgens = []
+        # Generators were run but not returned, transformers and the external
+        # grid not even kept: the most loaded element (a 79 % transformer on
+        # the transmission grid) did not show.
+        all_gens = []
+        all_transformers = []
+        all_ext_grids = []
+
+        def _element_rows(table, res, element_type, t, fields):
+            ufn = getattr(net, 'user_friendly_names', {}) or {}
+            rows = []
+            for idx, row in res.iterrows():
+                technical = net[table].loc[idx, 'name']
+                item = {
+                    'name': get_display_name(ufn.get(technical, technical), technical, element_type, idx, 'timeseries'),
+                    'id': str(technical),
+                    'time_step': t,
+                }
+                for key, column in fields:
+                    item[key] = safe_float(row[column])
+                rows.append(item)
+            return rows
 
         for result in all_results:
             t = result['time_step']
@@ -11095,6 +11115,19 @@ def time_series_simulation(net, timeseries_params):
                         p_mw=safe_float(load['p_mw']),
                         q_mvar=safe_float(load['q_mvar'])
                     ))
+
+            if result.get('gen_results') is not None:
+                all_gens.extend(_element_rows('gen', result['gen_results'], 'Generator', t, (
+                    ('p_mw', 'p_mw'), ('q_mvar', 'q_mvar'), ('vm_pu', 'vm_pu'))))
+            if result.get('trafo_results') is not None:
+                all_transformers.extend(_element_rows('trafo', result['trafo_results'], 'Transformer', t, (
+                    ('loading_percent', 'loading_percent'), ('p_hv_mw', 'p_hv_mw'), ('q_hv_mvar', 'q_hv_mvar'))))
+            if result.get('trafo3w_results') is not None:
+                all_transformers.extend(_element_rows('trafo3w', result['trafo3w_results'], 'Transformer3W', t, (
+                    ('loading_percent', 'loading_percent'), ('p_hv_mw', 'p_hv_mw'), ('q_hv_mvar', 'q_hv_mvar'))))
+            if result.get('ext_grid_results') is not None:
+                all_ext_grids.extend(_element_rows('ext_grid', result['ext_grid_results'], 'External Grid', t, (
+                    ('p_mw', 'p_mw'), ('q_mvar', 'q_mvar'))))
 
             if sgen_results is not None:
                 for idx, sgen in sgen_results.iterrows():
@@ -11149,23 +11182,39 @@ def time_series_simulation(net, timeseries_params):
                     'avg_loading_percent': 0.0
                 }
         
+        transformer_stats = {}
+        for row in all_transformers:
+            transformer_stats.setdefault(row['name'], []).append(row['loading_percent'])
+        transformer_stats = {
+            name: {'min_loading_percent': min(values), 'max_loading_percent': max(values),
+                   'avg_loading_percent': sum(values) / len(values)}
+            for name, values in transformer_stats.items()
+        }
+
         timeseries_converged = all(result['converged'] for result in all_results)
-        
+
+        # A preset only reads as the run's when some element followed it:
+        # with a profile of its own for every element, "constant" described
+        # nothing that ran.
         return {
             'timeseries_converged': timeseries_converged,
             'time_steps': time_steps,
             'profile_mode': profile_mode,
-            'load_profile': load_profile,
-            'generation_profile': generation_profile,
-            'load_profile_values': load_profile_values,
-            'generation_profile_values': gen_profile_values,
+            'load_profile': load_profile if 'load' in preset_used else None,
+            'generation_profile': generation_profile if 'gen' in preset_used else None,
+            'load_profile_values': load_profile_values if 'load' in preset_used else [],
+            'generation_profile_values': gen_profile_values if 'gen' in preset_used else [],
             'profiles_used': profiles_used,
             'busbars': [vars(bus) for bus in all_busbars],
             'lines': [vars(line) for line in all_lines],
             'loads': [vars(ld) for ld in all_loads],
             'sgens': [vars(sg) for sg in all_sgens],
+            'gens': all_gens,
+            'transformers': all_transformers,
+            'externalgrids': all_ext_grids,
             'voltage_statistics': vm_stats,
             'loading_statistics': loading_stats,
+            'transformer_loading_statistics': transformer_stats,
             'time_stamps': [str(ts) for ts in time_stamps]
         }
         

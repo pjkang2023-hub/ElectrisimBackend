@@ -2072,7 +2072,9 @@ def test_drawn_diagram_time_series_matches_spec(client, quiet, grid):
     profiles, in MW - must give each hour the power flow pandapower gives the
     spec with the same P, Q kept at each element's power factor. Every load and
     generator gets a profile: the dialog left out the radial grid's wind farm,
-    drawn as a Wind Turbine, so it ran at its drawn 3 MW all day.
+    drawn as a Wind Turbine, so it ran at its drawn 3 MW all day. Generators,
+    transformers and the external grid are reported each hour too: they were
+    not, though the transmission grid's most loaded element is a transformer.
     """
     with open(os.path.join(REFERENCE_DIR, f'{grid}.diagram_timeseries_payload.json'),
               encoding='utf-8') as handle:
@@ -2092,7 +2094,12 @@ def test_drawn_diagram_time_series_matches_spec(client, quiet, grid):
 
     vm = {(b['time_step'], b['name']): b['vm_pu'] for b in result['busbars']}
     loading = {(l['time_step'], l['name']): l['loading_percent'] for l in result['lines']}
+    gens = {(g['time_step'], g['name']): g for g in result['gens']}
+    trafos = {(g['time_step'], g['name']): g for g in result['transformers']}
+    grid_p = {g['time_step']: g['p_mw'] for g in result['externalgrids']}
     net, _ = sld.build_network(spec)
+    assert len(grid_p) == steps and len(gens) == steps * len(net.gen)
+    assert len(trafos) == steps * (len(net.trafo) + len(net.trafo3w))
     base = {table: net[table].copy() for table in ('load', 'sgen', 'gen')}
     differ = []
     for t in range(steps):
@@ -2115,7 +2122,68 @@ def test_drawn_diagram_time_series_matches_spec(client, quiet, grid):
             name = net.line.at[idx, 'name']
             if abs(loading[(t, name)] - net.res_line.at[idx, 'loading_percent']) > 1e-4:
                 differ.append(f'hour {t} line {name}: {loading[(t, name)]} % drawn')
+        for idx in net.gen.index:
+            got = gens[(t, net.gen.at[idx, 'name'])]
+            if abs(got['p_mw'] - net.res_gen.at[idx, 'p_mw']) > 1e-6 or abs(got['q_mvar'] - net.res_gen.at[idx, 'q_mvar']) > 1e-4:
+                differ.append(f"hour {t} generator {net.gen.at[idx, 'name']}: {got['p_mw']} MW, {got['q_mvar']} Mvar drawn")
+        for table in ('trafo', 'trafo3w'):
+            for idx in net[table].index:
+                got = trafos[(t, net[table].at[idx, 'name'])]['loading_percent']
+                if abs(got - net['res_' + table].at[idx, 'loading_percent']) > 1e-4:
+                    differ.append(f"hour {t} transformer {net[table].at[idx, 'name']}: {got} % drawn")
+        if abs(grid_p[t] - net.res_ext_grid.p_mw.sum()) > 1e-4:
+            differ.append(f'hour {t} external grid: {grid_p[t]} MW drawn')
     assert not differ, '\n  '.join(differ[:10])
+    for name, stats in result['transformer_loading_statistics'].items():
+        values = [trafos[(t, name)]['loading_percent'] for t in range(steps)]
+        assert stats['max_loading_percent'] == pytest.approx(max(values))
+        assert stats['avg_loading_percent'] == pytest.approx(sum(values) / steps)
+
+
+@pytest.mark.parametrize('grid', GRIDS)
+def test_time_series_scale_factors_stay_scale_factors(client, quiet, grid):
+    """
+    A scale factor profile multiplies the element's base P - and Q - whatever
+    its size. Factors peaking between 20 % and 105 % of an element's base P
+    were taken for MW: the dialog's Constant preset (1.0) ran the 3 MW
+    Industrial park at 1 MW, the 4 MW CHP plant and the 2 MW wind farm at
+    1 MW. Constant 1.0 is the load flow as drawn.
+    """
+    with open(os.path.join(REFERENCE_DIR, f'{grid}.diagram_timeseries_payload.json'),
+              encoding='utf-8') as handle:
+        request = json.load(handle)
+    params = next(v for v in request.values() if isinstance(v, dict) and 'element_profiles' in v)
+    factors = [1.0, 0.5, 0.25]
+    params['time_steps'] = str(len(factors))
+    for profile in params['element_profiles'].values():
+        profile['mode'] = 'scale'
+        profile['values'] = factors
+    with quiet():
+        response = client.post('/', json=request)
+    result = json.loads(response.get_data(as_text=True))
+    assert result['timeseries_converged'] is True
+    assert {p['mode'] for p in result['profiles_used'].values()} == {'scale'}
+    assert result['load_profile'] is None and result['generation_profile'] is None
+
+    spec = load_spec(grid)
+    net, _ = sld.build_network(spec)
+    differ = []
+    for key, table in (('loads', 'load'), ('sgens', 'sgen'), ('gens', 'gen')):
+        base = {name: (p, q) for name, p, q in zip(
+            net[table].name, net[table].p_mw, net[table]['q_mvar'] if 'q_mvar' in net[table] else [0] * len(net[table]))}
+        for row in result[key]:
+            p0, q0 = base[row['name']]
+            factor = factors[row['time_step']]
+            if abs(row['p_mw'] - p0 * factor) > 1e-6 or (table != 'gen' and abs(row['q_mvar'] - q0 * factor) > 1e-6):
+                differ.append(f"hour {row['time_step']} {row['name']}: {row['p_mw']:.4f} MW, "
+                              f"{p0 * factor:.4f} MW wanted")
+    assert not differ, f'{grid}:\n  ' + '\n  '.join(differ)
+
+    # Hour 0, every factor 1.0: the drawn grid's load flow.
+    want = results_by_id(run(net), spec_ids(net))
+    vm = {b['name']: b['vm_pu'] for b in result['busbars'] if b['time_step'] == 0}
+    for bus in spec['buses']:
+        assert vm[str(bus.get('name') or bus['id'])] == pytest.approx(want['bus'][bus['id']]['vm_pu'], abs=DRAWN_TOL)
 
 
 @pytest.mark.parametrize('grid', GRIDS)
