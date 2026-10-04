@@ -2,7 +2,9 @@ import opendssdirect as dss
 from typing import List, Optional
 import math
 import json
+import random
 import re
+import statistics
 import threading
 
 from storage_q_capability import (
@@ -4400,8 +4402,85 @@ def _capture_monte_carlo_sample(BusbarsDictConnectionToName, LinesDict, LinesDic
     return buses, lines
 
 
-def _build_monte_carlo_result(mode, number, random_distribution, bus_samples, line_samples, converged_count):
+def _default_daily_shape_stats():
+    """Mean and standard deviation of OpenDSS's built-in daily load curve - what M2 and M3 draw a Gaussian factor from."""
+    dss.LoadShape.Name('default')
+    values = list(dss.LoadShape.PMult())
+    return statistics.mean(values), statistics.pstdev(values)
+
+
+def _monte_carlo_solves(mode, number, random_distribution):
+    """
+    Solve the Monte Carlo samples one at a time; yield after each whether it converged.
+
+    M1 and M3 solve one native sample per call. A native M2 solve is a whole
+    day - 24 hourly steps of which only the last could be read - so M2 runs
+    each day hour by hour itself, as OpenDSS does: one load factor for the
+    day (Uniform 0-1, or Gaussian on the default daily curve's mean and
+    standard deviation), the hours solved in Daily mode. Storage starts every
+    day as drawn: carried over, a discharging battery was empty from the
+    first day on.
+    """
+    if mode.upper() != 'M2':
+        dss.Text.Command('set Number=1')
+        for _ in range(number):
+            dss.Text.Command('solve')
+            yield dss.Solution.Converged()
+        return
+    storage = {}
+    for name in dss.Storages.AllNames():
+        if name and name.lower() != 'none':
+            storage[name] = {}
+            for prop in ('%stored', 'State', 'kW'):
+                dss.Text.Command(f'? Storage.{name}.{prop}')
+                storage[name][prop] = dss.Text.Result()
+    if random_distribution == 'Gaussian':
+        mean, stddev = _default_daily_shape_stats()
+        draw = lambda: random.gauss(mean, stddev)
+    else:
+        draw = random.random
+    for _ in range(number):
+        for name, props in storage.items():
+            for prop, value in props.items():
+                dss.Text.Command(f'Storage.{name}.{prop}={value}')
+        for command in ('set Mode=Daily', 'set Stepsize=1h', 'set Number=1', 'set Hour=0',
+                        'set Sec=0', f'set LoadMult={draw()}'):
+            dss.Text.Command(command)
+        for _ in range(24):
+            dss.Text.Command('solve')
+            yield dss.Solution.Converged()
+
+
+def _monte_carlo_random_description(mode, random_distribution):
+    """How the load factors were drawn, which differs between M1 and M2/M3."""
+    per_load = mode.upper() == 'M1'
+    if random_distribution != 'Gaussian':
+        text = 'Uniform 0-1'
+    elif per_load:
+        settings = set()
+        for name in dss.Loads.AllNames():
+            if name and name.lower() != 'none':
+                values = []
+                for prop in ('%mean', '%stddev'):
+                    dss.Text.Command(f'? Load.{name}.{prop}')
+                    values.append(dss.Text.Result())
+                settings.add(tuple(values))
+        if len(settings) == 1:
+            mean, stddev = next(iter(settings))
+            text = f"Gaussian, mean {float(mean):g} %, \u03c3 {float(stddev):g} % (each load's %mean and %stddev)"
+        else:
+            text = "Gaussian on each load's %mean and %stddev"
+    else:
+        mean, stddev = _default_daily_shape_stats()
+        text = (f"Gaussian, mean {100 * mean:.1f} %, \u03c3 {100 * stddev:.1f} % "
+                "(OpenDSS's default daily load curve)")
+    return text + (', drawn for each load separately' if per_load else ', one factor for all loads together')
+
+
+def _build_monte_carlo_result(mode, number, random_distribution, bus_samples, line_samples, converged_count,
+                              n_samples=None, random_description=None, notes=None):
     """Aggregate captured Monte Carlo samples into the frontend response schema."""
+    n_samples = number if n_samples is None else n_samples
     bus_stats = []
     for bus_id, entry in bus_samples.items():
         values = entry['values']
@@ -4423,10 +4502,12 @@ def _build_monte_carlo_result(mode, number, random_distribution, bus_samples, li
     ]
     return {
         'mode': mode, 'number': number, 'random': random_distribution,
+        'random_description': random_description or random_distribution,
+        'notes': list(notes or []),
         'bus_stats': bus_stats, 'line_stats': line_stats,
         'samples': {'bus_voltage_pu': histogram_buses},
-        'summary': {'n_samples': number, 'converged_count': converged_count,
-                    'failed_count': number - converged_count},
+        'summary': {'n_samples': n_samples, 'converged_count': converged_count,
+                    'failed_count': n_samples - converged_count},
     }
 
 
@@ -4483,6 +4564,10 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
     monte_carlo_bus_samples = {}
     monte_carlo_line_samples = {}
     monte_carlo_converged_count = 0
+    # M2 samples every hour of each day.
+    monte_carlo_samples_total = monte_carlo_number * (24 if mode.upper() == 'M2' else 1)
+    monte_carlo_random_description = None
+    monte_carlo_notes = []
 
     # Set OpenDSS circuit parameters
     f = frequency
@@ -4571,9 +4656,10 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
                 # Retain the requested Number setting in the exported model, then
                 # use one solve at a time to preserve each random realization.
                 execute_dss_command('set Number=1')
-                for sample_index in range(monte_carlo_number):
-                    dss.Text.Command('solve')
-                    if not dss.Solution.Converged():
+                monte_carlo_random_description = _monte_carlo_random_description(mode, monte_carlo_random)
+                for sample_index, sample_converged in enumerate(
+                        _monte_carlo_solves(mode, monte_carlo_number, monte_carlo_random)):
+                    if not sample_converged:
                         print(f"[OpenDSS] Monte Carlo sample {sample_index + 1} did not converge")
                         continue
                     monte_carlo_converged_count += 1
@@ -5840,9 +5926,23 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
     if _opendss_warnings:
         result['warnings'] = list(_opendss_warnings)
     if monte_carlo_mode:
+        # The model gives no element a daily or yearly profile, so M2's days
+        # and M3's hour vary nothing but storage.
+        if mode.upper() == 'M2':
+            monte_carlo_notes.append(
+                f'Each day is solved hour by hour: {monte_carlo_number} days x 24 h = '
+                f'{monte_carlo_samples_total} samples. The loads carry no daily profile, so a '
+                "day's load factor holds all day; storage starts each day as drawn and follows "
+                'its dispatch through the day.')
+        elif mode.upper() == 'M3':
+            hour = monte_carlo_hour if monte_carlo_hour not in (None, '') else 0
+            monte_carlo_notes.append(
+                f'The hour ({hour}) has no effect: the loads carry no yearly profile.')
         result['monte_carlo'] = _build_monte_carlo_result(
             mode.upper(), monte_carlo_number, monte_carlo_random, monte_carlo_bus_samples,
-            monte_carlo_line_samples, monte_carlo_converged_count)
+            monte_carlo_line_samples, monte_carlo_converged_count,
+            n_samples=monte_carlo_samples_total,
+            random_description=monte_carlo_random_description, notes=monte_carlo_notes)
 
     # Add OpenDSS commands to result if export was requested
     if export_commands and opendss_commands:

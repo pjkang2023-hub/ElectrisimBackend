@@ -855,11 +855,12 @@ def test_drawn_diagram_opendss_load_flow_matches_spec(client, quiet, opendss_scr
     assert not differ, f'{grid}:\n  ' + '\n  '.join(differ)
 
 
-def _monte_carlo_payload(number):
-    with open(os.path.join(REFERENCE_DIR, 'reference_transmission.diagram_opendss_payload.json'),
+def _monte_carlo_payload(number, grid='reference_transmission', mode='M1', random='Uniform', hour='0'):
+    with open(os.path.join(REFERENCE_DIR, f'{grid}.diagram_opendss_payload.json'),
               encoding='utf-8') as handle:
         payload = json.load(handle)
-    payload['0'].update(mode='M1', monteCarloNumber=str(number), monteCarloRandom='Uniform')
+    payload['0'].update(mode=mode, monteCarloNumber=str(number), monteCarloRandom=random,
+                        monteCarloHour=hour)
     return payload
 
 
@@ -912,7 +913,9 @@ def test_monte_carlo_in_a_fresh_backend(tmp_path):
     assert not [w for w in result.get('warnings') or [] if 'kW set' in str(w)], result['warnings']
 
 
-def test_monte_carlo_samples_are_snapshots_with_the_same_loads(client, quiet, opendss_scratch):
+@pytest.mark.parametrize('mode', ('M1', 'M3'))
+@pytest.mark.parametrize('grid', GRIDS)
+def test_monte_carlo_samples_are_snapshots_with_the_same_loads(client, quiet, opendss_scratch, grid, mode):
     """
     Each Monte Carlo sample is the load flow of the circuit with its loads
     drawn: re-solved as an ordinary snapshot with each load's sampled power,
@@ -939,12 +942,14 @@ def test_monte_carlo_samples_are_snapshots_with_the_same_loads(client, quiet, op
 
     ode._capture_monte_carlo_sample = record
     try:
-        result = _post_harmonics(client, quiet, _monte_carlo_payload(10))
+        result = _post_harmonics(client, quiet, _monte_carlo_payload(10, grid, mode))
     finally:
         ode._capture_monte_carlo_sample = capture
     assert result['monte_carlo']['summary']['converged_count'] == len(samples) == 10
 
+    # M3 draws one factor for the circuit, as its load multiplier.
     dss.Text.Command('set Mode=Snapshot')
+    dss.Text.Command('set LoadMult=1')
     differ = []
     for index, (args, buses, sampled) in enumerate(samples, 1):
         for name, (kw, kvar) in sampled.items():
@@ -957,6 +962,121 @@ def test_monte_carlo_samples_are_snapshots_with_the_same_loads(client, quiet, op
                 differ.append(f"sample {index}, {bus['name']}: {bus['vm_pu']:.5f} pu in the sample, "
                               f"{snapshot[bus_id]['vm_pu']:.5f} pu as a snapshot")
     assert not differ, '\n  '.join(differ)
+
+
+def _load_corners(grid):
+    """
+    pandapower's range for every bus voltage and line loading with each load
+    and motor either off or at its full power: what independent Uniform 0-1
+    factors can reach.
+    """
+    import copy
+    import itertools
+
+    spec = load_spec(grid)
+    net, _ = sld.build_network(spec)
+    volts, loading = {}, {}
+    for combo in itertools.product((0.0, 1.0), repeat=len(net.load) + len(net.motor)):
+        case = copy.deepcopy(net)
+        case.load['scaling'] = list(combo[:len(net.load)])
+        case.motor['scaling'] = list(combo[len(net.load):])
+        pp.runpp(case)
+        for name, vm in zip(case.bus.name, case.res_bus.vm_pu):
+            volts.setdefault(name, []).append(vm)
+        for name, value in zip(case.line.name, case.res_line.loading_percent):
+            loading.setdefault(name, []).append(value)
+    return ({name: (min(v), max(v)) for name, v in volts.items()},
+            {name: max(v) for name, v in loading.items()})
+
+
+@pytest.mark.parametrize('grid', GRIDS)
+def test_monte_carlo_stays_within_the_load_corners(client, quiet, opendss_scratch, grid):
+    """
+    M1 draws each load's factor from Uniform 0-1 on its own, so every bus
+    voltage and line loading lies within pandapower's range over the
+    combinations of each load off or at full power - on the radial grid,
+    with reverse flow on feeder B, not simply between no load and full load
+    - and the means sit at the half-load case.
+    """
+    result = _post_harmonics(client, quiet, _monte_carlo_payload(100, grid))
+    mc = result['monte_carlo']
+    assert mc['summary']['converged_count'] == 100
+    assert mc['random_description'] == 'Uniform 0-1, drawn for each load separately'
+    volts, loading = _load_corners(grid)
+    differ = []
+    for bus in mc['bus_stats']:
+        low, high = volts[bus['name']]
+        # Within 0.001 pu: OpenDSS feeds the grid through its short-circuit
+        # impedance (0.0004 pu at the transmission grid's 110 kV busbar).
+        if bus['vmin'] < low - 1e-3 or bus['vmax'] > high + 1e-3:
+            differ.append(f"{bus['name']}: {bus['vmin']:.4f}..{bus['vmax']:.4f} pu, "
+                          f"corners {low:.4f}..{high:.4f}")
+    for line in mc['line_stats']:
+        if line['loading_max'] > loading[line['name']] * 1.03 + 0.3:
+            differ.append(f"{line['name']}: up to {line['loading_max']:.2f} %, "
+                          f"corners up to {loading[line['name']]:.2f} %")
+    assert not differ, f'{grid}:\n  ' + '\n  '.join(differ)
+
+
+def test_monte_carlo_m2_solves_every_hour_of_each_day(client, quiet, opendss_scratch):
+    """
+    A native M2 solve is a whole day, and only its last hour was recorded -
+    with the radial grid's battery, discharging 0.5 MW from 80 % of 2 MWh,
+    empty in every sample, its state carried from one day to the next. M2
+    now records all 24 hours of each day, one load factor holding through the
+    day, the battery starting each day as drawn: 0.5 MW for three hours, then
+    idle. Hours with the battery at its dispatch are snapshots of the circuit
+    at that day's factor. M3's hour does nothing - the loads carry no yearly
+    profile - and the results say so; both draw one factor for all loads.
+    """
+    import opendssdirect as dss
+    import opendss_electrisim as ode
+
+    capture = ode._capture_monte_carlo_sample
+    samples = []
+
+    def record(*args):
+        buses, lines = capture(*args)
+        dss.Circuit.SetActiveElement('Storage.' + dss.Storages.AllNames()[0])
+        storage_kw = sum(dss.CktElement.Powers()[0::2])
+        samples.append((args, buses, dss.Solution.Hour(), dss.Solution.LoadMult(), storage_kw))
+        return buses, lines
+
+    ode._capture_monte_carlo_sample = record
+    try:
+        result = _post_harmonics(client, quiet, _monte_carlo_payload(2, 'reference_radial', 'M2'))
+    finally:
+        ode._capture_monte_carlo_sample = capture
+    mc = result['monte_carlo']
+    assert mc['summary'] == {'n_samples': 48, 'converged_count': 48, 'failed_count': 0}
+    assert mc['random_description'] == 'Uniform 0-1, one factor for all loads together'
+    assert any('2 days x 24 h' in note for note in mc['notes']), mc['notes']
+    assert len(samples) == 48
+    for day in (samples[:24], samples[24:]):
+        assert [hour for _, _, hour, _, _ in day] == list(range(1, 25))
+        assert len({factor for _, _, _, factor, _ in day}) == 1
+        assert [round(kw) for _, _, _, _, kw in day[:3]] == [-500] * 3
+        assert all(abs(kw) < 10 for _, _, _, _, kw in day[3:])
+
+    battery = dss.Storages.AllNames()[0]
+    dss.Text.Command('set Mode=Snapshot')
+    differ = []
+    for index, (args, buses, hour, factor, _) in enumerate(samples[:3] + samples[24:27], 1):
+        dss.Text.Command(f'Storage.{battery}.%stored=80 State=Discharging kW=500')
+        dss.Text.Command(f'set LoadMult={factor}')
+        dss.Text.Command('solve')
+        snapshot = capture(*args)[0]
+        for bus_id, bus in buses.items():
+            if abs(bus['vm_pu'] - snapshot[bus_id]['vm_pu']) > 1e-4:
+                differ.append(f"hour {hour}, {bus['name']}: {bus['vm_pu']:.5f} pu in the sample, "
+                              f"{snapshot[bus_id]['vm_pu']:.5f} pu as a snapshot")
+    assert not differ, '\n  '.join(differ)
+
+    m3 = _post_harmonics(client, quiet, _monte_carlo_payload(5, 'reference_radial', 'M3', 'Gaussian', '12'))
+    m3 = m3['monte_carlo']
+    assert m3['notes'] == ['The hour (12) has no effect: the loads carry no yearly profile.']
+    assert m3['random_description'].startswith('Gaussian, mean 82.6 %')
+    assert m3['random_description'].endswith('one factor for all loads together')
 
 
 def test_opendss_warnings_name_elements_by_their_label(client, quiet, opendss_scratch):
