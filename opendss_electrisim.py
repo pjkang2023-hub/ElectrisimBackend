@@ -1441,10 +1441,11 @@ def create_line_1ph_element(dss, element_data, element_name, element_id, Busbars
     phase, conn = _element_phase_conn(element_data)
     t1 = _format_opendss_bus_terminal(bus_from_name, phase, conn)
     t2 = _format_opendss_bus_terminal(bus_to_name, phase, conn)
-    r_ohm_per_km = float(element_data.get('r_ohm_per_km', 0.122) or 0.122)
-    x_ohm_per_km = float(element_data.get('x_ohm_per_km', 0.112) or 0.112)
+    n_par = _element_parallel(element_data)
+    r_ohm_per_km = float(element_data.get('r_ohm_per_km', 0.122) or 0.122) / n_par
+    x_ohm_per_km = float(element_data.get('x_ohm_per_km', 0.112) or 0.112) / n_par
     length_km = float(element_data.get('length_km', 1) or 1)
-    c_nf_per_km = element_data.get('c_nf_per_km')
+    c_nf_per_km = _scaled_per_km(element_data.get('c_nf_per_km'), n_par)
     try:
         line_cmd = f'New Line.{element_name} phases=1 Bus1={t1} Bus2={t2} R1={r_ohm_per_km} X1={x_ohm_per_km} Length={length_km} units=km'
         if c_nf_per_km not in (None, '', '0', 0):
@@ -1514,7 +1515,7 @@ def create_transformer_1ph_element(dss, element_data, element_name, element_id, 
     bus_to_name = BusbarsDictConnectionToName.get(bus_to_ref) or _sanitize_opendss_name(bus_to_ref)
     phase, conn = _element_phase_conn(element_data)
     try:
-        sn_kva = float(element_data.get('sn_kva', 25) or 25)
+        sn_kva = float(element_data.get('sn_kva', 25) or 25) * _element_parallel(element_data)
         vk_percent = float(element_data.get('vk_percent', 2.0) or 2.0)
         vkr_percent = float(element_data.get('vkr_percent', 0.6) or 0.6)
         kv_hv = float(element_data.get('vn_hv_kv', BusbarsDictVoltage.get(bus_from_name) or 7.2) or 7.2)
@@ -1553,6 +1554,40 @@ def create_transformer_1ph_element(dss, element_data, element_name, element_id, 
 
 
 # Individual element creation functions
+def _element_parallel(element_data):
+    """
+    How many identical circuits or units the element stands for. OpenDSS has
+    no such property and it was never read: a double-circuit line went in as
+    one circuit (twice the impedance, half the rating), as pandapower does not.
+    """
+    try:
+        n = int(float(element_data.get('parallel') or 1))
+    except (TypeError, ValueError):
+        n = 1
+    return n if n >= 1 else 1
+
+
+def _scaled_per_km(value, factor):
+    """A per-km line constant times factor, left as given when absent."""
+    if value in (None, ''):
+        return value
+    return float(value) * factor
+
+
+def _line_rated_ka(element_data):
+    """The line's thermal rating as pandapower takes it: max_i_ka x df x parallel."""
+    try:
+        amps = float(element_data.get('max_i_ka'))
+    except (TypeError, ValueError):
+        return 0.0
+    try:
+        df = float(element_data.get('df') if element_data.get('df') not in (None, '') else 1.0)
+    except (TypeError, ValueError):
+        df = 1.0
+    rated = amps * (df if df > 0 else 1.0) * _element_parallel(element_data)
+    return rated if rated > 0 and not math.isinf(rated) else 0.0
+
+
 def _line_rating_suffix(element_data):
     """
     The line's thermal rating for OpenDSS: max_i_ka (derated by df) as
@@ -1569,6 +1604,7 @@ def _line_rating_suffix(element_data):
     except (TypeError, ValueError):
         df = 1.0
     amps *= df if df > 0 else 1.0
+    amps *= _element_parallel(element_data)
     if not (amps > 0) or math.isinf(amps):
         return ''
     return f' normamps={amps:g} emergamps={amps:g}'
@@ -1642,6 +1678,17 @@ def create_line_element(dss, element_data, element_name, element_id, BusbarsDict
                     raise
                 raise ValueError(f"Line '{element_name}': Invalid value for c0_nf_per_km: {c0_nf_per_km}")
         
+        # n identical circuits in parallel: series impedances / n, shunt
+        # capacitances x n (the rating x n is in _line_rating_suffix).
+        n_par = _element_parallel(element_data)
+        if n_par > 1:
+            r_ohm_per_km = _scaled_per_km(r_ohm_per_km, 1.0 / n_par)
+            x_ohm_per_km = _scaled_per_km(x_ohm_per_km, 1.0 / n_par)
+            r0_ohm_per_km = _scaled_per_km(r0_ohm_per_km, 1.0 / n_par)
+            x0_ohm_per_km = _scaled_per_km(x0_ohm_per_km, 1.0 / n_par)
+            c_nf_per_km = _scaled_per_km(c_nf_per_km, n_par)
+            c0_nf_per_km = _scaled_per_km(c0_nf_per_km, n_par)
+
         try:
             # Create line using OpenDSS command with parameters from frontend
             line_cmd = f'New Line.{element_name} phases=3 Bus1={bus_from_name} Bus2={bus_to_name} R1={r_ohm_per_km} X1={x_ohm_per_km} Length={length_km} units=km'
@@ -2742,8 +2789,10 @@ def create_transformer_element(dss, element_data, element_name, element_id, Busb
             else:
                 bus_hv_name, bus_lv_name = bus_to_name, bus_from_name
             
-            # Convert MVA to kVA
-            sn_kva = sn_mva * 1000
+            # Convert MVA to kVA; n units in parallel are one of n x the
+            # rating at the same per-unit impedance, with n x the iron losses.
+            n_par = _element_parallel(element_data)
+            sn_kva = sn_mva * 1000 * n_par
             
             # Convert vector group to OpenDSS connection format
             conns = vector_group_to_opendss_conns(vector_group)
@@ -2753,7 +2802,7 @@ def create_transformer_element(dss, element_data, element_name, element_id, Busb
             i0_percent_raw = element_data.get('i0_percent', '0')
             
             # Convert loss parameters to float
-            pfe_kw = float(pfe_kw_raw)
+            pfe_kw = float(pfe_kw_raw) * n_par
             i0_percent = float(i0_percent_raw)
             
             # Get tap parameters from frontend
@@ -4405,14 +4454,16 @@ def _capture_monte_carlo_sample(BusbarsDictConnectionToName, LinesDict, LinesDic
     line_ratings = {}
     for element in in_data.values():
         if isinstance(element, dict) and 'Line' in str(element.get('typ', '')):
-            line_ratings[_sanitize_opendss_name(element.get('name', ''))] = element.get('max_i_ka')
+            line_ratings[_sanitize_opendss_name(element.get('name', ''))] = _line_rated_ka(element)
     for key, line_name in LinesDict.items():
         try:
             dss.Circuit.SetActiveElement(f"Line.{line_name}")
             currents = dss.CktElement.Currents()
             n_conductors = dss.CktElement.NumConductors()
             n_phases = dss.CktElement.NumPhases()
-            current_ka = _opendss_terminal_i_ka(currents, 0, n_conductors, n_phases) if currents else 0.0
+            # The worse end, as in the load-flow results.
+            current_ka = max(_opendss_terminal_i_ka(currents, 0, n_conductors, n_phases),
+                             _opendss_terminal_i_ka(currents, 1, n_conductors, n_phases)) if currents else 0.0
             rating_ka = float(line_ratings.get(key) or 0)
             lines[key] = {
                 'id': LinesDictId.get(key, key),
@@ -5098,13 +5149,14 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
             max_i_ka = None
             for data_key, data_value in in_data.items():
                 if _sanitize_opendss_name(data_value.get('name', '')) == key and 'Line' in data_value.get('typ', ''):
-                    max_i_ka_raw = data_value.get('max_i_ka')
-                    if max_i_ka_raw is not None:
-                        max_i_ka = float(max_i_ka_raw)
+                    # max_i_ka x df x parallel, as pandapower rates it.
+                    max_i_ka = _line_rated_ka(data_value)
                     break
             
             if max_i_ka and max_i_ka > 0 and is_enabled:
-                loading_percent = (i_from_ka / max_i_ka) * 100
+                # The worse end: the from end alone read a charged cable low
+                # (LA2 3.42 % for 3.54 %).
+                loading_percent = (max(i_from_ka, i_to_ka) / max_i_ka) * 100
             else:
                 # Fallback if max_i_ka not available or line is disabled
                 loading_percent = 0.0
@@ -5404,13 +5456,15 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
                                         break
                         
                         if element_data:
+                            # n units in parallel carry n x the rating.
+                            n_par = _element_parallel(element_data)
                             sn_mva_raw = element_data.get('sn_mva')
                             if sn_mva_raw is not None:
-                                sn_mva = float(sn_mva_raw)
+                                sn_mva = float(sn_mva_raw) * n_par
                             else:
                                 sn_kva_raw = element_data.get('sn_kva')
                                 if sn_kva_raw is not None:
-                                    sn_mva = float(sn_kva_raw) / 1000.0
+                                    sn_mva = float(sn_kva_raw) / 1000.0 * n_par
                         else:
                             # Debug: show what transformers ARE in in_data
                             transformer_keys_found = []
