@@ -816,6 +816,33 @@ def test_short_circuit_studies_refuse_isolated_buses(client, quiet, params, line
     assert sorted(n.strip() for n in named.split(',')) == sorted(cut_off)
 
 
+@pytest.mark.parametrize('line, cut_off', (('LA1', ('A1', 'A2', 'LV network A')),
+                                           ('LA2', ('A2', 'LV network A'))))
+def test_load_flow_names_isolated_buses(client, quiet, monkeypatch, line, cut_off):
+    """
+    The load flow refuses a grid with buses cut off, naming them as the
+    diagram does in its exception and its diagnostic - the message every
+    other study's refusal now shares.
+    """
+    with open(os.path.join(REFERENCE_DIR, 'reference_radial.diagram_payload.json'),
+              encoding='utf-8') as handle:
+        payload = json.load(handle)
+    for element in payload.values():
+        if isinstance(element, dict) and element.get('userFriendlyName') == line:
+            element['in_service'] = False
+    # The exception text is otherwise suppressed in the response.
+    monkeypatch.setenv('ELECTRISIM_DEBUG_ERRORS', '1')
+    with quiet():
+        response = client.post('/', json=payload)
+    result = json.loads(response.get_data(as_text=True))
+    assert result.get('error') is True
+    assert result['exception'] == ('Isolated buses found: ' + ', '.join(cut_off)
+                                   + '. Check your network connectivity.')
+    isolated = result['diagnostic']['isolated_buses']
+    assert [b['name'] for b in isolated] == list(cut_off)
+    assert all(str(b['id']).startswith('mxCell_') for b in isolated), isolated
+
+
 @pytest.mark.parametrize('grid', GRIDS)
 def test_ansi_short_circuit_runs_on_connected_grids(client, quiet, grid):
     """The isolated-bus refusal leaves a fully supplied grid alone."""

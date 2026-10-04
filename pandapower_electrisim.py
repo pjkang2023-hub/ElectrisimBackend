@@ -5670,13 +5670,9 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
             
             try:
                 # Check for isolated buses before running power flow
-                isolated_buses = pp.topology.unsupplied_buses(net)
-                if len(isolated_buses) > 0:
-                    isolated_refs = resolve_element_refs(net, 'bus', isolated_buses)
-                    isolated_names = [r.get('name') or r.get('id') or str(r.get('index')) for r in isolated_refs]
-                    raise ValueError(
-                        f"Isolated buses found: {', '.join(isolated_names)}. Check your network connectivity."
-                    )
+                isolated = isolated_buses_message(net)
+                if isolated:
+                    raise ValueError(isolated)
                 
                 # DiscreteTapControl + DiscreteShuntController (per-family flags from UI)
                 rc2 = bool(run_control_trafo2w)
