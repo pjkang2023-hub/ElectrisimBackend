@@ -8471,11 +8471,12 @@ def contingency_analysis(net, contingency_params):
         max_vm_pu = float(contingency_params.get('max_vm_pu', 1.05))
         max_loading_percent = float(contingency_params.get('max_loading_percent', 100))
         
-        # Validate network connectivity
-        isolated_buses = top.unsupplied_buses(net)
-        if len(isolated_buses) > 0:
-            raise ValueError(f"Isolated buses found: {isolated_buses}. Check your network connectivity.")
-        
+        # Validate network connectivity, naming the buses as the diagram does:
+        # the raw set read "{np.int64(5), np.int64(6), np.int64(7)}".
+        isolated = isolated_buses_message(net)
+        if isolated:
+            raise ValueError(isolated)
+
         # Check if network has elements
         
         # Run base case power flow

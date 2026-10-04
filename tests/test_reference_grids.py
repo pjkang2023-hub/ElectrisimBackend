@@ -2686,6 +2686,29 @@ def test_time_series_scale_factors_stay_scale_factors(client, quiet, grid):
         assert vm[str(bus.get('name') or bus['id'])] == pytest.approx(want['bus'][bus['id']]['vm_pu'], abs=DRAWN_TOL)
 
 
+@pytest.mark.parametrize('line, cut_off', (('LA1', ('A1', 'A2', 'LV network A')),
+                                           ('LA2', ('A2', 'LV network A'))))
+def test_contingency_analysis_names_isolated_buses(client, quiet, line, cut_off):
+    """
+    A drawn grid with buses already cut off was refused with pandapower's
+    indices: "Isolated buses found: {np.int64(5), np.int64(6), np.int64(7)}".
+    It must name them as the diagram does, like the short-circuit studies.
+    """
+    with open(os.path.join(REFERENCE_DIR, 'reference_radial.diagram_contingency_payload.json'),
+              encoding='utf-8') as handle:
+        request = json.load(handle)
+    for element in request.values():
+        if isinstance(element, dict) and element.get('userFriendlyName') == line:
+            element['in_service'] = False
+    with quiet():
+        response = client.post('/', json=request)
+    # The frontend alerts the 'error' text.
+    error = json.loads(response.get_data(as_text=True)).get('error') or ''
+    assert 'Isolated buses found:' in error, error
+    named = error.split('Isolated buses found:')[1].split('. Check')[0]
+    assert sorted(n.strip() for n in named.split(',')) == sorted(cut_off)
+
+
 @pytest.mark.parametrize('grid', GRIDS)
 def test_drawn_diagram_contingency_analysis_matches_spec(client, quiet, grid):
     """
