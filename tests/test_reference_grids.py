@@ -2219,7 +2219,15 @@ def test_drawn_diagram_contingency_analysis_matches_spec(client, quiet, grid):
     voltages for the spec with that element out, a bus it cuts off must count
     as lost supply - an islanded bus has no voltage, which no limit caught -
     and the transmission grid's three-winding main transformer is an outage
-    too. On the radial grid nearly every outage cuts something off.
+    too, as are static generators. On the radial grid nearly every outage
+    cuts something off.
+
+    Each cut-off bus carries the load and generation it loses, so the worst
+    case is the one cutting off most load among those with most violations:
+    by count alone, the first of four tied cases won - the Wind farm cable,
+    cutting off no load. And each element's worst over all the outages, with
+    the outage causing it, is pandapower's: the diagram showed one case,
+    with L3 at 16.9 % where the main transformer's outage takes it to 52 %.
     """
     import math
 
@@ -2230,8 +2238,19 @@ def test_drawn_diagram_contingency_analysis_matches_spec(client, quiet, grid):
         response = client.post('/', json=request)
     result = json.loads(response.get_data(as_text=True))
     spec = load_spec(grid)
-    out_of = {'line': ('line',), 'transformer': ('trafo', 'trafo3w'), 'generator': ('gen',)}
+    out_of = {'line': ('line',), 'transformer': ('trafo', 'trafo3w'), 'generator': ('gen', 'sgen')}
 
+    base, _ = sld.build_network(spec)
+    pp.runpp(base, algorithm='nr', calculate_voltage_angles=True)
+    load_at, gen_at = {}, {}
+    for table, target in (('load', load_at), ('motor', load_at), ('gen', gen_at), ('sgen', gen_at)):
+        for bus, p in zip(base[table].bus, base['res_' + table].p_mw):
+            target[bus] = target.get(bus, 0.0) + p
+    for bus, p in zip(base.storage.bus, base.res_storage.p_mw):
+        load_at[bus] = load_at.get(bus, 0.0) + max(p, 0.0)
+        gen_at[bus] = gen_at.get(bus, 0.0) + max(-p, 0.0)
+
+    worst_loading, worst_vm = {}, {}
     outages = []
     for case in result['contingency_results']:
         assert case['converged'], case['description']
@@ -2251,12 +2270,44 @@ def test_drawn_diagram_contingency_analysis_matches_spec(client, quiet, grid):
                 assert drawn[bus] == pytest.approx(want, abs=DRAWN_TOL), (name, bus)
         flagged = {v['element'] for v in case['violations'] if v['type'] == 'supply'}
         assert flagged == cut_off, (name, flagged, cut_off)
+        dead = [i for i in net.bus.index if math.isnan(net.res_bus.at[i, 'vm_pu'])]
+        assert case['lost_load_mw'] == pytest.approx(sum(load_at.get(i, 0.0) for i in dead), abs=1e-6), name
+        assert case['lost_generation_mw'] == pytest.approx(sum(gen_at.get(i, 0.0) for i in dead), abs=1e-6), name
+        for kind in ('line', 'trafo', 'trafo3w'):
+            for i in net[kind].index:
+                value = net['res_' + kind].at[i, 'loading_percent']
+                element = net[kind].at[i, 'name']
+                if not math.isnan(value) and value > worst_loading.get(element, (-1, ''))[0]:
+                    worst_loading[element] = (value, name)
+        for i in net.bus.index:
+            value = net.res_bus.at[i, 'vm_pu']
+            if not math.isnan(value):
+                low, high = worst_vm.get(net.bus.at[i, 'name'], (9.0, 0.0))
+                worst_vm[net.bus.at[i, 'name']] = (min(low, value), max(high, value))
 
     expected = ([('line', str(l.get('name') or l['id'])) for l in spec['lines']]
                 + [('trafo', str(t.get('name') or t['id'])) for t in spec['transformers']]
                 + [('trafo3w', str(t.get('name') or t['id'])) for t in spec.get('three_winding_transformers', [])]
-                + [('gen', str(g.get('name') or g['id'])) for g in spec['generators']])
+                + [('gen', str(g.get('name') or g['id'])) for g in spec['generators']]
+                + [('sgen', str(g.get('name') or g['id'])) for g in spec['static_generators']])
     assert sorted(outages) == sorted(expected)
+
+    severity = lambda c: (len(c['violations']), c['lost_load_mw'], c['max_loading_percent'])
+    worst = max(result['contingency_results'], key=severity)
+    assert result['worst_case'] == worst['name']
+    if grid == 'reference_transmission':
+        assert worst['description'] == 'Outage of transformer Main transformer 110/20/10'
+        # The station auxiliaries and the pump's input at 96 % efficiency.
+        assert worst['lost_load_mw'] == pytest.approx(0.5 + 0.8 / 0.96)
+
+    by_element = result['worst_by_element']
+    for row in by_element['line'] + by_element['transformer']:
+        value, outage = worst_loading[row['name']]
+        assert row['loading_percent'] == pytest.approx(value, abs=1e-6), row['name']
+        assert row['worst_outage'] == outage, row['name']
+    for row in by_element['bus']:
+        low, high = worst_vm[row['name']]
+        assert (row['vm_pu'], row['vm_max_pu']) == pytest.approx((low, high), abs=DRAWN_TOL), row['name']
     assert any(cut for case in result['contingency_results']
                for cut in case['violations'] if cut['type'] == 'supply'), 'no outage cut a bus off'
 

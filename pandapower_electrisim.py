@@ -8311,6 +8311,80 @@ def _contingency_friendly_name(net, raw_name):
     return name
 
 
+def _contingency_bus_power(net):
+    """
+    Base-case load and generation at each bus, MW: what an outage cuts off
+    with the bus. Storage counts as load while charging, generation while
+    discharging.
+    """
+    load, gen = {}, {}
+
+    def add(target, buses, values):
+        for bus, value in zip(buses, values):
+            if pd.notna(value) and value:
+                target[bus] = target.get(bus, 0.0) + float(value)
+
+    for table, target in (('load', load), ('motor', load), ('asymmetric_load', load),
+                          ('gen', gen), ('sgen', gen), ('asymmetric_sgen', gen)):
+        res = net.get('res_' + table) if hasattr(net, 'get') else getattr(net, 'res_' + table, None)
+        if table in net and len(net[table]) and res is not None and len(res):
+            on = net[table].index[net[table].in_service]
+            p = res['p_mw'] if 'p_mw' in res else res.filter(like='p_').sum(axis=1)
+            add(target, net[table].loc[on, 'bus'], p.reindex(on))
+    if 'storage' in net and len(net.storage) and len(net.res_storage):
+        on = net.storage.index[net.storage.in_service]
+        p = net.res_storage.p_mw.reindex(on)
+        add(load, net.storage.loc[on, 'bus'], p.clip(lower=0))
+        add(gen, net.storage.loc[on, 'bus'], (-p).clip(lower=0))
+    return load, gen
+
+
+def _contingency_worst_by_element(net, contingency_results):
+    """
+    Each element's worst over the N-1 cases, with the outage that causes it.
+
+    The diagram showed one case - the one with most violations - labelled
+    "worst-case N-1" on every element: on the transmission grid the Wind
+    farm cable's outage, with L3 at 16.9 % where the main transformer's
+    outage takes it to 52 %.
+    """
+    buses, lines, trafos = {}, {}, {}
+    for case in contingency_results:
+        if not case.get('converged'):
+            continue
+        outage = case.get('outage') or case.get('description')
+        for row in case.get('line_results', []):
+            value = row.get('loading_percent')
+            if value is None or pd.isna(value):
+                continue
+            best = lines.get(row['name'])
+            if best is None or value > best['loading_percent']:
+                lines[row['name']] = dict(row, worst_outage=outage)
+        for row in case.get('trafo_results', []):
+            value = row.get('loading_percent')
+            if value is None or pd.isna(value):
+                continue
+            best = trafos.get(row['name'])
+            if best is None or value > best['loading_percent']:
+                trafos[row['name']] = dict(row, worst_outage=outage)
+        for row in case.get('bus_results', []):
+            entry = buses.setdefault(row['name'], {
+                'bus_id': row['bus_id'], 'name': row['name'], 'vm_pu': None,
+                'vm_max_pu': None, 'worst_outage': None, 'worst_outage_max': None,
+                'deenergised_by': [],
+            })
+            value = row.get('vm_pu')
+            if value is None or pd.isna(value):
+                entry['deenergised_by'].append(outage)
+                continue
+            if entry['vm_pu'] is None or value < entry['vm_pu']:
+                entry.update(vm_pu=value, va_degree=row.get('va_degree'), p_mw=row.get('p_mw'),
+                             q_mvar=row.get('q_mvar'), worst_outage=outage)
+            if entry['vm_max_pu'] is None or value > entry['vm_max_pu']:
+                entry.update(vm_max_pu=value, worst_outage_max=outage)
+    return {'bus': list(buses.values()), 'line': list(lines.values()), 'transformer': list(trafos.values())}
+
+
 def contingency_analysis(net, contingency_params):
     """
     Perform contingency analysis on the network.
@@ -8389,12 +8463,25 @@ def contingency_analysis(net, contingency_params):
                         'element_idx': gen_idx,
                         'description': f"Outage of generator {gen_name}"
                     })
+            # Static generators too - PV, wind - which were never taken out:
+            # the transmission grid's 2 MW wind farm among them.
+            for gen_idx in net.sgen.index:
+                if net.sgen.loc[gen_idx, 'in_service']:
+                    gen_name = _contingency_friendly_name(net, net.sgen.loc[gen_idx, 'name'])
+                    contingency_cases.append({
+                        'name': f"Sgen_{gen_name}",
+                        'type': 'sgen',
+                        'element_idx': gen_idx,
+                        'description': f"Outage of generator {gen_name}"
+                    })
         
         # Results storage
         contingency_results = []
         violations = []
         critical_contingencies = []
         
+        bus_load_mw, bus_gen_mw = _contingency_bus_power(net)
+
         # Store base case results
         base_case_results = {
             'bus_vm_pu': net.res_bus.vm_pu.copy(),
@@ -8418,6 +8505,8 @@ def contingency_analysis(net, contingency_params):
                     net_cont.trafo3w.loc[contingency_case['element_idx'], 'in_service'] = False
                 elif contingency_case['type'] == 'gen':
                     net_cont.gen.loc[contingency_case['element_idx'], 'in_service'] = False
+                elif contingency_case['type'] == 'sgen':
+                    net_cont.sgen.loc[contingency_case['element_idx'], 'in_service'] = False
                 
                 # Run power flow for contingency case
                 pp.runpp(net_cont, algorithm='nr', calculate_voltage_angles=True)
@@ -8430,13 +8519,23 @@ def contingency_analysis(net, contingency_params):
                 # violation at all.
                 in_service = net_cont.bus.index[net_cont.bus.in_service]
                 dead = net_cont.res_bus.loc[net_cont.res_bus.index.intersection(in_service)]
+                # How much each cut-off bus carried: every one counted the
+                # same, so an outage cutting off only a wind farm ranked with
+                # one dropping 1.3 MW of load.
+                lost_load = lost_gen = 0.0
                 for bus_idx in dead.index[dead.vm_pu.isna()]:
                     bus_name = _contingency_friendly_name(net, net_cont.bus.loc[bus_idx, 'name'])
+                    load_mw, gen_mw = bus_load_mw.get(bus_idx, 0.0), bus_gen_mw.get(bus_idx, 0.0)
+                    lost_load += load_mw
+                    lost_gen += gen_mw
                     case_violations.append({
                         'type': 'supply',
                         'element': f"Bus_{bus_name}",
-                        'description': 'Loss of supply: bus de-energised',
-                        'severity': 'high'
+                        'description': (f'Loss of supply: bus de-energised, {load_mw:.3f} MW load '
+                                        f'and {gen_mw:.3f} MW generation cut off'),
+                        'severity': 'high',
+                        'lost_load_mw': load_mw,
+                        'lost_generation_mw': gen_mw,
                     })
                 
                 # Check voltage violations
@@ -8498,11 +8597,19 @@ def contingency_analysis(net, contingency_params):
                             })
                 
                 # Store results for this contingency
+                loadings = [v for v in list(net_cont.res_line.loading_percent)
+                            + list(net_cont.res_trafo.loading_percent)
+                            + list(net_cont.res_trafo3w.loading_percent) if pd.notna(v)]
                 contingency_result = {
                     'name': contingency_case['name'],
                     'description': contingency_case['description'],
+                    # The element taken out, by name ("Outage of line L4" -> "L4").
+                    'outage': contingency_case['description'].split(' ', 3)[-1],
                     'converged': True,
                     'violations': case_violations,
+                    'lost_load_mw': lost_load,
+                    'lost_generation_mw': lost_gen,
+                    'max_loading_percent': max(loadings) if loadings else 0.0,
                     'bus_results': [],
                     'line_results': [],
                     'trafo_results': []
@@ -8656,8 +8763,11 @@ def contingency_analysis(net, contingency_params):
             error_message = f"No contingency results generated. All {len(contingency_cases)} cases failed to converge."
             return json.dumps({'error': error_message}, separators=(',', ':'))
         
-        # Use the worst-case scenario results for display
-        worst_case = max(contingency_results, key=lambda x: len(x.get('violations', [])))
+        # The worst case: most violations, then most load cut off, then the
+        # highest loading. Violations alone tied every cut-off bus, and the
+        # first such case won - one cutting off no load at all.
+        worst_case = max(contingency_results, key=lambda x: (
+            len(x.get('violations', [])), x.get('lost_load_mw', 0.0), x.get('max_loading_percent', 0.0)))
         
         for bus_result in worst_case.get('bus_results', []):
             bus_out = ContingencyBusOut(
@@ -8700,7 +8810,9 @@ def contingency_analysis(net, contingency_params):
             'line': [line.__dict__ for line in line_out_list],
             'transformer': [trafo.__dict__ for trafo in trafo_out_list],
             'summary': summary,
-            'contingency_results': contingency_results
+            'contingency_results': contingency_results,
+            'worst_case': worst_case.get('name'),
+            'worst_by_element': _contingency_worst_by_element(net, contingency_results),
         }
         
         # Sanitize NaN/Inf so the body is strict JSON (browser JSON.parse rejects NaN tokens).
