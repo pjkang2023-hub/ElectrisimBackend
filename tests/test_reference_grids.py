@@ -2175,6 +2175,51 @@ def test_grid_code_vq_wind_farm_at_its_own_connection(client, quiet):
     assert at_pcc and all(min(abs(v - u) for u in curve['u_pu']) <= _PQ_PCC_V_TOL + 1e-4 for v in at_pcc)
 
 
+def _grid_code_pq_result(client, quiet, request):
+    with quiet():
+        text = client.post('/', json=request).get_data(as_text=True)
+    last = [line for line in text.splitlines() if line.strip()][-1]
+    return json.loads(last)['data']['grid_code_pq_results']
+
+
+def test_grid_code_pq_at_a_pcc_carrying_load_is_not_assessable(client, quiet):
+    """
+    The dialog's default PCC was the first bus: on the transmission grid the
+    110 kV busbar, which with the plant's units off still imports 7.55 MW for
+    the town and the rest. The P-Q measured that load, the plant's curve sat
+    at imports, the required envelope at exports, and the verdict was
+    "NON-COMPLIANT". Such a PCC is reported as not assessable. At the wind
+    farm's own bus the PCC carries nothing with the units off, and the
+    plant's Pmax there is its 2 MW.
+    """
+    with open(os.path.join(REFERENCE_DIR, 'reference_transmission.diagram_grid_code_pq_payload.json'),
+              encoding='utf-8') as handle:
+        request = json.load(handle)
+    request['0'].update(voltage_levels=[0.9], p_step_pct=25)
+    result = _grid_code_pq_result(client, quiet, request)
+    assert result['assessable'] is False
+    # pandapower with PV and wind off at 0.9 pu, the CHP plant held to its
+    # reactive limits as the study holds it.
+    spec = load_spec('reference_transmission')
+    for gen in spec['static_generators']:
+        gen['p_mw'] = 0.0
+        gen['q_mvar'] = 0.0
+    net, _ = sld.build_network(spec)
+    net.ext_grid['vm_pu'] = 0.9
+    pp.runpp(net, enforce_q_lims=True)
+    assert abs(result['pcc_units_off_p_mw']) == pytest.approx(float(net.res_ext_grid.p_mw.sum()), abs=0.01)
+    assert any('7.55 MW' in w and 'not the plant' in w for w in result['warnings'])
+
+    cell = {v.get('userFriendlyName'): v['name'] for v in request.values()
+            if isinstance(v, dict) and 'name' in v}
+    request['0'].update(pcc_bus_name=cell['Wind farm connection'], generator_names=[cell['Wind farm']])
+    result = _grid_code_pq_result(client, quiet, request)
+    assert result['assessable'] is True
+    assert abs(result['pcc_units_off_p_mw']) < 0.01
+    assert result['pmax_pcc_mw'] == pytest.approx(2.0, abs=0.01)
+    assert not [w for w in result['warnings'] if 'not the plant' in w]
+
+
 def test_grid_code_pmax_at_the_pcc_counts_export_only():
     """
     "Pmax at the PCC" sizes the grid-code requirement. It was the largest |P|,

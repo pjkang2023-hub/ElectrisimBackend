@@ -2060,21 +2060,27 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
                 compliance[v_key] = None
 
         pq0 = None
-        if i_show_pq0:
-            net0 = deepcopy(net)
-            _pq_clear_controllers(net0)
-            _pq_apply_tap_family_filter(net0, ctx)
-            for g in gen_info:
-                _pq_set_gen_pq(net0, g, 0.0, 0.0)
-            net0.ext_grid.at[ext_grid_idx, 'vm_pu'] = float(voltage_levels[0]) * u_scale if voltage_levels else 1.0
-            iLDF[0] += 1
-            if _pq_run_pf(
-                    net0, verbose, rc2, rc3, rcs, force_control=False,
-                    cancel_event=ctx.get('cancel_event')):
-                p0 = _pq_pcc_p(net0, pcc_bus_idx, ext_grid_idx)
-                q0 = pp_el._rpc_pcc_q_for_chart(net0, pcc_bus_idx, ext_grid_idx)
-                # Residual exchange at the PCC with plant units off. This is not the
-                # P=0 capability on the red envelope (units still supplying Q there).
+        units_off_p = None
+        # Always: with the units off, a PCC that is the plant's carries next
+        # to nothing. One carrying the network's load measures that load - a
+        # 2.3 MW plant "at" a 110 kV busbar importing 7.5 MW - and its P-Q
+        # says nothing about the plant.
+        net0 = deepcopy(net)
+        _pq_clear_controllers(net0)
+        _pq_apply_tap_family_filter(net0, ctx)
+        for g in gen_info:
+            _pq_set_gen_pq(net0, g, 0.0, 0.0)
+        net0.ext_grid.at[ext_grid_idx, 'vm_pu'] = float(voltage_levels[0]) * u_scale if voltage_levels else 1.0
+        iLDF[0] += 1
+        if _pq_run_pf(
+                net0, verbose, rc2, rc3, rcs, force_control=False,
+                cancel_event=ctx.get('cancel_event')):
+            p0 = _pq_pcc_p(net0, pcc_bus_idx, ext_grid_idx)
+            q0 = pp_el._rpc_pcc_q_for_chart(net0, pcc_bus_idx, ext_grid_idx)
+            units_off_p = float(p0)
+            # Residual exchange at the PCC with plant units off. This is not the
+            # P=0 capability on the red envelope (units still supplying Q there).
+            if i_show_pq0:
                 pq0 = {
                     'p_mw': round(float(p0), 4),
                     'q_mvar': round(float(q0), 4),
@@ -2082,8 +2088,15 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
                 _pq_emit(
                     f'  Units off (not the P=0 envelope): P={p0:.3f} MW  Q={q0:.3f} Mvar',
                     ctx, progress=True)
-            else:
-                _pq_emit('  Units off (PQ0): load flow failed', ctx, progress=True)
+        elif i_show_pq0:
+            _pq_emit('  Units off (PQ0): load flow failed', ctx, progress=True)
+        assessable = True
+        if units_off_p is not None and abs(units_off_p) > max(0.05 * pn, 0.05):
+            assessable = False
+            warnings_list.append(
+                f"With the plant's units off the PCC still carries {abs(units_off_p):.2f} MW: loads or "
+                "other sources sit behind it, so the P-Q at the PCC is not the plant's and compliance "
+                "cannot be judged. Choose the bus where the plant connects.")
 
         tap_health = ctx['tap_health']
         tap_warnings = _pq_tap_health_warnings(tap_health)
@@ -2140,6 +2153,8 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
                     ('pn' if requirements else None)
                 ),
                 'compliance': compliance,
+                'assessable': assessable,
+                'pcc_units_off_p_mw': None if units_off_p is None else round(units_off_p, 4),
                 'warnings': warnings_list,
                 'total_installed_mw': round(total_installed_mw, 4),
                 'pn_mw': round(pn, 4),
