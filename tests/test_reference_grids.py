@@ -1746,6 +1746,11 @@ def test_drawn_diagram_dg_screening(client, quiet, opendss_scratch, grid):
     basekv) and failed; it never fell back from the solver that diverges here,
     and it read the grid's power from whichever element was active last, with
     the wrong sign - so every case showed reverse power.
+
+    The thermal check is pandapower's worst line or transformer loading: it
+    took lines only, each against OpenDSS's default 400 A rather than its own
+    rating. The POC is the DER's own bus - the one chosen was only a label -
+    and Volt-VAR, an inverter control, is not "compared" for a generator.
     """
     spec = load_spec(grid)
     pv = next(g for g in spec['static_generators'] if g['id'] == 'PV')
@@ -1765,13 +1770,59 @@ def test_drawn_diagram_dg_screening(client, quiet, opendss_scratch, grid):
     assert {checks['voltage_min']['location'], checks['voltage_max']['location']} <= labels,         'voltage checks must name buses as the diagram labels them'
     assert all(np.isfinite(float(c['value'])) for c in checks.values()), checks
 
+    assert result['summary']['poc_bus_label'] == _bus_label(spec, pv['bus'])
+    assert result['invcontrol_compare'] is None or result['invcontrol_compare']['applicable'] is False
+
     pv['p_mw'] = 0.5
     net, _ = sld.build_network(spec)
     grid_p = float(run(net).res_ext_grid['p_mw'].sum())
+    loadings = dict(zip(net.line.name, net.res_line.loading_percent))
+    loadings.update(zip(net.trafo.name, net.res_trafo.loading_percent))
+    loadings.update(zip(net.trafo3w.name, net.res_trafo3w.loading_percent))
+    worst = max(loadings, key=loadings.get)
+    assert checks['thermal']['location'] == worst, (checks['thermal'], worst)
+    assert checks['thermal']['value'] == pytest.approx(loadings[worst], rel=0.03), worst
     drawn_p = checks['reverse_power']['value'] / 1000.0
     assert abs(drawn_p - grid_p) < OPENDSS_LF_P_TOL, \
         f'{grid}: grid supplies {drawn_p:.4f} MW in the screening, {grid_p:.4f} MW in pandapower'
     assert checks['reverse_power']['status'] == ('fail' if grid_p < -0.001 else 'pass')
+
+
+def test_dg_hosting_capacity_counts_transformers(client, quiet, opendss_scratch):
+    """
+    The transmission grid's rooftop PV, on the 0.4 kV LV2 bus behind the 1 MVA
+    Substation LV2: its hosting capacity is where that transformer reaches
+    100 % - 1602 kW in pandapower. With lines only checked it screened clear
+    up to the 5 MW search limit (the transformer at 445 %), and a search that
+    never failed reported its last midpoint, "4990 kW", for "at least 5000".
+    """
+    grid = 'reference_transmission'
+    spec = load_spec(grid)
+    request = _study_request(grid, {}, key='dg_interconnection_params')
+    cell = {v.get('userFriendlyName'): v['name'] for v in request.values()
+            if isinstance(v, dict) and 'name' in v}
+    params = {'typ': 'DgInterconnectionOpenDss', 'proposed_kw': 500, 'vmin_pu': 0.95, 'vmax_pu': 1.05,
+              'max_loading_percent': 100, 'run_hosting_capacity': True, 'hc_max_kw': 5000,
+              'compare_invcontrol': True, 'frequency': 50}
+
+    request['dg_interconnection_params'] = dict(params, poc_bus_id=cell['110 kV busbar A'],
+                                                der_id=cell['Rooftop PV'], der_type='Generator')
+    result = _post_study(client, quiet, request)
+    hosting = result['hosting_capacity']
+    assert hosting['at_least'] is False
+    assert hosting['hosting_capacity_kw'] == pytest.approx(1602.2, abs=hosting['tolerance_kw'])
+    assert 'Substation LV2' in hosting['limiting_constraint_at_upper']
+    # Screened at its own bus, and told so.
+    assert result['summary']['poc_bus_label'] == 'LV2'
+    assert any('LV2' in w and '110 kV busbar A' in w for w in result['warnings'])
+
+    request['dg_interconnection_params'] = dict(params, poc_bus_id=cell['20 kV busbar 2'],
+                                                der_id=cell['CHP plant'], der_type='Generator')
+    result = _post_study(client, quiet, request)
+    hosting = result['hosting_capacity']
+    assert hosting['at_least'] is True and hosting['hosting_capacity_kw'] == 5000
+    assert hosting['limiting_constraint_at_upper'] is None
+    assert not [w for w in result['warnings'] if 'POC' in w]
 
 
 # --- protection coordination ---------------------------------------------------

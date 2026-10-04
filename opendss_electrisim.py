@@ -1449,6 +1449,7 @@ def create_line_1ph_element(dss, element_data, element_name, element_id, Busbars
         line_cmd = f'New Line.{element_name} phases=1 Bus1={t1} Bus2={t2} R1={r_ohm_per_km} X1={x_ohm_per_km} Length={length_km} units=km'
         if c_nf_per_km not in (None, '', '0', 0):
             line_cmd += f' C1={float(c_nf_per_km)}'
+        line_cmd += _line_rating_suffix(element_data)
         execute_dss_command(line_cmd)
         in_service = element_data.get('in_service', True)
         is_in_service = in_service if isinstance(in_service, bool) else str(in_service).lower() not in ['false', 'no', '0']
@@ -1552,6 +1553,27 @@ def create_transformer_1ph_element(dss, element_data, element_name, element_id, 
 
 
 # Individual element creation functions
+def _line_rating_suffix(element_data):
+    """
+    The line's thermal rating for OpenDSS: max_i_ka (derated by df) as
+    normamps and emergamps. Without it every line had OpenDSS's default 400 A,
+    which the DG screening's thermal check measured against - a 420 A cable
+    read 5 % high, a 362 A line 10 % low.
+    """
+    try:
+        amps = float(element_data.get('max_i_ka')) * 1000.0
+    except (TypeError, ValueError):
+        return ''
+    try:
+        df = float(element_data.get('df') if element_data.get('df') not in (None, '') else 1.0)
+    except (TypeError, ValueError):
+        df = 1.0
+    amps *= df if df > 0 else 1.0
+    if not (amps > 0) or math.isinf(amps):
+        return ''
+    return f' normamps={amps:g} emergamps={amps:g}'
+
+
 def create_line_element(dss, element_data, element_name, element_id, BusbarsDictVoltage, BusbarsDictConnectionToName, LinesDict, LinesDictId, created_elements, execute_dss_command=None):
     """Create a line element in OpenDSS"""
     
@@ -1633,6 +1655,7 @@ def create_line_element(dss, element_data, element_name, element_id, BusbarsDict
                 line_cmd += f' C1={c_nf_per_km}'
             if c0_nf_per_km is not None:
                 line_cmd += f' C0={c0_nf_per_km}'
+            line_cmd += _line_rating_suffix(element_data)
                 
             execute_dss_command(line_cmd)
             
@@ -6490,6 +6513,38 @@ def _dg_collect_metrics(dss, BusbarsDictConnectionToName, LinesDict, LinesDictId
     # and the source is Vsource.source, not the External Grid's cell name -
     # activating that name failed silently and read whatever element was
     # active last, so every screening flagged reverse power.
+    # Transformers too, by their windings' current against rated current (as
+    # pandapower loads them): only lines were checked, and PV behind a 1 MVA
+    # transformer screened clear up to 5 MW with the transformer at 445 %.
+    try:
+        for trafo_name in dss.Transformers.AllNames() or []:
+            if not trafo_name or trafo_name.lower() == 'none':
+                continue
+            try:
+                dss.Circuit.SetActiveElement(f'Transformer.{trafo_name}')
+                currents = dss.CktElement.CurrentsMagAng()
+                n_cond = dss.CktElement.NumConductors()
+                n_phases = dss.CktElement.NumPhases()
+                n_term = dss.CktElement.NumTerminals()
+                dss.Transformers.Name(trafo_name)
+                worst = 0.0
+                for w in range(n_term):
+                    dss.Transformers.Wdg(w + 1)
+                    kva, kv = float(dss.Transformers.kVA()), float(dss.Transformers.kV())
+                    if kva <= 0 or kv <= 0:
+                        continue
+                    rated = kva / (math.sqrt(3) * kv) if n_phases > 1 else kva / kv
+                    mags = [currents[2 * (w * n_cond + c)] for c in range(n_phases)
+                            if 2 * (w * n_cond + c) < len(currents)]
+                    if mags and rated > 0:
+                        worst = max(worst, max(mags) / rated * 100.0)
+                line_metrics.append({'name': trafo_name, 'id': trafo_name, 'loading_percent': float(worst),
+                                     'kind': 'transformer'})
+            except Exception:
+                continue
+    except Exception:
+        pass
+
     source_p_kw = 0.0
     try:
         total = dss.Circuit.TotalPower()
@@ -6540,7 +6595,7 @@ def _dg_evaluate_checks(bus_metrics, line_metrics, source_p_kw, vmin_pu, vmax_pu
         ok = worst_line['loading_percent'] <= max_loading_percent + 1e-9
         checks.append({
             'id': 'thermal',
-            'name': 'Thermal loading',
+            'name': 'Thermal loading (lines and transformers)',
             'status': 'pass' if ok else 'fail',
             'value': round(worst_line['loading_percent'], 2),
             'limit': max_loading_percent,
@@ -6732,6 +6787,20 @@ def dg_interconnection_screening(in_data, params):
             'error': True,
             'message': f'DER element not found (id={der_id}, type={der_type}). Select an existing PVSystem, Storage, or Generator on the canvas.',
         })
+    # The screening resizes the DER where it is connected: that bus is the
+    # point of coupling. The POC chosen was only a label - the default, the
+    # first bus, put a 20 kV CHP plant "at" the 110 kV busbar.
+    warnings = []
+    der_bus = str(der.get('bus') or '')
+    if der_bus and poc_bus_id and str(poc_bus_id) != der_bus:
+        warnings.append(f'The DER connects at {{{der_bus}}}, not at the POC chosen, {{{poc_bus_id}}}; '
+                        'it is screened where it is connected.')
+    if der_bus:
+        poc_bus_id = der_bus
+    # Volt-VAR is an OpenDSS InvControl, which acts on PVSystem and Storage
+    # elements only: for a generator the "comparison" repeated the base case.
+    der_typ = str(der.get('typ', ''))
+    inverter = der_typ.startswith(('PVSystem', 'Storage'))
 
     # Baseline proposed size
     _dg_scale_der(der, proposed_kw, proposed_kva)
@@ -6749,7 +6818,13 @@ def dg_interconnection_screening(in_data, params):
 
     mitigations = []
     inv_compare = None
-    if compare_inv:
+    if compare_inv and not inverter:
+        inv_compare = {
+            'applicable': False,
+            'note': f'Volt-VAR InvControl acts on PVSystem and Storage inverters; {{{der_id}}} is a '
+                    f'{der_typ.rstrip("0123456789") or "generator"}, so there is nothing to compare.',
+        }
+    elif compare_inv:
         clean_inv = copy.deepcopy(clean)
         der_inv = _dg_find_der_element(clean_inv, der_id, der_type)
         if der_inv is not None:
@@ -6762,6 +6837,7 @@ def dg_interconnection_screening(in_data, params):
                     res_inv['bus_metrics'], res_inv['line_metrics'], res_inv['source_p_kw'],
                     vmin_pu, vmax_pu, max_loading)
                 inv_compare = {
+                    'applicable': True,
                     'overall': o2,
                     'checks': c2,
                     'limiting_constraint': lim2,
@@ -6780,46 +6856,57 @@ def dg_interconnection_screening(in_data, params):
 
     hosting = None
     if run_hc:
-        lo, hi = 0.0, max(hc_max_kw, proposed_kw)
-        best = 0.0
-        iters = 0
-        last_lim = None
-        while (hi - lo) > hc_tol_kw and iters < 24:
-            mid = 0.5 * (lo + hi)
+        use_inv = bool(inv_compare and inv_compare.get('applicable') and inv_compare.get('overall') == 'pass')
+
+        def screen_at(kw):
             clean_hc = copy.deepcopy(clean)
             der_hc = _dg_find_der_element(clean_hc, der_id, der_type)
             if der_hc is None:
-                break
-            _dg_scale_der(der_hc, mid, proposed_kva)
-            # Prefer InvControl if it helped
-            if inv_compare and inv_compare.get('overall') == 'pass':
-                der_hc['inv_control_mode'] = 'VOLTVAR'
-                ctrl = 'Time'
-            else:
-                der_hc['inv_control_mode'] = 'NONE'
-                ctrl = 'Static'
-            res_hc = _dg_build_and_solve(clean_hc, frequency, controlmode=ctrl)
-            iters += 1
+                return None, 'DER not found'
+            _dg_scale_der(der_hc, kw, proposed_kva)
+            # Volt-VAR, where it is an inverter and it helped.
+            der_hc['inv_control_mode'] = 'VOLTVAR' if use_inv else 'NONE'
+            res_hc = _dg_build_and_solve(clean_hc, frequency, controlmode='Time' if use_inv else 'Static')
             if not res_hc.get('ok') or not res_hc.get('converged'):
-                hi = mid
-                last_lim = 'Did not converge'
-                continue
+                return False, 'Did not converge'
             _c, o_hc, lim_hc = _dg_evaluate_checks(
                 res_hc['bus_metrics'], res_hc['line_metrics'], res_hc['source_p_kw'],
                 vmin_pu, vmax_pu, max_loading)
-            last_lim = lim_hc
-            if o_hc == 'pass':
-                best = mid
-                lo = mid
-            else:
-                hi = mid
+            return o_hc == 'pass', lim_hc
+
+        top = max(hc_max_kw, proposed_kw)
+        # The top first: a search that never failed reported the last midpoint
+        # below it - "4990 kW" for "no limit up to 5000 kW".
+        top_ok, top_lim = screen_at(top)
+        iters = 1
+        best = 0.0
+        last_lim = top_lim
+        if top_ok:
+            best = top
+        else:
+            lo, hi = 0.0, top
+            while (hi - lo) > hc_tol_kw and iters < 24:
+                mid = 0.5 * (lo + hi)
+                ok, lim = screen_at(mid)
+                iters += 1
+                if ok is None:
+                    break
+                if ok:
+                    best = lo = mid
+                else:
+                    hi = mid
+                    last_lim = lim
         hosting = {
             'hosting_capacity_kw': round(best, 2),
+            'at_least': bool(top_ok),
             'iterations': iters,
-            'search_max_kw': hc_max_kw,
+            'search_max_kw': top,
             'tolerance_kw': hc_tol_kw,
-            'limiting_constraint_at_upper': last_lim,
+            'limiting_constraint_at_upper': None if top_ok else last_lim,
         }
+        if top_ok:
+            warnings.append(f'No limit was reached up to the search maximum, {top:g} kW: the hosting '
+                            'capacity is at least that.')
 
     # Name places as the diagram labels them; OpenDSS knows only cell ids
     # (bus names lower-cased), which the user cannot find on the drawing.
@@ -6832,6 +6919,12 @@ def dg_interconnection_screening(in_data, params):
         return re.sub(r'mxcell_\d+', lambda m: labels.get(m.group(0).lower(), m.group(0)),
                       str(text), flags=re.IGNORECASE)
 
+    def label_braced(text):
+        return re.sub(r'\{([^{}]*)\}', lambda m: labels.get(m.group(1).lower(), m.group(1)), str(text))
+
+    warnings = [label_braced(w) for w in warnings]
+    if inv_compare and inv_compare.get('note'):
+        inv_compare['note'] = label_braced(inv_compare['note'])
     for check in list(checks or []) + list((inv_compare or {}).get('checks') or []):
         check['location'] = label(check.get('location'))
     if inv_compare and inv_compare.get('limiting_constraint'):
@@ -6858,6 +6951,7 @@ def dg_interconnection_screening(in_data, params):
         'invcontrol_compare': inv_compare,
         'mitigations': mitigations,
         'hosting_capacity': hosting,
+        'warnings': warnings,
         'related': {
             'bess_sizing': 'Pandapower BESS sizing study can size storage to POC P/Q targets.',
             'rpc': 'Pandapower Grid Code Compliance (P-Q & U-Q) checks reactive capability envelopes.',
