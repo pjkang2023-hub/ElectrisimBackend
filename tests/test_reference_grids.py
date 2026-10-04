@@ -85,13 +85,14 @@ def run(net):
     return net
 
 
-def run_sc(net, fault='3ph', case='max'):
+def run_sc(net, fault='3ph', case='max', lv_tol_percent=10, topology='auto', inverse_y=True):
     """A fault at every bus, called as the backend calls it."""
     # Branch results need the state a power flow leaves; the backend's
     # pp.diagnostic() runs one before it calls calc_sc.
     run(net)
     sc.calc_sc(net, fault=fault, case=case, ip=True, ith=True, tk_s=1.0, kappa_method='C',
-               r_fault_ohm=0.0, x_fault_ohm=0.0, check_connectivity=False, branch_results=True)
+               r_fault_ohm=0.0, x_fault_ohm=0.0, check_connectivity=False, branch_results=True,
+               lv_tol_percent=lv_tol_percent, topology=topology, inverse_y=inverse_y)
     return net
 
 
@@ -612,6 +613,12 @@ def _sc_fixture(grid, fault, case):
     return payload
 
 
+def _sc_lv_tol(payload):
+    """The LV tolerance the dialog chose - sent as 'fault_impedance'."""
+    params = next(v for v in payload.values() if 'Parameters' in str(v.get('typ')))
+    return int(params['fault_impedance'])
+
+
 @pytest.mark.parametrize('case', ('max', 'min'))
 @pytest.mark.parametrize('fault', ('3ph', '2ph'))
 @pytest.mark.parametrize('grid', GRIDS)
@@ -632,7 +639,8 @@ def test_drawn_diagram_short_circuit_matches_spec(client, quiet, grid, fault, ca
 
     spec = load_spec(grid)
     net, _ = sld.build_network(spec)
-    want = sc_by_id(run_sc(net, fault, case), spec_ids(net))
+    # With the dialog's LV tolerance: the 6 % it sent ran as pandapower's 10 %.
+    want = sc_by_id(run_sc(net, fault, case, _sc_lv_tol(payload)), spec_ids(net))
 
     label_of_cell = {v['name']: v.get('userFriendlyName') for v in payload.values()
                      if isinstance(v, dict) and 'name' in v}
@@ -648,6 +656,42 @@ def test_drawn_diagram_short_circuit_matches_spec(client, quiet, grid, fault, ca
                 differ.append(f"bus {bus['id']} {column}: spec {want[bus['id']][column]!r}, "
                               f"drawn {got[column]!r}")
     assert not differ, f'{grid} {fault}: the drawn short circuit differs\n  ' + '\n  '.join(differ[:20])
+
+
+@pytest.mark.parametrize('lv_tol, topology, inverse_y', ((6, 'auto', 'True'), (10, 'meshed', 'False'),
+                                                       (10, 'radial', 'True')))
+def test_short_circuit_takes_the_dialogs_iec_settings(client, quiet, lv_tol, topology, inverse_y):
+    """
+    The LV tolerance, topology and inverse-Y choice were read and dropped, so
+    pandapower's defaults always ran: the dialog's default 6 % (c max 1.05)
+    as 10 % (1.10) - LV1 23.726 kA for 23.690 - and Radial or Meshed did
+    nothing. Each choice must give pandapower's own result for it.
+    """
+    grid = 'reference_transmission'
+    payload = _sc_fixture(grid, '3ph', 'max')
+    params = next(v for v in payload.values() if 'Parameters' in str(v.get('typ')))
+    params.update(fault_impedance=str(lv_tol), topology=topology, inverse_y=inverse_y)
+    drawn = _post_short_circuit(client, quiet, payload)
+    assert not drawn.get('error'), drawn.get('message') or drawn.get('exception')
+    assert (drawn['study_params']['lv_tol_percent'], drawn['study_params']['topology'],
+            drawn['study_params']['inverse_y']) == (lv_tol, topology, inverse_y == 'True')
+
+    spec = load_spec(grid)
+    net, _ = sld.build_network(spec)
+    want = sc_by_id(run_sc(net, '3ph', 'max', lv_tol, topology, inverse_y == 'True'), spec_ids(net))
+    label_of_cell = {v['name']: v.get('userFriendlyName') for v in payload.values()
+                     if isinstance(v, dict) and 'name' in v}
+    rows = {label_of_cell.get(r['name'], r['name']): r for r in drawn['busbars']}
+    for bus in spec['buses']:
+        got = rows[str(bus.get('name') or bus['id'])]
+        for column in SC_COLUMNS:
+            assert float(got[column]) == pytest.approx(want[bus['id']][column], abs=DRAWN_TOL), (bus['id'], column)
+
+    # The tolerance matters at the LV buses: c max 1.05 against 1.10.
+    lv1 = next(b['id'] for b in spec['buses'] if (b.get('name') or b['id']) == 'LV1')
+    other = sc_by_id(run_sc(sld.build_network(spec)[0], '3ph', 'max', 16 - lv_tol, topology,
+                            inverse_y == 'True'), spec_ids(net))
+    assert abs(other[lv1]['ikss_ka'] - want[lv1]['ikss_ka']) > 0.02
 
 
 def test_short_circuit_names_missing_machine_data(client, quiet):
@@ -1126,7 +1170,7 @@ def test_drawn_diagram_single_phase_short_circuit_matches_spec(client, quiet, gr
 
     spec = load_spec(grid)
     net, _ = sld.build_network(spec)
-    want = sc_by_id(run_sc(net, '1ph', case), spec_ids(net), SC_1PH_COLUMNS)
+    want = sc_by_id(run_sc(net, '1ph', case, _sc_lv_tol(payload)), spec_ids(net), SC_1PH_COLUMNS)
     label_of_cell = {v['name']: v.get('userFriendlyName') for v in payload.values()
                      if isinstance(v, dict) and 'name' in v}
     rows = {label_of_cell.get(r['name'], r['name']): r for r in drawn.get('busbars', [])}
@@ -1134,7 +1178,7 @@ def test_drawn_diagram_single_phase_short_circuit_matches_spec(client, quiet, gr
     # IEC 60909-0 peak and thermal current for an earth fault, from
     # pandapower's own three-phase kappa and m at each bus:
     # ip1 = kappa sqrt(2) Ik1'', ith1 = Ik1'' sqrt(m + 1).
-    kappa, m = iec_kappa_and_m(spec, case)
+    kappa, m = iec_kappa_and_m(spec, case, _sc_lv_tol(payload))
 
     differ = []
     for bus in spec['buses']:
@@ -1152,7 +1196,7 @@ def test_drawn_diagram_single_phase_short_circuit_matches_spec(client, quiet, gr
     assert not differ, f'{grid}: the drawn earth fault differs\n  ' + '\n  '.join(differ)
 
 
-def iec_kappa_and_m(spec, case='max'):
+def iec_kappa_and_m(spec, case='max', lv_tol_percent=10):
     """
     Each bus's peak factor kappa and thermal factor m for a maximum
     three-phase fault, read from pandapower's own result table - the backend
@@ -1160,7 +1204,7 @@ def iec_kappa_and_m(spec, case='max'):
     """
     from pandapower.pypower.idx_bus_sc import KAPPA, M
     net, _ = sld.build_network(spec)
-    run_sc(net, '3ph', case)
+    run_sc(net, '3ph', case, lv_tol_percent)
     rows = net['_pd2ppc_lookups']['bus']
     table = net['_ppc']['bus']
     ids = spec_ids(net)['bus']

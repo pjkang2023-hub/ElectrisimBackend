@@ -1599,6 +1599,8 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
         lines.append("    check_connectivity=False,")
         lines.append("    branch_results=True,")
         lines.append("    return_all_currents=False,")
+        for key, value in _sc_iec_options(sc).items():
+            lines.append(f"    {key}={value!r},")
         lines.append(")")
         lines.append("")
         lines.append("# Print short-circuit results")
@@ -7634,7 +7636,29 @@ def analyze_shortcircuit_input_data(in_data):
     return recommendations
 
 
-def _three_phase_kappa(net, case, bus, tk_s, r_fault_ohm, x_fault_ohm):
+def _sc_iec_options(in_data):
+    """
+    The dialog's IEC 60909 settings as calc_sc takes them. They were read and
+    dropped, so pandapower's defaults always applied: the 6 % LV tolerance the
+    dialog defaults to (c max 1.05) ran as 10 % (c max 1.10), and Radial,
+    Meshed and the inverse-Y choice did nothing.
+    """
+    try:
+        lv_tol = int(float(in_data.get('lv_tol_percent', in_data.get('fault_impedance', 6))))
+    except (TypeError, ValueError):
+        lv_tol = 6
+    if lv_tol not in (6, 10):
+        lv_tol = 6
+    topology = str(in_data.get('topology') or 'auto').strip().lower()
+    if topology not in ('auto', 'radial', 'meshed'):
+        topology = 'auto'
+    inverse_y = in_data.get('inverse_y', True)
+    if not isinstance(inverse_y, bool):
+        inverse_y = str(inverse_y).strip().lower() not in ('false', '0', 'no', 'off')
+    return {'lv_tol_percent': lv_tol, 'topology': topology, 'inverse_y': inverse_y}
+
+
+def _three_phase_kappa(net, case, bus, tk_s, r_fault_ohm, x_fault_ohm, iec_options=None):
     """
     Each bus's peak factor kappa for a three-phase fault, as pandapower
     computes it (method C), indexed like net.res_bus_sc.
@@ -7649,7 +7673,7 @@ def _three_phase_kappa(net, case, bus, tk_s, r_fault_ohm, x_fault_ohm):
     net3 = copy.deepcopy(net)
     sc.calc_sc(net3, fault='3ph', case=case, bus=bus, ip=True, ith=False, tk_s=tk_s,
                kappa_method='C', r_fault_ohm=r_fault_ohm, x_fault_ohm=x_fault_ohm,
-               check_connectivity=False, branch_results=False)
+               check_connectivity=False, branch_results=False, **(iec_options or {}))
     index = net.res_bus_sc.index
     rows = net3['_pd2ppc_lookups']['bus'][index.values]
     return pd.Series(net3['_ppc']['bus'][rows, KAPPA], index=index)
@@ -7830,14 +7854,13 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
         bus = bus[0]
     
     # Get other parameters
-    lv_tol_percent = int(in_data.get('fault_impedance', 10))  # Frontend 'fault_impedance' becomes 'lv_tol_percent'
+    # The frontend sends the LV tolerance as 'fault_impedance'.
+    iec_options = _sc_iec_options(in_data)
     ip = True
     ith = True
-    topology = in_data.get('topology', 'radial')
     tk_s = float(in_data.get('tk_s', 1.0))
     r_fault_ohm = float(in_data.get('r_fault_ohm', 0.0))
     x_fault_ohm = float(in_data.get('x_fault_ohm', 0.0))
-    inverse_y = in_data.get('inverse_y', False)
     
     # Debug print to see what parameters are being passed
     
@@ -7893,6 +7916,7 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
             check_connectivity=False,
             branch_results=True,
             return_all_currents=False,  # Changed: False gives max/min per branch with simple index
+            **iec_options,
         )
         
         # Check if ip_ka and ith_ka calculations failed (all NaN) for single-phase faults
@@ -7901,7 +7925,8 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
             # fault. IEC 60909-0 allows the three-phase kappa at the same bus:
             #   ip1 = kappa * sqrt(2) * Ik1''     ith1 = Ik1'' * sqrt(m + n)
             # with n = 1 (far from generator) and m from kappa, f and tk.
-            kappa = _three_phase_kappa(net, fault_location, bus, tk_s, r_fault_ohm, x_fault_ohm)
+            kappa = _three_phase_kappa(net, fault_location, bus, tk_s, r_fault_ohm, x_fault_ohm,
+                                       iec_options)
             ikss = net.res_bus_sc['ikss_ka']
             net.res_bus_sc['ip_ka'] = kappa * np.sqrt(2) * ikss
             net.res_bus_sc['ith_ka'] = ikss * np.sqrt(
@@ -8197,6 +8222,9 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
         'tk_s': tk_s,
         'r_fault_ohm': r_fault_ohm,
         'x_fault_ohm': x_fault_ohm,
+        'lv_tol_percent': iec_options['lv_tol_percent'],
+        'topology': iec_options['topology'],
+        'inverse_y': iec_options['inverse_y'],
         'standard': 'iec60909',
     }
 
