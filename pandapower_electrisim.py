@@ -13618,6 +13618,163 @@ def _prot_safe_float(value, default=None):
         return default
 
 
+# --- Automatic OCR settings -------------------------------------------------------
+#
+# pandapower's OCRelay sets pickups only for relays on lines, and grades them only
+# when every closed switch sits on a line: on any grid with a transformer breaker
+# no relay set to "automatic" could be evaluated. These rules are pandapower's,
+# carried over to transformer breakers, and evaluated by Electrisim.
+
+_PROT_AUTO_SC_FRACTION = 0.95          # I>> of a line relay: a fault 95 % along its line
+_PROT_AUTO_TRAFO_INST_MARGIN = 1.2     # I>> of a transformer relay: 120 % of its worst through-fault
+_PROT_AUTO_INVERSE_OVERLOAD = 1.2      # IDMT pickup: 120 % of the rated current, as pandapower
+
+
+def _prot_auto_grading_depths(net, sw_indices):
+    """
+    Relays crossed between the External Grid and each relay (itself included),
+    the depth pandapower grades line relays by: the deepest trips first.
+    """
+    from collections import deque
+    adjacency, element_node = _prot_element_graph(net)
+    relay_edges = {}
+    for sw_idx in sw_indices:
+        sw = net.switch.loc[int(sw_idx)]
+        if not bool(sw['closed']) or sw['et'] == 'b':
+            continue
+        relay_edges[frozenset((('bus', int(sw['bus'])), element_node(sw['et'], sw['element'])))] = int(sw_idx)
+    dist, queue = {}, deque()
+    for _, row in net.ext_grid.iterrows():
+        if bool(row.get('in_service', True)):
+            node = ('bus', int(row['bus']))
+            dist[node] = 0
+            queue.append(node)
+    while queue:
+        node = queue.popleft()
+        for nxt in adjacency.get(node, ()):
+            weight = 1 if frozenset((node, nxt)) in relay_edges else 0
+            if dist[node] + weight < dist.get(nxt, math.inf):
+                dist[nxt] = dist[node] + weight
+                (queue.appendleft if weight == 0 else queue.append)(nxt)
+    depths = {}
+    for edge, sw_idx in relay_edges.items():
+        known = [dist[n] for n in edge if n in dist]
+        if known:
+            depths[sw_idx] = min(known) + 1
+    return depths
+
+
+def _prot_auto_rated_ka(net, sw):
+    """Rated current of what the relay protects, on its own side."""
+    et, element, bus = str(sw['et']), int(sw['element']), int(sw['bus'])
+
+    def num(row, key, default=1.0):
+        value = row.get(key, default)
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return default
+        return value if value > 0 and math.isfinite(value) else default
+
+    if et == 'l' and element in net.line.index:
+        row = net.line.loc[element]
+        return num(row, 'max_i_ka', 0.0) * num(row, 'df') * num(row, 'parallel'), 'its line rating'
+    if et == 't' and element in net.trafo.index:
+        row = net.trafo.loc[element]
+        side = 'hv' if int(row['hv_bus']) == bus else 'lv'
+        return (num(row, 'sn_mva', 0.0) * num(row, 'parallel')
+                / (math.sqrt(3) * num(row, f'vn_{side}_kv'))), f'the transformer {side.upper()} rating'
+    if et == 't3' and element in net.trafo3w.index:
+        row = net.trafo3w.loc[element]
+        side = next((s for s in ('hv', 'mv', 'lv') if int(row[f'{s}_bus']) == bus), 'hv')
+        return (num(row, f'sn_{side}_mva', 0.0)
+                / (math.sqrt(3) * num(row, f'vn_{side}_kv'))), f'the transformer {side.upper()} rating'
+    return 0.0, None
+
+
+def _prot_auto_fault_current_ka(net, sw_idx, fault_bus=None, line_fraction=None):
+    """Maximum three-phase fault current the relay sees, for a fault at a bus or along its line."""
+    net_sc = deepcopy(net)
+    if line_fraction is not None:
+        from pandapower.protection.utility_functions import create_sc_bus
+        element = int(net.switch.at[sw_idx, 'element'])
+        net_sc = create_sc_bus(net_sc, sc_line_id=element, sc_fraction=float(line_fraction))
+        # As in the line-fault scenarios: create_sc_bus moves non-line switches too.
+        not_line = net.switch.index[net.switch['et'] != 'l']
+        net_sc.switch.loc[not_line, 'element'] = net.switch.loc[not_line, 'element']
+        fault_bus = int(max(net_sc.bus.index))
+    ensure_ext_grid_zero_sequence_min(net_sc)
+    sc.calc_sc(net_sc, bus=int(fault_bus), branch_results=True, fault='3ph', case='max')
+    return _prot_switch_current_ka(net_sc, sw_idx)
+
+
+def _prot_auto_oc_settings(net, spec, sw_idx, depths, grading_mode):
+    """
+    (settings, note): the relay's automatic pickups and grading, or (None, why).
+
+    I>: the rated current x overload factor x CT factor. I>>: for a line relay
+    the current it sees for a fault 95 % along its line (x safety factor); for a
+    transformer relay on the grid side 120 % of the worst through-fault at its
+    other terminals, so only an internal fault trips it at once, and none on
+    the load side (an incomer cannot tell its busbar from a feeder fault). t>:
+    the base t> for the deepest relay, plus t_diff for each relay nearer the
+    grid.
+    """
+    sw = net.switch.loc[int(sw_idx)]
+    et = str(sw['et'])
+    rated_ka, rated_basis = _prot_auto_rated_ka(net, sw)
+    if not rated_ka > 0:
+        return None, 'the protected element has no current rating'
+    out = dict(spec)
+    overload = float(spec.get('overload_factor') or 1.25)
+    ct = float(spec.get('ct_current_factor') or 1.2)
+    safety = float(spec.get('safety_factor') or 1.0)
+    out['I_g_a'] = rated_ka * overload * ct * 1000.0
+    out['I_s_a'] = rated_ka * _PROT_AUTO_INVERSE_OVERLOAD * 1000.0
+
+    inst_ka, inst_basis = None, None
+    try:
+        if et == 'l':
+            line = net.line.loc[int(sw['element'])]
+            at_from = int(line['from_bus']) == int(sw['bus'])
+            fraction = _PROT_AUTO_SC_FRACTION if at_from else 1.0 - _PROT_AUTO_SC_FRACTION
+            seen = _prot_auto_fault_current_ka(net, sw_idx, line_fraction=fraction)
+            if seen:
+                inst_ka = seen * safety
+                inst_basis = f'a fault {_PROT_AUTO_SC_FRACTION:.0%} along its line'
+        elif et in ('t', 't3'):
+            adjacency, element_node = _prot_element_graph(net)
+            grid = {('bus', int(b)) for b, live in zip(net.ext_grid['bus'], net.ext_grid.get('in_service', [True] * len(net.ext_grid))) if bool(live)}
+            if _prot_reaches_source(adjacency, ('bus', int(sw['bus'])), grid,
+                                    {element_node(et, sw['element'])}):
+                table = net.trafo if et == 't' else net.trafo3w
+                cols = ('hv_bus', 'lv_bus') if et == 't' else ('hv_bus', 'mv_bus', 'lv_bus')
+                others = [int(table.at[int(sw['element']), c]) for c in cols
+                          if int(table.at[int(sw['element']), c]) != int(sw['bus'])]
+                through = [x for x in (_prot_auto_fault_current_ka(net, sw_idx, fault_bus=b) for b in others) if x]
+                if through:
+                    inst_ka = max(through) * _PROT_AUTO_TRAFO_INST_MARGIN * safety
+                    inst_basis = f'{_PROT_AUTO_TRAFO_INST_MARGIN:.0%} of the worst through-fault'
+            else:
+                inst_basis = 'none on the load side of a transformer'
+    except Exception as e:
+        inst_basis = f'none: its fault current could not be computed ({type(e).__name__})'
+    if inst_ka is not None and inst_ka * 1000.0 <= out['I_g_a']:
+        inst_ka, inst_basis = None, 'none: the fault current along it is below I>'
+    out['I_gg_a'] = inst_ka * 1000.0 if inst_ka is not None else None
+
+    depth = depths.get(int(sw_idx))
+    if grading_mode != 'manual' and depth is not None and depths:
+        steps = max(depths.values()) - depth
+        out['t_g'] = float(spec.get('t_g') or 0.5) + steps * float(spec.get('t_diff') or 0.3)
+
+    parts = [f"I> {out['I_g_a']:.0f} A ({rated_basis} {rated_ka * 1000:.0f} A x {overload:g} x {ct:g})"]
+    parts.append(f"I>> {out['I_gg_a']:.0f} A ({inst_basis})" if out['I_gg_a'] else f'I>> {inst_basis or "none"}')
+    if depth is not None and grading_mode != 'manual':
+        parts.append(f"t> {out['t_g']:.2f} s ({depth} relay{'s' if depth != 1 else ''} from the grid)")
+    return out, 'Automatic settings by Electrisim: ' + '; '.join(parts) + '.'
+
+
 def _prot_collect_switch_protection_specs(in_data):
     """
     Walk the raw frontend payload and collect the protection spec for every Switch
@@ -13955,6 +14112,7 @@ def _attach_protection_devices(net, specs, grading_mode='auto'):
         subtype: _prot_build_manual_time_settings(net, specs, subtype)
         for subtype in _OC_SUBTYPE_TO_SWITCH_TYPE
     } if grading_mode == 'manual' else {}
+    auto_depths = None  # relays' grading depths, found when first needed
 
     for sw_id, spec in specs.items():
         sw_idx = _prot_resolve_sw_idx_for_id(net, sw_id)
@@ -14063,9 +14221,33 @@ def _attach_protection_devices(net, specs, grading_mode='auto'):
                 # relay is reported once, by the ElectriSim evaluator below.
                 _prot_drop_new_protection_rows(net, protection_index_before)
                 if spec.get('pickup_mode') != 'manual':
-                    # Automatic pickups come from OCRelay. Evaluating the
-                    # dialog's unset (zero) pickups instead tripped every relay
-                    # instantly for every fault, anywhere in the network.
+                    # pandapower's OCRelay sets and grades relays on lines only:
+                    # Electrisim sets this one by the same rules, extended to
+                    # transformer breakers. (Evaluating the dialog's unset, zero,
+                    # pickups tripped every relay instantly for every fault.)
+                    if auto_depths is None:
+                        auto_depths = _prot_auto_grading_depths(net, [
+                            i for i in (_prot_resolve_sw_idx_for_id(net, k) for k, v in specs.items()
+                                        if v.get('protection_type') == _PROTECTION_KIND_OCR)
+                            if i is not None])
+                    auto_spec, auto_note = _prot_auto_oc_settings(net, spec, int(sw_idx), auto_depths, grading_mode)
+                    if auto_spec is not None:
+                        summaries.append({
+                            'switch_id': sw_id,
+                            'switch_name': spec.get('sw_name'),
+                            'user_friendly_name': spec.get('user_friendly_name'),
+                            'sw_idx': int(sw_idx),
+                            'kind': 'OCR', 'subtype': subtype, 'curve_type': curve_type,
+                            'pickup_mode': spec.get('pickup_mode'),
+                            'engine': 'electrisim',
+                            'attached': True,
+                            'custom_evaluator': 'oc_electrisim',
+                            'not_computed': False,
+                            'settings': auto_spec,
+                            'reason': auto_note,
+                            'traceback': tb_text,
+                        })
+                        continue
                     summaries.append({
                         'switch_id': sw_id,
                         'switch_name': spec.get('sw_name'),
@@ -14075,10 +14257,8 @@ def _attach_protection_devices(net, specs, grading_mode='auto'):
                         'pickup_mode': spec.get('pickup_mode'),
                         'attached': False, 'not_computed': True,
                         'reason': (
-                            f"Automatic pickup needs pandapower's OCRelay, which could not be built "
-                            f'({type(e).__name__}: {e}). Its topological grading requires every '
-                            "closed switch to sit on a line. Set this relay's pickup currents "
-                            'by hand (pickup mode Manual) to evaluate it.'
+                            f'Automatic pickup could not be set: {auto_note}. '
+                            "Set this relay's pickup currents by hand (pickup mode Manual) to evaluate it."
                         ),
                         'traceback': tb_text,
                     })

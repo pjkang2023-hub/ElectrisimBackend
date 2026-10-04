@@ -2136,22 +2136,87 @@ def test_protection_names_isolated_buses(client, quiet, line, cut_off):
                                  'component to a supplied bus before running protection coordination.')
 
 
-def test_protection_automatic_pickup_it_cannot_build_is_not_computed(client, quiet):
+def _fault_along_line_ka(spec, line_name, fraction_from_bus):
+    """pandapower: the current at a line's from end for a fault part way along it."""
+    net, _ = sld.build_network(spec)
+    i = int(net.line.index[net.line.name == line_name][0])
+    row = net.line.loc[i]
+    fault = pp.create_bus(net, vn_kv=net.bus.vn_kv[row.from_bus])
+    near = pp.create_line_from_parameters(net, row.from_bus, fault, row.length_km * fraction_from_bus,
+                                          row.r_ohm_per_km, row.x_ohm_per_km, row.c_nf_per_km, row.max_i_ka)
+    pp.create_line_from_parameters(net, fault, row.to_bus, row.length_km * (1 - fraction_from_bus),
+                                   row.r_ohm_per_km, row.x_ohm_per_km, row.c_nf_per_km, row.max_i_ka)
+    net.line.loc[i, 'in_service'] = False
+    run(net)
+    sc.calc_sc(net, bus=fault, case='max', branch_results=True)
+    return float(net.res_line_sc.ikss_from_ka[near])
+
+
+def test_protection_automatic_pickup_with_a_transformer_breaker(client, quiet):
     """
-    pandapower's OCRelay grades only networks whose closed switches all sit on
-    lines, and this one has a transformer breaker. Its fallback then read the
-    dialog's unset pickups as 0 A, so every relay tripped instantly for every
-    fault anywhere; the relays must be reported as not computed instead.
+    pandapower's OCRelay sets and grades relays only when every closed switch
+    sits on a line: with the radial grid's transformer breaker no relay set to
+    automatic could be evaluated. Electrisim sets them by pandapower's rules,
+    carried over to transformer breakers - I> the rating x overload x CT
+    factor, I>> the current for a fault 95 % along the relay's line and none
+    on a transformer's load side, t> one t_diff more for each relay nearer the
+    grid - and the radial grid then grades: each feeder clears its own
+    faults, the incomer backs it up.
     """
     with quiet():
         response = client.post('/', json=_protection_request())
     result = json.loads(response.get_data(as_text=True))
-    assert result['summary']['n_not_computed'] == 4
-    assert not any(row.get('tripped') for s in result.get('scenarios', []) for row in s['trip'])
-    reasons = [a['reason'] for a in result['attach_summaries']]
-    assert all('pickup mode Manual' in r for r in reasons), reasons
-    # The alert is all the user sees: it must say what to do, per relay.
-    assert result['message'].count('pickup mode Manual') == 4, result['message']
+    assert not result.get('error'), result.get('message')
+    assert result['summary']['n_not_computed'] == 0
+    settings = {a['user_friendly_name']: a['settings'] for a in result['attach_summaries']}
+    assert all('Automatic settings by Electrisim' in a['reason'] for a in result['attach_summaries'])
+
+    assert settings['CB_A']['I_g_a'] == pytest.approx(421 * 1.25 * 1.2)
+    assert settings['Wind feeder breaker']['I_g_a'] == pytest.approx(500 * 1.25 * 1.2)
+    # The 40 MVA transformer's 20 kV side, where CB_T1 sits.
+    assert settings['CB_T1']['I_g_a'] == pytest.approx(40e3 / (math.sqrt(3) * 20) * 1.25 * 1.2)
+    # The fault 95 % along LA1 from the substation, where CB_A sits.
+    spec = load_spec('reference_radial')
+    assert settings['CB_A']['I_gg_a'] == pytest.approx(_fault_along_line_ka(spec, 'LA1', 0.95) * 1000, rel=1e-3)
+    assert settings['CB_T1']['I_gg_a'] is None          # the incomer: load side of T1
+    for feeder in ('CB_A', 'CB_B', 'Wind feeder breaker'):
+        assert settings[feeder]['t_g'] == pytest.approx(0.5), feeder   # deepest: their own t>
+    assert settings['CB_T1']['t_g'] == pytest.approx(0.8 + 0.3)        # one relay nearer the grid
+
+    lines = [v for v in _protection_request().values() if str(v.get('typ', '')).startswith('Line')]
+    feeder_breaker = {'LA1': 'CB_A', 'LA2': 'CB_A', 'LB1': 'CB_B', 'LB2': 'CB_B',
+                      'Wind farm cable': 'Wind feeder breaker'}
+    for scenario in result['scenarios']:
+        line = lines[int(scenario['sc_line_id'])]['userFriendlyName']
+        own = feeder_breaker[line]
+        tripped = {row['switch_name'] for row in scenario['trip'] if row['tripped']}
+        assert own in tripped and tripped <= {own, 'CB_T1'}, (line, tripped)
+        assert scenario['primary_switches'] == [own]
+    assert result['summary']['n_miscoordination'] == 0
+    assert result['unwanted_trips'] == []
+
+
+def test_protection_automatic_pickup_on_transformer_feeds(client, quiet):
+    """
+    On the transmission grid, three of five breakers sit on transformers. A
+    transformer breaker on the grid side has an instantaneous stage at 120 %
+    of the worst through-fault, so only a fault inside the transformer trips
+    it at once: Transformer B's at 1.2 x its 110 kV current for a 20 kV fault.
+    """
+    payload = _protection_request(lambda name: {'pickup_mode': 'auto'}, grid='reference_transmission')
+    with quiet():
+        response = client.post('/', json=payload)
+    result = json.loads(response.get_data(as_text=True))
+    assert not result.get('error'), result.get('message')
+    assert result['summary']['n_not_computed'] == 0
+    settings = {a['user_friendly_name']: a['settings'] for a in result['attach_summaries']}
+
+    net, _ = sld.build_network(load_spec('reference_transmission'))
+    run(net)
+    sc.calc_sc(net, bus=int(net.bus.index[net.bus.name == '20 kV busbar 2'][0]), case='max', branch_results=True)
+    through = float(net.res_trafo_sc.ikss_hv_ka[net.trafo.name == 'Transformer B 110/20'].iloc[0])
+    assert settings['CB_T2']['I_gg_a'] == pytest.approx(1.2 * through * 1000, rel=1e-3)
+    assert settings['CB_T2']['I_g_a'] == pytest.approx(25e3 / (math.sqrt(3) * 110) * 1.25 * 1.2)
 
 
 def test_protection_manual_settings_grade(client, quiet):
