@@ -134,7 +134,7 @@ minimises total cost:
 | element | dispatch limits (defaults) |
 |---|---|
 | `external_grids` | `min_p_mw` (-1e6: may export) and `max_p_mw` (1e6) |
-| `generators` | `min_p_mw` (0) to `max_p_mw` (`sn_mva`); `min_q_mvar` / `max_q_mvar` (what the rated power factor allows); `controllable` (true) |
+| `generators` | `min_p_mw` (0) to `max_p_mw` (rated active power, `sn_mva` × `cos_phi`); `min_q_mvar` / `max_q_mvar` (what the rated power factor allows), so the rated point is within `sn_mva`; `controllable` (true) |
 | `static_generators` | priced ones are curtailable: `min_p_mw` (0) to `max_p_mw` (`p_mw`, the output available), reactive power up to power factor 0.9 at `sn_mva`; unpriced ones run at `p_mw` |
 | `storage` | runs at `p_mw` |
 | `motors` | run at their load, like `loads` |

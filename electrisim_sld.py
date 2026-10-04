@@ -534,12 +534,15 @@ def build_network(spec):
         )
         record('gen', idx, ident)
         # Optimal power flow: dispatchable between these limits - by default
-        # from nothing to its rating, and the reactive power its rated power
-        # factor allows.
+        # from nothing to its rated active power, and the reactive power its
+        # rated power factor allows: the corner of that rectangle is the rated
+        # point, so the machine stays within its MVA. Up to sn_mva in MW, a
+        # 6 MVA, 0.8 pf CHP plant was dispatched at 6.09 MVA.
         sn = float(net.gen.at[idx, 'sn_mva'])
-        q_cap = round(sn * math.sin(math.acos(min(max(cos_phi or 0.85, 0.01), 1.0))), 6)
+        pf = min(max(cos_phi or 0.85, 0.01), 1.0)
+        q_cap = round(sn * math.sin(math.acos(pf)), 6)
         net.gen.at[idx, 'controllable'] = bool(row.get('controllable', True))
-        for field, default in (('min_p_mw', 0.0), ('max_p_mw', sn),
+        for field, default in (('min_p_mw', 0.0), ('max_p_mw', round(sn * pf, 6)),
                                ('min_q_mvar', -q_cap), ('max_q_mvar', q_cap)):
             net.gen.at[idx, field] = _num(row.get(field), field, where, problems, default=default)
         _opf_cost(net, row, where, problems, idx, 'gen')

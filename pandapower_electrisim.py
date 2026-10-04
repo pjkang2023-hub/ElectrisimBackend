@@ -9880,10 +9880,22 @@ def optimalPowerFlow(net, opf_params):
         }
         
         # Add optimization results summary if available
+        # With no cost rows pandapower minimises the total generation, and
+        # res_cost is that sum in MW: it was reported as "11.4985 EUR". Report
+        # it as what it is, and a cost - per hour, MW times price per MWh -
+        # only when prices were used.
+        priced = len(net.poly_cost) > 0 or len(net.pwl_cost) > 0
+        response_data['cost_function'] = cost_function if priced else 'none'
         if hasattr(net, 'OPF_converged') and net.OPF_converged:
             response_data['opf_converged'] = True
             if hasattr(net, 'res_cost'):
-                response_data['total_cost'] = float(net.res_cost)
+                if priced:
+                    response_data['total_cost'] = float(net.res_cost)
+                    response_data['cost_per'] = 'h'
+                else:
+                    response_data['total_cost'] = None
+                    response_data['objective'] = 'total_generation'
+                    response_data['total_generation_mw'] = float(net.res_cost)
         else:
             response_data['opf_converged'] = False
         

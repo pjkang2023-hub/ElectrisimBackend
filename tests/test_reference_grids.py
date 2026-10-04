@@ -144,8 +144,8 @@ def _opf_data(net, prices):
     """
     What the spec reference documents for the optimal power flow, written out:
     buses held to 0.9-1.1 pu; the grid free to import or export; generators
-    dispatchable from nothing to their rating, with the reactive power their
-    rated power factor allows; priced static generators curtailable from their
+    dispatchable from nothing to their rated active power (sn_mva x cos_phi),
+    with the reactive power their rated power factor allows; priced static generators curtailable from their
     p_mw down, with reactive power up to power factor 0.9 at their rating;
     storage fixed. prices maps
     (table, index) -> cost per MWh.
@@ -157,8 +157,9 @@ def _opf_data(net, prices):
     net.ext_grid['max_p_mw'] = 1e6
     for idx in net.gen.index:
         sn = float(net.gen.at[idx, 'sn_mva'])
-        q = round(sn * math.sin(math.acos(float(net.gen.at[idx, 'cos_phi']))), 6)
-        net.gen.loc[idx, ['controllable', 'min_p_mw', 'max_p_mw', 'min_q_mvar', 'max_q_mvar']] =             (True, 0.0, sn, -q, q)
+        pf = float(net.gen.at[idx, 'cos_phi'])
+        q = round(sn * math.sin(math.acos(pf)), 6)
+        net.gen.loc[idx, ['controllable', 'min_p_mw', 'max_p_mw', 'min_q_mvar', 'max_q_mvar']] =             (True, 0.0, round(sn * pf, 6), -q, q)
     for idx in net.sgen.index:
         controllable = ('sgen', idx) in prices
         net.sgen.loc[idx, ['controllable']] = controllable
@@ -1233,6 +1234,10 @@ def test_drawn_diagram_optimal_power_flow(client, quiet, grid):
     switches, so everything behind a breaker came back isolated and the OPF
     failed; it also left out wind turbines, shunt reactors and capacitor
     banks. And the spec's prices and limits had no way onto the drawing.
+
+    A generator is dispatched up to its rated active power, sn_mva x
+    cos_phi, so it stays within its MVA: up to sn_mva in MW, the 6 MVA,
+    0.8 pf CHP plant ran at 6.09 MVA. The cost is per hour.
     """
     with open(os.path.join(REFERENCE_DIR, f'{grid}.diagram_opf_payload.json'),
               encoding='utf-8') as handle:
@@ -1287,6 +1292,37 @@ def test_drawn_diagram_optimal_power_flow(client, quiet, grid):
     if abs(float(result['total_cost']) - float(net.res_cost)) > OPF_COST_TOL:
         differ.append(f"total cost {result['total_cost']} drawn, {net.res_cost} for the spec")
     assert not differ, f'{grid}:\n  ' + '\n  '.join(differ)
+    assert result['cost_function'] == 'polynomial' and result['cost_per'] == 'h'
+    for element in spec['generators']:
+        row = next(r for r in result['generators'] if r['name'].startswith(str(element['name'])))
+        rating = float(net.gen.at[ids['gen'][element['id']], 'sn_mva'])
+        assert math.hypot(float(row['p_mw']), float(row['q_mvar'])) <= rating * 1.0001, row
+    if grid == 'reference_transmission':
+        # The CHP plant at its rated 4.8 MW, the grid the rest.
+        assert float(result['total_cost']) == pytest.approx(4.8 * 45 + float(net.res_ext_grid.p_mw.sum()) * 60, abs=0.05)
+        assert float(result['total_cost']) == pytest.approx(481.76, abs=0.05)
+
+
+def test_optimal_power_flow_without_prices_reports_no_cost(client, quiet):
+    """
+    With no cost function pandapower minimises the total generation, and its
+    objective - that total, in MW - was reported as the dispatch cost: "11.4985
+    EUR" on the transmission grid. It is reported as what it is.
+    """
+    with open(os.path.join(REFERENCE_DIR, 'reference_transmission.diagram_opf_payload.json'),
+              encoding='utf-8') as handle:
+        payload = json.load(handle)
+    params = next(v for v in payload.values() if 'Parameters' in str(v.get('typ')))
+    params['cost_function'] = 'none'
+    with quiet():
+        response = client.post('/', json=payload)
+    result = json.loads(response.get_data(as_text=True))
+    assert result['opf_converged'] is True
+    assert result['cost_function'] == 'none'
+    assert result['total_cost'] is None and result['objective'] == 'total_generation'
+    generated = sum(float(r['p_mw']) for key in ('externalgrids', 'generators', 'staticgenerators')
+                    for r in result[key])
+    assert result['total_generation_mw'] == pytest.approx(generated, abs=1e-3)
 
 
 # --- studies sent from the shared network builder ----------------------------
