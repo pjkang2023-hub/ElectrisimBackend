@@ -750,6 +750,40 @@ def test_exported_short_circuit_script_reproduces_the_study(client, quiet, grid,
         assert got[row['name']] == pytest.approx(float(row['ikss_ka']), rel=1e-9, abs=1e-9), row['name']
 
 
+@pytest.mark.parametrize('grid', GRIDS)
+def test_poi_fault_study_coordination_matches_spec(client, quiet, grid):
+    """
+    The POI study's IEC coordination currents called calc_sc with
+    check_connectivity=False and no pp.diagnostic before it, so every row was
+    "'pandapowerNet' instance has no attribute '_is_elements_final'" and every
+    grounding SLG current 0. Each row must be the spec's current at that bus,
+    with the study's k = 1.1 for every static generator.
+    """
+    payload = _sc_fixture(grid, '3ph', 'max')
+    key = next(k for k, v in payload.items() if 'Parameters' in str(v.get('typ')))
+    payload[key] = {'typ': 'PoiFaultStudy Parameters', 'frequency_hz': 50, 'slg_target_ground_i_a': 0,
+                    'contact_parting_cycles': 3, 'prefault_v_pu': 1.0}
+    study = _post_short_circuit(client, quiet, payload)
+    assert not study.get('error'), study.get('message')
+    assert study['coordination'], 'no coordination rows'
+    assert not [r['error'] for r in study['coordination'] if r.get('error')][:1]
+
+    spec = load_spec(grid)
+    want = {}
+    for fault in ('3ph', '1ph'):
+        for case in ('max', 'min'):
+            net, _ = sld.build_network(spec)
+            if not net.sgen.empty:
+                net.sgen['k'] = 1.1
+            want[fault, case] = sc_by_id(run_sc(net, fault, case), spec_ids(net), ('ikss_ka',))
+    id_of_label = {str(b.get('name') or b['id']): b['id'] for b in spec['buses']}
+    for row in study['coordination']:
+        expected = want[row['fault_type'], row['case']][id_of_label[row['bus_name']]]['ikss_ka']
+        assert row['ikss_ka'] == pytest.approx(expected, abs=DRAWN_TOL), \
+            (row['bus_name'], row['fault_type'], row['case'])
+    assert study['grounding'] and all(g['slg_i_ka_lv'] > 0 for g in study['grounding'])
+
+
 @pytest.mark.parametrize('fault', ('3ph', '1ph'))
 @pytest.mark.parametrize('grid', GRIDS)
 def test_short_circuit_does_not_need_the_diagnostic(client, quiet, monkeypatch, grid, fault):

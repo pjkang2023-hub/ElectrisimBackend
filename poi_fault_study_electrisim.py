@@ -236,7 +236,10 @@ def _iec_bus_sc(
             ith=True,
             tk_s=tk_s,
             kappa_method="C",
-            check_connectivity=False,
+            # With False a fresh net fails in pandapower's gen lookup
+            # (net._is_elements_final is never set), so every coordination
+            # row was an error and every grounding SLG current 0.
+            check_connectivity=True,
             branch_results=False,
             return_all_currents=False,
         )
