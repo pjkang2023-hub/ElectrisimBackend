@@ -8971,11 +8971,12 @@ def optimalPowerFlow(net, opf_params):
         if not isinstance(dcline_cost_cp2, dict):
             dcline_cost_cp2 = {}
         
-        # Check for isolated buses
-        isolated_buses = top.unsupplied_buses(net)
-        if len(isolated_buses) > 0:
-            raise ValueError(f"Isolated buses found: {isolated_buses}. Check your network connectivity.")
-        
+        # Check for isolated buses, named as the diagram does: the raw set
+        # read "{np.int64(5), np.int64(6), np.int64(7)}".
+        isolated = isolated_buses_message(net)
+        if isolated:
+            raise ValueError(isolated)
+
         # Ensure min/max p_mw columns exist before default cost setup (PWL uses these breakpoints)
         if 'min_p_mw' not in net.gen.columns:
             net.gen['min_p_mw'] = 0.0
@@ -9417,22 +9418,18 @@ def optimalPowerFlow(net, opf_params):
             "exception": exc_text,
             "diagnostic": {}
         }
-        
+
         # Try to get diagnostic information
         try:
             diag_result_dict = pp.diagnostic(net, report_style='detailed')
-            
-            # Check for isolated buses
+
+            # Isolated buses as the load flow reports them, {index, id, name}:
+            # bare indices were listed as "5, 6, 7" and could not be located.
             isolated_buses = pp.topology.unsupplied_buses(net)
             if len(isolated_buses) > 0:
-                # Convert set to list (isolated_buses is a set, not numpy array)
-                if isinstance(isolated_buses, set):
-                    diagnostic_response["diagnostic"]["isolated_buses"] = list(isolated_buses)
-                elif hasattr(isolated_buses, 'tolist'):
-                    diagnostic_response["diagnostic"]["isolated_buses"] = isolated_buses.tolist()
-                else:
-                    diagnostic_response["diagnostic"]["isolated_buses"] = list(isolated_buses)
-            
+                diagnostic_response["diagnostic"]["isolated_buses"] = resolve_element_refs(
+                    net, 'bus', sorted(isolated_buses))
+
             # Process diagnostic data to convert element indices to user-friendly names
             processed_diagnostic = process_diagnostic_data(net, diag_result_dict)
             # Merge processed diagnostic with isolated_buses (don't overwrite)
