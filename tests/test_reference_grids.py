@@ -742,6 +742,30 @@ def test_drawn_diagram_harmonics_reach_every_bus(client, quiet, opendss_scratch,
     assert not differ, f'{grid}:\n  ' + '\n  '.join(differ)
 
 
+@pytest.mark.parametrize('grid', GRIDS)
+def test_harmonic_spectrum_none_injects_nothing(client, quiet, opendss_scratch, grid):
+    """
+    "None" left spectrum= out, so OpenDSS gave every element its class
+    default - a load defaultload, a 6-pulse rectifier - and nothing changed:
+    8.38 % THD at the transmission grid's F1 either way. A motor, which has
+    no spectrum of its own, took defaultload too. With every spectrum None
+    there is no distortion, and each line's fundamental is its load-flow
+    current.
+    """
+    payload = _harmonic_payload(grid)
+    for element in payload.values():
+        if isinstance(element, dict) and 'spectrum' in element:
+            element['spectrum'] = 'none'
+    assert any(str(e.get('typ', '')).startswith('Motor') and 'spectrum' not in e
+               for e in payload.values() if isinstance(e, dict)), 'the motor draws no spectrum'
+    result = _post_harmonics(client, quiet, payload)
+    distorted = {b['name']: b['vthd_percent'] for b in result['busbars'] if b['vthd_percent'] > 1e-3}
+    assert not distorted, distorted
+    for line in result['lines']:
+        assert float(line['fundamental_current_a']) == pytest.approx(
+            float(line['i_from_ka']) * 1000, rel=1e-3, abs=0.05), line['name']
+
+
 def test_opendss_takes_defaults_for_null_text(client, quiet, opendss_scratch):
     """
     Diagrams imported before the frontend stopped writing pandapower's empty
@@ -780,9 +804,11 @@ def test_drawn_diagram_opendss_load_flow_matches_spec(client, quiet, opendss_scr
     """
     The OpenDSS load flow of the drawn diagram gives the spec's answer: every
     bus at the spec's voltage - generators at their own setpoint, which OpenDSS
-    used to ignore - the grid supplying the spec's active power, and each
-    battery at its dispatch, which OpenDSS refused while the drawing gave it no
-    state of charge.
+    used to ignore - the grid supplying the spec's active power, each battery
+    at its dispatch, which OpenDSS refused while the drawing gave it no state
+    of charge, and every line at pandapower's current and loading. Line
+    currents were read as sqrt(magnitude^2 + angle^2): 98 A for 8 A on the
+    transmission grid's 110 kV line.
     """
     with open(os.path.join(REFERENCE_DIR, f'{grid}.diagram_opendss_payload.json'),
               encoding='utf-8') as handle:
@@ -813,6 +839,17 @@ def test_drawn_diagram_opendss_load_flow_matches_spec(client, quiet, opendss_scr
     if len(drawn_storage) != len(spec_storage) or any(
             abs(a - b) > OPENDSS_STORAGE_TOL for a, b in zip(drawn_storage, spec_storage)):
         differ.append(f'storage dispatch {drawn_storage} MW in OpenDSS, {spec_storage} in the spec')
+    pp_lines = {name: (i * 1000, loading) for name, i, loading in zip(
+        net.line.name, net.res_line.i_from_ka, net.res_line.loading_percent)}
+    for line in result['lines']:
+        name = label_of_cell.get(line['name'], line['name'])
+        i_a, loading = float(line['i_from_ka']) * 1000, float(line['loading_percent'])
+        want_i, want_loading = pp_lines[name]
+        # Within 1 A or 3 %: OpenDSS and pandapower model line charging alike
+        # but not identically.
+        if abs(i_a - want_i) > max(1.0, 0.03 * want_i) or abs(loading - want_loading) > max(0.3, 0.03 * want_loading):
+            differ.append(f'line {name}: {i_a:.1f} A ({loading:.1f} %) in OpenDSS, '
+                          f'{want_i:.1f} A ({want_loading:.1f} %) in pandapower')
     assert not differ, f'{grid}:\n  ' + '\n  '.join(differ)
 
 

@@ -1352,7 +1352,9 @@ def create_load_1ph_element(dss, element_data, element_name, element_id, Busbars
     try:
         load_cmd = f"New Load.{load_name} phases=1 Bus1={bus_terminal} kV={kv} kW={p_kw} kvar={abs(q_kvar)} conn={conn}"
         spectrum = element_data.get('spectrum', 'defaultload')
-        if spectrum and str(spectrum).lower() != 'none':
+        if spectrum and str(spectrum).lower() == 'none':
+            load_cmd += f" spectrum={_no_harmonics_spectrum(dss, execute_dss_command)}"
+        elif spectrum:
             load_cmd += f" spectrum={spectrum}"
         pct_series_rl = element_data.get('pctSeriesRL', '')
         if pct_series_rl not in ('', None):
@@ -1409,7 +1411,9 @@ def create_generator_1ph_element(dss, element_data, element_name, element_id, Bu
         if sn_kva not in (None, '', '0', 0):
             gen_cmd += f" kVA={float(sn_kva)}"
         spectrum = element_data.get('spectrum', 'defaultgen')
-        if spectrum and str(spectrum).lower() != 'none':
+        if spectrum and str(spectrum).lower() == 'none':
+            gen_cmd += f" spectrum={_no_harmonics_spectrum(dss, execute_dss_command)}"
+        elif spectrum:
             gen_cmd += f" spectrum={spectrum}"
         execute_dss_command(gen_cmd)
         in_service = element_data.get('in_service', True)
@@ -1870,14 +1874,38 @@ def _create_spectrum_from_csv(dss, spectrum_name, csv_text, execute_dss_command)
     return True
 
 
+NO_HARMONICS_SPECTRUM = 'electrisim_no_harmonics'
+
+
+def _no_harmonics_spectrum(dss, execute_dss_command):
+    """
+    A spectrum of the fundamental alone, for elements set to "None".
+
+    OpenDSS gives an element without spectrum= its class default - a load
+    defaultload, a generator defaultgen - so leaving it out, as "None" did,
+    left every element injecting harmonics.
+    """
+    try:
+        dss.Circuit.SetActiveClass('Spectrum')
+        if NO_HARMONICS_SPECTRUM in [str(n).lower() for n in dss.ActiveClass.AllNames()]:
+            return NO_HARMONICS_SPECTRUM
+    except Exception:
+        pass
+    run = execute_dss_command or dss.Text.Command
+    run(f'New Spectrum.{NO_HARMONICS_SPECTRUM} NumHarm=1 harmonic=(1) %mag=(100) angle=(0)')
+    return NO_HARMONICS_SPECTRUM
+
+
 def _resolve_named_spectrum_for_element(dss, element_data, default_spectrum, spectrum_object_name, execute_dss_command):
     """
     Resolve spectrum= for Generator, static Generator, PVSystem, Vsource: named spectrum or
     custom CSV (creates New Spectrum.<spectrum_object_name> and references it).
     """
     spectrum = element_data.get('spectrum', default_spectrum)
-    if spectrum is None or str(spectrum).strip().lower() == 'none':
+    if spectrum is None:
         return None
+    if str(spectrum).strip().lower() == 'none':
+        return _no_harmonics_spectrum(dss, execute_dss_command)
     spectrum = str(spectrum).strip()
     sl = spectrum.lower()
     if sl == 'custom':
@@ -1971,7 +1999,9 @@ def create_load_element(dss, element_data, element_name, element_id, BusbarsDict
                 load_cmd += " model=1"  # Constant P+jQ model for motors
             
             # Append harmonic analysis properties if provided
-            spectrum = element_data.get('spectrum', 'defaultload')
+            # A motor (no spectrum of its own) took defaultload, a 6-pulse
+            # rectifier; a directly fed induction motor injects no harmonics.
+            spectrum = element_data.get('spectrum') or ('none' if is_motor else 'defaultload')
             if spectrum and spectrum.lower() != 'none':
                 spectrum_to_use = spectrum
                 # For TCR_PU / HVDC_PU: use built-in IEEE benchmark spectra
@@ -2002,6 +2032,8 @@ def create_load_element(dss, element_data, element_name, element_id, BusbarsDict
                     else:
                         spectrum_to_use = 'defaultload'
                 load_cmd += f" spectrum={spectrum_to_use}"
+            elif spectrum:
+                load_cmd += f" spectrum={_no_harmonics_spectrum(dss, execute_dss_command)}"
             # %SeriesRL: IEEE benchmark uses 100% for harmonic loads (TCR_PU, HVDC_PU)
             spectrum_upper = (spectrum or '').upper()
             if spectrum_upper in ('TCR_PU', 'HVDC_PU'):
@@ -2368,7 +2400,13 @@ def _opendss_terminal_pq_kw(powers, terminal_index, n_conductors=0, n_phases=3):
 
 
 def _opendss_terminal_i_ka(currents, terminal_index, n_conductors=0, n_phases=3):
-    """Average phase/conductor current magnitude (kA) for one OpenDSS terminal."""
+    """
+    Average phase/conductor current magnitude (kA) for one OpenDSS terminal,
+    from CktElement.Currents() - rectangular (re, im) pairs. Lines passed
+    CurrentsMagAng() (magnitude, angle in degrees) and got sqrt(mag^2 +
+    angle^2): 98 A for the 8 A on the transmission reference grid's 110 kV
+    line, and loadings to match.
+    """
     n_per_terminal = _opendss_n_per_terminal(n_conductors, n_phases)
     start = terminal_index * n_per_terminal
     n_cond = int(n_conductors) if n_conductors else int(n_phases or 3)
@@ -3461,6 +3499,8 @@ def create_storage_element(dss, element_data, element_name, element_id, BusbarsD
                             simple_cmd += " spectrum=default"
                     else:
                         simple_cmd += f" spectrum={spectrum}"
+                elif spectrum is not None and str(spectrum).strip().lower() == 'none':
+                    simple_cmd += f" spectrum={_no_harmonics_spectrum(dss, execute_dss_command)}"
                 
                 execute_dss_command(simple_cmd)
                 
@@ -4327,7 +4367,7 @@ def _capture_monte_carlo_sample(BusbarsDictConnectionToName, LinesDict, LinesDic
     for key, line_name in LinesDict.items():
         try:
             dss.Circuit.SetActiveElement(f"Line.{line_name}")
-            currents = dss.CktElement.CurrentsMagAng()
+            currents = dss.CktElement.Currents()
             n_conductors = dss.CktElement.NumConductors()
             n_phases = dss.CktElement.NumPhases()
             current_ka = _opendss_terminal_i_ka(currents, 0, n_conductors, n_phases) if currents else 0.0
@@ -4891,8 +4931,8 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
                 else:
                     p_from_mw = p_to_mw = q_from_mvar = q_to_mvar = 0.0
 
-                # Get currents (in A) - use magnitude from currents_mag_ang
-                currents = dss.CktElement.CurrentsMagAng()
+                # Get currents (in A), as (re, im) pairs
+                currents = dss.CktElement.Currents()
                 if len(currents) >= 2:
                     n_conductors = dss.CktElement.NumConductors()
                     n_phases = dss.CktElement.NumPhases()
