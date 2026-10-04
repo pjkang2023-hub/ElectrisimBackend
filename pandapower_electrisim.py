@@ -10926,16 +10926,12 @@ def controller_simulation(net, controller_params):
         try:
             diag_result_dict = pp.diagnostic(net, report_style='detailed')
             
-            # Check for isolated buses
+            # Isolated buses as the load flow reports them, {index, id, name}:
+            # bare indices were listed as "5, 6, 7" and could not be located.
             isolated_buses = pp.topology.unsupplied_buses(net)
             if len(isolated_buses) > 0:
-                # Convert set to list (isolated_buses is a set, not numpy array)
-                if isinstance(isolated_buses, set):
-                    diagnostic_response["diagnostic"]["isolated_buses"] = list(isolated_buses)
-                elif hasattr(isolated_buses, 'tolist'):
-                    diagnostic_response["diagnostic"]["isolated_buses"] = isolated_buses.tolist()
-                else:
-                    diagnostic_response["diagnostic"]["isolated_buses"] = list(isolated_buses)
+                diagnostic_response["diagnostic"]["isolated_buses"] = resolve_element_refs(
+                    net, 'bus', sorted(isolated_buses))
             
             # Process diagnostic data to convert element indices to user-friendly names
             processed_diagnostic = process_diagnostic_data(net, diag_result_dict)
@@ -11507,16 +11503,12 @@ def time_series_simulation(net, timeseries_params):
         try:
             diag_result_dict = pp.diagnostic(net, report_style='detailed')
             
-            # Check for isolated buses
+            # Isolated buses as the load flow reports them, {index, id, name}:
+            # bare indices were listed as "5, 6, 7" and could not be located.
             isolated_buses = pp.topology.unsupplied_buses(net)
             if len(isolated_buses) > 0:
-                # Convert set to list (isolated_buses is a set, not numpy array)
-                if isinstance(isolated_buses, set):
-                    diagnostic_response["diagnostic"]["isolated_buses"] = list(isolated_buses)
-                elif hasattr(isolated_buses, 'tolist'):
-                    diagnostic_response["diagnostic"]["isolated_buses"] = isolated_buses.tolist()
-                else:
-                    diagnostic_response["diagnostic"]["isolated_buses"] = list(isolated_buses)
+                diagnostic_response["diagnostic"]["isolated_buses"] = resolve_element_refs(
+                    net, 'bus', sorted(isolated_buses))
             
             # Process diagnostic data to convert element indices to user-friendly names
             processed_diagnostic = process_diagnostic_data(net, diag_result_dict)

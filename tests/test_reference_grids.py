@@ -2737,6 +2737,40 @@ def test_time_series_scale_factors_stay_scale_factors(client, quiet, grid):
         assert vm[str(bus.get('name') or bus['id'])] == pytest.approx(want['bus'][bus['id']]['vm_pu'], abs=DRAWN_TOL)
 
 
+@pytest.mark.parametrize('study, fail', (
+    ('TimeSeriesSimulationPandaPower Parameters', 'pandapower_electrisim._ts_build_load_preset'),
+    ('ControllerSimulationPandaPower Parameters', 'pandapower.control.run_control')))
+def test_failed_study_diagnostic_names_isolated_buses(client, quiet, monkeypatch, study, fail):
+    """
+    When the time series or controller simulation failed on a grid with buses
+    cut off, the diagnostic carried them as numpy indices, which the response
+    could not serialise: "Server error: Object of type int64 is not JSON
+    serializable" in place of the diagnostic dialog. They must come as the
+    load flow sends them, {index, id, name}. An island alone does not fail
+    either study, so the failure is forced.
+    """
+    with open(os.path.join(REFERENCE_DIR, 'reference_radial.diagram_timeseries_payload.json'),
+              encoding='utf-8') as handle:
+        payload = json.load(handle)
+    params = next(v for v in payload.values() if 'Parameters' in str(v.get('typ')))
+    params['typ'] = study
+    for element in payload.values():
+        if isinstance(element, dict) and element.get('userFriendlyName') == 'LA1':
+            element['in_service'] = False
+
+    def failing(*args, **kwargs):
+        raise RuntimeError('forced failure')
+
+    monkeypatch.setattr(fail, failing)
+    with quiet():
+        response = client.post('/', json=payload)
+    result = json.loads(response.get_data(as_text=True))
+    assert result.get('error') is True, result
+    isolated = result['diagnostic']['isolated_buses']
+    assert sorted(b['name'] for b in isolated) == ['A1', 'A2', 'LV network A']
+    assert all(str(b['id']).startswith('mxCell_') for b in isolated), isolated
+
+
 @pytest.mark.parametrize('line, cut_off', (('LA1', ('A1', 'A2', 'LV network A')),
                                            ('LA2', ('A2', 'LV network A'))))
 def test_contingency_analysis_names_isolated_buses(client, quiet, line, cut_off):
