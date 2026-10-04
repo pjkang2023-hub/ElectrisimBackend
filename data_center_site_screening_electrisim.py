@@ -494,6 +494,18 @@ def site_screening_analysis(net, params: Dict[str, Any]) -> str:
             n11_without_site = _contingency_violation_keys(net0, n11_cases, limits) if n11_cases else {}
             site_bus = _named(net, net.bus, int(net.load.loc[load_idx, "bus"]))[0]
 
+            # The site's headroom does not depend on the size asked about: find
+            # it once. Each size searched again for the same answer, and a size
+            # whose load flow failed reported 0 MW - so every row of the
+            # default 300-1000 MW sizes at a 20 kV site said it could take
+            # nothing, when it could take 21.65 MW.
+            _progress(params, f"{site_name} — headroom")
+            headroom = _headroom_mw(
+                net, load_idx, load_indices, load_snapshot, power_factor, limits,
+                on_step=lambda i, n, site_name=site_name: _progress(params, f"{site_name} — headroom {i}/{n}"),
+            )
+            _progress(params, f"{site_name} — headroom {headroom:g} MW")
+
             for mw in mw_sizes:
                 label = f"{site_name} · {mw:g} MW"
                 _progress(params, f"{label} — base case")
@@ -508,7 +520,7 @@ def site_screening_analysis(net, params: Dict[str, Any]) -> str:
                             "site_id": site_id,
                             "site_name": site_name,
                             "requested_mw": mw,
-                            "headroom_mw": 0.0,
+                            "headroom_mw": headroom,
                             "base_violations": base_violations,
                             "worst_n1_violations": -1,
                             "worst_n11_violations": -1,
@@ -517,7 +529,8 @@ def site_screening_analysis(net, params: Dict[str, Any]) -> str:
                             "n1_failed_cases": 0,
                             "n11_failed_cases": 0,
                             "upgrade_likely": True,
-                            "notes": "Base load flow did not converge at requested MW.",
+                            "notes": (f"Base load flow did not converge at requested MW; the site can take "
+                                      f"{headroom:g} MW within the limits."),
                             "base_violation_details": base_details,
                             "base_snapshot": base_snap,
                             "case_violations": -1,
@@ -531,10 +544,6 @@ def site_screening_analysis(net, params: Dict[str, Any]) -> str:
                     )
                     continue
 
-                headroom = _headroom_mw(
-                    net, load_idx, load_indices, load_snapshot, power_factor, limits,
-                    on_step=lambda i, n, label=label: _progress(params, f"{label} — headroom {i}/{n}"),
-                )
                 case_n, case_details = _count_violations(net_case, **limits)
                 case_snap = _dashboard_snapshot(net_case, f"{label} — intact", _site_marker(net_case, load_idx))
                 site_mark = _site_marker(net_case, load_idx)
@@ -551,8 +560,6 @@ def site_screening_analysis(net, params: Dict[str, Any]) -> str:
                     )
                     if n11_cases else (0, "", 0, [], None)
                 )
-                _progress(params, f"{label} — headroom {headroom:g} MW")
-
                 upgrade = headroom < mw or w_n1 > 0 or w_n11 > 0
                 if base_violations == 0 and (w_n1 > 0 or w_n11 > 0):
                     upgrade = True
