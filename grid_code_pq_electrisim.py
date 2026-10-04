@@ -688,7 +688,9 @@ def _pq_storage_q_caps(net, storage_idx, p_gen, sn_mva, q_mode, element_data=Non
         if lim is not None:
             q_mi, q_ma = lim
             return max(0.0, float(q_ma)), max(0.0, float(-q_mi))
-    if q_mode == 'from_rating' and sn_mva > 0:
+    # Without a curve the circular Sn-P limit, as for a static generator: the
+    # flat 0.5 Sn gave a battery at full discharge Q beyond its rating.
+    if q_mode in ('from_rating', 'from_sgen_curve') and sn_mva > 0:
         fr = math.sqrt(max(sn_mva ** 2 - abs(p_gen) ** 2, 0))
         return fr, fr
     half = sn_mva * 0.5 if sn_mva > 0 else 0.0
@@ -718,6 +720,28 @@ def _pq_gen_p(net, g):
         return 0.0 if pd.isna(val) else -float(val)
     val = net.sgen.at[g['idx'], 'p_mw']
     return 0.0 if pd.isna(val) else float(val)
+
+
+def _pq_other_sources_at_bus(net, bus_idx, gen_info):
+    """Friendly names of in-service sources on bus_idx that are not plant units."""
+    plant = {(g.get('type'), g['idx']) for g in gen_info}
+    friendly = getattr(net, 'user_friendly_names', None) or {}
+    names = []
+    for table, kind in (('sgen', 'sgen'), ('storage', 'storage'), ('gen', 'gen')):
+        tbl = getattr(net, table, None)
+        if tbl is None or tbl.empty:
+            continue
+        for idx in tbl.index:
+            if (kind, idx) in plant or int(tbl.at[idx, 'bus']) != int(bus_idx):
+                continue
+            if 'in_service' in tbl.columns and not bool(tbl.at[idx, 'in_service']):
+                continue
+            p = tbl.at[idx, 'p_mw']
+            if pd.isna(p) or abs(float(p)) < 1e-6:
+                continue
+            name = str(tbl.at[idx, 'name'])
+            names.append(str(friendly.get(name, name)))
+    return names
 
 
 def _pq_gens_have_q_limits(net):
@@ -1658,6 +1682,16 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
             # which includes Battery DC Pmax when the wizard wrote it onto
             # max_p_mw / min_p_mw.
             p_rated = min(caps) if caps else 0.0
+            if p_rated <= 0:
+                # No rating on the diagram: its P there, as for a static
+                # generator. A rating of 0 held a battery discharging 0.5 MW
+                # at zero through the whole sweep.
+                try:
+                    p_rated = abs(float(net.storage.at[idx, 'p_mw']))
+                except (TypeError, ValueError):
+                    p_rated = 0.0
+                if pd.isna(p_rated):
+                    p_rated = 0.0
             gen_info.append({
                 'type': 'storage',
                 'idx': idx,
@@ -2093,10 +2127,15 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
         assessable = True
         if units_off_p is not None and abs(units_off_p) > max(0.05 * pn, 0.05):
             assessable = False
-            warnings_list.append(
+            message = (
                 f"With the plant's units off the PCC still carries {abs(units_off_p):.2f} MW: loads or "
                 "other sources sit behind it, so the P-Q at the PCC is not the plant's and compliance "
                 "cannot be judged. Choose the bus where the plant connects.")
+            others = _pq_other_sources_at_bus(net, pcc_bus_idx, gen_info)
+            if others:
+                message += (" Sources at the PCC that are not among the plant's units: "
+                            + ', '.join(others) + " - tick them if they belong to the plant.")
+            warnings_list.append(message)
 
         tap_health = ctx['tap_health']
         tap_warnings = _pq_tap_health_warnings(tap_health)

@@ -2220,6 +2220,52 @@ def test_grid_code_pq_at_a_pcc_carrying_load_is_not_assessable(client, quiet):
     assert not [w for w in result['warnings'] if 'not the plant' in w]
 
 
+def test_grid_code_pq_counts_storage_at_the_plant_bus(client, quiet):
+    """
+    The radial grid's wind farm shares its bus with a battery discharging
+    0.5 MW. The dialog offered static generators and wind turbines only, so
+    the battery stayed on with the units "off" and the default study was not
+    assessable - with nothing to say which source was in the way. As a plant
+    unit it is switched off with the rest, and with no rating on the diagram
+    it is rated at its diagram P: it was rated 0 and held at 0 all sweep.
+    """
+    with open(os.path.join(REFERENCE_DIR, 'reference_radial.diagram_grid_code_pq_payload.json'),
+              encoding='utf-8') as handle:
+        request = json.load(handle)
+    cell = {v.get('userFriendlyName'): v['name'] for v in request.values()
+            if isinstance(v, dict) and 'name' in v}
+    request['0'].update(voltage_levels=[0.9], p_step_pct=25, pcc_bus_name=cell['Wind connection'],
+                        generator_names=[cell['Wind farm C']])
+    request['0'].pop('requirements', None)
+    result = _grid_code_pq_result(client, quiet, request)
+    assert result['assessable'] is False
+    # pandapower with the wind farm off at 0.9 pu, the gas engine held to its
+    # reactive limits: what leaves the wind connection bus is the battery's.
+    spec = load_spec('reference_radial')
+    wind = next(g for g in spec['static_generators'] if g['name'] == 'Wind farm C')
+    wind['p_mw'] = 0.0
+    net, _ = sld.build_network(spec)
+    net.ext_grid['vm_pu'] = 0.9
+    pp.runpp(net, enforce_q_lims=True)
+    bus = int(net.bus.index[net.bus.name == 'Wind connection'][0])
+    assert abs(result['pcc_units_off_p_mw']) == pytest.approx(abs(float(net.res_bus.p_mw.at[bus])), abs=0.01)
+    assert any('0.50 MW' in w and 'Battery' in w for w in result['warnings'])
+
+    request['0']['storage_names'] = [cell['Battery']]
+    result = _grid_code_pq_result(client, quiet, request)
+    assert result['assessable'] is True
+    assert abs(result['pcc_units_off_p_mw']) < 0.01
+    assert result['pn_mw'] == pytest.approx(3.5)
+    assert result['pmax_pcc_mw'] == pytest.approx(3.5, abs=0.01)
+    assert not [w for w in result['warnings'] if 'not the plant' in w]
+    # At full discharge a battery rated at its P has no Q left: the Q at
+    # Pmax is the wind farm's, within its 3.3 MVA circle at 3 MW. The flat
+    # 0.5 Sn added 0.25 Mvar.
+    curve = result['curves']['0.9000']
+    assert curve['p_mw'][-1] == pytest.approx(3.5, abs=0.01)
+    assert curve['q_max_mvar'][-1] <= (3.3 ** 2 - 3.0 ** 2) ** 0.5 + 0.005
+
+
 def test_grid_code_pmax_at_the_pcc_counts_export_only():
     """
     "Pmax at the PCC" sizes the grid-code requirement. It was the largest |P|,
