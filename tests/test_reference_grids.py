@@ -756,8 +756,9 @@ def test_poi_fault_study_coordination_matches_spec(client, quiet, grid):
     The POI study's IEC coordination currents called calc_sc with
     check_connectivity=False and no pp.diagnostic before it, so every row was
     "'pandapowerNet' instance has no attribute '_is_elements_final'" and every
-    grounding SLG current 0. Each row must be the spec's current at that bus,
-    with the study's k = 1.1 for every static generator.
+    grounding SLG current 0. Each row must be the spec's current at that bus -
+    with each static generator's own k, which the study overrode with 1.1
+    ('Wind farm' 1.2 on the transmission grid, 'Wind farm C' 1.3 on the radial).
     """
     payload = _sc_fixture(grid, '3ph', 'max')
     key = next(k for k, v in payload.items() if 'Parameters' in str(v.get('typ')))
@@ -773,8 +774,6 @@ def test_poi_fault_study_coordination_matches_spec(client, quiet, grid):
     for fault in ('3ph', '1ph'):
         for case in ('max', 'min'):
             net, _ = sld.build_network(spec)
-            if not net.sgen.empty:
-                net.sgen['k'] = 1.1
             want[fault, case] = sc_by_id(run_sc(net, fault, case), spec_ids(net), ('ikss_ka',))
     id_of_label = {str(b.get('name') or b['id']): b['id'] for b in spec['buses']}
     for row in study['coordination']:

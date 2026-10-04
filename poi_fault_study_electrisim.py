@@ -221,10 +221,11 @@ def _iec_bus_sc(
 ) -> dict:
     work = copy.deepcopy(net)
     apply_ngr_to_net(work)
-    if hasattr(work, "sgen") and not work.sgen.empty and "k" in work.sgen.columns:
-        work.sgen["k"] = 1.1
-    from pandapower_electrisim import ensure_ext_grid_zero_sequence_min
+    from pandapower_electrisim import ensure_ext_grid_zero_sequence_min, ensure_sgen_k
 
+    # As the short-circuit study does: 1.1 here for every sgen overrode a
+    # ratio set on the element.
+    ensure_sgen_k(work)
     ensure_ext_grid_zero_sequence_min(work)
     try:
         sc.calc_sc(

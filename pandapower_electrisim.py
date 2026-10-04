@@ -121,6 +121,15 @@ def _ext_grid_zero_seq_min(data, min_key, max_value):
     return safe_float(raw, max_value)
 
 
+def ensure_sgen_k(net):
+    """Each static generator's short-circuit ratio k: 1.1 where the diagram
+    gives none, a value set on the element kept."""
+    if 'k' not in net.sgen.columns:
+        net.sgen['k'] = 1.1
+    else:
+        net.sgen['k'] = net.sgen['k'].where(net.sgen['k'] > 0, 1.1)
+
+
 def ensure_ext_grid_zero_sequence_min(net):
     """
     pandapower single-phase min short-circuit reads ext_grid['x0x_min'] and
@@ -7820,11 +7829,7 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
     # print("\nBus Data:")
     # print(net.bus)
         
-    # 1.1 where the diagram gives no ratio; a value set on the element is kept.
-    if 'k' not in net.sgen.columns:
-        net.sgen['k'] = 1.1
-    else:
-        net.sgen['k'] = net.sgen['k'].where(net.sgen['k'] > 0, 1.1)
+    ensure_sgen_k(net)
     #print(net.sgen["k"])
     
     
