@@ -101,7 +101,12 @@ def grid_code_vq_capability(net, vq_params, in_data=None):
         uq_curve = _vq_build_uq_curve_from_pq(pq_results, p_target)
         p_pcc_mw = _vq_p_at_pmax_from_curves(pq_results)
 
-        uq_compliance = pp_el._rpc_check_uq_compliance(uq_curve, uq_requirements)
+        # A PCC that carries more than the plant measures the network's Q:
+        # at the transmission grid's 110 kV busbar the "plant" swung from
+        # +0.85 to -8.6 Mvar, and was judged NON-COMPLIANT on it.
+        assessable = pq_results.get('assessable', True) is not False
+        uq_compliance = (pp_el._rpc_check_uq_compliance(uq_curve, uq_requirements)
+                         if assessable else None)
 
         i_park = bool(pq_results.get('i_park_ctrl'))
         result = {
@@ -110,6 +115,8 @@ def grid_code_vq_capability(net, vq_params, in_data=None):
                 'uq_curve': uq_curve,
                 'uq_requirements': uq_requirements if uq_requirements else {},
                 'uq_compliance': uq_compliance,
+                'assessable': assessable,
+                'pcc_units_off_p_mw': pq_results.get('pcc_units_off_p_mw'),
                 'curves': pq_results.get('curves') or {},
                 'point_loadflows': pq_results.get('point_loadflows') or {},
                 'warnings': pq_results.get('warnings') or [],

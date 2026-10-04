@@ -2170,9 +2170,95 @@ def test_grid_code_vq_wind_farm_at_its_own_connection(client, quiet):
                                                     need['q_req_max_mvar'], need['q_req_min_mvar']):
         assert q_max >= need_max and q_min <= need_min, f'{u} pu: {q_min}..{q_max} Mvar'
     assert result['uq_compliance'] is True
+    assert result['assessable'] is True and abs(result['pcc_units_off_p_mw']) < 0.01
+    # The default full-converter turbine table, about 0.44 Sn of its 2.5 MVA,
+    # caps Q at 2 MW below the 1.5 Mvar circle - at every voltage level.
+    assert curve['q_max_mvar'] == pytest.approx([1.1] * 5, abs=0.01)
+    assert curve['q_min_mvar'] == pytest.approx([-1.1] * 5, abs=0.01)
     at_pcc = [float(m.split('U_pcc=')[1].split()[0]) for m in
               (line['message'] for line in lines if line.get('type') == 'progress') if 'U_pcc=' in m]
     assert at_pcc and all(min(abs(v - u) for u in curve['u_pu']) <= _PQ_PCC_V_TOL + 1e-4 for v in at_pcc)
+
+
+def test_grid_code_vq_at_a_pcc_carrying_load_is_not_assessable(client, quiet):
+    """
+    At the 110 kV busbar the V-Q measured the network's Q - +0.85 Mvar at
+    0.9 pu, -8.6 Mvar at 1.1 - and judged the plant NON-COMPLIANT on it. The
+    P-Q engine underneath knew the PCC was not the plant's, but the V-Q result
+    dropped that and gave its verdict anyway.
+    """
+    with open(os.path.join(REFERENCE_DIR, 'reference_transmission.diagram_grid_code_vq_payload.json'),
+              encoding='utf-8') as handle:
+        request = json.load(handle)
+    cell = {v.get('userFriendlyName'): v['name'] for v in request.values()
+            if isinstance(v, dict) and 'name' in v}
+    request['0']['pcc_bus_name'] = cell['110 kV busbar A']
+    with quiet():
+        text = client.post('/', json=request).get_data(as_text=True)
+    last = [line for line in text.splitlines() if line.strip()][-1]
+    result = json.loads(last)['data']['grid_code_vq_results']
+    assert result['assessable'] is False
+    assert result['uq_compliance'] is None
+    # pandapower with the wind farm off at 0.9 pu, the CHP plant held to its
+    # reactive limits as the study holds it.
+    spec = load_spec('reference_transmission')
+    wind = next(g for g in spec['static_generators'] if g['name'] == 'Wind farm')
+    wind['p_mw'] = 0.0
+    wind['q_mvar'] = 0.0
+    net, _ = sld.build_network(spec)
+    net.ext_grid['vm_pu'] = 0.9
+    pp.runpp(net, enforce_q_lims=True)
+    assert abs(result['pcc_units_off_p_mw']) == pytest.approx(float(net.res_ext_grid.p_mw.sum()), abs=0.01)
+    assert any("not the plant's" in w for w in result['warnings'])
+
+
+def test_grid_code_vq_counts_storage_at_the_plant_bus(client, quiet):
+    """
+    The radial grid's wind farm shares its bus with a battery discharging
+    0.5 MW. The V-Q dialog offered no storage, so the battery stayed on with
+    the units "off" and the default study was not assessable - telling the
+    user to tick a battery the dialog did not list. The V-Q runs the P-Q
+    engine, which takes storage: with the battery the plant is 3.5 MW, and at
+    full power the wind farm's 1.374 Mvar covers the 0.3287 x 3.5 required.
+    """
+    with open(os.path.join(REFERENCE_DIR, 'reference_radial.diagram_grid_code_pq_payload.json'),
+              encoding='utf-8') as handle:
+        request = json.load(handle)
+    cell = {v.get('userFriendlyName'): v['name'] for v in request.values()
+            if isinstance(v, dict) and 'name' in v}
+    levels = [0.9, 0.95, 1.0, 1.05, 1.1]
+    params = {k: v for k, v in request['0'].items() if k not in ('requirements', 'grid_code_template_key',
+                                                                  'grid_code_template_name', 'p_start_pct',
+                                                                  'p_step_pct', 'p_end_pct', 'i_show_pq0')}
+    params.update(typ='GridCodeVqPandaPower Parameters', pcc_bus_name=cell['Wind connection'],
+                  generator_names=[cell['Wind farm C']], p_max_pct=100, voltage_levels=levels,
+                  uq_requirements={'u_pu': levels, 'q_req_max_mvar': [0.3287 * 3.5] * 5,
+                                   'q_req_min_mvar': [-0.3287 * 3.5] * 5})
+    request['0'] = params
+
+    def vq():
+        with quiet():
+            text = client.post('/', json=request).get_data(as_text=True)
+        last = [line for line in text.splitlines() if line.strip()][-1]
+        return json.loads(last)['data']['grid_code_vq_results']
+
+    result = vq()
+    assert result['assessable'] is False and result['uq_compliance'] is None
+    assert result['pcc_units_off_p_mw'] == pytest.approx(0.5, abs=0.01)
+    assert any('Battery' in w for w in result['warnings'])
+
+    request['0']['storage_names'] = [cell['Battery']]
+    result = vq()
+    assert result['assessable'] is True and abs(result['pcc_units_off_p_mw']) < 0.01
+    assert result['pn_mw'] == pytest.approx(3.5)
+    assert result['p_pcc_mw'] == pytest.approx(3.5, abs=0.01)
+    # The wind farm at 3 MW within its 3.3 MVA circle; the battery at full
+    # discharge has no Q left.
+    q_wind = (3.3 ** 2 - 3.0 ** 2) ** 0.5
+    assert result['uq_curve']['q_max_mvar'] == pytest.approx([q_wind] * 5, abs=0.005)
+    assert result['uq_curve']['q_min_mvar'] == pytest.approx([-q_wind] * 5, abs=0.005)
+    assert result['uq_compliance'] is True
+    assert not [w for w in result['warnings'] if "not the plant's" in w]
 
 
 def _grid_code_pq_result(client, quiet, request):

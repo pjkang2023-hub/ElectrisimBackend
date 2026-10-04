@@ -2129,7 +2129,7 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
             assessable = False
             message = (
                 f"With the plant's units off the PCC still carries {abs(units_off_p):.2f} MW: loads or "
-                "other sources sit behind it, so the P-Q at the PCC is not the plant's and compliance "
+                "other sources sit behind it, so what the PCC measures is not the plant's and compliance "
                 "cannot be judged. Choose the bus where the plant connects.")
             others = _pq_other_sources_at_bus(net, pcc_bus_idx, gen_info)
             if others:
