@@ -327,6 +327,14 @@ def run_poi_fault_study(net, in_data: dict, in_data_full=None) -> str:
     if poi_idx is None:
         return json.dumps({"error": True, "message": "No external grid (POI) found in the network."})
 
+    # As the IEC and ANSI studies do: a cut-off bus made the ANSI solve fail
+    # without a message, or came out at 0 kA in the grounding table.
+    from pandapower_electrisim import isolated_buses_message
+
+    isolated = isolated_buses_message(net)
+    if isolated:
+        return json.dumps({"error": True, "message": isolated})
+
     _, close_in, remote = classify_buses(net, poi_idx)
 
     ansi_params = {

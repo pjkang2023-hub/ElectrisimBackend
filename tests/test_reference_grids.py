@@ -750,6 +750,25 @@ def test_exported_short_circuit_script_reproduces_the_study(client, quiet, grid,
         assert got[row['name']] == pytest.approx(float(row['ikss_ka']), rel=1e-9, abs=1e-9), row['name']
 
 
+ANSI_PARAMS = {'typ': 'ShortCircuitAnsi Parameters', 'fault_type': '3ph', 'fault_bus_mode': 'all',
+               'frequency_hz': 50, 'prefault_v_pu': 1.0, 'contact_parting_cycles': 3,
+               'r_fault_ohm': '0', 'x_fault_ohm': '0'}
+POI_PARAMS = {'typ': 'PoiFaultStudy Parameters', 'frequency_hz': 50, 'slg_target_ground_i_a': 0,
+              'contact_parting_cycles': 3, 'prefault_v_pu': 1.0}
+
+
+def _sc_study_payload(grid, params, out_of_service=()):
+    """The drawn diagram sent for another short-circuit study (ANSI, POI),
+    with the elements labelled in out_of_service switched off."""
+    payload = _sc_fixture(grid, '3ph', 'max')
+    key = next(k for k, v in payload.items() if 'Parameters' in str(v.get('typ')))
+    payload[key] = dict(params)
+    for element in payload.values():
+        if isinstance(element, dict) and element.get('userFriendlyName') in out_of_service:
+            element['in_service'] = False
+    return payload
+
+
 @pytest.mark.parametrize('grid', GRIDS)
 def test_poi_fault_study_coordination_matches_spec(client, quiet, grid):
     """
@@ -760,11 +779,7 @@ def test_poi_fault_study_coordination_matches_spec(client, quiet, grid):
     with each static generator's own k, which the study overrode with 1.1
     ('Wind farm' 1.2 on the transmission grid, 'Wind farm C' 1.3 on the radial).
     """
-    payload = _sc_fixture(grid, '3ph', 'max')
-    key = next(k for k, v in payload.items() if 'Parameters' in str(v.get('typ')))
-    payload[key] = {'typ': 'PoiFaultStudy Parameters', 'frequency_hz': 50, 'slg_target_ground_i_a': 0,
-                    'contact_parting_cycles': 3, 'prefault_v_pu': 1.0}
-    study = _post_short_circuit(client, quiet, payload)
+    study = _post_short_circuit(client, quiet, _sc_study_payload(grid, POI_PARAMS))
     assert not study.get('error'), study.get('message')
     assert study['coordination'], 'no coordination rows'
     assert not [r['error'] for r in study['coordination'] if r.get('error')][:1]
@@ -783,30 +798,18 @@ def test_poi_fault_study_coordination_matches_spec(client, quiet, grid):
     assert study['grounding'] and all(g['slg_i_ka_lv'] > 0 for g in study['grounding'])
 
 
-ANSI_PARAMS = {'typ': 'ShortCircuitAnsi Parameters', 'fault_type': '3ph', 'fault_bus_mode': 'all',
-               'frequency_hz': 50, 'prefault_v_pu': 1.0, 'contact_parting_cycles': 3,
-               'r_fault_ohm': '0', 'x_fault_ohm': '0'}
-
-
-def _ansi_payload(grid, out_of_service=()):
-    payload = _sc_fixture(grid, '3ph', 'max')
-    key = next(k for k, v in payload.items() if 'Parameters' in str(v.get('typ')))
-    payload[key] = dict(ANSI_PARAMS)
-    for element in payload.values():
-        if isinstance(element, dict) and element.get('userFriendlyName') in out_of_service:
-            element['in_service'] = False
-    return payload
-
-
 @pytest.mark.parametrize('line, cut_off', (('LA1', ('A1', 'A2', 'LV network A')),
                                            ('LA2', ('A2', 'LV network A'))))
-def test_ansi_short_circuit_refuses_isolated_buses(client, quiet, line, cut_off):
+@pytest.mark.parametrize('params', (ANSI_PARAMS, POI_PARAMS), ids=('ansi', 'poi'))
+def test_short_circuit_studies_refuse_isolated_buses(client, quiet, params, line, cut_off):
     """
     With a feeder cable out, the ANSI study failed with "singular matrix"
     (LA2: an island with no source) or solved the cut-off buses from their
-    local machines alone (LA1). Like the IEC study it must name them instead.
+    local machines alone (LA1); the POI study, built on it, failed without a
+    message or gave transformer TA 0 kA to earth. Like the IEC study each
+    must name the cut-off buses instead.
     """
-    result = _post_short_circuit(client, quiet, _ansi_payload('reference_radial', (line,)))
+    result = _post_short_circuit(client, quiet, _sc_study_payload('reference_radial', params, (line,)))
     message = result.get('message') or ''
     assert result.get('error') and message.startswith('Isolated buses found:'), message
     named = message[len('Isolated buses found:'):].split('. Check')[0]
@@ -816,7 +819,7 @@ def test_ansi_short_circuit_refuses_isolated_buses(client, quiet, line, cut_off)
 @pytest.mark.parametrize('grid', GRIDS)
 def test_ansi_short_circuit_runs_on_connected_grids(client, quiet, grid):
     """The isolated-bus refusal leaves a fully supplied grid alone."""
-    result = _post_short_circuit(client, quiet, _ansi_payload(grid))
+    result = _post_short_circuit(client, quiet, _sc_study_payload(grid, ANSI_PARAMS))
     assert not result.get('error'), result.get('message')
     assert len(result['busbars']) == len(load_spec(grid)['buses'])
 
