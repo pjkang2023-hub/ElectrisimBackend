@@ -5537,14 +5537,23 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
                     i_hv_ka = _opendss_terminal_i_ka(currents, 0, n_conductors, n_phases)
                     i_mv_ka = _opendss_terminal_i_ka(currents, 1, n_conductors, n_phases)
                     i_lv_ka = _opendss_terminal_i_ka(currents, 2, n_conductors, n_phases)
-                sn_hv = 100.0  # default
+                # The worst winding, each against its own rating: the HV side
+                # alone read the transmission grid's main transformer at 14.6 %
+                # (5.8 MVA of 40) while its 15 MVA tertiary carried 19.7 %.
+                sn = {'hv': 100.0, 'mv': 100.0, 'lv': 100.0}
                 for elem_key, elem_data in in_data.items():
                     if isinstance(elem_data, dict) and elem_data.get('typ', '').startswith('Three Winding'):
                         if _sanitize_opendss_name(elem_data.get('name', '')) == trafo_name:
-                            sn_hv = float(elem_data.get('sn_hv_mva', 100))
+                            for side in sn:
+                                try:
+                                    sn[side] = float(elem_data.get(f'sn_{side}_mva', 100))
+                                except (TypeError, ValueError):
+                                    pass
                             break
-                s_actual = math.sqrt(abs(p_hv_mw)**2 + abs(q_hv_mvar)**2)
-                loading_percent = (s_actual / sn_hv * 100.0) if sn_hv > 0 else 0.0
+                loading_percent = max(
+                    (math.hypot(p, q) / sn[side] * 100.0) if sn[side] > 0 else 0.0
+                    for side, p, q in (('hv', p_hv_mw, q_hv_mvar), ('mv', p_mv_mw, q_mv_mvar),
+                                       ('lv', p_lv_mw, q_lv_mvar)))
             frontend_id = Transformers3WDictId.get(key, key)
             t3w = Transformer3WOut(name=key, id=frontend_id, i_hv_ka=i_hv_ka, i_mv_ka=i_mv_ka, i_lv_ka=i_lv_ka,
                                    loading_percent=loading_percent, p_hv_mw=p_hv_mw, q_hv_mvar=q_hv_mvar,
