@@ -2065,6 +2065,20 @@ def test_grid_code_pmax_at_the_pcc_counts_export_only():
     assert _pq_pmax_pcc_for_req({'p_mw': [0.0, -1.0, -2.0]}, sign_out=-1.0) == pytest.approx(2.0)
 
 
+# Each battery's power hour by hour in a 24 h time series (+ charging), by
+# hand: the radial grid's discharges 0.5 MW from 80 % of 2 MWh - 1.6 MWh,
+# empty after 3.2 h; the transmission grid's charges 0.1 MW from 50 % of
+# 0.5 MWh - full after 2.5 h.
+TS_BATTERY_MW = {
+    'reference_radial': [-0.5, -0.5, -0.5, -0.1] + [0.0] * 20,
+    'reference_transmission': [0.1, 0.1, 0.05] + [0.0] * 21,
+}
+TS_BATTERY_SOC = {
+    'reference_radial': [55.0, 30.0, 5.0] + [0.0] * 21,
+    'reference_transmission': [70.0, 90.0] + [100.0] * 22,
+}
+
+
 @pytest.mark.parametrize('grid', GRIDS)
 def test_drawn_diagram_time_series_matches_spec(client, quiet, grid):
     """
@@ -2075,6 +2089,8 @@ def test_drawn_diagram_time_series_matches_spec(client, quiet, grid):
     drawn as a Wind Turbine, so it ran at its drawn 3 MW all day. Generators,
     transformers and the external grid are reported each hour too: they were
     not, though the transmission grid's most loaded element is a transformer.
+    A battery holds its power only while it has energy, or room, for it: it
+    held it all day, 12 MWh out of the radial grid's 1.6 MWh battery.
     """
     with open(os.path.join(REFERENCE_DIR, f'{grid}.diagram_timeseries_payload.json'),
               encoding='utf-8') as handle:
@@ -2112,6 +2128,7 @@ def test_drawn_diagram_time_series_matches_spec(client, quiet, grid):
                 net[table].at[idx, 'p_mw'] = p
                 if 'q_mvar' in net[table] and p0:
                     net[table].at[idx, 'q_mvar'] = base[table].at[idx, 'q_mvar'] * p / p0
+        net.storage['p_mw'] = TS_BATTERY_MW[grid][t]
         pp.runpp(net, algorithm='nr', calculate_voltage_angles='auto')
         for idx in net.bus.index:
             name = net.bus.at[idx, 'name']
@@ -2138,6 +2155,15 @@ def test_drawn_diagram_time_series_matches_spec(client, quiet, grid):
         values = [trafos[(t, name)]['loading_percent'] for t in range(steps)]
         assert stats['max_loading_percent'] == pytest.approx(max(values))
         assert stats['avg_loading_percent'] == pytest.approx(sum(values) / steps)
+
+    battery = sorted(result['storages'], key=lambda row: row['time_step'])
+    assert [row['p_mw'] for row in battery] == pytest.approx(TS_BATTERY_MW[grid], abs=1e-9)
+    assert [row['soc_percent'] for row in battery] == pytest.approx(TS_BATTERY_SOC[grid], abs=1e-9)
+    hour = TS_BATTERY_MW[grid].index(0.0) - 1
+    assert result['notes'] == [
+        f"Battery: {'charging 0.1' if grid == 'reference_transmission' else 'discharging 0.5'} MW, it runs "
+        f"{'full' if grid == 'reference_transmission' else 'empty'} in hour {hour} "
+        f"({abs(TS_BATTERY_MW[grid][hour]):.3g} MW that hour) and is idle after."]
 
 
 @pytest.mark.parametrize('grid', GRIDS)

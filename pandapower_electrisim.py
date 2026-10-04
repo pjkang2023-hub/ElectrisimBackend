@@ -10884,6 +10884,59 @@ def _ts_set_pq(table, idx, orig_p, orig_q, value, mode):
         table.loc[idx, 'q_mvar'] = net_q
 
 
+def _ts_storage_state(net):
+    """
+    Each battery's drawn power and stored energy, for tracking hour by hour.
+
+    A battery held its drawn power every hour: 0.5 MW for 24 h from the
+    radial grid's 2 MWh at 80 %, 12 MWh out of 1.6. One without an energy
+    rating or a state of charge cannot be tracked and keeps its power.
+    """
+    state = {}
+    if not hasattr(net, 'storage') or net.storage.empty:
+        return state
+    for idx in net.storage.index:
+        row = net.storage.loc[idx]
+        scaling = float(row['scaling']) if 'scaling' in row and pd.notna(row['scaling']) else 1.0
+        max_e = float(row['max_e_mwh']) if 'max_e_mwh' in row and pd.notna(row['max_e_mwh']) else float('nan')
+        min_e = float(row['min_e_mwh']) if 'min_e_mwh' in row and pd.notna(row['min_e_mwh']) else 0.0
+        soc = float(row['soc_percent']) if 'soc_percent' in row and pd.notna(row['soc_percent']) else float('nan')
+        trackable = bool(row.get('in_service', True)) and max_e > 0 and not math.isnan(soc)
+        state[idx] = {
+            'p_mw': float(row['p_mw']) * scaling,   # + charging, as pandapower
+            'scaling': scaling or 1.0,
+            'max_e': max_e, 'min_e': min_e,
+            'energy': max_e * soc / 100.0 if trackable else float('nan'),
+            'trackable': trackable,
+            'limited_from': None,
+        }
+    return state
+
+
+def _ts_dispatch_storage(net, state, t, hours=1.0):
+    """Set each battery's power for this hour within the energy it has room for or holds."""
+    for idx, st in state.items():
+        if not st['trackable']:
+            continue
+        want = st['p_mw']
+        if want > 0:
+            p = min(want, max(0.0, st['max_e'] - st['energy']) / hours)
+        else:
+            p = -min(-want, max(0.0, st['energy'] - st['min_e']) / hours)
+        if abs(p) < 1e-12:
+            p = 0.0
+        if abs(p - want) > 1e-9 and st['limited_from'] is None:
+            st['limited_from'], st['limited_p'] = t, p
+        net.storage.loc[idx, 'p_mw'] = p / st['scaling']
+        st['p_now'] = p
+
+
+def _ts_advance_storage(state, hours=1.0):
+    for st in state.values():
+        if st['trackable']:
+            st['energy'] += st.get('p_now', 0.0) * hours
+
+
 def _ts_run_powerflow(net, timeseries_params, time_index, prev_converged):
     """Run PF for one time step; warm-start from previous step when possible (pandapower timeseries style)."""
     algorithm = timeseries_params.get('algorithm', 'nr')
@@ -10974,6 +11027,8 @@ def time_series_simulation(net, timeseries_params):
 
         all_results = []
         prev_converged = False
+        storage_state = _ts_storage_state(net)
+        all_storages = []
 
         for t in range(time_steps):
             if orig_load_p is not None:
@@ -10994,7 +11049,22 @@ def time_series_simulation(net, timeseries_params):
                     val, mode = _element_profile(elem_name, 'gen', t, gen_profile_values)
                     _ts_set_pq(net.gen, idx, orig_gen_p, orig_gen_q, val, mode)
 
+            _ts_dispatch_storage(net, storage_state, t)
             prev_converged = _ts_run_powerflow(net, timeseries_params, t, prev_converged)
+            _ts_advance_storage(storage_state)
+            ufn = getattr(net, 'user_friendly_names', {}) or {}
+            for idx, st in storage_state.items():
+                technical = net.storage.loc[idx, 'name']
+                all_storages.append({
+                    'name': get_display_name(ufn.get(technical, technical), technical, 'Storage', idx, 'timeseries'),
+                    'id': str(technical),
+                    'time_step': t,
+                    'p_mw': safe_float(net.res_storage.loc[idx, 'p_mw']),
+                    'q_mvar': safe_float(net.res_storage.loc[idx, 'q_mvar']),
+                    # State of charge at the end of the hour.
+                    'soc_percent': safe_float(100.0 * st['energy'] / st['max_e']) if st['trackable'] else None,
+                    'energy_mwh': safe_float(st['energy']) if st['trackable'] else None,
+                })
 
             all_results.append({
                 'time_step': t,
@@ -11193,6 +11263,20 @@ def time_series_simulation(net, timeseries_params):
 
         timeseries_converged = all(result['converged'] for result in all_results)
 
+        notes = []
+        for idx, st in storage_state.items():
+            technical = net.storage.loc[idx, 'name']
+            ufn = getattr(net, 'user_friendly_names', {}) or {}
+            label = ufn.get(technical, technical)
+            if not st['trackable']:
+                notes.append(f"{label}: no energy rating or state of charge, so it held "
+                             f"{abs(st['p_mw']):.3g} MW every hour.")
+            elif st['limited_from'] is not None:
+                notes.append(f"{label}: {'charging' if st['p_mw'] > 0 else 'discharging'} "
+                             f"{abs(st['p_mw']):.3g} MW, it runs {'full' if st['p_mw'] > 0 else 'empty'} "
+                             f"in hour {st['limited_from']} ({abs(st['limited_p']):.3g} MW that hour) "
+                             f"and is idle after.")
+
         # A preset only reads as the run's when some element followed it:
         # with a profile of its own for every element, "constant" described
         # nothing that ran.
@@ -11212,6 +11296,8 @@ def time_series_simulation(net, timeseries_params):
             'gens': all_gens,
             'transformers': all_transformers,
             'externalgrids': all_ext_grids,
+            'storages': all_storages,
+            'notes': notes,
             'voltage_statistics': vm_stats,
             'loading_statistics': loading_stats,
             'transformer_loading_statistics': transformer_stats,
