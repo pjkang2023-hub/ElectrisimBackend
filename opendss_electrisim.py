@@ -6610,23 +6610,22 @@ def _dg_evaluate_checks(bus_metrics, line_metrics, source_p_kw, vmin_pu, vmax_pu
 
     # Reverse power at source: OpenDSS Vsource P > 0 means power into the grid from the circuit
     # Convention varies; treat large negative circuit TotalPower export as reverse through source.
+    # Informational, not a limit: a warning, never the limiting constraint. It
+    # read "fail" and was named as what limited a screening that passed - on
+    # the radial grid, which exports before any change.
     reverse = source_p_kw < -1.0  # kW into grid / reverse through POC source
     checks.append({
         'id': 'reverse_power',
         'name': 'Reverse power at source',
-        'status': 'fail' if reverse else 'pass',
+        'status': 'warning' if reverse else 'pass',
         'value': round(source_p_kw, 3),
         'limit': 0.0,
         'location': 'source',
         'unit': 'kW',
         'note': 'Negative source P indicates export / reverse power through the grid source',
     })
-    if reverse and limiting is None:
-        limiting = f"Reverse power at source ({source_p_kw:.1f} kW)"
 
-    overall = 'pass' if all(c['status'] == 'pass' for c in checks if c['id'] != 'reverse_power') else 'fail'
-    # Reverse power is informational for DG interconnection unless strict mode - flag but do not alone fail hosting
-    hard_fail = any(c['status'] == 'fail' and c['id'] != 'reverse_power' for c in checks)
+    hard_fail = any(c['status'] == 'fail' for c in checks)
     overall = 'fail' if hard_fail else 'pass'
     return checks, overall, limiting
 
@@ -6802,6 +6801,11 @@ def dg_interconnection_screening(in_data, params):
     der_typ = str(der.get('typ', ''))
     inverter = der_typ.startswith(('PVSystem', 'Storage'))
 
+    # The grid's power with the DER as drawn, so the change the proposed size
+    # makes to any export can be seen.
+    as_drawn = _dg_build_and_solve(copy.deepcopy(clean), frequency, controlmode='Static')
+    as_drawn_kw = as_drawn.get('source_p_kw') if as_drawn.get('ok') and as_drawn.get('converged') else None
+
     # Baseline proposed size
     _dg_scale_der(der, proposed_kw, proposed_kva)
     # Optionally disable InvControl for baseline
@@ -6815,6 +6819,12 @@ def dg_interconnection_screening(in_data, params):
     checks, overall, limiting = _dg_evaluate_checks(
         result_base['bus_metrics'], result_base['line_metrics'], result_base['source_p_kw'],
         vmin_pu, vmax_pu, max_loading)
+    for check in checks:
+        if check['id'] == 'reverse_power' and as_drawn_kw is not None:
+            check['as_drawn_kw'] = round(as_drawn_kw, 3)
+            if as_drawn_kw < -1.0:
+                check['note'] = (f'The grid already exports {-as_drawn_kw:.1f} kW with the DER as drawn; '
+                                 f'at the proposed size the source carries {check["value"]:.1f} kW.')
 
     mitigations = []
     inv_compare = None

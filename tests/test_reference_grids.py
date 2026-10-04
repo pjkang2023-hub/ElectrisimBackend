@@ -1785,7 +1785,9 @@ def test_drawn_diagram_dg_screening(client, quiet, opendss_scratch, grid):
     drawn_p = checks['reverse_power']['value'] / 1000.0
     assert abs(drawn_p - grid_p) < OPENDSS_LF_P_TOL, \
         f'{grid}: grid supplies {drawn_p:.4f} MW in the screening, {grid_p:.4f} MW in pandapower'
-    assert checks['reverse_power']['status'] == ('fail' if grid_p < -0.001 else 'pass')
+    # Export is a warning, never what limits the screening.
+    assert checks['reverse_power']['status'] == ('warning' if grid_p < -0.001 else 'pass')
+    assert 'Reverse power' not in str(result['summary']['limiting_constraint'])
 
 
 def test_dg_hosting_capacity_counts_transformers(client, quiet, opendss_scratch):
@@ -1823,6 +1825,44 @@ def test_dg_hosting_capacity_counts_transformers(client, quiet, opendss_scratch)
     assert hosting['at_least'] is True and hosting['hosting_capacity_kw'] == 5000
     assert hosting['limiting_constraint_at_upper'] is None
     assert not [w for w in result['warnings'] if 'POC' in w]
+
+
+def test_dg_screening_radial_grid(client, quiet, opendss_scratch):
+    """
+    The radial grid's rooftop PV, behind transformer TA: hosting capacity where
+    TA reaches 100 %, 1355 kW in pandapower. The grid already exports 980 kW as
+    drawn, which the reverse-power check read as a failure and named as the
+    limiting constraint of a screening that passed: it is a warning, with the
+    export as drawn. The battery, a Storage element, gets a real Volt-VAR
+    comparison.
+    """
+    grid = 'reference_radial'
+    request = _study_request(grid, {}, key='dg_interconnection_params')
+    cell = {v.get('userFriendlyName'): v['name'] for v in request.values()
+            if isinstance(v, dict) and 'name' in v}
+    params = {'typ': 'DgInterconnectionOpenDss', 'proposed_kw': 500, 'vmin_pu': 0.95, 'vmax_pu': 1.05,
+              'max_loading_percent': 100, 'run_hosting_capacity': True, 'hc_max_kw': 5000,
+              'compare_invcontrol': True, 'frequency': 50}
+
+    request['dg_interconnection_params'] = dict(params, poc_bus_id='', der_id=cell['Rooftop PV'],
+                                                der_type='Generator')
+    result = _post_study(client, quiet, request)
+    hosting = result['hosting_capacity']
+    assert hosting['hosting_capacity_kw'] == pytest.approx(1355.0, abs=hosting['tolerance_kw'])
+    assert 'TA' in hosting['limiting_constraint_at_upper']
+    assert result['summary']['poc_bus_label'] == 'LV network A'
+    reverse = next(c for c in result['checks'] if c['id'] == 'reverse_power')
+    assert reverse['status'] == 'warning'
+    assert reverse['as_drawn_kw'] == pytest.approx(-980.1, abs=1.0)
+    assert '980' in reverse['note']
+    assert result['summary']['overall'] == 'pass' and result['summary']['limiting_constraint'] is None
+
+    request['dg_interconnection_params'] = dict(params, poc_bus_id='', der_id=cell['Battery'],
+                                                der_type='Storage')
+    result = _post_study(client, quiet, request)
+    assert result['invcontrol_compare']['applicable'] is True
+    assert {c['id'] for c in result['invcontrol_compare']['checks']} >= {'voltage_max', 'thermal'}
+    assert result['hosting_capacity']['at_least'] is True
 
 
 # --- protection coordination ---------------------------------------------------
