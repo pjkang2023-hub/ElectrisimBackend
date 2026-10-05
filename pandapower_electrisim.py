@@ -15244,6 +15244,21 @@ def _prot_check_miscoordination(net, scenarios, t_diff):
             for idx, row in data.iterrows():
                 source_names.setdefault(('bus', int(row['bus'])), []).append(
                     _contingency_friendly_name(net, row.get('name') if pd.notna(row.get('name')) else f'{table} {idx}'))
+    # Inverter-based sources (static generators, wind turbines, storage) feed a
+    # fault too - about their rated current - until their own protection
+    # disconnects them. Too little to operate an overcurrent relay, they do not
+    # make a relay a primary, but a fault zone holding one is not cleared of
+    # it by the breakers: the wind farm inside the transmission ring's L1-L4
+    # zone, or behind the radial grid's wind feeder breaker, went unmentioned.
+    inverter_names = {}
+    for table in ('sgen', 'storage'):
+        data = getattr(net, table, None)
+        if data is None or data.empty:
+            continue
+        for idx, row in data.iterrows():
+            if bool(row.get('in_service', True)):
+                inverter_names.setdefault(('bus', int(row['bus'])), []).append(
+                    _contingency_friendly_name(net, row.get('name') if pd.notna(row.get('name')) else f'{table} {idx}'))
 
     for scenario in scenarios:
         if scenario.get('error'):
@@ -15281,6 +15296,8 @@ def _prot_check_miscoordination(net, scenarios, t_diff):
         primaries = {k: far for k, far in boundary.items()
                      if _prot_reaches_source(adjacency, far, sources, zone)}
         scenario['unprotected_sources'] = sorted({n for b in zone & sources for n in source_names.get(b, [])})
+        scenario['unprotected_inverter_sources'] = sorted(
+            {n for b in zone for n in inverter_names.get(b, [])})
         scenario['primary_switches'] = [label(k) for k in primaries]
 
         backups = {}
