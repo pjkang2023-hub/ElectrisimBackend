@@ -1700,6 +1700,108 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
     
     return '\n'.join(lines)
 
+def _electrisim_warn(net, message):
+    """A warning returned with the results (net.warnings), and printed."""
+    if not hasattr(net, 'warnings'):
+        net.warnings = []
+    net.warnings.append(message)
+    print(f"WARNING: {message}")
+
+
+def _electrisim_dc_bus(net, name):
+    """Index of the DC bus drawn as ``name``, or None: an AC bus is not a DC bus."""
+    return (getattr(net, 'dc_buses', None) or {}).get(name)
+
+
+def _electrisim_in_service(el):
+    value = el.get('in_service', True)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ('false', '0', 'no', 'off')
+
+
+def _electrisim_drop_uncoupled_dc(net):
+    """
+    Set aside the DC buses no converter ties to the AC network, with what is on them.
+
+    pandapower solves a DC network only through a VSC: one held by a DC source
+    alone does not converge, and an uncoupled DC island upsets the AC
+    Jacobian too (bess_preliminary_electrisim._strip_dc_for_ac_lf). The BESS
+    plant builder draws battery racks this way, for the drawing only.
+    """
+    bus_dc = getattr(net, 'bus_dc', None)
+    if bus_dc is None or not len(bus_dc):
+        return
+    parent = {int(b): int(b) for b in bus_dc.index}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for _, row in net.line_dc.iterrows():
+        if bool(row['in_service']):
+            parent[find(int(row['from_bus_dc']))] = find(int(row['to_bus_dc']))
+    coupled = set()
+    for _, row in net.vsc.iterrows():
+        if bool(row['in_service']):
+            coupled.add(find(int(row['bus_dc'])))
+    for _, row in net.b2b_vsc.iterrows():
+        if bool(row['in_service']):
+            coupled.update({find(int(row['bus_dc_plus'])), find(int(row['bus_dc_minus']))})
+    drop = {int(b) for b in bus_dc.index if find(int(b)) not in coupled}
+    if not drop:
+        return
+    names = getattr(net, 'user_friendly_names', {}) or {}
+    labels = sorted(str(names.get(bus_dc.at[b, 'name'], bus_dc.at[b, 'name'])) for b in drop)
+    for table, cols in (('line_dc', ('from_bus_dc', 'to_bus_dc')), ('load_dc', ('bus_dc',)),
+                        ('source_dc', ('bus_dc',)), ('vsc', ('bus_dc',)),
+                        ('b2b_vsc', ('bus_dc_plus', 'bus_dc_minus'))):
+        df = net[table]
+        if len(df):
+            hit = df[list(cols)].isin(drop).any(axis=1)
+            df.drop(df.index[hit], inplace=True)
+    bus_dc.drop(sorted(drop), inplace=True)
+    _electrisim_warn(net, f"DC bus{'es' if len(labels) > 1 else ''} {', '.join(labels)} "
+                          f"{'are' if len(labels) > 1 else 'is'} not connected to the AC network through a VSC, "
+                          "so it and what is on it are left out: pandapower solves a DC network only "
+                          "through a converter.")
+
+
+def _electrisim_set_aside_dc_network(net, study):
+    """
+    Leave a DC network out of a study that cannot model it, and say so.
+
+    pandapower's optimal power flow has no VSC or DC network model: with one it
+    failed (with init='pf', a divide by zero on the DC branches) or, started
+    flat, returned the AC result as if the DC loads were not there.
+    """
+    bus_dc = getattr(net, 'bus_dc', None)
+    if bus_dc is None or not len(bus_dc):
+        return
+    n_bus, n_load = len(bus_dc), len(net.load_dc)
+    p_load = float(net.load_dc['p_dc_mw'].sum()) if n_load else 0.0
+    for table in ('line_dc', 'load_dc', 'source_dc', 'vsc', 'b2b_vsc', 'bus_dc'):
+        df = net[table]
+        if len(df):
+            df.drop(df.index, inplace=True)
+    _electrisim_warn(net, f"{study} leaves the DC network out ({n_bus} DC bus{'es' if n_bus != 1 else ''}"
+                          + (f", {n_load} DC load{'s' if n_load != 1 else ''} of {p_load:.3g} MW" if n_load else '')
+                          + "): pandapower's optimal power flow does not model VSCs or DC networks, "
+                          "so this result does not include them.")
+
+
+def _electrisim_row_id(df, index):
+    return df.at[index, 'id'] if 'id' in df.columns else str(index)
+
+
+def _electrisim_source_dc_vm(net, index):
+    """res_source_dc has only its power: its voltage is its DC bus's."""
+    bus = net.source_dc.at[index, 'bus_dc']
+    return net.res_bus_dc.at[bus, 'vm_pu'] if bus in net.res_bus_dc.index else None
+
+
 def create_busbars(in_data, net):
     Busbars = {}
     # Store user-friendly names mapping for later use
@@ -1782,8 +1884,9 @@ def create_busbars(in_data, net):
             # Store the user-friendly name mapping
             net.user_friendly_names[bus_name] = user_friendly_name
     
-    # Store DC buses in Busbars dict for compatibility
-    Busbars.update(DcBuses)
+    # DC buses keep their own map: in Busbars, a DC bus index read as an AC bus
+    # put an AC element drawn on a DC bus on whichever AC bus had that index.
+    net.dc_buses = dict(DcBuses)
     
     # Store DC bus names in net object for later use (to distinguish DC vs AC buses)
     net.dc_bus_names = set(DcBuses.keys())
@@ -3927,7 +4030,7 @@ def create_other_elements(in_data,net,x, Busbars):
                 in_service = bool(in_data[x]['in_service']) if isinstance(in_data[x]['in_service'], bool) else (in_data[x]['in_service'] == 'true' or in_data[x]['in_service'] == True)
             pp.create_shunt_as_capacitor(net, typ="capacitor", bus=bus_idx, name=in_data[x]['name'], id=in_data[x]['id'], q_mvar=safe_float(in_data[x]['q_mvar']), loss_factor=safe_float(in_data[x]['loss_factor']), vn_kv=safe_float(in_data[x]['vn_kv']), step=float(safe_float(in_data[x].get('step', 1)) or 1), max_step=float(safe_float(in_data[x].get('max_step', 1)) or 1), in_service=in_service)        
         
-        if (in_data[x]['typ'].startswith("Load")):
+        if (in_data[x]['typ'].startswith("Load") and not in_data[x]['typ'].startswith("Load DC")):
             bus_idx = Busbars.get(in_data[x]['bus'])
             if bus_idx is None:
                 element_name = in_data[x].get('userFriendlyName', in_data[x].get('name', 'Unknown'))
@@ -4189,8 +4292,10 @@ def create_other_elements(in_data,net,x, Busbars):
             net.user_friendly_names[stor_nm] = uf_storage
    
         if (in_data[x]['typ'].startswith("Load DC")):
-            bus_idx = Busbars.get(in_data[x]['bus'])
+            bus_idx = _electrisim_dc_bus(net, in_data[x].get('bus'))
             if bus_idx is None:
+                _electrisim_warn(net, f"Load DC '{in_data[x].get('userFriendlyName', in_data[x].get('name'))}' "
+                                      "is not connected to a DC bus, so it is left out.")
                 continue
             # Get in_service parameter (default to True if not specified)
             in_service = True
@@ -4200,6 +4305,9 @@ def create_other_elements(in_data,net,x, Busbars):
             dc_extra = {}
             if in_data[x].get('id') is not None:
                 dc_extra['id'] = in_data[x]['id']
+            # An explicit index: pandapower 3.3 takes create_load_dc's next index
+            # from the DC source table, so each DC load overwrote the last.
+            dc_extra['index'] = int(net.load_dc.index.max()) + 1 if len(net.load_dc) else 0
             try:
                 pp.create_load_dc(net, bus_dc=bus_idx, name=in_data[x]['name'],
                                   p_dc_mw=p_dc, in_service=in_service, **dc_extra)
@@ -4222,8 +4330,10 @@ def create_other_elements(in_data,net,x, Busbars):
             net.user_friendly_names[load_dc_name] = user_friendly_name
         
         if (in_data[x]['typ'].startswith("Source DC")):
-            bus_idx = Busbars.get(in_data[x]['bus'])
+            bus_idx = _electrisim_dc_bus(net, in_data[x].get('bus'))
             if bus_idx is None:
+                _electrisim_warn(net, f"Source DC '{in_data[x].get('userFriendlyName', in_data[x].get('name'))}' "
+                                      "is not connected to a DC bus, so it is left out.")
                 continue
             # Get in_service parameter (default to True if not specified)
             in_service = True
@@ -4352,15 +4462,13 @@ def create_other_elements(in_data,net,x, Busbars):
                 print(f"Warning: VSC '{element_name}' skipped - VSC not supported in pandapower {pp.__version__}. Upgrade to pandapower 3.1+")
                 continue
                 
+            element_name = in_data[x].get('userFriendlyName', in_data[x].get('name', 'Unknown'))
             bus_idx = Busbars.get(in_data[x].get('bus', ''))
-            if bus_idx is None:
-                element_name = in_data[x].get('userFriendlyName', in_data[x].get('name', 'Unknown'))
-                print(f"Warning: VSC '{element_name}' skipped - AC bus not found")
-                continue
-            bus_dc_idx = Busbars.get(in_data[x].get('bus_dc', ''))
-            if bus_dc_idx is None:
-                element_name = in_data[x].get('userFriendlyName', in_data[x].get('name', 'Unknown'))
-                print(f"Warning: VSC '{element_name}' skipped - DC bus not connected. VSC requires connection to both AC bus and DC bus.")
+            bus_dc_idx = _electrisim_dc_bus(net, in_data[x].get('bus_dc', ''))
+            if bus_idx is None or bus_dc_idx is None:
+                missing = ' and '.join(k for k, v in (('an AC bus', bus_idx), ('a DC bus', bus_dc_idx)) if v is None)
+                _electrisim_warn(net, f"VSC '{element_name}' is not connected to {missing}, so it is left out: "
+                                      "a VSC joins one AC bus and one DC bus.")
                 continue
             # Get in_service parameter (default to True if not specified)
             in_service = True
@@ -4405,7 +4513,7 @@ def create_other_elements(in_data,net,x, Busbars):
             # 2. Full mode: AC bus to DC bus pair (bus_dc_plus/bus_dc_minus)
             
             bus_idx = Busbars.get(in_data[x].get('bus', ''))
-            bus_dc_idx = Busbars.get(in_data[x].get('bus_dc', ''))
+            bus_dc_idx = _electrisim_dc_bus(net, in_data[x].get('bus_dc', ''))
             
             # Check for simple VSC mode (AC bus to single DC bus)
             if bus_idx is not None and bus_dc_idx is not None:
@@ -4445,14 +4553,12 @@ def create_other_elements(in_data,net,x, Busbars):
                     print(f"Warning: B2B VSC '{element_name}' skipped - B2B VSC not supported in pandapower {pp.__version__}. Upgrade to pandapower 3.1+")
                     continue
                     
-                bus_dc_plus_idx = Busbars.get(in_data[x].get('bus_dc_plus', ''))
-                bus_dc_minus_idx = Busbars.get(in_data[x].get('bus_dc_minus', ''))
+                bus_dc_plus_idx = _electrisim_dc_bus(net, in_data[x].get('bus_dc_plus', ''))
+                bus_dc_minus_idx = _electrisim_dc_bus(net, in_data[x].get('bus_dc_minus', ''))
                 
-                if bus_idx is None:
-                    print(f"Warning: B2B VSC '{element_name}' skipped - AC bus not connected. Connect B2B VSC to both an AC bus and a DC bus.")
-                    continue
-                if bus_dc_plus_idx is None or bus_dc_minus_idx is None:
-                    print(f"Warning: B2B VSC '{element_name}' skipped - DC buses not connected. For simple HVDC, connect B2B VSC to both an AC bus and a DC bus.")
+                if bus_idx is None or bus_dc_plus_idx is None or bus_dc_minus_idx is None:
+                    _electrisim_warn(net, f"B2B VSC '{element_name}' is left out: it joins one AC bus to one DC bus, "
+                                          "or to two DC buses (plus and minus poles).")
                     continue
                     
                 # Get in_service parameter
@@ -4498,77 +4604,31 @@ def create_other_elements(in_data,net,x, Busbars):
                       f"DC Lines must be connected between two buses (draw it as a line connecting buses).")
                 continue
             
-            from_bus_idx = Busbars.get(bus_from)
-            to_bus_idx = Busbars.get(bus_to)
-            
-            if from_bus_idx is None:
-                print(f"Warning: DC Line '{element_name}' skipped - from_bus '{bus_from}' not found.")
+            from_dc, to_dc = _electrisim_dc_bus(net, bus_from), _electrisim_dc_bus(net, bus_to)
+            is_dc_to_dc = from_dc is not None and to_dc is not None
+            from_bus_idx = from_dc if is_dc_to_dc else Busbars.get(bus_from)
+            to_bus_idx = to_dc if is_dc_to_dc else Busbars.get(bus_to)
+            if from_bus_idx is None or to_bus_idx is None:
+                _electrisim_warn(net, f"DC Line '{element_name}' is left out: it joins two DC buses (a DC cable) "
+                                      "or two AC buses (an HVDC link), not one of each.")
                 continue
-            if to_bus_idx is None:
-                print(f"Warning: DC Line '{element_name}' skipped - to_bus '{bus_to}' not found.")
-                continue
-            
+
             # Get in_service parameter (default to True if not specified)
-            in_service = True
-            if 'in_service' in in_data[x]:
-                in_service = bool(in_data[x]['in_service']) if isinstance(in_data[x]['in_service'], bool) else (in_data[x]['in_service'] == 'true' or in_data[x]['in_service'] == True)
-            
-            # Check if both buses are DC buses - use create_line_dc for DC-to-DC connections
-            dc_bus_names = getattr(net, 'dc_bus_names', set())
-            is_dc_to_dc = bus_from in dc_bus_names and bus_to in dc_bus_names
-            
+            in_service = _electrisim_in_service(in_data[x])
+
             if is_dc_to_dc:
-                # DC Line connecting two DC buses - use create_line_dc
-                if hasattr(pp, 'create_line_dc'):
-                    print(f"Creating DC line (line_dc) '{element_name}': DC bus {bus_from} -> DC bus {bus_to}")
-                    
-                    # Get line parameters
-                    length_km = safe_float(in_data[x].get('length_km', 100.0))  # Default 100km for HVDC
-                    r_ohm_per_km = safe_float(in_data[x].get('r_ohm_per_km', 0.01))  # Default DC cable resistance
-                    
-                    # Try to create a standard type for DC line if it doesn't exist
-                    std_type_name = "HVDC_Cable_320kV"
-                    try:
-                        # Check if std_type already exists
-                        if not hasattr(net, 'std_types') or 'line_dc' not in net.std_types or std_type_name not in net.std_types['line_dc']:
-                            # Create a standard type for DC lines
-                            if hasattr(pp, 'create_std_type'):
-                                pp.create_std_type(net, {
-                                    "r_ohm_per_km": r_ohm_per_km,
-                                    "c_nf_per_km": 0.0,  # DC cables don't have capacitance issues like AC
-                                    "max_i_ka": 2.0,  # Max current rating
-                                }, name=std_type_name, element="line_dc")
-                                print(f"Created DC line standard type: {std_type_name}")
-                    except Exception as e:
-                        print(f"Note: Could not create std_type: {e}")
-                    
-                    try:
-                        # create_line_dc requires from_bus_dc and to_bus_dc (DC bus indices)
-                        line_dc_idx = pp.create_line_dc(net, from_bus_dc=from_bus_idx, to_bus_dc=to_bus_idx,
-                                         length_km=length_km, std_type=std_type_name,
-                                         name=in_data[x]['name'], in_service=in_service)
-                        # Store custom 'id' field in the line_dc dataframe
-                        if 'id' not in net.line_dc.columns:
-                            net.line_dc['id'] = ''
-                        net.line_dc.at[line_dc_idx, 'id'] = in_data[x].get('id', '')
-                    except TypeError as e:
-                        # If std_type approach fails, try without it using different parameters
-                        print(f"Standard type approach failed: {e}. Trying direct parameters...")
-                        try:
-                            # Some pandapower versions allow direct parameters
-                            line_dc_idx = pp.create_line_dc(net, from_bus_dc=from_bus_idx, to_bus_dc=to_bus_idx,
-                                             length_km=length_km, r_ohm_per_km=r_ohm_per_km,
-                                             name=in_data[x]['name'], in_service=in_service)
-                            # Store custom 'id' field in the line_dc dataframe
-                            if 'id' not in net.line_dc.columns:
-                                net.line_dc['id'] = ''
-                            net.line_dc.at[line_dc_idx, 'id'] = in_data[x].get('id', '')
-                        except Exception as e2:
-                            print(f"Warning: Could not create DC line: {e2}. DC grid simulation may not work correctly.")
-                            continue
-                else:
-                    print(f"Warning: DC Line '{element_name}' connects DC buses but create_line_dc not available in pandapower {pp.__version__}. Skipped.")
-                    continue
+                # A DC cable between two DC buses, with its own length,
+                # resistance and rating. (One std type built from the first
+                # line used to give every DC line that line's resistance and 2 kA.)
+                line_dc_idx = pp.create_line_dc_from_parameters(
+                    net, from_bus_dc=from_bus_idx, to_bus_dc=to_bus_idx,
+                    length_km=safe_float(in_data[x].get('length_km'), 1.0),
+                    r_ohm_per_km=safe_float(in_data[x].get('r_ohm_per_km'), 0.1),
+                    max_i_ka=safe_float(in_data[x].get('max_i_ka'), 1.0),
+                    name=in_data[x]['name'], in_service=in_service)
+                if 'id' not in net.line_dc.columns:
+                    net.line_dc['id'] = ''
+                net.line_dc.at[line_dc_idx, 'id'] = in_data[x].get('id', '')
             else:
                 # DC Line connecting two AC buses - use create_dcline (simplified HVDC model)
                 print(f"Creating DC line (dcline) '{element_name}': AC bus {bus_from} -> AC bus {bus_to}")
@@ -4593,6 +4653,7 @@ def create_other_elements(in_data,net,x, Busbars):
                 net.user_friendly_names = {}
             net.user_friendly_names[dcline_name] = element_name
 
+    _electrisim_drop_uncoupled_dc(net)
     _electrisim_finalize_pending_line_flow_shunts(net)
     apply_sgen_q_capability_curves(net, in_data)
     apply_sgen_q_setpoint_from_curve(net, in_data)
@@ -6897,11 +6958,15 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                 switchesList = list()
                 
                 class VSCOut(object):
-                    def __init__(self, name: str, id: str, p_mw: float, vm_pu: float):          
+                    def __init__(self, name: str, id: str, p_mw: float, vm_pu: float, q_mvar: float = None,
+                                 p_dc_mw: float = None, vm_dc_pu: float = None):
                         self.name = name
                         self.id = id
                         self.p_mw = p_mw
                         self.vm_pu = vm_pu
+                        self.q_mvar = q_mvar
+                        self.p_dc_mw = p_dc_mw
+                        self.vm_dc_pu = vm_dc_pu
                        
                 class VSCsOut(object):
                     def __init__(self, vscs: List[VSCOut]):
@@ -6909,12 +6974,17 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                 vscsList = list()
                 
                 class B2bVSCOut(object):
-                    def __init__(self, name: str, id: str, p_mw: float, vm1_pu: float, vm2_pu: float):          
+                    def __init__(self, name: str, id: str, p_mw: float, q_mvar: float, vm_pu: float,
+                                 p_dc_mw_p: float, p_dc_mw_m: float, vm_dc_pu_p: float, vm_dc_pu_m: float):
                         self.name = name
                         self.id = id
                         self.p_mw = p_mw
-                        self.vm1_pu = vm1_pu
-                        self.vm2_pu = vm2_pu
+                        self.q_mvar = q_mvar
+                        self.vm_pu = vm_pu
+                        self.p_dc_mw_p = p_dc_mw_p
+                        self.p_dc_mw_m = p_dc_mw_m
+                        self.vm_dc_pu_p = vm_dc_pu_p
+                        self.vm_dc_pu_m = vm_dc_pu_m
                        
                 class B2bVSCsOut(object):
                     def __init__(self, b2bvscs: List[B2bVSCOut]):
@@ -7452,9 +7522,9 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                        
                                         
                 #DC Bus
-                if(hasattr(net, 'res_dc_bus') and not net.res_dc_bus.empty):
-                    for index, row in net.res_dc_bus.iterrows():    
-                        dcbus = DcBusOut(name=net.dc_bus._get_value(index, 'name'), id = net.dc_bus._get_value(index, 'id'), vm_pu=row['vm_pu'], p_mw=row['p_mw'])        
+                if(hasattr(net, 'res_bus_dc') and not net.res_bus_dc.empty):
+                    for index, row in net.res_bus_dc.iterrows():    
+                        dcbus = DcBusOut(name=net.bus_dc.at[index, 'name'], id=_electrisim_row_id(net.bus_dc, index), vm_pu=row['vm_pu'], p_mw=row['p_mw'])        
                         dcbusesList.append(dcbus) 
                         dcbuses = DcBusesOut(dcbuses = dcbusesList) 
                     result = {**result, **dcbuses.__dict__}
@@ -7462,7 +7532,7 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                 #Load DC
                 if(hasattr(net, 'res_load_dc') and not net.res_load_dc.empty):
                     for index, row in net.res_load_dc.iterrows():    
-                        loaddc = LoadDcOut(name=net.load_dc._get_value(index, 'name'), id = net.load_dc._get_value(index, 'id'), p_mw=row['p_mw'])        
+                        loaddc = LoadDcOut(name=net.load_dc.at[index, 'name'], id=_electrisim_row_id(net.load_dc, index), p_mw=row['p_dc_mw'])        
                         loadsdcList.append(loaddc) 
                         loadsdc = LoadsDcOut(loadsdc = loadsdcList) 
                     result = {**result, **loadsdc.__dict__}
@@ -7470,7 +7540,7 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                 #Source DC
                 if(hasattr(net, 'res_source_dc') and not net.res_source_dc.empty):
                     for index, row in net.res_source_dc.iterrows():    
-                        sourcedc = SourceDcOut(name=net.source_dc._get_value(index, 'name'), id = net.source_dc._get_value(index, 'id'), vm_pu=row['vm_pu'], p_mw=row['p_mw'])        
+                        sourcedc = SourceDcOut(name=net.source_dc.at[index, 'name'], id=_electrisim_row_id(net.source_dc, index), vm_pu=_electrisim_source_dc_vm(net, index), p_mw=row['p_dc_mw'])        
                         sourcesdcList.append(sourcedc) 
                         sourcesdc = SourcesDcOut(sourcesdc = sourcesdcList) 
                     result = {**result, **sourcesdc.__dict__}
@@ -7498,7 +7568,7 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                     for index, row in net.res_vsc.iterrows():
                         vsc_name = net.vsc.at[index, 'name'] if 'name' in net.vsc.columns else f'VSC_{index}'
                         vsc_id = net.vsc.at[index, 'id'] if 'id' in net.vsc.columns else str(index)
-                        vsc = VSCOut(name=vsc_name, id=vsc_id, p_mw=row['p_mw'], vm_pu=row.get('vm_pu', 0.0))        
+                        vsc = VSCOut(name=vsc_name, id=vsc_id, p_mw=row['p_mw'], vm_pu=row.get('vm_pu', 0.0), q_mvar=row.get('q_mvar'), p_dc_mw=row.get('p_dc_mw'), vm_dc_pu=row.get('vm_dc_pu'))        
                         vscsList.append(vsc) 
                         vscs = VSCsOut(vscs = vscsList) 
                     result = {**result, **vscs.__dict__}
@@ -7508,7 +7578,7 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                     for index, row in net.res_b2b_vsc.iterrows():    
                         b2b_name = net.b2b_vsc.at[index, 'name'] if 'name' in net.b2b_vsc.columns else f'B2B_VSC_{index}'
                         b2b_id = net.b2b_vsc.at[index, 'id'] if 'id' in net.b2b_vsc.columns else str(index)
-                        b2bvsc = B2bVSCOut(name=b2b_name, id=b2b_id, p_mw=row['p_mw'], vm1_pu=row['vm1_pu'], vm2_pu=row['vm2_pu'])        
+                        b2bvsc = B2bVSCOut(name=b2b_name, id=b2b_id, p_mw=row['p_mw'], q_mvar=row.get('q_mvar'), vm_pu=row.get('vm_pu'), p_dc_mw_p=row.get('p_dc_mw_p'), p_dc_mw_m=row.get('p_dc_mw_m'), vm_dc_pu_p=row.get('vm_dc_pu_p'), vm_dc_pu_m=row.get('vm_dc_pu_m'))        
                         b2bvscsList.append(b2bvsc) 
                         b2bvscs = B2bVSCsOut(b2bvscs = b2bvscsList) 
                     result = {**result, **b2bvscs.__dict__}
@@ -8923,6 +8993,7 @@ def optimalPowerFlow(net, opf_params):
         algorithm = opf_params.get('ac_algorithm', 'pypower') if opf_type == 'ac' else opf_params.get('dc_algorithm', 'pypower')
         calculate_voltage_angles = opf_params.get('calculate_voltage_angles', 'auto')
         init = opf_params.get('init', 'pf')
+        _electrisim_set_aside_dc_network(net, 'Optimal power flow')
         delta = float(opf_params.get('delta', 1e-8))
         trafo_model = opf_params.get('trafo_model', 't')
         trafo_loading = opf_params.get('trafo_loading', 'current')
@@ -9965,6 +10036,8 @@ def optimalPowerFlow(net, opf_params):
 
         # Label for UI: study currency from OPF payload (coefficient column names stay EUR-style in pandapower).
         response_data['cost_currency'] = str(opf_params.get('cost_currency') or 'EUR')
+        if getattr(net, 'warnings', None):
+            response_data['warnings'] = list(net.warnings)
 
         return _jsonify_safe(response_data)
 
