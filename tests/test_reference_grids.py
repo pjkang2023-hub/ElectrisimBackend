@@ -3039,12 +3039,12 @@ def test_site_screening_charges_the_site_only_what_it_adds(client, quiet):
 
 # --- arc flash -------------------------------------------------------------------
 
-def _arc_flash(client, quiet, mode, grid):
+def _arc_flash(client, quiet, mode, grid, **params):
     request = _study_request(grid, {
         'typ': 'ArcFlashPandaPower Parameters', 'electrode_config': 'VCB', 'equipment_mode': mode,
         'working_distance_mm': '455', 'conductor_gap_mm': '25', 'enclosure_height_mm': '508',
         'enclosure_width_mm': '508', 'enclosure_depth_mm': '508',
-        'clearing_time_s': '0.2', 'clearing_time_min_s': '0.2'})
+        'clearing_time_s': '0.2', 'clearing_time_min_s': '0.2', **params})
     result = _post_study(client, quiet, request)
     rows = {row['name']: row for row in result['arc_flash']}
     with open(os.path.join(REFERENCE_DIR, f'{grid}.spec.json'), encoding='utf-8') as handle:
@@ -3107,8 +3107,30 @@ def test_arc_flash_by_voltage_class(client, quiet, grid):
     else:
         assert rows['20 kV substation']['incident_energy_cal_cm2'] == pytest.approx(24.93, abs=0.01)
         assert rows['20 kV substation']['ppe_category'] == '3'
-        assert rows['LV network A']['incident_energy_cal_cm2'] == pytest.approx(6.50, abs=0.01)
+        # 30.21 kA bolted at the 6 % LV tolerance (6.50 at pandapower's 10 %).
+        assert rows['LV network A']['incident_energy_cal_cm2'] == pytest.approx(6.48, abs=0.01)
         assert rows['110 kV supply']['ppe_category'] == 'Dangerous'
+
+
+@pytest.mark.parametrize('lv_tol', (None, 6, 10))
+@pytest.mark.parametrize('grid', GRIDS)
+def test_arc_flash_bolted_currents_take_the_lv_tolerance(client, quiet, grid, lv_tol):
+    """
+    The bolted fault currents came from pandapower's default 10 % LV
+    tolerance (c max 1.10) while the short-circuit study defaults to 6 %
+    (1.05): the radial grid's LV network A 30.346 kA here, 30.208 kA there.
+    They follow the tolerance chosen, 6 % unless 10 % is.
+    """
+    params = {} if lv_tol is None else {'lv_tol_percent': str(lv_tol)}
+    rows = _arc_flash(client, quiet, 'by_voltage', grid, **params)
+    net, _ = sld.build_network(load_spec(grid))
+    run(net)
+    sc.calc_sc(net, fault='3ph', case='max', lv_tol_percent=lv_tol or 6)
+    spec = load_spec(grid)
+    want = {_bus_label(spec, b['id']): float(net.res_bus_sc.ikss_ka.iloc[i])
+            for i, b in enumerate(spec['buses'])}
+    for name, row in rows.items():
+        assert row['ikss_ka'] == pytest.approx(want[name], rel=1e-9), name
 
 
 def test_arc_flash_takes_the_short_circuit_studys_sgen_k(quiet):

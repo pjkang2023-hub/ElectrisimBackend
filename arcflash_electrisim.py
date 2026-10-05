@@ -198,6 +198,9 @@ def arcflash(net, in_data, in_data_full=None):
       equipment_mode: by_voltage (default) - typical gap, enclosure and working
         distance for each bus voltage (IEEE 1584-2018 Table 8) - or uniform,
         the values above for every bus
+      lv_tol_percent: 6 (default) or 10 - the LV voltage tolerance that sets
+        c max (1.05 or 1.10) for the bolted fault currents, as in the
+        short-circuit study
     """
     if not _HAS_ARCFLASH:
         return json.dumps({
@@ -228,6 +231,15 @@ def arcflash(net, in_data, in_data_full=None):
         clearing_time_s = 0.2
     if clearing_time_min_s <= 0:
         clearing_time_min_s = clearing_time_s
+    # The short-circuit study's LV tolerance, defaulting as its dialog does:
+    # pandapower's default 10 % (c max 1.10) gave LV bolted currents 0.15-0.5 %
+    # above the short-circuit study's for the same network.
+    try:
+        lv_tol_percent = int(float(in_data.get("lv_tol_percent", 6) or 6))
+    except (TypeError, ValueError):
+        lv_tol_percent = 6
+    if lv_tol_percent not in (6, 10):
+        lv_tol_percent = 6
     equipment_mode = str(in_data.get("equipment_mode", "by_voltage") or "by_voltage").strip().lower()
     if equipment_mode not in ("by_voltage", "uniform"):
         equipment_mode = "by_voltage"
@@ -243,6 +255,7 @@ def arcflash(net, in_data, in_data_full=None):
             net,
             fault="3ph",
             case="max",
+            lv_tol_percent=lv_tol_percent,
             ip=False,
             ith=False,
             kappa_method="C",
@@ -390,6 +403,7 @@ def arcflash(net, in_data, in_data_full=None):
             "clearing_time_min_s": clearing_time_min_s,
             "fault": "3ph",
             "case": "max",
+            "lv_tol_percent": lv_tol_percent,
         },
     }
     if warnings:
