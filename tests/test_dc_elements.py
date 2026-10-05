@@ -150,8 +150,11 @@ def test_optimal_power_flow_leaves_the_dc_network_out_and_says_so(client, quiet)
     with open(os.path.join(REFERENCE_DIR, 'reference_radial.diagram_opf_payload.json'), encoding='utf-8') as handle:
         plain = json.load(handle)
     without = opf(json.loads(json.dumps(plain)))
-    with_dc = opf(_with_dc(plain))
-    assert any('Optimal power flow leaves the DC network out (2 DC buses, 2 DC loads of 0.15 MW)' in w
+    # DC breakers too - on a cable, and coupling the battery rack - go with the DC network.
+    with_dc = opf(_with(_with_dc(plain), _breaker('qa', 'dc_a', 'cable', 'line_dc'),
+                        _breaker('qr', 'dc_b', 'rack', 'bus_dc')))
+    assert not with_dc.get('dcbreakers')
+    assert any('Optimal power flow leaves the DC network out (3 DC buses, 2 DC loads of 0.15 MW)' in w
                for w in with_dc['warnings']), with_dc.get('warnings')
     assert [g['p_mw'] for g in with_dc['externalgrids']] == pytest.approx([g['p_mw'] for g in without['externalgrids']])
 
@@ -270,3 +273,89 @@ def test_dc_capacitor_holds_its_energy_and_cable_keeps_its_emt_data(client, quie
         pe.create_other_elements(request, net, '0', busbars)
     assert net.line_dc.at[0, 'l_mh_per_km'] == pytest.approx(0.3) and net.line_dc.at[0, 'c_uf_per_km'] == pytest.approx(0.2)
     assert net.electrisim_dc_capacitors[0]['esr_mohm'] == pytest.approx(2.0)
+
+
+# --- DC circuit breakers ------------------------------------------------------------
+
+def _with(request, *elements):
+    start = max(int(k) for k in request if str(k).isdigit()) + 1
+    for k, el in enumerate(elements):
+        request[str(start + k)] = el
+    return request
+
+
+def _breaker(name, bus, element, et, closed=True, **ratings):
+    return {'typ': 'DC Breaker0', 'name': name, 'id': f'cell-{name}', 'userFriendlyName': name.upper(),
+            'bus': bus, 'element': element, 'et': et, 'closed': 'true' if closed else 'false',
+            **{k: str(v) for k, v in ratings.items()}}
+
+
+def _run(client, quiet, request):
+    with quiet():
+        response = client.post('/', json=request)
+    result = json.loads(response.get_data(as_text=True))
+    assert not result.get('error'), result.get('message')
+    return result
+
+
+def test_dc_breaker_on_a_cable(client, quiet):
+    """
+    Closed, a breaker at DC bus A's end of the cable changes nothing and carries
+    the cable's current there: 0.1 MW at DC bus B's voltage, 0.125 kA, 63 % of its 0.2 kA.
+    Open, it takes the cable out: DC bus B has no converter left, so it and
+    Server hall B are set aside, and the warnings say so.
+    """
+    closed = _run(client, quiet, _with(_drawn_request(), _breaker('q1', 'dc_a', 'cable', 'line_dc',
+                                                                  rated_current_ka=0.2, rated_voltage_kv=1.0)))
+    v_b = next(b['vm_pu'] for b in closed['dcbuses'] if b['id'] == 'cell-dc_b')
+    assert v_b == pytest.approx(1 - 0.01 * P_B / V_DC ** 2, abs=2e-5)
+    (q1,) = closed['dcbreakers']
+    # The cable carries Server hall B's 0.1 MW at DC bus B's voltage.
+    assert q1['closed'] is True and q1['i_ka'] == pytest.approx(0.1 / (0.8 * v_b), rel=1e-6)
+    assert q1['loading_percent'] == pytest.approx(100 * q1['i_ka'] / 0.2)
+    assert len(closed['linedcs']) == 1
+
+    opened = _run(client, quiet, _with(_drawn_request(), _breaker('q1', 'dc_a', 'cable', 'line_dc', closed=False)))
+    assert {b['id'] for b in opened['dcbuses']} == {'cell-dc_a'}
+    assert any('DC bus B' in w and 'not connected to the AC network through a VSC' in w for w in opened['warnings'])
+    (q1,) = opened['dcbreakers']
+    assert q1['closed'] is False and q1['i_ka'] == 0.0
+
+
+def test_dc_breaker_as_a_bus_coupler(client, quiet):
+    """
+    Between DC bus B and a new DC bus C, a closed breaker is a coupler: C's
+    0.04 MW load is supplied at B's voltage and the breaker carries its 0.05 kA.
+    Open, C has no converter and is set aside. The coupler is not a DC cable.
+    """
+    bus_c = {'typ': 'DC Bus3', 'name': 'dc_c', 'id': 'cell-dc_c', 'userFriendlyName': 'DC bus C', 'vn_kv': '0.8'}
+    load_c = {'typ': 'Load DC2', 'name': 'ld_c', 'id': 'cell-ld_c', 'userFriendlyName': 'Server hall C',
+              'bus': 'dc_c', 'p_mw': '0.04'}
+    closed = _run(client, quiet, _with(_drawn_request(), bus_c, load_c,
+                                       _breaker('qc', 'dc_b', 'dc_c', 'bus_dc', rated_current_ka=0.1)))
+    vm = {b['id']: b['vm_pu'] for b in closed['dcbuses']}
+    assert vm['cell-dc_c'] == pytest.approx(vm['cell-dc_b'], abs=1e-6)
+    (qc,) = closed['dcbreakers']
+    assert qc['i_ka'] == pytest.approx(0.04 / (0.8 * vm['cell-dc_c']), rel=1e-4)
+    assert [l['id'] for l in closed['linedcs']] == ['cell-cable']
+
+    opened = _run(client, quiet, _with(_drawn_request(), bus_c, load_c, _breaker('qc', 'dc_b', 'dc_c', 'bus_dc', closed=False)))
+    assert 'cell-dc_c' not in {b['id'] for b in opened['dcbuses']}
+    assert any('DC bus C' in w and 'not connected to the AC network' in w for w in opened['warnings'])
+
+
+def test_dc_breaker_at_a_vsc_terminal_and_its_warnings(client, quiet):
+    """
+    Opening the breaker at the VSC's DC terminal takes the converter out: the
+    DC network is left without one and set aside. A breaker rated below its
+    bus's voltage, or not on a DC bus, is named.
+    """
+    lv = _dc_element(_drawn_request(), 'vsc1')['bus']
+    result = _run(client, quiet, _with(_drawn_request(),
+                                       _breaker('qv', 'dc_a', 'vsc1', 'vsc', closed=False, rated_voltage_kv=0.6),
+                                       _breaker('qx', lv, 'cable', 'line_dc')))
+    warnings = result['warnings']
+    assert 'dcbuses' not in result or not result['dcbuses']
+    assert any('DC buses' in w and 'DC bus A' in w for w in warnings), warnings
+    assert any("DC Breaker 'QV' is rated 0.6 kV, below its bus's 0.8 kV" in w for w in warnings), warnings
+    assert any("DC Breaker 'QX' is not connected to a DC bus" in w for w in warnings), warnings

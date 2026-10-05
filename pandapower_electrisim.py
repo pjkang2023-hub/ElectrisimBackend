@@ -1807,6 +1807,115 @@ def _electrisim_warn(net, message):
     print(f"WARNING: {message}")
 
 
+# --- DC circuit breakers ----------------------------------------------------------------
+#
+# pandapower has no DC switch. A DC breaker sits between a DC bus and what it
+# switches: a DC cable, a VSC's DC terminal, a DC load or source - which is
+# taken out of service while the breaker is open - or a second DC bus, joined
+# by a near-zero-resistance DC line (a coupler) in service while it is closed.
+# Breakers are applied once every element exists, as the payload may list a
+# breaker before what it switches.
+
+_DC_BREAKER_TARGETS = ('line_dc', 'vsc', 'b2b_vsc', 'load_dc', 'source_dc')
+_DC_COUPLER_R_OHM = 1e-6
+
+
+def _electrisim_flag(value, default=True):
+    if value is None or value == '':
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ('false', '0', 'no', 'off', 'open')
+
+
+def _electrisim_apply_dc_breakers(net):
+    pending = getattr(net, '_electrisim_pending_dc_breakers', None) or []
+    net.electrisim_dc_breakers = []
+    for el in pending:
+        label = el.get('userFriendlyName') or el.get('name')
+        bus = _electrisim_dc_bus(net, el.get('bus'))
+        if bus is None:
+            _electrisim_warn(net, f"DC Breaker '{label}' is not connected to a DC bus, so it is left out.")
+            continue
+        closed = _electrisim_flag(el.get('closed'), True)
+        rated_kv = safe_float(el.get('rated_voltage_kv'), 0.0)
+        rec = {
+            'name': el.get('name'), 'id': el.get('id', ''), 'label': label, 'closed': closed, 'bus_dc': int(bus),
+            'et': el.get('et'), 'target': None, 'breaker_type': el.get('breaker_type') or 'solid_state',
+            'rated_voltage_kv': rated_kv,
+            'rated_current_ka': safe_float(el.get('rated_current_ka'), 0.0),
+            'breaking_capacity_ka': safe_float(el.get('breaking_capacity_ka'), 0.0),
+            'opening_time_ms': safe_float(el.get('opening_time_ms'), 0.0),
+            'limiting_inductance_mh': safe_float(el.get('limiting_inductance_mh'), 0.0),
+            'arrester_clamp_kv': safe_float(el.get('arrester_clamp_kv'), 0.0),
+            'arrester_energy_kj': safe_float(el.get('arrester_energy_kj'), 0.0),
+        }
+        vn = float(net.bus_dc.at[bus, 'vn_kv'])
+        if 0 < rated_kv < vn:
+            _electrisim_warn(net, f"DC Breaker '{label}' is rated {rated_kv:g} kV, below its bus's {vn:g} kV.")
+        et, element = el.get('et'), el.get('element')
+        if et == 'bus_dc':
+            other = _electrisim_dc_bus(net, element)
+            if other is None:
+                _electrisim_warn(net, f"DC Breaker '{label}' joins a DC bus to something that is not a DC bus, so it is left out.")
+                continue
+            idx = pp.create_line_dc_from_parameters(
+                net, from_bus_dc=bus, to_bus_dc=other, length_km=1.0, r_ohm_per_km=_DC_COUPLER_R_OHM,
+                max_i_ka=rec['rated_current_ka'] or 10.0, name=el.get('name'), in_service=closed)
+            net.line_dc.at[idx, 'electrisim_dc_breaker'] = True
+            if 'id' in net.line_dc.columns:
+                net.line_dc.at[idx, 'id'] = el.get('id', '')
+            rec['target'] = ('line_dc', int(idx))
+        elif et in _DC_BREAKER_TARGETS:
+            table = net[et]
+            hit = table.index[table['name'] == element] if len(table) else []
+            if not len(hit):
+                _electrisim_warn(net, f"DC Breaker '{label}': what it switches was not built, so it is left out.")
+                continue
+            idx = int(hit[0])
+            if not closed:
+                table.at[idx, 'in_service'] = False
+            rec['target'] = (et, idx)
+        else:
+            _electrisim_warn(net, f"DC Breaker '{label}' is left out: it goes between a DC bus and a DC cable, "
+                                  "a VSC, a DC load or source, or a second DC bus.")
+            continue
+        net.electrisim_dc_breakers.append(rec)
+        if not hasattr(net, 'user_friendly_names'):
+            net.user_friendly_names = {}
+        net.user_friendly_names[el.get('name')] = label
+
+
+def _electrisim_dc_breaker_current_ka(net, rec):
+    """The current through a DC breaker (kA), from what it switches; 0 while it is open."""
+    if not rec['closed'] or rec['target'] is None:
+        return 0.0
+    table, idx = rec['target']
+    bus = rec['bus_dc']
+    res_bus = getattr(net, 'res_bus_dc', None)
+    vm = float(res_bus.at[bus, 'vm_pu']) if res_bus is not None and bus in res_bus.index else np.nan
+    v_kv = vm * float(net.bus_dc.at[bus, 'vn_kv'])
+    if table == 'line_dc':
+        res = net.res_line_dc
+        if idx not in res.index:
+            return np.nan
+        if 'electrisim_dc_breaker' in net.line_dc.columns and net.line_dc.at[idx, 'electrisim_dc_breaker'] == True:
+            return abs(float(res.at[idx, 'i_ka']))
+        side = 'from' if int(net.line_dc.at[idx, 'from_bus_dc']) == bus else 'to'
+        return abs(float(res.at[idx, f'i_{side}_ka']))
+    if table == 'vsc':
+        p = net.res_vsc.at[idx, 'p_dc_mw'] if idx in net.res_vsc.index else np.nan
+    elif table == 'b2b_vsc':
+        row = net.res_b2b_vsc.loc[idx] if idx in net.res_b2b_vsc.index else None
+        p = np.nan if row is None else (row['p_dc_mw_p'] if int(net.b2b_vsc.at[idx, 'bus_dc_plus']) == bus else row['p_dc_mw_m'])
+    elif table in ('load_dc', 'source_dc'):
+        res = net[f'res_{table}']
+        p = res.at[idx, 'p_dc_mw'] if idx in res.index else np.nan
+    else:
+        return np.nan
+    return abs(float(p)) / v_kv if v_kv and np.isfinite(v_kv) else np.nan
+
+
 def _electrisim_dc_bus(net, name):
     """Index of the DC bus drawn as ``name``, or None: an AC bus is not a DC bus."""
     return (getattr(net, 'dc_buses', None) or {}).get(name)
@@ -1864,9 +1973,16 @@ def _electrisim_drop_uncoupled_dc(net):
     bus_dc.drop(sorted(drop), inplace=True)
     if getattr(net, 'electrisim_dc_capacitors', None):
         net.electrisim_dc_capacitors = [c for c in net.electrisim_dc_capacitors if c['bus_dc'] not in drop]
+    if getattr(net, 'electrisim_dc_breakers', None):
+        # A breaker stays while its own bus does; what it switched may be gone.
+        net.electrisim_dc_breakers = [b for b in net.electrisim_dc_breakers if b['bus_dc'] not in drop]
+        for b in net.electrisim_dc_breakers:
+            if b['target'] is not None and b['target'][1] not in net[b['target'][0]].index:
+                b['target'] = None
     _electrisim_warn(net, f"DC bus{'es' if len(labels) > 1 else ''} {', '.join(labels)} "
                           f"{'are' if len(labels) > 1 else 'is'} not connected to the AC network through a VSC, "
-                          "so it and what is on it are left out: pandapower solves a DC network only "
+                          f"so {'they and what is on them are' if len(labels) > 1 else 'it and what is on it are'} left out: "
+                          "pandapower solves a DC network only "
                           "through a converter.")
 
 
@@ -1887,6 +2003,9 @@ def _electrisim_set_aside_dc_network(net, study):
         df = net[table]
         if len(df):
             df.drop(df.index, inplace=True)
+    for records in ('electrisim_dc_breakers', 'electrisim_dc_capacitors'):
+        if getattr(net, records, None):
+            setattr(net, records, [])
     _electrisim_warn(net, f"{study} leaves the DC network out ({n_bus} DC bus{'es' if n_bus != 1 else ''}"
                           + (f", {n_load} DC load{'s' if n_load != 1 else ''} of {p_load:.3g} MW" if n_load else '')
                           + "): pandapower's optimal power flow does not model VSCs or DC networks, "
@@ -4439,6 +4558,13 @@ def create_other_elements(in_data,net,x, Busbars):
                 net.user_friendly_names = {}
             net.user_friendly_names[load_dc_name] = user_friendly_name
         
+        if (in_data[x]['typ'].startswith("DC Breaker")):
+            # Applied once every element exists: see _electrisim_apply_dc_breakers.
+            if not hasattr(net, '_electrisim_pending_dc_breakers'):
+                net._electrisim_pending_dc_breakers = []
+            net._electrisim_pending_dc_breakers.append(in_data[x])
+            continue
+
         if (in_data[x]['typ'].startswith("DC Capacitor")):
             cap_name = in_data[x].get('name')
             cap_label = in_data[x].get('userFriendlyName', cap_name)
@@ -4788,6 +4914,7 @@ def create_other_elements(in_data,net,x, Busbars):
                 net.user_friendly_names = {}
             net.user_friendly_names[dcline_name] = element_name
 
+    _electrisim_apply_dc_breakers(net)
     _electrisim_drop_uncoupled_dc(net)
     _electrisim_finalize_pending_line_flow_shunts(net)
     apply_sgen_q_capability_curves(net, in_data)
@@ -7693,6 +7820,20 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                         })
                     result = {**result, 'dccapacitors': dccaps}
 
+                # DC breakers: open or closed, the current through each and its loading.
+                if getattr(net, 'electrisim_dc_breakers', None):
+                    breakers = []
+                    for rec in net.electrisim_dc_breakers:
+                        i_ka = _electrisim_dc_breaker_current_ka(net, rec)
+                        rated = rec['rated_current_ka']
+                        breakers.append({
+                            'name': rec['name'], 'id': rec['id'], 'closed': rec['closed'],
+                            'i_ka': i_ka if np.isfinite(i_ka) else None,
+                            'loading_percent': 100.0 * i_ka / rated if rated > 0 and np.isfinite(i_ka) else None,
+                            'rated_current_ka': rated, 'breaking_capacity_ka': rec['breaking_capacity_ka'],
+                        })
+                    result = {**result, 'dcbreakers': breakers}
+
                 #Switch (net.res_switch: p_from_mw, q_from_mvar, p_to_mw, q_to_mvar, i_ka, loading_percent)
                 if(hasattr(net, 'res_switch') and not net.res_switch.empty):
                     for index, row in net.res_switch.iterrows():    
@@ -7766,6 +7907,8 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                     
                     linedcsList = []
                     for index, row in net.res_line_dc.iterrows():
+                        if 'electrisim_dc_breaker' in net.line_dc.columns and net.line_dc.at[index, 'electrisim_dc_breaker'] == True:
+                            continue   # a DC breaker's coupler, reported with the breakers
                         line_dc_name = net.line_dc.at[index, 'name'] if 'name' in net.line_dc.columns else f'LineDC_{index}'
                         line_dc_id = net.line_dc.at[index, 'id'] if 'id' in net.line_dc.columns else str(index)
                         
