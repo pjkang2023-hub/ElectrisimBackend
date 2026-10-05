@@ -542,6 +542,14 @@ def build_system(
         line_map[name] = f"Trafo3w_{name}_hv"
 
     # --- Loads (PQ) ---
+    # Loads following a profile from the diagram's library start at its first
+    # value; run_tds scales them through the run (1.0 p.u. = the drawn P).
+    import load_profiles_electrisim as _lp
+    profile_library, profile_problems = _lp.library_from_params(params)
+    warnings.extend(profile_problems)
+    profile_assignments = _lp.load_assignments(in_data) if profile_library else {}
+    profile_repeat = params.get("profile_repeat", True) not in (False, "false", "False", 0, "0")
+    profiled_loads: List[Dict[str, Any]] = []
     pq_i = 0
     for _, el, typ in _iter_elements(in_data):
         if not typ.startswith("Load") or typ.startswith("Load DC"):
@@ -557,13 +565,28 @@ def build_system(
         p_mw = _sf(el.get("p_mw")) * scaling
         q_mvar = _sf(el.get("q_mvar")) * scaling
         u = 1 if _sb(el.get("in_service"), True) else 0
+        load_name = str(el.get("userFriendlyName") or el.get("name") or f"PQ_{pq_i}")
+        f0, q_f0 = 1.0, 1.0
+        assignment = profile_assignments.get(str(el.get("name")))
+        profile = profile_library.get(assignment["profile_id"]) if assignment else None
+        if assignment and profile is None:
+            warnings.append(f"{load_name}: its load profile is not in the library, so it does not follow one.")
+        if profile is not None:
+            rel_t = profile["t"] - profile["t"][0]
+            f0 = float(_lp.sample_profile(rel_t, profile["p"], [0.0], profile_repeat)[0])
+            q_f0 = f0 if assignment["q_mode"] == "pf" else 1.0
+            profiled_loads.append({
+                "idx": f"PQ_{pq_i}", "name": load_name, "profile": profile["name"],
+                "t": rel_t, "p": profile["p"], "q_mode": assignment["q_mode"],
+                "p_rated": p_mw / sn_base, "q_rated": q_mvar / sn_base,
+            })
         ss.add(
             "PQ",
             idx=f"PQ_{pq_i}",
-            name=str(el.get("userFriendlyName") or el.get("name") or f"PQ_{pq_i}"),
+            name=load_name,
             bus=bus,
-            p0=p_mw / sn_base,
-            q0=q_mvar / sn_base,
+            p0=p_mw * f0 / sn_base,
+            q0=q_mvar * q_f0 / sn_base,
             Vn=bus_vn.get(bus, 110.0),
             u=u,
         )
@@ -1116,6 +1139,8 @@ def build_system(
         "n_renewable_plants": renewable_count,
         "n_buses": len(bus_name_by_idx),
         "islanded_after": islanded_after,
+        "profiled_loads": profiled_loads,
+        "profile_repeat": profile_repeat,
     }
     return ss, meta
 
@@ -1202,6 +1227,62 @@ def _restore_prefault_state_on_clearing(ss) -> None:
     fault.tc.callback = clear
 
 
+def _lp_sample(load: Dict[str, Any], times, repeat: bool):
+    import load_profiles_electrisim as _lp
+    return _lp.sample_profile(load["t"], load["p"], times, repeat)
+
+
+# At most this many pieces when loads follow a profile: each restarts the solver.
+_PROFILE_MAX_PIECES = 2000
+
+
+def _run_tds_following_profiles(ss, profiled: List[Dict[str, Any]], tf: float, repeat: bool,
+                                warnings: List[str]) -> bool:
+    """
+    Run the time-domain simulation in short pieces, setting each profiled
+    load's power before each piece.
+
+    ANDES fixes a PQ load's power when the simulation starts: Ppf, and the
+    current and impedance it converts to, Ipeq and Req (Qpf, Iqeq, Xeq for Q).
+    Altering p0 during the run does nothing. A load following a profile has
+    all three rescaled to the profile's mean over each piece, so it keeps the
+    voltage dependence ANDES gives every load and only its size follows the
+    profile.
+    """
+    import load_profiles_electrisim as _lp
+    try:
+        ss.TDS.config.no_tqdm = True
+    except Exception:
+        pass
+    position = {idx: i for i, idx in enumerate(ss.PQ.idx.v)}
+    for load in profiled:
+        load["i"] = position[load["idx"]]
+        # The bus voltage the services were computed at.
+        load["v0"] = float(ss.PQ.v.v[load["i"]]) or 1.0
+    finest = min(float(np.median(np.diff(load["t"]))) for load in profiled)
+    step = max(finest, tf / _PROFILE_MAX_PIECES)
+    if step > finest * (1 + 1e-9):
+        warnings.append(f"Load profiles applied in {step:.4g} s pieces, coarser than their "
+                        f"{finest:g} s samples, to keep the run to {_PROFILE_MAX_PIECES} pieces; "
+                        "each piece uses the profile's mean over it.")
+    t0 = 0.0
+    while t0 < tf - 1e-12:
+        t1 = min(t0 + step, tf)
+        for load in profiled:
+            f = _lp.average_profile(load["t"], load["p"], t0, t1, repeat)
+            i, v0 = load["i"], load["v0"]
+            p = load["p_rated"] * f
+            ss.PQ.Ppf.v[i], ss.PQ.Ipeq.v[i], ss.PQ.Req.v[i] = p, p / v0, p / v0 ** 2
+            if load["q_mode"] == "pf":
+                q = load["q_rated"] * f
+                ss.PQ.Qpf.v[i], ss.PQ.Iqeq.v[i], ss.PQ.Xeq.v[i] = q, q / v0, q / v0 ** 2
+        ss.TDS.config.tf = t1
+        if not ss.TDS.run():
+            return False
+        t0 = t1
+    return True
+
+
 def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
     """Run power flow + time-domain simulation; return JSON string."""
     try:
@@ -1247,7 +1328,12 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
             # largest island and fails when none is left there; losing
             # synchronism is reported below instead.
             ss.TDS.config.criteria = 0
-        tds_ok = bool(ss.TDS.run())
+        profiled = meta.get("profiled_loads") or []
+        if profiled:
+            tds_ok = _run_tds_following_profiles(ss, profiled, tf, meta.get("profile_repeat", True),
+                                                 meta["warnings"])
+        else:
+            tds_ok = bool(ss.TDS.run())
         t = np.asarray(ss.dae.ts.t, dtype=float)
         if not tds_ok and len(t):
             # The run used to end with converged=false and no word of why;
@@ -1435,6 +1521,14 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
                 "frequency_nadir_hz": _clean_num(freq_nadir) if freq_nadir is not None else None,
                 "frequency_final_hz": _clean_num(freq_settling) if freq_settling is not None else None,
             },
+            "load_profiles": [{
+                "load": load["name"],
+                "profile": load["profile"],
+                "q_mode": load["q_mode"],
+                # The power it was set to through the run (MW), at the plotted times.
+                "p_mw": [_clean_num(float(load["p_rated"] * meta["sn_mva"] * v)) for v in
+                         _lp_sample(load, t_ds, meta.get("profile_repeat", True))],
+            } for load in (meta.get("profiled_loads") or [])],
             "ride_through": {
                 "enabled": bool(ride_pts),
                 "pass": ride_pass,

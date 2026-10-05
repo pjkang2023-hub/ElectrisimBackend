@@ -11155,9 +11155,19 @@ def time_series_simulation(net, timeseries_params):
         generation_profile = timeseries_params.get('generation_profile', 'constant')
         profile_mode = timeseries_params.get('profile_mode', 'preset')
         element_profiles = timeseries_params.get('element_profiles') or {}
+        # Hourly unless the study sets its own step: AI training loads swing
+        # within seconds.
+        step_s = float(safe_float(timeseries_params.get('time_step_s')) or 3600.0)
+        if not step_s > 0:
+            step_s = 3600.0
+        hourly = abs(step_s - 3600.0) < 1e-9
+        step_hours = step_s / 3600.0
 
         import datetime
-        time_stamps = [datetime.datetime(2024, 1, 1, hour=h) for h in range(time_steps)]
+        # Offsets, not hour=h: datetime(2024, 1, 1, hour=24) raised, so no run
+        # could go past 24 steps.
+        time_stamps = [datetime.datetime(2024, 1, 1) + datetime.timedelta(seconds=step_s * h)
+                       for h in range(time_steps)]
 
         orig_load_p = net.load['p_mw'].copy() if len(net.load) > 0 else None
         orig_load_q = net.load['q_mvar'].copy() if len(net.load) > 0 else None
@@ -11197,6 +11207,47 @@ def time_series_simulation(net, timeseries_params):
                     'id': str(elem_name),
                 }
 
+        # Loads following a profile from the diagram's library: its value at
+        # each step, or its mean over the step when the step is longer than
+        # the profile's own samples.
+        import load_profiles_electrisim as _lp
+        library, library_notes = _lp.library_from_params(timeseries_params)
+        repeat = timeseries_params.get('profile_repeat', True) not in (False, 'false', 'False', 0, '0')
+        library_loads = {}
+        for load_name, assignment in (timeseries_params.get('load_profile_assignments') or {}).items():
+            prof = library.get(assignment['profile_id'])
+            if prof is None:
+                library_notes.append(f"{assignment['display_name']}: its load profile is not in the library, "
+                                     "so it does not follow one.")
+                continue
+            rel_t = prof['t'] - prof['t'][0]
+            prof_dt = float(np.median(np.diff(rel_t)))
+            averaged = step_s > 2 * prof_dt
+            if averaged:
+                values = [_lp.average_profile(rel_t, prof['p'], k * step_s, (k + 1) * step_s, repeat)
+                          for k in range(time_steps)]
+            else:
+                values = [float(v) for v in _lp.sample_profile(rel_t, prof['p'], np.arange(time_steps) * step_s, repeat)]
+            library_loads[load_name] = {'values': values, 'q_mode': assignment['q_mode']}
+            profiles_used[load_name] = {
+                'mode': 'scale',
+                'declared_mode': 'library',
+                'values': values,
+                'element_type': 'load',
+                'display_name': assignment['display_name'],
+                'id': load_name,
+                'library_profile': prof['name'],
+                'q_mode': assignment['q_mode'],
+                'sampling': 'average' if averaged else 'instant',
+            }
+            if averaged:
+                library_notes.append(f"{assignment['display_name']} follows \"{prof['name']}\" averaged over each "
+                                     f"{step_s:g} s step: the profile's samples are {prof_dt:g} s apart.")
+            lasts = _lp.period_s(rel_t) if repeat else float(rel_t[-1])
+            if time_steps * step_s > lasts + 1e-9:
+                library_notes.append(f"{assignment['display_name']}: \"{prof['name']}\" lasts {lasts:g} s, "
+                                     + ("so it repeats through the run." if repeat else "and holds its last value after."))
+
         preset_used = set()
 
         def _element_profile(name, element_type, t, global_values):
@@ -11215,6 +11266,14 @@ def time_series_simulation(net, timeseries_params):
             if orig_load_p is not None:
                 for idx in net.load.index:
                     elem_name = str(net.load.loc[idx, 'name'])
+                    lib = library_loads.get(elem_name)
+                    if lib is not None:
+                        # 1.0 p.u. is the load's drawn P; Q follows at constant
+                        # power factor or stays as drawn.
+                        v = lib['values'][t]
+                        net.load.loc[idx, 'p_mw'] = float(orig_load_p.loc[idx]) * v
+                        net.load.loc[idx, 'q_mvar'] = float(orig_load_q.loc[idx]) * (v if lib['q_mode'] == 'pf' else 1.0)
+                        continue
                     val, mode = _element_profile(elem_name, 'load', t, load_profile_values)
                     _ts_set_pq(net.load, idx, orig_load_p, orig_load_q, val, mode)
 
@@ -11230,9 +11289,9 @@ def time_series_simulation(net, timeseries_params):
                     val, mode = _element_profile(elem_name, 'gen', t, gen_profile_values)
                     _ts_set_pq(net.gen, idx, orig_gen_p, orig_gen_q, val, mode)
 
-            _ts_dispatch_storage(net, storage_state, t)
+            _ts_dispatch_storage(net, storage_state, t, hours=step_hours)
             prev_converged = _ts_run_powerflow(net, timeseries_params, t, prev_converged)
-            _ts_advance_storage(storage_state)
+            _ts_advance_storage(storage_state, hours=step_hours)
             ufn = getattr(net, 'user_friendly_names', {}) or {}
             for idx, st in storage_state.items():
                 technical = net.storage.loc[idx, 'name']
@@ -11242,7 +11301,7 @@ def time_series_simulation(net, timeseries_params):
                     'time_step': t,
                     'p_mw': safe_float(net.res_storage.loc[idx, 'p_mw']),
                     'q_mvar': safe_float(net.res_storage.loc[idx, 'q_mvar']),
-                    # State of charge at the end of the hour.
+                    # State of charge at the end of the step.
                     'soc_percent': safe_float(100.0 * st['energy'] / st['max_e']) if st['trackable'] else None,
                     'energy_mwh': safe_float(st['energy']) if st['trackable'] else None,
                 })
@@ -11444,19 +11503,21 @@ def time_series_simulation(net, timeseries_params):
 
         timeseries_converged = all(result['converged'] for result in all_results)
 
-        notes = []
+        notes = list(library_notes)
         for idx, st in storage_state.items():
             technical = net.storage.loc[idx, 'name']
             ufn = getattr(net, 'user_friendly_names', {}) or {}
             label = ufn.get(technical, technical)
             if not st['trackable']:
                 notes.append(f"{label}: no energy rating or state of charge, so it held "
-                             f"{abs(st['p_mw']):.3g} MW every hour.")
+                             f"{abs(st['p_mw']):.3g} MW every {'hour' if hourly else 'step'}.")
             elif st['limited_from'] is not None:
+                when = (f"in hour {st['limited_from']} ({abs(st['limited_p']):.3g} MW that hour)" if hourly else
+                        f"at step {st['limited_from']}, t = {st['limited_from'] * step_s:g} s "
+                        f"({abs(st['limited_p']):.3g} MW that step)")
                 notes.append(f"{label}: {'charging' if st['p_mw'] > 0 else 'discharging'} "
                              f"{abs(st['p_mw']):.3g} MW, it runs {'full' if st['p_mw'] > 0 else 'empty'} "
-                             f"in hour {st['limited_from']} ({abs(st['limited_p']):.3g} MW that hour) "
-                             f"and is idle after.")
+                             f"{when} and is idle after.")
 
         # A preset only reads as the run's when some element followed it:
         # with a profile of its own for every element, "constant" described
@@ -11464,6 +11525,7 @@ def time_series_simulation(net, timeseries_params):
         return {
             'timeseries_converged': timeseries_converged,
             'time_steps': time_steps,
+            'time_step_s': step_s,
             'profile_mode': profile_mode,
             'load_profile': load_profile if 'load' in preset_used else None,
             'generation_profile': generation_profile if 'gen' in preset_used else None,

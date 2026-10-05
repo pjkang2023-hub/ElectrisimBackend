@@ -77,6 +77,7 @@ import electrisim_ops
 import electrisim_sld
 import opender_electrisim
 import arcflash_electrisim
+import load_profiles_electrisim
 import andes_electrisim
 import motor_starting_electrisim
 import json
@@ -1322,8 +1323,14 @@ def simulation():
                     'algorithm': in_data[x].get('algorithm', 'nr'),
                     'calculate_voltage_angles': in_data[x].get('calculate_voltage_angles', 'auto'),
                     'init': in_data[x].get('init') or in_data[x].get('initialization') or 'auto',
+                    # Seconds between steps (hourly by default) and the
+                    # diagram's load profile library, with the loads that follow it.
+                    'time_step_s': in_data[x].get('time_step_s'),
+                    'load_profiles': in_data[x].get('load_profiles') or {},
+                    'profile_repeat': in_data[x].get('profile_repeat', True),
+                    'load_profile_assignments': load_profiles_electrisim.load_assignments(in_data),
                 }
-                
+
                 # Create network
                 net = pp.create_empty_network(f_hz=timeseries_params['frequency'])
                 Busbars = pandapower_electrisim.create_busbars(in_data, net)
