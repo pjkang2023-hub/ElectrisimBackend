@@ -1755,18 +1755,18 @@ def _electrisim_runpp(net, max_rounds=60, tolerance_mw=1e-9, **kwargs):
     rows = _electrisim_dc_dc_rows(net)
     if not rows:
         return _electrisim_runpp_dc_loads(net, max_rounds, tolerance_mw, **kwargs)
-    ld = net.load_dc
     for _ in range(max_rounds):
         _electrisim_runpp_dc_loads(net, max_rounds, tolerance_mw, **kwargs)
         worst = 0.0
-        for i in rows:
-            p_out = _electrisim_dc_dc_output_mw(net, i)
+        for table, i in rows:
+            df, col = net[table], _STAGE_P_COLUMN[table]
+            p_out = _electrisim_dc_dc_output_mw(net, i, table)
             if not np.isfinite(p_out):
                 continue
-            target = _electrisim_dc_dc_input_power(p_out, float(ld.at[i, 'electrisim_dcdc_eta']),
-                                                   float(ld.at[i, 'electrisim_dcdc_p_nl_mw']))
-            worst = max(worst, abs(target - float(ld.at[i, 'p_dc_mw'])))
-            ld.at[i, 'p_dc_mw'] = target
+            target = _electrisim_dc_dc_input_power(p_out, float(df.at[i, 'electrisim_dcdc_eta']),
+                                                   float(df.at[i, 'electrisim_dcdc_p_nl_mw']))
+            worst = max(worst, abs(target - float(df.at[i, col])))
+            df.at[i, col] = target
         if worst <= tolerance_mw:
             return None
         kwargs = {**kwargs, 'init': 'results'}
@@ -1867,9 +1867,49 @@ def _electrisim_without_aux(df):
     return df[df['electrisim_aux'] != True]
 
 
+def _electrisim_res_without_aux(net, table):
+    """A copy of ``table``'s results without the converters' auxiliary rows."""
+    res = net[f'res_{table}']
+    df = net[table]
+    if 'electrisim_aux' in df.columns:
+        aux = df.index[df['electrisim_aux'] == True]
+        res = res.drop(index=res.index.intersection(aux))
+    return res.copy()
+
+
 def _electrisim_dc_dc_input_power(p_out, eta, p_nl):
     """What a DC/DC converter draws (MW) for ``p_out`` delivered; losses either way."""
     return p_out / eta + p_nl if p_out >= 0 else p_out * eta + p_nl
+
+
+def _electrisim_stage_columns(name, eta, p_nl_mw, output):
+    """
+    The columns that make a load a converter stage's input: _electrisim_runpp
+    sets its power from what ``output`` (table, index) delivers.
+    """
+    return dict(electrisim_aux=True, electrisim_dcdc_role='input', electrisim_dcdc_name=name,
+                electrisim_dcdc_eta=eta, electrisim_dcdc_p_nl_mw=p_nl_mw,
+                electrisim_dcdc_out_table=output[0], electrisim_dcdc_out_idx=float(output[1]))
+
+
+def _electrisim_aux_dc_source(net, bus_dc, vm_pu, rated_mw, name, in_service):
+    """
+    A near-lossless VSC from an auxiliary AC grid, holding ``bus_dc`` at
+    ``vm_pu``: a converter's output stage. Returns (vsc, AC bus, grid).
+    """
+    vn = float(net.bus_dc.at[bus_dc, 'vn_kv'])
+    z_base = vn ** 2 / max(rated_mw, 1.0)
+    aux_bus = pp.create_bus(net, vn_kv=vn, name=f'{name} auxiliary AC', in_service=in_service)
+    net.bus.at[aux_bus, 'electrisim_aux'] = True
+    aux_grid = pp.create_ext_grid(net, aux_bus, vm_pu=1.0, name=f'{name} auxiliary grid', in_service=in_service,
+                                  s_sc_max_mva=1000.0, s_sc_min_mva=1000.0, rx_max=0.1, rx_min=0.1)
+    net.ext_grid.at[aux_grid, 'electrisim_aux'] = True
+    vsc = pp.create_vsc(net, aux_bus, bus_dc, r_ohm=_DCDC_AUX_R_PU * z_base, x_ohm=_DCDC_AUX_X_PU * z_base,
+                        r_dc_ohm=_DCDC_AUX_RDC_PU * z_base, control_mode_ac='q_mvar', control_value_ac=0.0,
+                        control_mode_dc='vm_pu', control_value_dc=vm_pu, name=f'{name} output',
+                        in_service=in_service)
+    net.vsc.at[vsc, 'electrisim_aux'] = True
+    return int(vsc), int(aux_bus), int(aux_grid)
 
 
 def _electrisim_new_load_dc(net, bus, p_mw, name, in_service, **columns):
@@ -1912,30 +1952,17 @@ def _electrisim_build_dc_dc_converters(net):
                                       f"its {side} bus is {vn:g} kV.")
         on = rec['in_service']
         if mode == 'voltage':
-            vn_out = float(net.bus_dc.at[b_out, 'vn_kv'])
-            z_base = vn_out ** 2 / max(rec['rated_mw'], 1.0)
-            aux_bus = pp.create_bus(net, vn_kv=vn_out, name=f'{name} auxiliary AC', in_service=on)
-            net.bus.at[aux_bus, 'electrisim_aux'] = True
-            aux_grid = pp.create_ext_grid(net, aux_bus, vm_pu=1.0, name=f'{name} auxiliary grid', in_service=on,
-                                          s_sc_max_mva=1000.0, s_sc_min_mva=1000.0, rx_max=0.1, rx_min=0.1)
-            net.ext_grid.at[aux_grid, 'electrisim_aux'] = True
-            vsc = pp.create_vsc(net, aux_bus, b_out, r_ohm=_DCDC_AUX_R_PU * z_base, x_ohm=_DCDC_AUX_X_PU * z_base,
-                                r_dc_ohm=_DCDC_AUX_RDC_PU * z_base, control_mode_ac='q_mvar', control_value_ac=0.0,
-                                control_mode_dc='vm_pu', control_value_dc=rec['vm_out_pu'],
-                                name=f'{name} output', in_service=on)
-            net.vsc.at[vsc, 'electrisim_aux'] = True
-            rec.update(vsc=int(vsc), aux_bus=int(aux_bus), aux_ext_grid=int(aux_grid))
+            vsc, aux_bus, aux_grid = _electrisim_aux_dc_source(net, b_out, rec['vm_out_pu'], rec['rated_mw'], name, on)
+            rec.update(vsc=vsc, aux_bus=aux_bus, aux_ext_grid=aux_grid)
             p_in0 = rec['p_nl_mw']
         else:
             out = _electrisim_new_load_dc(net, b_out, -rec['p_set_mw'], f'{name} output', on,
                                           electrisim_aux=True, electrisim_dcdc_role='output', electrisim_dcdc_name=name)
             rec['output_load'] = int(out)
             p_in0 = _electrisim_dc_dc_input_power(rec['p_set_mw'], eta, rec['p_nl_mw'])
+        output = ('vsc', rec['vsc']) if rec['vsc'] is not None else ('load_dc', rec['output_load'])
         rec['input'] = int(_electrisim_new_load_dc(
-            net, b_in, p_in0, f'{name} input', on, electrisim_aux=True, electrisim_dcdc_role='input',
-            electrisim_dcdc_name=name, electrisim_dcdc_eta=eta, electrisim_dcdc_p_nl_mw=rec['p_nl_mw'],
-            electrisim_dcdc_vsc=float(rec['vsc']) if rec['vsc'] is not None else np.nan,
-            electrisim_dcdc_out=float(rec['output_load']) if rec['output_load'] is not None else np.nan))
+            net, b_in, p_in0, f'{name} input', on, **_electrisim_stage_columns(name, eta, rec['p_nl_mw'], output)))
         net.electrisim_dc_dc_converters.append(rec)
         if not hasattr(net, 'user_friendly_names'):
             net.user_friendly_names = {}
@@ -1997,7 +2024,8 @@ def _electrisim_freeze_dc_dc(net):
     and the DC networks they held are left out.
     """
     convs = getattr(net, 'electrisim_dc_dc_converters', None) or []
-    if not convs:
+    ssts = getattr(net, 'electrisim_ssts', None) or []
+    if not convs and not ssts:
         return
     try:
         # On a copy: the study starts from a network without load-flow results.
@@ -2005,16 +2033,24 @@ def _electrisim_freeze_dc_dc(net):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             _electrisim_runpp(solved, algorithm='nr', calculate_voltage_angles=True, init='auto')
-        for rec in convs:
-            if rec['input'] in solved.load_dc.index:
-                net.load_dc.at[rec['input'], 'p_dc_mw'] = float(solved.load_dc.at[rec['input'], 'p_dc_mw'])
+        for table, i in _electrisim_dc_dc_rows(solved):
+            col = _STAGE_P_COLUMN[table]
+            if i in net[table].index:
+                net[table].at[i, col] = float(solved[table].at[i, col])
     except Exception:   # noqa: BLE001 - the inputs keep their first estimate
         _electrisim_warn(net, "The load flow that settles the DC/DC converters' inputs did not solve: "
                               "they draw their no-load loss, or their set power over their efficiency.")
+    for table, i in _electrisim_dc_dc_rows(net):
+        net[table].at[i, 'electrisim_dcdc_role'] = 'frozen'
     held = []
+    for rec in ssts:
+        # Its rectifier and DC/DC stage are the power the MV side draws; a
+        # grid-forming inverter stays, as the source of its LV AC network.
+        held.append({'bus_out': rec['bus_lvdc']})
+        for table, idx in rec['aux']:
+            if idx is not None and idx in net[table].index:
+                net[table].drop(idx, inplace=True)
     for rec in convs:
-        if rec['input'] in net.load_dc.index:
-            net.load_dc.at[rec['input'], 'electrisim_dcdc_role'] = 'frozen'
         if rec['mode'] == 'voltage':
             held.append(rec)
             for table, idx in (('vsc', rec['vsc']), ('ext_grid', rec['aux_ext_grid']), ('bus', rec['aux_bus'])):
@@ -2024,33 +2060,71 @@ def _electrisim_freeze_dc_dc(net):
         names = getattr(net, 'user_friendly_names', {}) or {}
         buses = sorted({str(names.get(net.bus_dc.at[r['bus_out'], 'name'], net.bus_dc.at[r['bus_out'], 'name']))
                         for r in held if r['bus_out'] in net.bus_dc.index})
-        _electrisim_warn(net, "This study does not model DC/DC converters: each is the power its input draws "
-                              "in the load flow, and the DC networks they hold "
+        _electrisim_warn(net, "This study does not model DC/DC converters or solid-state transformers: each is "
+                              "the power its input draws in the load flow, and the DC networks they hold "
                               f"({', '.join(buses)}) are left out.")
         _electrisim_drop_uncoupled_dc(net, quiet=True)
         for b in getattr(net, 'electrisim_dc_breakers', None) or []:
             if b['target'] is not None and b['target'][1] not in net[b['target'][0]].index:
                 b['target'] = None
     net.electrisim_dc_dc_converters = []
+    net.electrisim_ssts = []
+
+
+_STAGE_P_COLUMN = {'load_dc': 'p_dc_mw', 'load': 'p_mw'}
 
 
 def _electrisim_dc_dc_rows(net):
-    ld = getattr(net, 'load_dc', None)
-    if ld is None or not len(ld) or 'electrisim_dcdc_role' not in ld.columns:
-        return []
-    return [i for i in ld.index if ld.at[i, 'electrisim_dcdc_role'] == 'input' and bool(ld.at[i, 'in_service'])]
+    """Each converter stage's input, as (table, index): a DC load, or an AC load (an SST's rectifier)."""
+    rows = []
+    for table in ('load_dc', 'load'):
+        df = getattr(net, table, None)
+        if df is None or not len(df) or 'electrisim_dcdc_role' not in df.columns:
+            continue
+        rows += [(table, i) for i in df.index
+                 if df.at[i, 'electrisim_dcdc_role'] == 'input' and bool(df.at[i, 'in_service'])]
+    return rows
 
 
-def _electrisim_dc_dc_output_mw(net, i):
-    """What the converter whose input load is ``i`` delivers (MW), from the last load flow."""
-    ld = net.load_dc
-    vsc = ld.at[i, 'electrisim_dcdc_vsc']
-    if pd.notna(vsc):
-        vsc = int(vsc)
+def _electrisim_stage_output_mw(net, table, idx):
+    """What a stage's output delivers (MW), from the last load flow."""
+    if idx is None or not np.isfinite(idx):
+        return np.nan
+    idx = int(idx)
+    if table == 'vsc':
         res = getattr(net, 'res_vsc', None)
-        return -float(res.at[vsc, 'p_dc_mw']) if res is not None and vsc in res.index else np.nan
-    out = ld.at[i, 'electrisim_dcdc_out']
-    return -float(ld.at[int(out), 'p_dc_mw']) if pd.notna(out) and int(out) in ld.index else np.nan
+        return -float(res.at[idx, 'p_dc_mw']) if res is not None and idx in res.index else np.nan
+    if table == 'load_dc':
+        return -float(net.load_dc.at[idx, 'p_dc_mw']) if idx in net.load_dc.index else np.nan
+    if table == 'ext_grid':
+        res = getattr(net, 'res_ext_grid', None)
+        return float(res.at[idx, 'p_mw']) if res is not None and idx in res.index else np.nan
+    if table == 'sgen':
+        return float(net.sgen.at[idx, 'p_mw']) if idx in net.sgen.index else np.nan
+    return np.nan
+
+
+def _electrisim_dc_dc_output_mw(net, i, table='load_dc'):
+    """What the stage whose input is row ``i`` of ``table`` delivers (MW)."""
+    df = net[table]
+    return _electrisim_stage_output_mw(net, df.at[i, 'electrisim_dcdc_out_table'], df.at[i, 'electrisim_dcdc_out_idx'])
+
+
+def _electrisim_stage_result(net, stage):
+    """A converter stage's input and output power, loss, efficiency and loading."""
+    table, i = stage['input']
+    out = {'stage': stage['stage'], 'rated_mw': stage['rated_mw'], 'p_in_mw': 0.0, 'p_out_mw': 0.0,
+           'loss_mw': 0.0, 'efficiency_percent': None, 'loading_percent': 0.0}
+    if i is None or i not in net[table].index or not bool(net[table].at[i, 'in_service']):
+        return out
+    p_in = float(net[table].at[i, _STAGE_P_COLUMN[table]])
+    p_out = _electrisim_dc_dc_output_mw(net, i, table)
+    if not np.isfinite(p_out):
+        return out
+    out.update(p_in_mw=p_in, p_out_mw=p_out, loss_mw=p_in - p_out,
+               efficiency_percent=100.0 * p_out / p_in if p_in > 1e-12 and p_out >= 0 else None,
+               loading_percent=100.0 * max(abs(p_in), abs(p_out)) / stage['rated_mw'] if stage['rated_mw'] > 0 else None)
+    return out
 
 
 def _electrisim_dc_dc_result(net, rec):
@@ -2076,6 +2150,157 @@ def _electrisim_dc_dc_result(net, rec):
     if rec['rated_mw'] > 0 and out['loading_percent'] and out['loading_percent'] > 100.0:
         _electrisim_warn(net, f"DC/DC Converter '{rec['label']}' is loaded to {out['loading_percent']:.1f} % "
                               "of its rated power.")
+    return out
+
+
+# --- Solid-state transformers -------------------------------------------------------------
+#
+# One element, three ports: MV AC, LV DC, and an optional LV AC. It is built
+# as three stages on the DC/DC converter's parts, each stage's input drawing
+# its output divided by its efficiency plus its no-load loss:
+#   rectifier   the power the MV bus supplies, with a set Q, into an internal
+#               DC link held at the voltage the user sets;
+#   DC/DC       from the link to the LV DC port, holding its voltage;
+#   inverter    from the LV DC port to the LV AC port: grid-following, a set
+#               P and Q into an LV AC network another source holds, or
+#               grid-forming, holding an islanded LV AC network's voltage.
+# The rectifier is the P and Q it draws at the MV bus rather than a lossy VSC,
+# so each stage's efficiency holds exactly, as the DC/DC converter's does.
+
+def _electrisim_build_ssts(net, Busbars):
+    pending = getattr(net, '_electrisim_pending_sst', None) or []
+    net.electrisim_ssts = []
+    for el in pending:
+        name = el.get('name')
+        label = el.get('userFriendlyName') or name
+        b_mv, b_lvac = Busbars.get(el.get('bus_mv')), Busbars.get(el.get('bus_lv_ac'))
+        b_lvdc = _electrisim_dc_bus(net, el.get('bus_lv_dc'))
+        if b_mv is not None and b_lvac is not None and float(net.bus.at[b_lvac, 'vn_kv']) > float(net.bus.at[b_mv, 'vn_kv']):
+            b_mv, b_lvac = b_lvac, b_mv   # the MV port is the higher voltage, whichever pin it is on
+        if b_mv is None or b_lvdc is None:
+            _electrisim_warn(net, f"Solid-State Transformer '{label}' needs an AC bus at its MV port and a DC bus at "
+                                  "its LV DC port, so it is left out.")
+            continue
+        on = _electrisim_in_service(el)
+
+        def stage_params(prefix, eta_default, rated_default):
+            eta = safe_float(el.get(f'{prefix}_efficiency_percent'), eta_default) / 100.0
+            if not 0 < eta <= 1:
+                _electrisim_warn(net, f"Solid-State Transformer '{label}': a {prefix} efficiency of {100 * eta:g} % "
+                                      "is taken as 100 %.")
+                eta = 1.0
+            return eta, safe_float(el.get(f'{prefix}_no_load_kw'), 0.0) / 1e3, safe_float(el.get(f'{prefix}_rated_mw'), rated_default)
+
+        rec = {'name': name, 'id': el.get('id', ''), 'label': label, 'in_service': on, 'bus_mv': int(b_mv),
+               'bus_lvdc': int(b_lvdc), 'bus_lvac': int(b_lvac) if b_lvac is not None else None,
+               'link_kv': safe_float(el.get('link_kv'), 0.0), 'stages': [], 'aux': [], 'inverter_mode': None}
+        if rec['link_kv'] <= 0:
+            rec['link_kv'] = float(net.bus.at[b_mv, 'vn_kv']) * math.sqrt(2) * 1.1
+        for key, bus, vn in (('vn_mv_kv', b_mv, float(net.bus.at[b_mv, 'vn_kv'])),
+                             ('vn_lv_dc_kv', b_lvdc, float(net.bus_dc.at[b_lvdc, 'vn_kv'])),
+                             ('vn_lv_ac_kv', b_lvac, float(net.bus.at[b_lvac, 'vn_kv']) if b_lvac is not None else None)):
+            rated_kv = safe_float(el.get(key), 0.0)
+            if vn and rated_kv > 0 and abs(rated_kv - vn) > 0.1 * vn:
+                port = {'vn_mv_kv': 'MV', 'vn_lv_dc_kv': 'LV DC', 'vn_lv_ac_kv': 'LV AC'}[key]
+                _electrisim_warn(net, f"Solid-State Transformer '{label}': its {port} port is rated {rated_kv:g} kV, "
+                                      f"its bus is {vn:g} kV.")
+
+        # The internal DC link, held by the rectifier.
+        link = pp.create_bus_dc(net, vn_kv=rec['link_kv'], name=f'{name} DC link', in_service=on)
+        net.bus_dc.at[link, 'electrisim_aux'] = True
+        r_eta, r_nl, r_rated = stage_params('rect', 98.5, 1.0)
+        r_vsc, r_bus, r_grid = _electrisim_aux_dc_source(net, link, 1.0, r_rated, f'{name} rectifier', on)
+        mv_load = pp.create_load(net, b_mv, p_mw=r_nl, q_mvar=safe_float(el.get('q_mv_mvar'), 0.0), name=name,
+                                 in_service=on)
+        for key, value in _electrisim_stage_columns(name, r_eta, r_nl, ('vsc', r_vsc)).items():
+            net.load.at[mv_load, key] = value
+        if 'id' in net.load.columns:
+            net.load.at[mv_load, 'id'] = el.get('id', '')
+        rec['stages'].append({'stage': 'rectifier', 'input': ('load', int(mv_load)), 'rated_mw': r_rated})
+
+        # The DC/DC stage, holding the LV DC port.
+        d_eta, d_nl, d_rated = stage_params('dcdc', 98.0, 1.0)
+        d_vsc, d_bus, d_grid = _electrisim_aux_dc_source(net, b_lvdc, safe_float(el.get('vm_lv_dc_pu'), 1.0),
+                                                         d_rated, f'{name} DC/DC', on)
+        d_in = _electrisim_new_load_dc(net, link, d_nl, f'{name} DC/DC input', on,
+                                       **_electrisim_stage_columns(name, d_eta, d_nl, ('vsc', d_vsc)))
+        rec['stages'].append({'stage': 'dcdc', 'input': ('load_dc', int(d_in)), 'rated_mw': d_rated})
+        rec['aux'] = [('vsc', r_vsc), ('ext_grid', r_grid), ('bus', r_bus), ('vsc', d_vsc), ('ext_grid', d_grid),
+                      ('bus', d_bus), ('load_dc', int(d_in)), ('bus_dc', int(link))]
+
+        # The inverter, when the LV AC port is connected.
+        if b_lvac is not None:
+            i_eta, i_nl, i_rated = stage_params('inv', 97.5, 0.5)
+            mode = 'grid_forming' if str(el.get('inverter_mode') or '').strip().lower() == 'grid_forming' else 'grid_following'
+            rec['inverter_mode'] = mode
+            if mode == 'grid_following':
+                out = pp.create_sgen(net, b_lvac, p_mw=safe_float(el.get('p_ac_mw'), 0.0),
+                                     q_mvar=safe_float(el.get('q_ac_mvar'), 0.0), name=f'{name} inverter',
+                                     in_service=on, k=1.2, rx=0.1)
+                net.sgen.at[out, 'electrisim_aux'] = True
+                output = ('sgen', int(out))
+            else:
+                # Its short-circuit power: an inverter's current limit, some 1.2 times its rating.
+                s_sc = max(1.2 * i_rated, 0.01)
+                out = pp.create_ext_grid(net, b_lvac, vm_pu=safe_float(el.get('vm_lv_ac_pu'), 1.0), name=f'{name} inverter',
+                                         in_service=on, s_sc_max_mva=s_sc, s_sc_min_mva=s_sc, rx_max=0.1, rx_min=0.1)
+                net.ext_grid.at[out, 'electrisim_aux'] = True
+                output = ('ext_grid', int(out))
+                _electrisim_sst_check_island(net, rec, int(out))
+            p0 = _electrisim_dc_dc_input_power(safe_float(el.get('p_ac_mw'), 0.0), i_eta, i_nl) if mode == 'grid_following' else i_nl
+            i_in = _electrisim_new_load_dc(net, b_lvdc, p0, f'{name} inverter input', on,
+                                           **_electrisim_stage_columns(name, i_eta, i_nl, output))
+            rec['stages'].append({'stage': 'inverter', 'input': ('load_dc', int(i_in)), 'rated_mw': i_rated,
+                                  'output': output})
+            rec['aux'].append(('load_dc', int(i_in)))
+        net.electrisim_ssts.append(rec)
+        if not hasattr(net, 'user_friendly_names'):
+            net.user_friendly_names = {}
+        net.user_friendly_names[name] = label
+
+
+def _electrisim_sst_check_island(net, rec, grid):
+    """A grid-forming inverter holds an LV AC network nothing else holds."""
+    try:
+        mg = top.create_nxgraph(net, respect_switches=True)
+        island = set(top.connected_component(mg, rec['bus_lvac']))
+    except Exception:   # noqa: BLE001 - the check is advisory
+        return
+    others = [i for i in net.ext_grid.index if i != grid and bool(net.ext_grid.at[i, 'in_service'])
+              and int(net.ext_grid.at[i, 'bus']) in island]
+    others += [('gen', i) for i in net.gen.index if bool(net.gen.at[i, 'in_service']) and int(net.gen.at[i, 'bus']) in island]
+    if others or rec['bus_mv'] in island:
+        _electrisim_warn(net, f"Solid-State Transformer '{rec['label']}': its grid-forming inverter holds an LV AC "
+                              "network another source also holds; a grid-following inverter suits a network that "
+                              "is not an island.")
+
+
+def _electrisim_sst_result(net, rec):
+    out = {'name': rec['name'], 'id': rec['id'], 'in_service': rec['in_service'], 'inverter_mode': rec['inverter_mode'],
+           'link_kv': rec['link_kv'], 'stages': [_electrisim_stage_result(net, st) for st in rec['stages']],
+           'p_mv_mw': 0.0, 'q_mv_mvar': 0.0, 'vm_mv_pu': None, 'vm_lv_dc_pu': None, 'vm_lv_ac_pu': None,
+           'p_lv_ac_mw': None, 'q_lv_ac_mvar': None}
+    table, i = rec['stages'][0]['input']
+    if rec['in_service'] and i in net.load.index:
+        out['p_mv_mw'] = float(net.load.at[i, 'p_mw'])
+        out['q_mv_mvar'] = float(net.load.at[i, 'q_mvar'])
+    for key, res, bus in (('vm_mv_pu', 'res_bus', rec['bus_mv']), ('vm_lv_dc_pu', 'res_bus_dc', rec['bus_lvdc']),
+                          ('vm_lv_ac_pu', 'res_bus', rec['bus_lvac'])):
+        df = getattr(net, res, None)
+        if bus is not None and df is not None and bus in df.index and np.isfinite(df.at[bus, 'vm_pu']):
+            out[key] = float(df.at[bus, 'vm_pu'])
+    inverter = next((st for st in rec['stages'] if st['stage'] == 'inverter'), None)
+    if inverter and rec['in_service']:
+        table, idx = inverter['output']
+        if table == 'sgen':
+            out['p_lv_ac_mw'], out['q_lv_ac_mvar'] = float(net.sgen.at[idx, 'p_mw']), float(net.sgen.at[idx, 'q_mvar'])
+        elif idx in getattr(net, 'res_ext_grid', pd.DataFrame()).index:
+            out['p_lv_ac_mw'] = float(net.res_ext_grid.at[idx, 'p_mw'])
+            out['q_lv_ac_mvar'] = float(net.res_ext_grid.at[idx, 'q_mvar'])
+    for st in out['stages']:
+        if st['loading_percent'] and st['loading_percent'] > 100.0:
+            _electrisim_warn(net, f"Solid-State Transformer '{rec['label']}': its {st['stage']} stage is loaded to "
+                                  f"{st['loading_percent']:.1f} % of its rated power.")
     return out
 
 
@@ -2291,11 +2516,24 @@ def _electrisim_set_aside_dc_network(net, study):
         df = net[table]
         if len(df):
             df.drop(df.index, inplace=True)
-    # The DC/DC converters' auxiliary AC grids go with them.
-    for table in ('ext_grid', 'bus'):
-        df = net[table]
-        if 'electrisim_aux' in df.columns:
-            df.drop(df.index[df['electrisim_aux'] == True], inplace=True)
+    # The converters' auxiliary AC grids go with them; a grid-forming
+    # inverter, on a real bus, stays as the source of its LV AC network.
+    if 'electrisim_aux' in net.bus.columns:
+        aux_buses = net.bus.index[net.bus['electrisim_aux'] == True]
+        net.ext_grid.drop(net.ext_grid.index[net.ext_grid['bus'].isin(aux_buses)], inplace=True)
+        net.bus.drop(aux_buses, inplace=True)
+        # pandapower's OPF takes the external grids as numbered 0, 1, ...: renumber
+        # them, and the cost rows that name them.
+        renumber = {old: new for new, old in enumerate(net.ext_grid.index)}
+        if any(old != new for old, new in renumber.items()):
+            net.ext_grid.index = [renumber[i] for i in net.ext_grid.index]
+            for cost in ('poly_cost', 'pwl_cost'):
+                df = net[cost] if cost in net else None
+                if df is not None and len(df):
+                    hit = df['et'] == 'ext_grid'
+                    df.loc[hit, 'element'] = df.loc[hit, 'element'].map(lambda e: renumber.get(int(e), e))
+    if getattr(net, 'electrisim_ssts', None):
+        net.electrisim_ssts = []
     if getattr(net, 'electrisim_dc_dc_converters', None):
         net.electrisim_dc_dc_converters = []
     for records in ('electrisim_dc_breakers', 'electrisim_dc_capacitors'):
@@ -4855,6 +5093,13 @@ def create_other_elements(in_data,net,x, Busbars):
                 net.user_friendly_names = {}
             net.user_friendly_names[load_dc_name] = user_friendly_name
         
+        if (in_data[x]['typ'].startswith("Solid-State Transformer")):
+            # Built once every element exists: see _electrisim_build_ssts.
+            if not hasattr(net, '_electrisim_pending_sst'):
+                net._electrisim_pending_sst = []
+            net._electrisim_pending_sst.append(in_data[x])
+            continue
+
         if (in_data[x]['typ'].startswith("DC/DC Converter")):
             # Built once every DC bus exists: see _electrisim_build_dc_dc_converters.
             if not hasattr(net, '_electrisim_pending_dc_dc'):
@@ -5223,6 +5468,7 @@ def create_other_elements(in_data,net,x, Busbars):
             net.user_friendly_names[dcline_name] = element_name
 
     _electrisim_build_dc_dc_converters(net)
+    _electrisim_build_ssts(net, Busbars)
     _electrisim_apply_dc_breakers(net)
     _electrisim_drop_uncoupled_dc(net)
     _electrisim_finish_dc_dc(net)
@@ -5237,7 +5483,7 @@ def create_other_elements(in_data,net,x, Busbars):
     except Exception:
         net._electrisim_export_sgen_q_init = {}
     # A study that does not model DC/DC converters sees each as its input's power.
-    if getattr(net, 'electrisim_dc_dc_converters', None) and (
+    if (getattr(net, 'electrisim_dc_dc_converters', None) or getattr(net, 'electrisim_ssts', None)) and (
             'OptimalPowerFlow' in study or not any(k in study for k in _DCDC_STUDIES)):
         _electrisim_freeze_dc_dc(net)
 
@@ -7641,7 +7887,7 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                             externalgrid = ExternalGridOut(name=net.ext_grid._get_value(index, 'name'), id = net.ext_grid._get_value(index, 'id'), p_mw=row['p_mw'], q_mvar=row['q_mvar'], pf = row['p_mw']/math.sqrt(math.pow(row['p_mw'],2)+math.pow(row['q_mvar'],2)), q_p=row['q_mvar']/row['p_mw'])        
                             externalgridsList.append(externalgrid) 
                             externalgrids = ExternalGridsOut(externalgrids = externalgridsList) 
-                        result = {**result, **externalgrids.__dict__}          
+                        result = {**result, **ExternalGridsOut(externalgrids = externalgridsList).__dict__}          
                              
                 #Generator         
                 if(net.res_gen.empty):
@@ -7659,11 +7905,13 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                     pass
                 else:                    
                         for index, row in net.res_sgen.iterrows():    
+                            if _electrisim_is_aux(net.sgen, index):
+                                continue   # a converter stage's own element
                             staticgenerator = StaticGeneratorOut(name=net.sgen._get_value(index, 'name'), id = net.sgen._get_value(index, 'id'), p_mw=row['p_mw'], q_mvar=row['q_mvar'])        
                             staticgeneratorsList.append(staticgenerator) 
                             staticgenerators = StaticGeneratorsOut(staticgenerators = staticgeneratorsList)
                         
-                        result = {**result, **staticgenerators.__dict__}
+                        result = {**result, **StaticGeneratorsOut(staticgenerators = staticgeneratorsList).__dict__}
                         
                         
                 
@@ -7907,12 +8155,14 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                     pass
                 else:                    
                         for index, row in net.res_load.iterrows():    
+                            if _electrisim_is_aux(net.load, index):
+                                continue   # a converter stage's own element
                             load = LoadOut(name=net.load._get_value(index, 'name'), id = net.load._get_value(index, 'id'), p_mw=row['p_mw'], q_mvar=row['q_mvar'])        
                             # print(load)  # Comment out this debug line
                             loadsList.append(load) 
                             # print(loadsList)  # Comment out this debug line
                             loads = LoadsOut(loads = loadsList) 
-                        result = {**result, **loads.__dict__}        
+                        result = {**result, **LoadsOut(loads = loadsList).__dict__}        
                         
                 #Asymmetric Load
                 if(net.res_asymmetric_load.empty):
@@ -8104,10 +8354,12 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                 #DC Bus
                 if(hasattr(net, 'res_bus_dc') and not net.res_bus_dc.empty):
                     for index, row in net.res_bus_dc.iterrows():    
+                        if _electrisim_is_aux(net.bus_dc, index):
+                            continue   # a converter stage's own element
                         dcbus = DcBusOut(name=net.bus_dc.at[index, 'name'], id=_electrisim_row_id(net.bus_dc, index), vm_pu=row['vm_pu'], p_mw=row['p_mw'])        
                         dcbusesList.append(dcbus) 
                         dcbuses = DcBusesOut(dcbuses = dcbusesList) 
-                    result = {**result, **dcbuses.__dict__}
+                    result = {**result, **DcBusesOut(dcbuses = dcbusesList).__dict__}
                 
                 #Load DC
                 if(hasattr(net, 'res_load_dc') and not net.res_load_dc.empty):
@@ -8117,7 +8369,7 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                         loaddc = LoadDcOut(name=net.load_dc.at[index, 'name'], id=_electrisim_row_id(net.load_dc, index), p_mw=row['p_dc_mw'])        
                         loadsdcList.append(loaddc) 
                         loadsdc = LoadsDcOut(loadsdc = loadsdcList) 
-                    result = {**result, **loadsdc.__dict__}
+                    result = {**result, **LoadsDcOut(loadsdc = loadsdcList).__dict__}
                 
                 #Source DC
                 if(hasattr(net, 'res_source_dc') and not net.res_source_dc.empty):
@@ -8154,6 +8406,10 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                         })
                     result = {**result, 'dcbreakers': breakers}
 
+                # Solid-state transformers: each stage's power, losses and loading; MV P and Q; port voltages.
+                if getattr(net, 'electrisim_ssts', None):
+                    result = {**result, 'ssts': [_electrisim_sst_result(net, r) for r in net.electrisim_ssts]}
+
                 # DC/DC converters: input and output power, losses, loading, both port voltages.
                 if getattr(net, 'electrisim_dc_dc_converters', None):
                     result = {**result, 'dcdcconverters': [_electrisim_dc_dc_result(net, c)
@@ -8187,7 +8443,7 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                         vsc = VSCOut(name=vsc_name, id=vsc_id, p_mw=row['p_mw'], vm_pu=row.get('vm_pu', 0.0), q_mvar=row.get('q_mvar'), p_dc_mw=row.get('p_dc_mw'), vm_dc_pu=row.get('vm_dc_pu'))        
                         vscsList.append(vsc) 
                         vscs = VSCsOut(vscs = vscsList) 
-                    result = {**result, **vscs.__dict__}
+                    result = {**result, **VSCsOut(vscs = vscsList).__dict__}
                 
                 #B2B VSC
                 if(hasattr(net, 'res_b2b_vsc') and not net.res_b2b_vsc.empty):
@@ -12002,14 +12258,14 @@ def time_series_simulation(net, timeseries_params):
             all_results.append({
                 'time_step': t,
                 'converged': net.converged,
-                'bus_results': _electrisim_without_aux(net.res_bus.join(net.bus[['electrisim_aux']]) if 'electrisim_aux' in net.bus.columns else net.res_bus).drop(columns=['electrisim_aux'], errors='ignore').copy(),
+                'bus_results': _electrisim_res_without_aux(net, 'bus'),
                 'line_results': net.res_line.copy(),
                 'gen_results': net.res_gen.copy() if len(net.gen) > 0 else None,
-                'sgen_results': net.res_sgen.copy() if len(net.sgen) > 0 else None,
-                'load_results': net.res_load.copy() if len(net.load) > 0 else None,
+                'sgen_results': _electrisim_res_without_aux(net, 'sgen') if len(net.sgen) > 0 else None,
+                'load_results': _electrisim_res_without_aux(net, 'load') if len(net.load) > 0 else None,
                 'trafo_results': net.res_trafo.copy() if len(net.trafo) > 0 else None,
                 'trafo3w_results': net.res_trafo3w.copy() if len(net.trafo3w) > 0 else None,
-                'ext_grid_results': (_electrisim_without_aux(net.res_ext_grid.join(net.ext_grid[['electrisim_aux']]) if 'electrisim_aux' in net.ext_grid.columns else net.res_ext_grid).drop(columns=['electrisim_aux'], errors='ignore').copy() if len(net.ext_grid) > 0 else None),
+                'ext_grid_results': _electrisim_res_without_aux(net, 'ext_grid') if len(net.ext_grid) > 0 else None,
             })
 
         # Prepare results

@@ -340,6 +340,8 @@ class _Builder:
         for b in net.bus_dc.index:
             if not bool(net.bus_dc.at[b, 'in_service']) or b not in res.index or not np.isfinite(res.at[b, 'vm_pu']):
                 continue
+            if 'electrisim_aux' in net.bus_dc.columns and net.bus_dc.at[b, 'electrisim_aux'] == True:
+                continue   # a solid-state transformer's internal DC link, inside its blocked stages
             self.bus_node[b] = ckt.node(_label(net, 'bus_dc', b))
             self.v_bus[b] = float(res.at[b, 'vm_pu']) * float(net.bus_dc.at[b, 'vn_kv']) * 1e3
         breakers = {}
