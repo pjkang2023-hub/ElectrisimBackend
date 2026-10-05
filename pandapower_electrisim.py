@@ -4601,12 +4601,12 @@ def create_other_elements(in_data,net,x, Busbars):
             if in_data[x].get('id') is not None:
                 src_extra['id'] = in_data[x]['id']
             try:
-                pp.create_source_dc(net, bus_dc=bus_idx, name=in_data[x]['name'],
+                src_idx = pp.create_source_dc(net, bus_dc=bus_idx, name=in_data[x]['name'],
                                     vm_pu=safe_float(in_data[x].get('vm_pu', 1.0)),
                                     in_service=in_service, **src_extra)
             except TypeError:
                 try:
-                    pp.create_source_dc(net, bus=bus_idx, name=in_data[x]['name'],
+                    src_idx = pp.create_source_dc(net, bus=bus_idx, name=in_data[x]['name'],
                                         vm_pu=safe_float(in_data[x].get('vm_pu', 1.0)),
                                         in_service=in_service, **src_extra)
                 except Exception as src_dc_err:
@@ -4616,6 +4616,10 @@ def create_other_elements(in_data,net,x, Busbars):
                 print(f"Warning: Source DC '{in_data[x].get('name')}' not created: {src_dc_err}")
                 continue
             
+            # Its internal resistance and inductance, for the DC fault study: the load flow holds its voltage.
+            net.source_dc.at[src_idx, 'electrisim_r_sc_mohm'] = safe_float(in_data[x].get('r_sc_mohm'), 0.0)
+            net.source_dc.at[src_idx, 'electrisim_l_sc_uh'] = safe_float(in_data[x].get('l_sc_uh'), 0.0)
+
             # Store user-friendly name for source DC
             source_dc_name = in_data[x]['name']
             user_friendly_name = in_data[x].get('userFriendlyName', source_dc_name)
