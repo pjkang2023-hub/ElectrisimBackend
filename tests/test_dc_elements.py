@@ -359,3 +359,18 @@ def test_dc_breaker_at_a_vsc_terminal_and_its_warnings(client, quiet):
     assert any('DC buses' in w and 'DC bus A' in w for w in warnings), warnings
     assert any("DC Breaker 'QV' is rated 0.6 kV, below its bus's 0.8 kV" in w for w in warnings), warnings
     assert any("DC Breaker 'QX' is not connected to a DC bus" in w for w in warnings), warnings
+
+
+def test_dc_source_power_from_what_its_bus_draws(client, quiet):
+    """
+    The battery rack, coupled to DC bus B, holds its bus while the VSC holds
+    DC bus A: what the battery supplies leaves through the coupler. The load
+    flow reports that power - pandapower's own res_source_dc gave 0 MW for a
+    source supplying a load on its own bus.
+    """
+    result = _run(client, quiet, _with(_drawn_request(), _breaker('qr', 'dc_b', 'rack', 'bus_dc')))
+    (batt,) = result['sourcesdc']
+    (qr,) = result['dcbreakers']
+    v_rack = next(b['vm_pu'] for b in result['dcbuses'] if b['id'] == 'cell-rack') * 0.8
+    assert batt['p_mw'] == pytest.approx(qr['i_ka'] * v_rack, rel=1e-6)
+    assert batt['p_mw'] > 0.01

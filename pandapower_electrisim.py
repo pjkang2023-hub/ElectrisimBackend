@@ -2013,7 +2013,7 @@ def _electrisim_finish_dc_dc(net):
 
 
 # The studies that model DC/DC converters; the others see each as the power its input draws.
-_DCDC_STUDIES = ('PowerFlowPandaPower', 'TimeSeriesSimulationPandaPower', 'ContingencyAnalysisPandaPower',
+_DCDC_STUDIES = ('PowerFlowPandaPower', 'TimeSeriesSimulationPandaPower', 'ContingencyAnalysisPandaPower', 'EmtStudy',
                  'DcFaultStudy')
 
 
@@ -2346,6 +2346,8 @@ def _electrisim_apply_dc_breakers(net):
             'limiting_inductance_mh': safe_float(el.get('limiting_inductance_mh'), 0.0),
             'arrester_clamp_kv': safe_float(el.get('arrester_clamp_kv'), 0.0),
             'arrester_energy_kj': safe_float(el.get('arrester_energy_kj'), 0.0),
+            # The EMT study trips it above this (0: twice its rated current).
+            'trip_current_ka': safe_float(el.get('trip_current_ka'), 0.0),
         }
         vn = float(net.bus_dc.at[bus, 'vn_kv'])
         if 0 < rated_kv < vn:
@@ -2547,6 +2549,47 @@ def _electrisim_set_aside_dc_network(net, study):
 
 def _electrisim_row_id(df, index):
     return df.at[index, 'id'] if 'id' in df.columns else str(index)
+
+
+def _electrisim_source_dc_currents_ka(net):
+    """
+    Each DC source's current into its bus (kA), by Kirchhoff's current law
+    there: what its loads draw and its cables carry away, less what its VSCs
+    inject, shared among the bus's sources. pandapower 3.3's res_source_dc
+    does not give it: a source holding a bus with a 0.15 MW load reports 0 MW.
+    """
+    out = {}
+    res_bus = getattr(net, 'res_bus_dc', None)
+    if res_bus is None or 'source_dc' not in net or not len(net.source_dc):
+        return out
+    by_bus = {}
+    for si in net.source_dc.index:
+        bus = int(net.source_dc.at[si, 'bus_dc'])
+        if bool(net.source_dc.at[si, 'in_service']) and bus in res_bus.index and np.isfinite(res_bus.at[bus, 'vm_pu']):
+            by_bus.setdefault(bus, []).append(si)
+    for bus, sources in by_bus.items():
+        v_kv = float(res_bus.at[bus, 'vm_pu']) * float(net.bus_dc.at[bus, 'vn_kv'])
+        if v_kv <= 0:
+            continue
+        i_out = 0.0
+        ld = net.load_dc
+        for li in ld.index[(ld['bus_dc'] == bus) & ld['in_service'].astype(bool)]:
+            i_out += float(ld.at[li, 'p_dc_mw']) / v_kv
+        res_line = getattr(net, 'res_line_dc', None)
+        for li in net.line_dc.index:
+            if not bool(net.line_dc.at[li, 'in_service']) or res_line is None or li not in res_line.index:
+                continue
+            if int(net.line_dc.at[li, 'from_bus_dc']) == bus:
+                i_out += float(res_line.at[li, 'i_from_ka'])
+            if int(net.line_dc.at[li, 'to_bus_dc']) == bus:
+                i_out += float(res_line.at[li, 'i_to_ka'])
+        res_vsc = getattr(net, 'res_vsc', None)
+        for vi in net.vsc.index:
+            if int(net.vsc.at[vi, 'bus_dc']) == bus and bool(net.vsc.at[vi, 'in_service']) and res_vsc is not None and vi in res_vsc.index:
+                i_out += float(res_vsc.at[vi, 'p_dc_mw']) / v_kv     # negative when the VSC injects
+        for si in sources:
+            out[si] = i_out / len(sources)
+    return out
 
 
 def _electrisim_source_dc_vm(net, index):
@@ -8373,8 +8416,13 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                 
                 #Source DC
                 if(hasattr(net, 'res_source_dc') and not net.res_source_dc.empty):
+                    # Its power from what its bus draws: res_source_dc does not give it.
+                    src_i = _electrisim_source_dc_currents_ka(net)
                     for index, row in net.res_source_dc.iterrows():    
-                        sourcedc = SourceDcOut(name=net.source_dc.at[index, 'name'], id=_electrisim_row_id(net.source_dc, index), vm_pu=_electrisim_source_dc_vm(net, index), p_mw=row['p_dc_mw'])        
+                        vm_src = _electrisim_source_dc_vm(net, index)
+                        p_src = (src_i[index] * vm_src * float(net.bus_dc.at[int(net.source_dc.at[index, 'bus_dc']), 'vn_kv'])
+                                 if index in src_i and vm_src is not None else row['p_dc_mw'])
+                        sourcedc = SourceDcOut(name=net.source_dc.at[index, 'name'], id=_electrisim_row_id(net.source_dc, index), vm_pu=vm_src, p_mw=p_src)        
                         sourcesdcList.append(sourcedc) 
                         sourcesdc = SourcesDcOut(sourcesdc = sourcesdcList) 
                     result = {**result, **sourcesdc.__dict__}

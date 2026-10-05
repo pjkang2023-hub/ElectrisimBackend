@@ -1,0 +1,26 @@
+{
+  "description": "EMT benchmarks for the DC networks, 800 V. simscape_emt_benchmarks.m builds each case in Simscape and tests/test_emt.py builds it with Electrisim's solver, both from this file. SI units.",
+  "switch_r_on": 1e-5,
+  "switch_r_off": 1e7,
+  "arrester_r_on": 1e-3,
+  "arrester_r_off": 1e7,
+  "long_cable": {
+    "description": "A source behind R and L energises, from rest, a 2 km cable as 10 pi sections into a resistive load; the far end is faulted at 0.5 ms.",
+    "E": 800.0, "Rs": 0.01, "Ls": 1e-5,
+    "km": 2.0, "r_per_km": 0.1, "l_per_km": 3e-4, "c_per_km": 2e-7, "sections": 10,
+    "R_load": 6.4, "Rf": 0.01, "t_fault": 5e-4, "t_end": 3e-3
+  },
+  "cpl": {
+    "description": "A constant-power load on a capacitor C, behind a source's R and L, at 95 % and 105 % of its stability limit R C v0^2 / L, starting at its equilibrium; its power steps up 1 % at 2 ms.",
+    "E": 800.0, "R": 0.05, "L": 1e-3, "C": 2e-3, "fractions": [0.95, 1.05], "step": 0.01, "t_step": 2e-3, "t_end": 0.15
+  },
+  "breaker": {
+    "description": "A source behind R and L feeds, from rest, a breaker (limiting inductor, switch and surge arrester), a cable and a resistive load; the load end is faulted at 1 ms and the breaker opens at a set time.",
+    "E": 800.0, "Rs": 0.005, "Ls": 2e-5, "L_lim": 1e-4, "Vc": 1400.0,
+    "R_cable": 0.02, "L_cable": 6e-5, "R_load": 6.4, "Rf": 1e-3, "t_fault": 1e-3,
+    "cases": {
+      "solid_state": {"t_open": 1.2e-3, "t_end": 5e-3},
+      "mechanical": {"t_open": 3e-3, "t_end": 8e-3}
+    }
+  }
+}

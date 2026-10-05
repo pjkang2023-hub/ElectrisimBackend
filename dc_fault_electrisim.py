@@ -34,170 +34,12 @@ import warnings
 
 import numpy as np
 import pandapower as pp
-from scipy.linalg import lu_factor, lu_solve
 from scipy.optimize import minimize_scalar
 
 import pandapower_electrisim as pe
+from emt_solver import Circuit, R_BIAS, R_FLOOR, R_OFF, R_ON  # noqa: F401 - the tests use them
 
-R_FLOOR = 1e-6          # ohm: a branch with no R or L
-R_ON, R_OFF = 1e-5, 1e6  # ohm: a diode conducting / blocking
-R_BIAS = 1e6            # ohm: holds a converter's AC side at its DC link's midpoint
-
-
-# --- The circuit and its solver ------------------------------------------------------
-
-class Circuit:
-    """
-    A circuit of two-terminal branches between nodes; node 0 is the DC
-    negative pole. Each branch's current is from its node a to its node b:
-
-    - RL: v_a - v_b + e(t) = R i + L di/dt, with e = e0 + E cos(w t + phi);
-    - C:  i = C d(v_a - v_b)/dt;
-    - R:  i = (v_a - v_b) / R;
-    - diode, anode a and cathode b: a resistance of R_ON conducting, R_OFF not.
-
-    Its state at t = 0 is each RL branch's current and each capacitor's
-    voltage v_a - v_b.
-    """
-
-    def __init__(self):
-        self.labels = ['DC negative pole']
-        self.rl, self.c, self.r, self.d = [], [], [], []
-
-    def node(self, label):
-        self.labels.append(label)
-        return len(self.labels) - 1
-
-    def add_rl(self, a, b, r, l, i0=0.0, e0=0.0, ac=None):
-        """``ac``: (amplitude, omega, phase) of an AC electromotive force."""
-        if r <= 0 and l <= 0:
-            r = R_FLOOR
-        amp, om, ph = ac or (0.0, 0.0, 0.0)
-        self.rl.append((a, b, max(r, 0.0), max(l, 0.0), i0, e0, amp, om, ph))
-        return len(self.rl) - 1
-
-    def add_c(self, a, b, c, w0=0.0):
-        self.c.append((a, b, c, w0))
-        return len(self.c) - 1
-
-    def add_r(self, a, b, r):
-        self.r.append((a, b, max(r, R_FLOOR)))
-        return len(self.r) - 1
-
-    def add_diode(self, anode, cathode):
-        self.d.append((anode, cathode))
-        return len(self.d) - 1
-
-    def simulate(self, t_end, dt, dt_coarse=None, t_fine=None, max_switch_iter=40):
-        """
-        Trapezoidal integration, with backward Euler for the first step and
-        for a step where a diode switches (which would otherwise ring).
-        Returns times and, at each, node voltages and branch currents.
-        """
-        n = len(self.labels)
-        rl = np.array(self.rl, dtype=float).reshape(-1, 9)
-        cc = np.array(self.c, dtype=float).reshape(-1, 4)
-        rr = np.array(self.r, dtype=float).reshape(-1, 3)
-        dd = np.array(self.d, dtype=int).reshape(-1, 2)
-        ra, rb = rl[:, 0].astype(int), rl[:, 1].astype(int)
-        R, L = rl[:, 2], rl[:, 3]
-        e0, eamp, eom, eph = rl[:, 5], rl[:, 6], rl[:, 7], rl[:, 8]
-        ca, cb, C = cc[:, 0].astype(int), cc[:, 1].astype(int), cc[:, 2]
-        xa, xb, Gr = rr[:, 0].astype(int), rr[:, 1].astype(int), 1.0 / rr[:, 2]
-        da, db = dd[:, 0], dd[:, 1]
-
-        steps = []
-        t = 0.0
-        t_fine = t_end if t_fine is None else t_fine
-        while t < t_end - 1e-15:
-            h = dt if t < t_fine - 1e-15 else (dt_coarse or dt)
-            h = min(h, t_end - t)
-            steps.append(h)
-            t += h
-        N = len(steps)
-        times = np.concatenate([[0.0], np.cumsum(steps)])
-        v_out = np.zeros((N + 1, n))
-        i_rl = np.zeros((N + 1, len(R)))
-        i_c = np.zeros((N + 1, len(C)))
-        i_r = np.zeros((N + 1, len(Gr)))
-        i_d = np.zeros((N + 1, len(da)))
-
-        def emf(tt):
-            return e0 + eamp * np.cos(eom * tt + eph)
-
-        i_now = rl[:, 4].copy()
-        w_now = cc[:, 3].copy()
-        ic_now = np.zeros(len(C))
-        v_now = None
-        on = np.zeros(len(da), dtype=bool)
-        i_rl[0] = i_now
-        cache = {}
-
-        def stamp(a, b, g, Y):
-            np.add.at(Y, (a, a), g)
-            np.add.at(Y, (b, b), g)
-            np.add.at(Y, (a, b), -g)
-            np.add.at(Y, (b, a), -g)
-
-        def factor(method, h, state):
-            key = (method, h, state.tobytes())
-            if key not in cache:
-                k = 2.0 if method == 'tr' else 1.0
-                Y = np.zeros((n, n))
-                stamp(ra, rb, 1.0 / (R + k * L / h), Y)
-                stamp(ca, cb, k * C / h, Y)
-                stamp(xa, xb, Gr, Y)
-                stamp(da, db, np.where(state, 1.0 / R_ON, 1.0 / R_OFF), Y)
-                if len(cache) > 256:
-                    cache.clear()
-                cache[key] = lu_factor(Y[1:, 1:])
-            return cache[key]
-
-        t = 0.0
-        for s, h in enumerate(steps):
-            t1 = t + h
-            e_now, e_next = emf(t), emf(t1)
-            method = 'be' if s == 0 else 'tr'
-            for _ in range(2):
-                state = on.copy()
-                for _it in range(max_switch_iter):
-                    k = 2.0 if method == 'tr' else 1.0
-                    G = 1.0 / (R + k * L / h)
-                    if method == 'tr':
-                        u_now = v_now[ra] - v_now[rb] + e_now
-                        J = G * e_next + G * (u_now + (2.0 * L / h - R) * i_now)
-                        Gc = 2.0 * C / h
-                        Jc = -Gc * w_now - ic_now
-                    else:
-                        J = G * e_next + G * (L / h) * i_now
-                        Gc = C / h
-                        Jc = -Gc * w_now
-                    rhs = np.bincount(rb, J, n) - np.bincount(ra, J, n)
-                    rhs += np.bincount(cb, Jc, n) - np.bincount(ca, Jc, n)
-                    v = np.zeros(n)
-                    v[1:] = lu_solve(factor(method, h, state), rhs[1:])
-                    vd = v[da] - v[db]
-                    new = np.where(state, vd > 0.0, vd > 1e-9)
-                    if np.array_equal(new, state):
-                        break
-                    state = new
-                if method == 'be' or np.array_equal(state, on):
-                    break
-                method = 'be'   # a diode switched: take this step by backward Euler
-                on = state
-            on = state
-            i_now = G * (v[ra] - v[rb]) + J
-            w_next = v[ca] - v[cb]
-            ic_now = Gc * w_next + Jc
-            w_now = w_next
-            v_now = v
-            t = t1
-            v_out[s + 1] = v
-            i_rl[s + 1] = i_now
-            i_c[s + 1] = ic_now
-            i_r[s + 1] = Gr * (v[xa] - v[xb])
-            i_d[s + 1] = np.where(on, 1.0 / R_ON, 1.0 / R_OFF) * (v[da] - v[db])
-        return {'t': times, 'v': v_out, 'i_rl': i_rl, 'i_c': i_c, 'i_r': i_r, 'i_d': i_d}
+# The solver: emt_solver.Circuit, shared with the EMT study.
 
 
 # --- IEC 61660-1's terms -------------------------------------------------------------
@@ -422,8 +264,8 @@ class _Builder:
             if not bool(net.source_dc.at[si, 'in_service']) or bus not in self.bus_node:
                 continue
             label = _label(net, 'source_dc', si)
-            p = _f(net.res_source_dc.at[si, 'p_dc_mw']) if si in net.res_source_dc.index else 0.0
-            i0 = -p * 1e6 / self._v(bus)   # injected (the results use the load convention)
+            # Injected: from what its bus draws (pandapower's res_source_dc does not give it).
+            i0 = pe._electrisim_source_dc_currents_ka(net).get(si, 0.0) * 1e3
             r = _f(net.source_dc.at[si, 'electrisim_r_sc_mohm']) * 1e-3 if 'electrisim_r_sc_mohm' in net.source_dc.columns else 0.0
             l = _f(net.source_dc.at[si, 'electrisim_l_sc_uh']) * 1e-6 if 'electrisim_l_sc_uh' in net.source_dc.columns else 0.0
             if r <= 0 and l <= 0:
