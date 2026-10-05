@@ -178,3 +178,95 @@ def test_other_studies_run_with_a_dc_network(client, quiet, fixture, params):
     result = json.loads(response.get_data(as_text=True))
     if isinstance(result, dict):
         assert not result.get('error'), result.get('message') or result.get('exception')
+
+
+# --- Phase 3: DC load models, DC capacitors, cable data for EMT -------------------
+
+V_DC = 800.0          # V, the DC network's nominal voltage
+P_B = 0.1e6           # W, Server hall B's rated power
+
+
+def _bus_b_load_flow(client, quiet, cable_km=0.1, **load_fields):
+    """The DC network with Server hall B given a load model; DC bus B's voltage and B's power."""
+    request = _drawn_request()
+    _dc_element(request, 'cable')['length_km'] = str(cable_km)
+    _dc_element(request, 'ld_b').update({k: str(v) for k, v in load_fields.items()})
+    with quiet():
+        response = client.post('/', json=request)
+    result = json.loads(response.get_data(as_text=True))
+    assert not result.get('error'), result.get('message')
+    v = next(b['vm_pu'] for b in result['dcbuses'] if b['id'] == 'cell-dc_b')
+    p = next(l['p_mw'] for l in result['loadsdc'] if l['id'] == 'cell-ld_b')
+    return v, p, result
+
+
+def _exact_bus_b(cable_km, current_of_v):
+    """DC bus A held at 1.0 p.u. by the VSC: V_B = V_A - R I(V_B), solved for V_B (p.u.)."""
+    from scipy.optimize import brentq
+    r = CABLE['r_ohm_per_km'] * cable_km
+    return brentq(lambda v: v - (1.0 - r * current_of_v(v) / V_DC), 0.05, 1.0)
+
+
+@pytest.mark.parametrize('model, shares, current', [
+    ('constant_current', None, lambda v: P_B / V_DC),
+    ('constant_resistance', None, lambda v: v * V_DC / (V_DC ** 2 / P_B)),
+    ('mixed', (50, 30, 20), lambda v: (0.5 * P_B / (v * V_DC) + 0.3 * P_B / V_DC + 0.2 * v * P_B / V_DC)),
+])
+def test_dc_load_models_in_the_load_flow(client, quiet, model, shares, current):
+    """
+    A DC load's power follows its bus voltage: constant current P = P0 v,
+    constant resistance P = P0 v^2, or a mix with constant power. The load
+    flow repeats until the loads settle; each matches the cable's exact
+    solution, over a 2 km cable so the voltage drop shows.
+    """
+    fields = {'load_model': model}
+    if shares:
+        fields.update(share_p_percent=shares[0], share_i_percent=shares[1], share_r_percent=shares[2])
+    v, p, _ = _bus_b_load_flow(client, quiet, cable_km=2.0, **fields)
+    exact = _exact_bus_b(2.0, current)
+    assert v == pytest.approx(exact, abs=1e-6)
+    assert p * 1e6 == pytest.approx(current(exact) * exact * V_DC, rel=1e-5)
+
+
+def test_dc_constant_power_load_turns_constant_current_at_low_voltage(client, quiet):
+    """
+    Over 20 km (2 Ohm) a 0.1 MW constant-power load has no solution: V^2 - V +
+    R P/V^2 = 0 needs R P/V^2 <= 1/4 and it is 0.31. Below 0.8 p.u. its
+    converter draws constant current, P0/(0.8 V): the bus settles at
+    1 - R P0/(0.8 V^2) = 0.609 p.u., drawing 0.076 MW.
+    """
+    v, p, _ = _bus_b_load_flow(client, quiet, cable_km=20.0, load_model='constant_power', v_min_pu=0.8)
+    exact = _exact_bus_b(20.0, lambda v: P_B / (0.8 * V_DC) if v < 0.8 else P_B / (v * V_DC))
+    assert exact == pytest.approx(1 - 2.0 * P_B / (0.8 * V_DC ** 2))
+    assert v == pytest.approx(exact, abs=1e-6)
+    assert p == pytest.approx(0.1 * exact / 0.8, rel=1e-5)
+
+
+def test_dc_capacitor_holds_its_energy_and_cable_keeps_its_emt_data(client, quiet):
+    """
+    A DC-link capacitor draws nothing in steady state; the results give its
+    stored energy, C V^2 / 2: 10 mF at 800 V holds 3.2 kJ. A DC cable's
+    inductance and capacitance are kept for the EMT study.
+    """
+    import pandapower_electrisim as pe
+    request = _drawn_request()
+    start = max(int(k) for k in request if str(k).isdigit()) + 1
+    request[str(start)] = {'typ': 'DC Capacitor0', 'name': 'cap', 'id': 'cell-cap', 'userFriendlyName': 'DC link',
+                           'bus': 'dc_a', 'c_mf': '10', 'esr_mohm': '2', 'esl_uh': '0.5'}
+    _dc_element(request, 'cable').update(l_mh_per_km='0.3', c_uf_per_km='0.2')
+    with quiet():
+        response = client.post('/', json=request)
+    result = json.loads(response.get_data(as_text=True))
+    assert not result.get('error'), result.get('message')
+    (cap,) = result['dccapacitors']
+    assert cap['vm_pu'] == pytest.approx(1.0) and cap['energy_kj'] == pytest.approx(3.2)
+    # Same DC bus voltages as without it.
+    v_b = next(b['vm_pu'] for b in result['dcbuses'] if b['id'] == 'cell-dc_b')
+    assert v_b == pytest.approx(1 - 0.01 * P_B / V_DC ** 2, abs=2e-5)
+
+    net = pp.create_empty_network()
+    with quiet():
+        busbars = pe.create_busbars(request, net)
+        pe.create_other_elements(request, net, '0', busbars)
+    assert net.line_dc.at[0, 'l_mh_per_km'] == pytest.approx(0.3) and net.line_dc.at[0, 'c_uf_per_km'] == pytest.approx(0.2)
+    assert net.electrisim_dc_capacitors[0]['esr_mohm'] == pytest.approx(2.0)

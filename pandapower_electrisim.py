@@ -1700,6 +1700,105 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
     
     return '\n'.join(lines)
 
+# --- Voltage-dependent DC loads ---------------------------------------------------------
+#
+# pandapower's DC load draws a fixed power. A DC load can also be constant
+# current, constant resistance, or a mix; its constant-power part changes to
+# constant current below v_min_pu (a converter's input current limit). The
+# model is kept as columns on net.load_dc, so it survives network copies, and
+# _electrisim_runpp repeats the load flow until those loads settle.
+
+_DC_LOAD_MODEL_COLUMNS = ('electrisim_p_rated_mw', 'electrisim_share_p', 'electrisim_share_i',
+                          'electrisim_share_r', 'electrisim_v_min_pu')
+_DC_LOAD_SHARES = {
+    'constant_power': (1.0, 0.0, 0.0),
+    'constant_current': (0.0, 1.0, 0.0),
+    'constant_resistance': (0.0, 0.0, 1.0),
+}
+
+
+def _electrisim_dc_load_shares(el):
+    """(constant power, constant current, constant resistance) shares of a DC load's rated power."""
+    model = str(el.get('load_model') or 'constant_power').strip().lower()
+    if model in _DC_LOAD_SHARES:
+        return _DC_LOAD_SHARES[model]
+    shares = [max(0.0, safe_float(el.get(k), d)) for k, d in
+              (('share_p_percent', 100.0), ('share_i_percent', 0.0), ('share_r_percent', 0.0))]
+    total = sum(shares)
+    return tuple(x / total for x in shares) if total > 0 else (1.0, 0.0, 0.0)
+
+
+def _electrisim_dc_load_power(p_rated, share_p, share_i, share_r, v_min, v):
+    """A DC load's power (MW) at its bus voltage v (p.u.)."""
+    v = max(float(v), 0.0)
+    p_part = 1.0 if v >= v_min else (v / v_min if v_min > 0 else 1.0)
+    return p_rated * (share_p * p_part + share_i * v + share_r * v * v)
+
+
+def _electrisim_has_dc_load_models(net):
+    ld = getattr(net, 'load_dc', None)
+    return (ld is not None and len(ld) and 'electrisim_share_p' in ld.columns
+            and bool((ld['electrisim_share_p'].fillna(1.0) < 1.0 - 1e-12).any()
+                     | (ld['electrisim_v_min_pu'].fillna(0.0) > 0).any()))
+
+
+def _electrisim_runpp(net, max_rounds=60, tolerance_mw=1e-9, **kwargs):
+    """
+    pp.runpp with voltage-dependent DC loads settled: plain runpp when there
+    is none.
+
+    Each such load is solved for the power it draws at the voltage that power
+    gives, g(p) = p - P(v(p)) = 0. A round sets each load to the power its
+    voltage gave in the last one - which settles normal cases in a few rounds -
+    while each load keeps a bracket on g's sign change and bisects when the
+    next power would leave it. A load flow that does not solve counts as too
+    much load. Near the voltage-collapse point, where repeating alone swings
+    back and forth, the bracket still closes on the answer.
+    """
+    if not _electrisim_has_dc_load_models(net):
+        return pp.runpp(net, **kwargs)
+    ld = net.load_dc
+    rows = [i for i in ld.index if pd.notna(ld.at[i, 'electrisim_share_p'])]
+    lo = {i: 0.0 for i in rows}       # powers known to be too low (g < 0)
+    hi = {i: None for i in rows}      # powers known to be too high (g > 0), once one is
+    for _ in range(max_rounds):
+        try:
+            pp.runpp(net, **kwargs)
+        except pp.LoadflowNotConverged:
+            for i in rows:
+                p = float(ld.at[i, 'p_dc_mw'])
+                hi[i] = p if hi[i] is None else min(hi[i], p)
+                ld.at[i, 'p_dc_mw'] = 0.5 * (lo[i] + hi[i])
+            kwargs = {**kwargs, 'init': 'auto'}
+            continue
+        worst = 0.0
+        proposals = {}
+        for i in rows:
+            bus = ld.at[i, 'bus_dc']
+            v = net.res_bus_dc.at[bus, 'vm_pu'] if bus in net.res_bus_dc.index else np.nan
+            if not np.isfinite(v):
+                continue
+            p = float(ld.at[i, 'p_dc_mw'])
+            target = _electrisim_dc_load_power(*(float(ld.at[i, c]) for c in _DC_LOAD_MODEL_COLUMNS), v)
+            worst = max(worst, abs(target - p))
+            if target > p:
+                lo[i] = max(lo[i], p)
+            elif target < p:
+                hi[i] = p if hi[i] is None else min(hi[i], p)
+            inside = target > lo[i] and (hi[i] is None or target < hi[i])
+            proposals[i] = target if inside else 0.5 * (lo[i] + (hi[i] if hi[i] is not None else 2 * p))
+        if worst <= tolerance_mw:
+            # The powers this round used are those its voltages give.
+            return None
+        for i, p_next in proposals.items():
+            ld.at[i, 'p_dc_mw'] = p_next
+        if kwargs.get('init') != 'results':
+            kwargs = {**kwargs, 'init': 'results'}
+    _electrisim_warn(net, f"Voltage-dependent DC loads had not settled after {max_rounds} load flows: "
+                          "their powers are those of the last one.")
+    return None
+
+
 def _electrisim_warn(net, message):
     """A warning returned with the results (net.warnings), and printed."""
     if not hasattr(net, 'warnings'):
@@ -1763,6 +1862,8 @@ def _electrisim_drop_uncoupled_dc(net):
             hit = df[list(cols)].isin(drop).any(axis=1)
             df.drop(df.index[hit], inplace=True)
     bus_dc.drop(sorted(drop), inplace=True)
+    if getattr(net, 'electrisim_dc_capacitors', None):
+        net.electrisim_dc_capacitors = [c for c in net.electrisim_dc_capacitors if c['bus_dc'] not in drop]
     _electrisim_warn(net, f"DC bus{'es' if len(labels) > 1 else ''} {', '.join(labels)} "
                           f"{'are' if len(labels) > 1 else 'is'} not connected to the AC network through a VSC, "
                           "so it and what is on it are left out: pandapower solves a DC network only "
@@ -4308,6 +4409,15 @@ def create_other_elements(in_data,net,x, Busbars):
             # An explicit index: pandapower 3.3 takes create_load_dc's next index
             # from the DC source table, so each DC load overwrote the last.
             dc_extra['index'] = int(net.load_dc.index.max()) + 1 if len(net.load_dc) else 0
+            # Its model: shares of constant power, current and resistance, and
+            # the voltage below which the constant-power part draws constant
+            # current; the input filter is for the EMT study.
+            share_p, share_i, share_r = _electrisim_dc_load_shares(in_data[x])
+            dc_extra.update(electrisim_p_rated_mw=p_dc, electrisim_share_p=share_p, electrisim_share_i=share_i,
+                            electrisim_share_r=share_r,
+                            electrisim_v_min_pu=safe_float(in_data[x].get('v_min_pu'), 0.0),
+                            filter_l_mh=safe_float(in_data[x].get('filter_l_mh'), 0.0),
+                            filter_c_uf=safe_float(in_data[x].get('filter_c_uf'), 0.0))
             try:
                 pp.create_load_dc(net, bus_dc=bus_idx, name=in_data[x]['name'],
                                   p_dc_mw=p_dc, in_service=in_service, **dc_extra)
@@ -4329,6 +4439,28 @@ def create_other_elements(in_data,net,x, Busbars):
                 net.user_friendly_names = {}
             net.user_friendly_names[load_dc_name] = user_friendly_name
         
+        if (in_data[x]['typ'].startswith("DC Capacitor")):
+            cap_name = in_data[x].get('name')
+            cap_label = in_data[x].get('userFriendlyName', cap_name)
+            bus_idx = _electrisim_dc_bus(net, in_data[x].get('bus'))
+            if bus_idx is None:
+                _electrisim_warn(net, f"DC Capacitor '{cap_label}' is not connected to a DC bus, so it is left out.")
+                continue
+            # A DC-link capacitor draws no current in steady state: it is kept
+            # for the DC fault and EMT studies, and its stored energy reported.
+            if not hasattr(net, 'electrisim_dc_capacitors'):
+                net.electrisim_dc_capacitors = []
+            net.electrisim_dc_capacitors.append({
+                'name': cap_name, 'id': in_data[x].get('id', ''), 'bus_dc': int(bus_idx),
+                'c_mf': safe_float(in_data[x].get('c_mf'), 0.0),
+                'esr_mohm': safe_float(in_data[x].get('esr_mohm'), 0.0),
+                'esl_uh': safe_float(in_data[x].get('esl_uh'), 0.0),
+                'in_service': _electrisim_in_service(in_data[x]),
+            })
+            if not hasattr(net, 'user_friendly_names'):
+                net.user_friendly_names = {}
+            net.user_friendly_names[cap_name] = cap_label
+
         if (in_data[x]['typ'].startswith("Source DC")):
             bus_idx = _electrisim_dc_bus(net, in_data[x].get('bus'))
             if bus_idx is None:
@@ -4625,7 +4757,10 @@ def create_other_elements(in_data,net,x, Busbars):
                     length_km=safe_float(in_data[x].get('length_km'), 1.0),
                     r_ohm_per_km=safe_float(in_data[x].get('r_ohm_per_km'), 0.1),
                     max_i_ka=safe_float(in_data[x].get('max_i_ka'), 1.0),
-                    name=in_data[x]['name'], in_service=in_service)
+                    name=in_data[x]['name'], in_service=in_service,
+                    # For the EMT study; a steady-state DC load flow does not use them.
+                    l_mh_per_km=safe_float(in_data[x].get('l_mh_per_km'), 0.0),
+                    c_uf_per_km=safe_float(in_data[x].get('c_uf_per_km'), 0.0))
                 if 'id' not in net.line_dc.columns:
                     net.line_dc['id'] = ''
                 net.line_dc.at[line_dc_idx, 'id'] = in_data[x].get('id', '')
@@ -5966,8 +6101,8 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                             except Exception:
                                 pass
                     try:
-                        pp.runpp(net, calculate_voltage_angles=calculate_voltage_angles,
-                                 run_control=plan_run_control, **plan_kwargs, **pf_kwargs)
+                        _electrisim_runpp(net, calculate_voltage_angles=calculate_voltage_angles,
+                                          run_control=plan_run_control, **plan_kwargs, **pf_kwargs)
                         pf_plan_used = plan_label
                         break
                     except Exception as plan_err:
@@ -7545,6 +7680,19 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                         sourcesdc = SourcesDcOut(sourcesdc = sourcesdcList) 
                     result = {**result, **sourcesdc.__dict__}
                 
+                # DC capacitors: their bus voltage and the energy they hold, E = C V^2 / 2.
+                if getattr(net, 'electrisim_dc_capacitors', None) and hasattr(net, 'res_bus_dc'):
+                    dccaps = []
+                    for cap in net.electrisim_dc_capacitors:
+                        bus = cap['bus_dc']
+                        vm = net.res_bus_dc.at[bus, 'vm_pu'] if bus in net.res_bus_dc.index else None
+                        v_kv = vm * float(net.bus_dc.at[bus, 'vn_kv']) if vm is not None and np.isfinite(vm) else None
+                        dccaps.append({
+                            'name': cap['name'], 'id': cap['id'], 'vm_pu': vm,
+                            'energy_kj': 0.5 * cap['c_mf'] * 1e-3 * (v_kv * 1e3) ** 2 / 1e3 if v_kv is not None and cap['in_service'] else None,
+                        })
+                    result = {**result, 'dccapacitors': dccaps}
+
                 #Switch (net.res_switch: p_from_mw, q_from_mvar, p_to_mw, q_to_mvar, i_ka, loading_percent)
                 if(hasattr(net, 'res_switch') and not net.res_switch.empty):
                     for index, row in net.res_switch.iterrows():    
@@ -8546,7 +8694,7 @@ def contingency_analysis(net, contingency_params):
         # Check if network has elements
         
         # Run base case power flow
-        pp.runpp(net, algorithm='nr', calculate_voltage_angles=True)
+        _electrisim_runpp(net, algorithm='nr', calculate_voltage_angles=True)
         
         # Define contingency cases based on element type
         contingency_cases = []
@@ -8643,7 +8791,7 @@ def contingency_analysis(net, contingency_params):
                     net_cont.sgen.loc[contingency_case['element_idx'], 'in_service'] = False
                 
                 # Run power flow for contingency case
-                pp.runpp(net_cont, algorithm='nr', calculate_voltage_angles=True)
+                _electrisim_runpp(net_cont, algorithm='nr', calculate_voltage_angles=True)
                 
                 # Check for violations
                 case_violations = []
@@ -11204,10 +11352,10 @@ def _ts_run_powerflow(net, timeseries_params, time_index, prev_converged):
         pf_init = 'results'
 
     try:
-        pp.runpp(net, algorithm=algorithm, calculate_voltage_angles=cva, init=pf_init, **pf_kwargs)
+        _electrisim_runpp(net, algorithm=algorithm, calculate_voltage_angles=cva, init=pf_init, **pf_kwargs)
     except Exception:
         if pf_init == 'results':
-            pp.runpp(net, algorithm=algorithm, calculate_voltage_angles=cva, init='auto', **pf_kwargs)
+            _electrisim_runpp(net, algorithm=algorithm, calculate_voltage_angles=cva, init='auto', **pf_kwargs)
         else:
             raise
     return bool(net.converged)
