@@ -462,6 +462,13 @@ class _Builder:
             bus_dc = int(net.vsc.at[vi, 'bus_dc'])
             if not bool(net.vsc.at[vi, 'in_service']) or bus_dc not in self.bus_node:
                 continue
+            if 'electrisim_aux' in net.vsc.columns and net.vsc.at[vi, 'electrisim_aux'] == True:
+                # A DC/DC converter's output stage: it blocks and feeds no fault current.
+                note = ('The DC/DC converters block at a DC fault and feed none of it; their current '
+                        'limits come with the EMT study.')
+                if note not in self.warnings:
+                    self.warnings.append(note)
+                continue
             if thevenin is None:
                 thevenin = _ac_thevenin(net, self.warnings)
             label = _label(net, 'vsc', vi)
