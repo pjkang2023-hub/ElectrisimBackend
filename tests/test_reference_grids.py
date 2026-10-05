@@ -1119,6 +1119,11 @@ def test_monte_carlo_samples_are_snapshots_with_the_same_loads(client, quiet, op
     drawn: re-solved as an ordinary snapshot with each load's sampled power,
     every bus comes out at the sample's voltage. Samples that started from
     a stale solution missed it by up to 0.004 pu on the LV buses.
+
+    Both are solved to 1e-8 pu. At the diagram's 1e-4 the two solutions,
+    iterated from different starting voltages, stop anywhere within about a
+    tolerance of the answer and differed by up to 1.9e-4 pu now and then:
+    the check failed on solver precision, not on the sample.
     """
     import opendssdirect as dss
     import opendss_electrisim as ode
@@ -1138,9 +1143,11 @@ def test_monte_carlo_samples_are_snapshots_with_the_same_loads(client, quiet, op
         samples.append((args, buses, sampled))
         return buses, lines
 
+    payload = _monte_carlo_payload(10, grid, mode)
+    payload['0']['tolerance'] = '1e-8'
     ode._capture_monte_carlo_sample = record
     try:
-        result = _post_harmonics(client, quiet, _monte_carlo_payload(10, grid, mode))
+        result = _post_harmonics(client, quiet, payload)
     finally:
         ode._capture_monte_carlo_sample = capture
     assert result['monte_carlo']['summary']['converged_count'] == len(samples) == 10
@@ -1148,6 +1155,8 @@ def test_monte_carlo_samples_are_snapshots_with_the_same_loads(client, quiet, op
     # M3 draws one factor for the circuit, as its load multiplier.
     dss.Text.Command('set Mode=Snapshot')
     dss.Text.Command('set LoadMult=1')
+    dss.Text.Command('set Tolerance=1e-8')
+    # 1e-8 solves agreed to 2.7e-8 pu over 60 runs; the stale start missed by 4e-3.
     differ = []
     for index, (args, buses, sampled) in enumerate(samples, 1):
         for name, (kw, kvar) in sampled.items():
@@ -1156,9 +1165,9 @@ def test_monte_carlo_samples_are_snapshots_with_the_same_loads(client, quiet, op
         assert dss.Solution.Converged(), f'sample {index}: the snapshot did not converge'
         snapshot = capture(*args)[0]
         for bus_id, bus in buses.items():
-            if abs(bus['vm_pu'] - snapshot[bus_id]['vm_pu']) > 1e-4:
-                differ.append(f"sample {index}, {bus['name']}: {bus['vm_pu']:.5f} pu in the sample, "
-                              f"{snapshot[bus_id]['vm_pu']:.5f} pu as a snapshot")
+            if abs(bus['vm_pu'] - snapshot[bus_id]['vm_pu']) > 1e-6:
+                differ.append(f"sample {index}, {bus['name']}: {bus['vm_pu']:.8f} pu in the sample, "
+                              f"{snapshot[bus_id]['vm_pu']:.8f} pu as a snapshot")
     assert not differ, '\n  '.join(differ)
 
 
