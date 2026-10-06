@@ -467,7 +467,10 @@ class DcDc:
       phase shift would leave the leakage current a DC offset - one its
       windings' small resistance hardly damps - which the half step avoids.
     Its control: its output voltage (a PI loop, its output current fed
-    forward) or its set power, the current its output bridge delivers limited
+    forward), lowered with its power in droop; or its set power - or the
+    power a reference function gives at each sample (``p_ref``: its PV
+    array's MPPT, its SOFC's operating power, its store's smoothing power);
+    the current its output bridge delivers limited
     (to its limit, and to zero in reverse unless it is bidirectional), sampled
     at each of its bridges' half periods, its voltages and output current as
     their mean since the last sample. It blocks - its bridges' switches open,
@@ -478,11 +481,15 @@ class DcDc:
     def __init__(self, builder, label, bus_in, bus_out, term_in, term_out, *, p_in_mw, p_out_mw, mode='voltage',
                  vm_out_pu=1.0, p_set_mw=0.0, rated_mw=0.0, eta=1.0, p_nl_mw=0.0, bidirectional=False,
                  limit_pu=1.2, model='average', switching_khz=20.0, c_out_mf=0.0, block_pu=0.8, r_in=0.0, r_out=0.0,
-                 every_step=False):
+                 every_step=False, droop_pu=0.0, p_ref=None, p_in_ref=None):
         """
         ``r_in``, ``r_out``: its terminals' resistance (0: the solver's floor).
         ``every_step``: its controller acting every step, not twice per period
         (average-value only: the benchmarks).
+        ``droop_pu``: in voltage mode, its output voltage set point falls by
+        this at its rated power. ``p_ref(t, state)``: in power mode, its
+        output power at each sample; ``p_in_ref(t, v_in, v_out, i_in)``: the
+        power its input is to draw (MPPT), its output that less its losses.
         """
         ckt = builder.ckt
         self.label = label
@@ -502,10 +509,11 @@ class DcDc:
         self.l_lk = vn_out ** 2 * 5.0 / (72.0 * self.f_sw * rated)       # its rating at 30 degrees
         self.vn_out, self.v_ref = vn_out, vm_out_pu * vn_out
         self.p_set = p_set_mw * 1e6
+        self.droop, self.p_ref, self.p_in_ref = droop_pu, p_ref, p_in_ref
         self.block_in, self.block_out = block_pu * vn_in, block_pu * vn_out
         c_out = c_out_mf * 1e-3 if c_out_mf > 0 else 4e-3 * rated / vn_out ** 2     # 2 ms of its rating stored
         c_in = 4e-3 * rated / vn_in ** 2
-        self.c_out = c_out
+        self.c_out, self.c_in = c_out, c_in
         w_v = 2 * math.pi * 300.0                            # its output voltage loop
         self.kp_v, self.ki_v = 2 * 0.7 * w_v * c_out, w_v * w_v * c_out
 
@@ -588,7 +596,7 @@ class DcDc:
         self.phi = self.phi_applied = self.phi0
         self.t_last, self.t_next, self.t_step = 0.0, self.t_sample or 0.0, 0.0
         self.prev = None
-        self.acc = np.zeros(3)                               # v_in, v_out, its output current: their integrals
+        self.acc = np.zeros(4)                               # v_in, v_out, its output and input currents: their integrals
         self.blocked_at = None
         self.limited_time = 0.0
         self.trace = []                                      # (t, P in, P out, v_in, v_out, its output bridge's current)
@@ -646,6 +654,7 @@ class DcDc:
         if v_in < self.block_in or v_out < self.block_out:
             self._block(t, state)
             return True
+        self.i_in_now = float(state.i_rl[self.k_in])
         changed = self._sample(t, state, v_in, v_out, i_out)
         changed = 'soft' if changed else False
         if self.k_src_out is not None:
@@ -662,11 +671,11 @@ class DcDc:
             self.t_last = t
             if elapsed <= 0:
                 return False
-            v_in_m, v_out_m, i_out_m = v_in, v_out, i_out
+            v_in_m, v_out_m, i_out_m, i_in_m = v_in, v_out, i_out, self.i_in_now
             i_bridge_m = self.i_bridge
             t_s, dt = t, elapsed
         else:
-            now = np.array([v_in, v_out, i_out])
+            now = np.array([v_in, v_out, i_out, self.i_in_now])
             prev = now if self.prev is None else self.prev
             self.acc += 0.5 * (prev + now) * (t - self.t_step)
             self.prev, self.t_step = now, t
@@ -676,18 +685,24 @@ class DcDc:
             self.t_last = t
             if elapsed <= 0:
                 return False
-            v_in_m, v_out_m, i_out_m = self.acc / elapsed
-            self.acc = np.zeros(3)
+            v_in_m, v_out_m, i_out_m, i_in_m = self.acc / elapsed
+            self.acc = np.zeros(4)
             # Its output bridge's mean current: what reached its bus, and what charged its output capacitor.
             i_bridge_m = i_out_m + self.c_out * (v_out - self.v_out_last) / elapsed
             t_s, dt = self.t_next, self.t_sample
         self.v_out_last = v_out
         # Its output current: for its output voltage, or its set power; limited.
         if self.mode == 'voltage':
-            err = self.v_ref - v_out_m
+            # In droop its set point falls with the power it delivers.
+            v_ref = self.v_ref * (1.0 - self.droop * v_out_m * i_out_m / self.rated) if self.droop else self.v_ref
+            err = v_ref - v_out_m
             i_ref = i_out_m + self.kp_v * err + self.int_v
         else:
             err = 0.0
+            if self.p_in_ref is not None:
+                self.p_set = stage_output(self.p_in_ref(t_s, v_in_m, v_out_m, i_in_m), self.eta, self.p_nl)
+            elif self.p_ref is not None:
+                self.p_set = self.p_ref(t_s, state)
             i_ref = self.p_set / max(v_out_m, 0.05 * self.vn_out)
         lo = -self.i_max if self.bidirectional else 0.0
         limited = not lo <= i_ref <= self.i_max

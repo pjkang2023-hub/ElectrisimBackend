@@ -40,6 +40,7 @@ import load_profiles_electrisim as lp
 import pandapower_electrisim as pe
 from dc_fault_electrisim import _ac_thevenin, _f, _label, _row_id, _waveform
 from emt_ac import AcBuilder
+import emt_der
 from emt_converters import DcDc, Vsc
 from emt_solver import R_BIAS, Circuit, dc_load_current
 
@@ -69,6 +70,8 @@ class _EmtBuilder:
         self.vscs = []          # VSCs on the AC network (an SST's rectifier and inverter among them), with their controls
         self.dcdcs = []         # DC/DC converters (an SST's DC/DC stage among them): dual active bridges
         self.skip = set()       # (table, index): load-flow elements a converter's EMT model stands for
+        self.ders = []          # (load-flow record, its EMT model): batteries, supercapacitors, flywheels, SOFCs, PV
+        self.smoothers = []     # (DC/DC converter, its smoothing controller)
         self._breakers_by_target = {}
         self.default_filters = []
 
@@ -80,15 +83,13 @@ class _EmtBuilder:
         for b in net.bus_dc.index:
             if not bool(net.bus_dc.at[b, 'in_service']) or b not in res.index or not np.isfinite(res.at[b, 'vm_pu']):
                 continue
+            if 'electrisim_hidden' in net.bus_dc.columns and net.bus_dc.at[b, 'electrisim_hidden'] == True:
+                continue   # a battery's cells: its EMT model stands for them
             self.vn[b] = float(net.bus_dc.at[b, 'vn_kv']) * 1e3
             self.v_bus[b] = float(res.at[b, 'vm_pu']) * self.vn[b]
             self.bus_node[b] = ckt.node(_label(net, 'bus_dc', b), self.v_bus[b])
             if not ('electrisim_aux' in net.bus_dc.columns and net.bus_dc.at[b, 'electrisim_aux'] == True)                     and not ('electrisim_hidden' in net.bus_dc.columns and net.bus_dc.at[b, 'electrisim_hidden'] == True):
                 self.visible_buses.append(b)
-        if getattr(net, 'electrisim_ders', None):
-            self.warnings.append("The EMT study does not model batteries, supercapacitors, flywheels, SOFC systems or "
-                                 "PV arrays yet: each is a stiff source at its load-flow voltage, as a converter's "
-                                 "output stage is, until it blocks; a supercapacitor directly on a bus is its capacitance.")
         for rec in getattr(net, 'electrisim_dc_breakers', None) or []:
             if rec['closed'] and rec['target'] is not None:
                 self._breakers_by_target.setdefault(rec['target'], []).append(rec)
@@ -101,6 +102,7 @@ class _EmtBuilder:
         self._capacitors()
         self._sources()
         self._loads()
+        self._ders()
         self._converters()
         self._dc_dc_converters()
         self._ssts()
@@ -133,6 +135,12 @@ class _EmtBuilder:
                 continue
             self.dcdc_plan.append(rec)
             self.skip.update(p for p in parts if p[1] is not None)
+        # The sources and stores: their load-flow stand-ins left out.
+        for rec in getattr(net, 'electrisim_ders', None) or []:
+            parts = rec['parts']
+            for table, key in (('vsc', 'vsc'), ('vsc', 'cells'), ('line_dc', 'line'), ('load_dc', 'load')):
+                if parts.get(key) is not None:
+                    self.skip.add((table, parts[key]))
         for rec in getattr(net, 'electrisim_ssts', None) or []:
             stages = {s['stage']: s for s in rec['stages']}
             rect, dcdc = stages.get('rectifier'), stages.get('dcdc')
@@ -176,7 +184,7 @@ class _EmtBuilder:
         net, ckt = self.net, self.ckt
         max_km = max(_f(self.params.get('max_section_km'), 1.0), 1e-3)
         for li in net.line_dc.index:
-            if not bool(net.line_dc.at[li, 'in_service']):
+            if not bool(net.line_dc.at[li, 'in_service']) or ('line_dc', li) in self.skip:
                 continue
             fb, tb = int(net.line_dc.at[li, 'from_bus_dc']), int(net.line_dc.at[li, 'to_bus_dc'])
             if fb not in self.bus_node or tb not in self.bus_node:
@@ -216,6 +224,8 @@ class _EmtBuilder:
         ckt = self.ckt
         names = getattr(self.net, 'user_friendly_names', {}) or {}
         for cap in getattr(self.net, 'electrisim_dc_capacitors', None) or []:
+            if cap.get('electrisim_der'):
+                continue   # a supercapacitor: its own model, with its leakage
             bus = cap['bus_dc']
             if not cap.get('in_service', True) or bus not in self.bus_node or cap['c_mf'] <= 0:
                 continue
@@ -295,12 +305,27 @@ class _EmtBuilder:
                 plan['measure'] = ('dc', node, k, None)
             label = _label(net, 'load_dc', li)
             if not aux:
-                self.loads.append({'label': label, 'id': _row_id(net, 'load_dc', li), 'node': node, 'p': pw,
+                self.loads.append({'label': label, 'id': _row_id(net, 'load_dc', li), 'node': node, 'p': pw, 'func': func,
                                    'bus': bus, 'vn': vn, 'constant_power': shares[0] > 0,
                                    'scale': scale if plan is not None else None})
                 self.series.append(('DC load', label, _row_id(net, 'load_dc', li), label, ('i_nl', k), 1.0))
             elif role == 'input':
                 self.series.append(('Converter input', label, '', label, ('i_nl', k), 1.0))
+
+    def _ders(self):
+        """Each source and store, its EMT model at its bus, from its load-flow state."""
+        net = self.net
+        for rec in getattr(net, 'electrisim_ders', None) or []:
+            bus = rec['bus']
+            if not rec['obj'].in_service or bus not in self.bus_node:
+                continue
+            v, p = pe._electrisim_der_power(net, rec)
+            model = emt_der.build(self.ckt, rec['obj'], rec['label'], self.bus_node[bus], v, p / max(v, 1e-6))
+            model.id = rec['id']
+            self.ders.append((rec, model))
+
+    def _der_on(self, bus):
+        return next((m for r, m in self.ders if r['bus'] == bus and r['coupling'] == 'converter'), None)
 
     def _converters(self):
         net, ckt = self.net, self.ckt
@@ -372,11 +397,29 @@ class _EmtBuilder:
             term_in = self._terminal('load_dc', rec['input'], b_in, p_in * 1e6 / self.v_bus[b_in])
             term_out = self._terminal(out[0], out[1], b_out, -p_out * 1e6 / self.v_bus[b_out])
             e = rec.get('emt') or {}
+            control = rec.get('control', rec['mode'])
             conv = DcDc(self, rec['label'], b_in, b_out, term_in, term_out, p_in_mw=p_in, p_out_mw=p_out,
                         mode=rec['mode'], vm_out_pu=rec['vm_out_pu'], p_set_mw=rec['p_set_mw'], rated_mw=rec['rated_mw'],
-                        eta=rec['eta'], p_nl_mw=rec['p_nl_mw'], bidirectional=rec['bidirectional'],
+                        eta=rec['eta'], p_nl_mw=rec['p_nl_mw'], bidirectional=rec['bidirectional'] or control == 'smoothing',
                         limit_pu=e.get('current_limit_pu', 1.2), model=e.get('model', 'average'),
-                        switching_khz=e.get('switching_khz', 20.0), c_out_mf=e.get('c_out_mf', 0.0), block_pu=block)
+                        switching_khz=e.get('switching_khz', 20.0), c_out_mf=e.get('c_out_mf', 0.0), block_pu=block,
+                        droop_pu=rec.get('droop_percent', 0.0) / 100.0 if control == 'droop' else 0.0)
+            conv.control_mode = control
+            conv.bus_out = b_out
+            store = self._der_on(b_in)
+            if control == 'mppt' and store is not None and store.kind == 'PV Array':
+                # Perturb and observe on its PV array's voltage, from the load flow's maximum power point.
+                conv.mppt = emt_der.Mppt(store, conv, self.v_bus[b_in])
+                conv.p_in_ref = conv.mppt
+            elif control == 'smoothing' and store is not None and store.kind in ('Battery', 'Supercapacitor', 'Flywheel'):
+                sm = rec['smoothing']
+                loads = [(ld['node'], ld['func']) for ld in self.loads if ld['bus'] == b_out]
+                mates = [r for r in self.dcdc_plan if r.get('control') == 'smoothing' and r['bus_out'] == b_out]
+                total = sum(max(r['rated_mw'], 1e-9) for r in mates)
+                smoother = emt_der.Smoothing(store, loads, max(sm['tau_s'], 1e-6), sm['soc_ref_percent'], sm['soc_gain'],
+                                             conv.rated, max(rec['rated_mw'], 1e-9) / total)
+                conv.p_ref = lambda t, state, f=smoother: f(t, state)
+                self.smoothers.append((conv, smoother))
             self._add_dcdc(conv, rec['id'])
 
     def _add_dcdc(self, conv, row_id):
@@ -500,6 +543,8 @@ class _EmtBuilder:
         if self.ac.profiled:
             self.ac.follow_profiles(t, state)
         changed = False
+        for _, model in self.ders:
+            model.control(t, state)
         for conv in self.vscs + self.dcdcs:
             r = conv.control(t, state)
             if r == 'soft':
@@ -675,6 +720,17 @@ def emt_study(net, params, in_data=None):
                 ckt.at(t_s, lambda st, pw=load['p'], f=factor: pw.__setitem__(0, pw[0] * f))
             event_times.append(t_s)
 
+    # A step in the PV arrays' irradiance.
+    if str(params.get('pv_step_wm2') or '').strip() not in ('', 'none'):
+        pvs = [m for _, m in b.ders if m.kind == 'PV Array']
+        if not pvs:
+            warnings_out.append('There is no PV array for the irradiance step.')
+        else:
+            t_pv = _f(params.get('pv_step_time_ms'), 5.0) * 1e-3
+            g = _f(params.get('pv_step_wm2'), 1000.0)
+            ckt.at(t_pv, lambda st, ms=pvs, g=g: [m.step_irradiance(g) for m in ms])
+            event_times.append(t_pv)
+
     # A fault on an AC bus.
     ac_fault = None
     ac_bus = str(params.get('ac_fault_bus') or 'none')
@@ -768,6 +824,21 @@ def emt_study(net, params, in_data=None):
             warnings_out.append(f"DC breaker {rec['label']} opened but its current had not reached zero by the end of the run.")
         result['breakers'].append(out)
     result['ac'] = _ac_results(sim, b.ac, net, t_fine, ac_fault)
+    result['ders'] = [_der_result(rec, m) for rec, m in b.ders]
+    for conv, sm in b.smoothers:
+        tr = np.array(sm.trace) if sm.trace else np.zeros((0, 3))
+        row = next(r for r in result['converters'] if r['label'] == conv.label)
+        if len(tr) > 1:
+            dt = np.maximum(np.diff(tr[:, 0]), 1e-12)
+            # The feed: the racks less every smoothing store on their bus (they sample together).
+            mates = [m for c, m in b.smoothers if c.bus_out == conv.bus_out and len(m.trace) == len(sm.trace)]
+            feed = tr[:, 1] - sum(np.array(m.trace)[:, 2] for m in mates)
+            row['smoothing'] = {'rack_peak_mw': _round(float(np.max(tr[:, 1])) / 1e6),
+                                'feed_peak_mw': _round(float(np.max(feed)) / 1e6),
+                                'rack_ramp_mw_s': _round(float(np.max(np.abs(np.diff(tr[:, 1])) / dt)) / 1e6),
+                                'feed_ramp_mw_s': _round(float(np.max(np.abs(np.diff(feed)) / dt)) / 1e6),
+                                'store_peak_mw': _round(float(np.max(np.abs(tr[:, 2]))) / 1e6),
+                                'limited_ms': _round(sm.limited_time * 1e3)}
     # A VSC's DC voltage loop, some 30 Hz, swings slower than the network: two of its periods to tell.
     min_span = VSC_VERDICT_SPAN if b.vscs else 1e-3
     # Loads following a profile keep the voltages moving: whether a swing settles cannot be told from them.
@@ -931,6 +1002,28 @@ def _mean(t, y):
     return float(np.trapezoid(y, t) / (t[-1] - t[0])) if len(t) > 1 and t[-1] > t[0] else float(y[-1])
 
 
+_DER_STATE = {'Battery': ('soc_percent', 100.0), 'Supercapacitor': ('v_cap_v', 1.0), 'Flywheel': ('speed_percent', 100.0),
+              'SOFC': ('p_h2_atm', 1.0), 'PV Array': ('irradiance_wm2', 1.0)}
+
+
+def _der_result(rec, model):
+    """A source's or store's power, voltage and state through the run."""
+    tr = np.array(model.trace) if model.trace else np.zeros((0, 4))
+    key, scale = _DER_STATE[model.kind]
+    out = {'label': model.label, 'id': rec['id'], 'kind': model.kind, 'coupling': rec['coupling']}
+    if len(tr):
+        p = tr[:, 1] * tr[:, 2]
+        out.update(p_start_mw=_round(p[0] / 1e6), p_end_mw=_round(p[-1] / 1e6), v_end_kv=_round(tr[-1, 1] / 1e3),
+                   v_min_kv=_round(float(np.min(tr[:, 1])) / 1e3), **{f'{key}_start': _round(tr[0, 3] * scale),
+                                                                       f'{key}_end': _round(tr[-1, 3] * scale)})
+        rows = emt_der.waveform(model.trace)
+        out['waveform'] = {'t_ms': [_round(r[0] * 1e3) for r in rows], 'p_mw': [_round(r[1] * r[2] / 1e6) for r in rows],
+                           'v_kv': [_round(r[1] / 1e3) for r in rows], key: [_round(r[3] * scale) for r in rows]}
+    if getattr(model, 'limited_time', 0.0):
+        out['limited_ms'] = _round(model.limited_time * 1e3)
+    return out
+
+
 def _dcdc_result(conv, t_event):
     """
     A DC/DC converter's power out over its first cycle (before the first
@@ -938,6 +1031,7 @@ def _dcdc_result(conv, t_event):
     """
     tr = np.array(conv.trace) if conv.trace else np.zeros((0, 6))
     out = {'label': conv.label, 'id': getattr(conv, 'id', ''), 'kind': 'DC/DC', 'model': conv.model,
+           'control': getattr(conv, 'control_mode', conv.mode),
            'switching_khz': _round(conv.f_sw / 1e3), 'rated_mw': _round(conv.rated / 1e6),
            'current_limit_ka': _round(conv.i_max / 1e3),
            'blocked_ms': _round(conv.blocked_at * 1e3) if conv.blocked_at is not None else None,
