@@ -282,6 +282,193 @@ def _deenergise_island(ss, out_line, t: float) -> Tuple[List[Any], List[str]]:
     return island, tripped
 
 
+# --- PCS: a battery, flywheel, SOFC system or PV array on an AC bus through its inverter -----------
+
+# A grid-forming PCS's power filter (s), as the EMT study's GridFormingVsc: its droop through that
+# filter is a virtual machine, M = tau D, D = 1 / droop.
+PCS_TAU_F = 0.02
+# REGCV1's voltage (current per voltage) and current (voltage per current) loop gains, per unit of
+# the PCS's own rating: ANDES takes them on the system base unconverted.
+_REGCV1_GAINS = {"Kpvd": 0.5, "Kivd": 0.02, "Kpvq": 0.5, "Kivq": 0.02,
+                 "KpId": 0.2, "KiId": 0.01, "KpIq": 0.2, "KiIq": 0.01}
+
+
+def _pcs_plants(in_data: Dict[str, Any], warnings: List[str]) -> List[Dict[str, Any]]:
+    """
+    Each PCS with its source, and the AC power and Q the load flow asks of it
+    (pandapower_electrisim._electrisim_pcs_set_point): its source found as
+    the load flow finds it - wired to its DC side, or alone on its DC bus.
+    """
+    import types
+    import der_electrisim
+    from pandapower_electrisim import _electrisim_pcs_set_point, _electrisim_pcs_window
+
+    rows = [el for _, el, typ in _iter_elements(in_data) if typ.startswith("PCS")]
+    if not rows:
+        return []
+    ders = [el for _, el, typ in _iter_elements(in_data) if der_electrisim.kind_of(typ)]
+    out = []
+    for el in rows:
+        label = str(el.get("userFriendlyName") or el.get("name"))
+        src = next((d for d in ders if el.get("der") and d.get("name") == el.get("der")), None)
+        if src is None and el.get("bus_dc"):
+            on_bus = [d for d in ders if d.get("bus") == el.get("bus_dc")]
+            src = on_bus[0] if len(on_bus) == 1 else None
+        if src is None:
+            warnings.append(f"PCS '{label}' has no battery, flywheel, SOFC system or PV array on its DC side, "
+                            "so it is left out.")
+            continue
+        kind = der_electrisim.kind_of(src.get("typ"))
+        if kind == "Supercapacitor":
+            warnings.append(f"PCS '{label}' is left out: a supercapacitor connects to a DC bus.")
+            continue
+        try:
+            obj = der_electrisim.build(src)
+        except ValueError as e:
+            warnings.append(f"PCS '{label}' is left out: {e}")
+            continue
+        if not (_sb(el.get("in_service"), True) and obj.in_service):
+            continue
+        s_rated = _sf(el.get("s_rated_mva"), 1.0)
+        s_rated = s_rated if s_rated > 0 else 1.0
+        eta = _sf(el.get("efficiency_percent"), 98.0) / 100.0
+        rec = {
+            "name": el.get("name"), "id": el.get("id", ""), "label": label, "bus": el.get("bus"),
+            "control": "grid_forming" if str(el.get("control") or "").strip().lower() == "grid_forming"
+            else "grid_following",
+            "s_rated": s_rated, "eta": eta if 0 < eta <= 1 else 1.0,
+            "p_nl_mw": _sf(el.get("no_load_loss_kw"), 0.0) / 1e3, "p_set_mw": _sf(el.get("p_set_mw"), 0.0),
+            "q_mode": str(el.get("q_mode") or "q"), "q_set_mvar": _sf(el.get("q_set_mvar"), 0.0),
+            "pf": _sf(el.get("pf"), 1.0), "vm_set_pu": _sf(el.get("vm_set_pu"), 1.0),
+            "droop_pf": max(_sf(el.get("droop_pf_percent"), 2.0), 1e-3) / 100.0,
+            "droop_qv": max(_sf(el.get("droop_qv_percent"), 5.0), 0.0) / 100.0,
+            "qv_droop": _sf(el.get("qv_droop_percent"), 5.0) / 100.0,
+            "k": _sf(el.get("current_limit_pu"), 1.2),
+            "source": {"obj": obj, "kind": kind, "name": src.get("name"),
+                       "label": str(src.get("userFriendlyName") or src.get("name"))},
+        }
+        net = types.SimpleNamespace(warnings=[])
+        rec["p_ac"], rec["q"] = _electrisim_pcs_set_point(net, rec)
+        warnings.extend(net.warnings)
+        if rec["q_mode"] == "qv" and rec["control"] == "grid_following":
+            warnings.append(f"PCS '{label}': it starts at its Q(V) droop's point, and holds that Q through the run.")
+        rec["p_max_ac"], rec["p_min_ac"] = _electrisim_pcs_window(rec)
+        out.append(rec)
+    return out
+
+
+def _add_pcs_dynamics(ss: Any, rec: Dict[str, Any], n: int, bus: Any, static_idx: str, freq: float,
+                      sn_base: float, defaults_applied: List[str]) -> Dict[str, Any]:
+    """
+    The PCS's ANDES model. Grid-forming: REGCV1, a virtual machine whose
+    damping is its P-f droop and whose inertia its power filter's. Grid-
+    following: a battery or flywheel ESD1 (its state of charge between its
+    window's ends, the energy it can store), a PV array PVD1, an SOFC system
+    REGCA1 + REECA1 with its power order ramp-limited and held between its
+    minimum load and its rating.
+    """
+    s, label = rec["s_rated"], f"PCS '{rec['label']}'"
+    obj, kind = rec["source"]["obj"], rec["source"]["kind"]
+    r = s / sn_base
+    if rec["control"] == "grid_forming":
+        d = 1.0 / rec["droop_pf"]
+        gains = {k: v * (r if k[2] == "v" else 1.0 / r) for k, v in _REGCV1_GAINS.items()}
+        # kv is a voltage per Q; ANDES converts it as a power (x S / S_base), so it is given as
+        # droop (S_base / S)^2 to land on droop x S_base / S on the system base.
+        idx = _add_model_safe(ss, "REGCV1", defaults_applied, label, idx=f"REGCV1_PCS_{n}",
+                              name=f"REGCV1_{rec['label']}", bus=bus, gen=static_idx, Sn=s, fn=freq,
+                              D=d, M=PCS_TAU_F * d, kw=0.0, kv=rec["droop_qv"] / (r * r), **gains)
+        return {"model": "REGCV1", "model_idx": idx}
+    # The frequency trip points ESD1 and PVD1 carry are a 60 Hz system's.
+    trips = {k: v * freq / 60.0 for k, v in (("ft0", 59.5), ("ft1", 59.7), ("ft2", 60.3), ("ft3", 60.5))}
+    common = dict(bus=bus, gen=static_idx, Sn=s, fn=freq, pqflag=0, ialim=max(rec["k"], 0.1),
+                  qmx=1.0, qmn=-1.0, **trips)
+    if kind in ("Battery", "Flywheel"):
+        if kind == "Battery":
+            en, soc0, soc_min, soc_max = obj.energy_kwh / 1e3, obj.soc0, obj.soc_min, obj.soc_max
+            eta_c, eta_d = obj.eta_charge, 1.0
+        else:
+            # Its energy, 1/2 J w^2, as a share of its energy at full speed: speed squared.
+            en, soc0, soc_min, soc_max = obj.e_max / 3.6e9, obj.s0 ** 2, obj.s_min ** 2, 1.0
+            eta_c = eta_d = obj.eta
+        idx = _add_model_safe(ss, "ESD1", defaults_applied, label, idx=f"ESD1_PCS_{n}",
+                              name=f"ESD1_{rec['label']}", pmx=max(rec["p_max_ac"], -rec["p_min_ac"], 1e-6) / s,
+                              En=max(en, 1e-9), SOCinit=soc0, SOCmin=soc_min, SOCmax=soc_max,
+                              EtaC=eta_c, EtaD=eta_d, **common)
+        return {"model": "ESD1", "model_idx": idx}
+    if kind == "PV Array":
+        idx = _add_model_safe(ss, "PVD1", defaults_applied, label, idx=f"PVD1_PCS_{n}",
+                              name=f"PVD1_{rec['label']}", pmx=max(rec["p_max_ac"], 1e-6) / s, **common)
+        return {"model": "PVD1", "model_idx": idx}
+    # SOFC: its power order changes no faster than its ramp rate.
+    reg = _add_model_safe(ss, "REGCA1", defaults_applied, label, idx=f"REGCA1_PCS_{n}",
+                          name=f"REGCA1_{rec['label']}", bus=bus, gen=static_idx, Sn=s,
+                          **_RENEWABLE_DEFAULTS["REGCA1"])
+    ramp = obj.ramp * obj.p_rated / 1e6 / s
+    # Its Q held as set (no power-factor or voltage control), no speed-dependent power, Q priority.
+    ree = reg and _add_model_safe(ss, "REECA1", defaults_applied, label, idx=f"REECA1_PCS_{n}",
+                                  name=f"REECA1_{rec['label']}", reg=reg, dPmax=ramp, dPmin=-ramp,
+                                  PMAX=max(rec["p_max_ac"], 0.0) / s, PMIN=max(rec["p_min_ac"], 0.0) / s,
+                                  PFFLAG=0, VFLAG=0, QFLAG=0, PFLAG=0, PQFLAG=0, **_RENEWABLE_DEFAULTS["REECA1"])
+    return {"model": "REGCA1", "model_idx": reg, "ree_idx": ree or None}
+
+
+def _settle_pcs_set_points(ss, meta: Dict[str, Any], rounds: int = 30) -> bool:
+    """
+    The load flow's droops in ANDES's power flow, rerun until they hold: a
+    grid-forming PCS at v = v_set - droop Q / S (its static generator's
+    voltage), a grid-following PCS in Q(V) mode at Q = -(v - v_set) / droop S
+    within its capability (the Q its static generator is held at). Each by
+    secant steps, as pandapower_electrisim._electrisim_settle_pcs.
+    """
+    sn = meta["sn_mva"]
+    plants = [g for g in meta["gen_map"].values() if g.get("pcs") and (
+        g["control"] == "grid_forming" and g["droop_qv"] > 0 and not g["on_slack_bus"]
+        or g["control"] == "grid_following" and g["q_mode"] == "qv")]
+    if not plants:
+        return True
+    hist: Dict[str, Tuple[float, float]] = {}
+
+    def secant(key, x, g, lo, hi, max_step):
+        last = hist.get(key)
+        hist[key] = (x, g)
+        x_new = x - 0.5 * g
+        if last is not None and abs(x - last[0]) > 1e-12 and abs(g - last[1]) > 1e-15:
+            slope = (g - last[1]) / (x - last[0])
+            if slope > 0:
+                x_new = x - g / slope
+        return min(max(x + max(min(x_new - x, max_step), -max_step), lo), hi)
+
+    pv_idx = list(ss.PV.idx.v)
+    for _ in range(rounds):
+        worst = 0.0
+        for g in plants:
+            k = pv_idx.index(g["static_idx"])
+            q = float(ss.PV.q.v[k]) * sn
+            v = float(ss.Bus.v.v[ss.Bus.idx2uid(g["bus"])])
+            if g["control"] == "grid_forming":
+                v_set = float(ss.PV.v0.v[k])
+                err = v_set - (g["vm_set_pu"] - g["droop_qv"] * q / g["s_rated_mva"])
+                worst = max(worst, abs(err))
+                if abs(err) > 1e-7:
+                    ss.PV.set("v0", g["static_idx"], secant(g["static_idx"], v_set, err, 0.8, 1.2, 0.05), base="device")
+            else:
+                target = -(v - g["vm_set_pu"]) / max(g["qv_droop"], 1e-3) * g["s_rated_mva"]
+                target = max(min(target, g["q_max_mvar"]), -g["q_max_mvar"])
+                err = (q - target) / g["s_rated_mva"]
+                worst = max(worst, abs(err))
+                if abs(err) > 1e-7:
+                    q_new = q - 0.5 * (q - target)
+                    ss.PV.set("qmax", g["static_idx"], q_new / sn, base="device")
+                    ss.PV.set("qmin", g["static_idx"], q_new / sn, base="device")
+        if worst <= 1e-7:
+            return True
+        if not ss.PFlow.run():
+            return False
+    meta["warnings"].append("The PCS's voltage droops did not settle in ANDES's power flow; it starts near them.")
+    return True
+
+
 def build_system(
     in_data: Dict[str, Any],
     params: Optional[Dict[str, Any]] = None,
@@ -662,6 +849,7 @@ def build_system(
 
     # --- External grids → Slack (no SynGen) ---
     slack_count = 0
+    slack_v0: Dict[Any, float] = {}
     for _, el, typ in _iter_elements(in_data):
         if not (typ.startswith("External Grid") or typ.startswith("ExternalGrid")):
             continue
@@ -680,6 +868,7 @@ def build_system(
             if vn > 0:
                 vm = vm / vn
         va = _sf(el.get("va_degree"), 0.0)
+        slack_v0[bus] = vm
         ss.add(
             "Slack",
             idx=idx,
@@ -1036,6 +1225,47 @@ def build_system(
             "name": ufname, "bus": bus, **model_ids,
         }
 
+    # --- PCS ---
+    pcs_count = 0
+    pcs_plants = _pcs_plants(in_data, warnings)
+    if slack_count == 0 and gen_count == 0 and any(r["control"] == "grid_forming" for r in pcs_plants):
+        raise ValueError(
+            "This network is held only by its PCS: ANDES's grid-forming model (REGCV1) cannot hold an island "
+            "on its own - it is unstable there even for a small load step. Simulate the island in the EMT "
+            "study, or add an External Grid or a synchronous Generator."
+        )
+    if any(r["control"] == "grid_following" for r in pcs_plants):
+        # Its Q as set: its static generator a PV bus held at that Q, which the power flow turns to PQ.
+        ss.PV.config.pv2pq = 1
+        ss.PV.qlim.enable = True
+    for rec in pcs_plants:
+        bus = bus_map.get(rec["bus"])
+        if bus is None:
+            warnings.append(f"PCS '{rec['label']}' needs an AC bus on its AC side, so it is left out.")
+            continue
+        pcs_count += 1
+        static_idx = f"PV_PCS_{pcs_count}"
+        q0 = rec["q"] / sn_base
+        kw = dict(idx=static_idx, name=rec["label"], bus=bus, Vn=bus_vn.get(bus, 110.0), Sn=rec["s_rated"],
+                  p0=rec["p_ac"] / sn_base, q0=q0)
+        if rec["control"] == "grid_forming":
+            # On an External Grid's bus it takes the grid's voltage, as in the load flow.
+            kw["v0"] = slack_v0.get(bus, rec["vm_set_pu"])
+        else:
+            kw.update(v0=1.0, qmax=q0, qmin=q0)
+        ss.add("PV", **kw)
+        ids = _add_pcs_dynamics(ss, rec, pcs_count, bus, static_idx, freq, sn_base, defaults_applied)
+        if ids.get("model_idx"):
+            renewable_count += 1
+        gen_map[str(rec["name"])] = {
+            "static_idx": static_idx, "syn_idx": None, "plant_kind": "PCS", "name": rec["label"], "bus": bus,
+            "pcs": True, "id": rec["id"], "control": rec["control"], "source_kind": rec["source"]["kind"],
+            "source": rec["source"]["label"], "s_rated_mva": rec["s_rated"], "p_mw": rec["p_ac"],
+            "q_mvar": rec["q"], "p_max_mw": rec["p_max_ac"], "p_min_mw": rec["p_min_ac"],
+            "vm_set_pu": rec["vm_set_pu"], "droop_qv": rec["droop_qv"], "q_mode": rec["q_mode"],
+            "qv_droop": rec["qv_droop"], "q_max_mvar": rec["q_max"], "on_slack_bus": bus in slack_v0, **ids,
+        }
+
     if gen_count + renewable_count == 0:
         raise ValueError(
             "Transient / eigenvalue analysis requires at least one synchronous Generator "
@@ -1137,12 +1367,54 @@ def build_system(
         "sn_mva": sn_base,
         "n_generators": gen_count,
         "n_renewable_plants": renewable_count,
+        "n_pcs": pcs_count,
         "n_buses": len(bus_name_by_idx),
         "islanded_after": islanded_after,
         "profiled_loads": profiled_loads,
         "profile_repeat": profile_repeat,
     }
     return ss, meta
+
+
+def _pcs_series(ss, meta: Dict[str, Any], idx: np.ndarray) -> List[Dict[str, Any]]:
+    """
+    Each PCS through the run: its power and Q (MW, Mvar) at its AC side; a
+    battery's state of charge, a flywheel's speed; a grid-forming PCS's
+    frequency. ESD1 and PVD1 inject their currents into their bus's voltage.
+    """
+    sn, out = meta["sn_mva"], []
+    v_bus = tds_values(ss, ss.Bus.v) if ss.Bus.n else None
+    for name, g in meta["gen_map"].items():
+        if not g.get("pcs") or not g.get("model_idx"):
+            continue
+        model = getattr(ss, g["model"])
+        try:
+            k = list(model.idx.v).index(g["model_idx"])
+        except ValueError:
+            continue
+        col = lambda var: tds_values(ss, var)[:, k]
+        row: Dict[str, Any] = {
+            "name": name, "id": g.get("id", ""), "label": g["name"], "control": g["control"], "model": g["model"],
+            "source": g["source"], "source_kind": g["source_kind"], "s_rated_mva": g["s_rated_mva"],
+            "p_max_mw": g["p_max_mw"], "p_min_mw": g["p_min_mw"],
+        }
+        if g["model"] in ("ESD1", "PVD1"):
+            v = v_bus[:, ss.Bus.idx2uid(g["bus"])]
+            p, q = col(model.Ipout_y) * v, col(model.Iqout_y) * v
+        else:
+            p, q = col(model.Pe), col(model.Qe)
+        row["p_mw"] = [_clean_num(float(x) * sn) for x in p[idx]]
+        row["q_mvar"] = [_clean_num(float(x) * sn) for x in q[idx]]
+        if g["model"] == "ESD1":
+            soc = col(model.pIG_y)[idx]
+            if g["source_kind"] == "Flywheel":
+                row["speed_percent"] = [_clean_num(100.0 * math.sqrt(max(float(x), 0.0))) for x in soc]
+            else:
+                row["soc_percent"] = [_clean_num(100.0 * float(x)) for x in soc]
+        if g["model"] == "REGCV1":
+            row["frequency_hz"] = [_clean_num(float(x) * meta["frequency"]) for x in col(model.omega)[idx]]
+        out.append(row)
+    return out
 
 
 def _extract_syn_series(ss, model_name: str, var_name: str, names: List[str]) -> List[Dict[str, Any]]:
@@ -1302,7 +1574,7 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
         except Exception:
             pass
 
-        pf_ok = bool(ss.PFlow.run())
+        pf_ok = bool(ss.PFlow.run()) and _settle_pcs_set_points(ss, meta)
         if not pf_ok:
             return json.dumps({
                 "error": True,
@@ -1402,11 +1674,16 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
                     "values": [_clean_num(float(x)) for x in col.tolist()],
                 })
 
-        # Frequency estimate from mean omega (pu → Hz)
+        pcs = _pcs_series(ss, meta, idx)
+
+        # Frequency estimate from mean omega (pu → Hz); without a machine, the grid-forming PCS's
         freq_hz = None
         if omega:
             mean_w = np.mean([np.asarray(s["values"], dtype=float) for s in omega], axis=0)
             freq_hz = (mean_w * meta["frequency"]).tolist()
+        elif any(r.get("frequency_hz") for r in pcs):
+            freq_hz = np.mean([np.asarray(r["frequency_hz"], dtype=float) for r in pcs if r.get("frequency_hz")],
+                              axis=0).tolist()
 
         # Losing synchronism did not show in the result, only in the plots. A
         # pole slip runs the rotor angle more than 180 degrees from where it
@@ -1496,6 +1773,7 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
             "omega": omega,
             "delta": delta,
             "bus_voltage": bus_v,
+            "pcs": pcs,
             "frequency_hz": [_clean_num(float(x)) for x in freq_hz] if freq_hz is not None else None,
             "tf": tf,
             "n_points": int(len(t_ds)),
@@ -1628,7 +1906,7 @@ def run_eig(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
         eig_params["line_outage"] = ""
 
         ss, meta = build_system(in_data, eig_params)
-        pf_ok = bool(ss.PFlow.run())
+        pf_ok = bool(ss.PFlow.run()) and _settle_pcs_set_points(ss, meta)
         if not pf_ok:
             return json.dumps({
                 "error": True,

@@ -2572,6 +2572,8 @@ def _electrisim_build_pcs(net, Busbars, study):
                                   "draw its transformer between them.")
         p_ac, q = _electrisim_pcs_set_point(net, rec)
         rec['p_set_ac'] = p_ac
+        rec['p_max_mw'], rec['p_min_mw'] = _electrisim_pcs_window(rec)
+        rec['opf_cost'] = safe_float(el.get('opf_marginal_cost_eur_per_mwh'), float('nan'))
         i_rated_ka = s_rated / (math.sqrt(3.0) * vn)
         common = dict(name=name, id=el.get('id', ''), in_service=on, sn_mva=s_rated, controllable=False)
         if sc_study or control == 'grid_following':
@@ -2587,6 +2589,8 @@ def _electrisim_build_pcs(net, Busbars, study):
                                 max_p_mw=s_rated, min_p_mw=-s_rated, **common)
             rec.update(table='gen', index=int(idx))
         net[rec['table']].at[rec['index'], 'electrisim_pcs'] = True
+        if 'OptimalPowerFlow' in str(study):
+            _electrisim_pcs_opf_limits(net, rec)
         net.electrisim_pcs.append(rec)
         if not hasattr(net, 'user_friendly_names'):
             net.user_friendly_names = {}
@@ -2626,6 +2630,53 @@ def _electrisim_pcs_set_point(net, rec):
         q = math.copysign(q_max, q)
     rec['q_max'] = q_max
     return p_ac, q
+
+
+def _electrisim_pcs_window(rec):
+    """
+    The most a PCS can deliver and take at its AC side (MW), from its source's
+    state and its rating: a battery or flywheel within its window (nothing
+    more out at its window's bottom, nothing more in at its top), an SOFC
+    system between its minimum load and its rating, a PV array up to its MPP.
+    """
+    src, obj = rec['source'], rec['source']['obj']
+    eta, p_nl, s = rec['eta'], rec['p_nl_mw'], rec['s_rated']
+    if src['kind'] == 'SOFC':
+        p_hi = _electrisim_stage_output(obj.p_rated * (1.0 - obj.aux_frac) / 1e6, eta, p_nl)
+        p_lo = _electrisim_stage_output(obj.p_min_frac * obj.p_rated / 1e6, eta, p_nl)
+    elif src['kind'] == 'PV Array':
+        p_hi, p_lo = max(_electrisim_stage_output(obj.mpp()[2] / 1e6, eta, p_nl), 0.0), 0.0
+    else:
+        dis, ch = obj.p_limits()
+        p_hi = _electrisim_stage_output(dis / 1e6, eta, p_nl) if dis > 0 else 0.0
+        p_lo = _electrisim_stage_output(-ch / 1e6, eta, p_nl) if ch > 0 else 0.0
+    return min(p_hi, s), max(p_lo, -s)
+
+
+def _electrisim_pcs_opf_limits(net, rec):
+    """
+    In the OPF a PCS is dispatched within its power window, its Q within the
+    box its rating leaves at either end of that window (inside its circle,
+    which pandapower's OPF cannot take): sqrt(S^2 - max(|P_max|, |P_min|)^2).
+    """
+    p_hi, p_lo = rec['p_max_mw'], rec['p_min_mw']
+    q_box = math.sqrt(max(rec['s_rated'] ** 2 - max(abs(p_hi), abs(p_lo)) ** 2, 0.0))
+    table, idx = rec['table'], rec['index']
+    for col, value in (('controllable', True), ('min_p_mw', p_lo), ('max_p_mw', max(p_hi, p_lo + 1e-6)),
+                       ('min_q_mvar', -q_box), ('max_q_mvar', q_box)):
+        net[table].at[idx, col] = value
+    # Start it inside its window.
+    net[table].at[idx, 'p_mw'] = min(max(float(net[table].at[idx, 'p_mw']), p_lo), p_hi)
+
+
+def _electrisim_pcs_opf_costs(net, gen_cp1, sgen_cp1):
+    """Each PCS's own marginal cost (EUR/MWh) where the diagram gives one and the study's costs do not."""
+    for rec in getattr(net, 'electrisim_pcs', None) or []:
+        cost = rec.get('opf_cost')
+        if cost is None or not math.isfinite(cost) or rec['table'] not in ('gen', 'sgen'):
+            continue
+        target = gen_cp1 if rec['table'] == 'gen' else sgen_cp1
+        target.setdefault(str(rec['id']), cost)
 
 
 def _electrisim_pcs_weight(rec):
@@ -2821,7 +2872,9 @@ def _electrisim_pcs_result(net, rec):
     out = {'name': rec['name'], 'id': rec['id'], 'label': rec['label'], 'control': rec['control'],
            'source': src['label'], 'source_kind': src['kind'], 'in_service': rec['in_service'],
            'islanded': rec['island'] is not None, 'p_mw': None, 'q_mvar': None, 's_mva': None,
-           'loading_percent': None, 'vm_pu': None, 'p_dc_mw': None, 'loss_mw': None, 'frequency_hz': None}
+           'loading_percent': None, 'vm_pu': None, 'p_dc_mw': None, 'loss_mw': None, 'frequency_hz': None,
+           's_rated_mva': rec['s_rated'], 'current_limit_pu': rec['k'], 'p_max_mw': rec.get('p_max_mw'),
+           'p_min_mw': rec.get('p_min_mw'), 'q_capability_mvar': None}
     res = getattr(net, f"res_{rec['table']}", None)
     if not rec['in_service'] or res is None or rec['index'] not in res.index:
         return out
@@ -2832,6 +2885,7 @@ def _electrisim_pcs_result(net, rec):
     p_dc = _electrisim_dc_dc_input_power(p, rec['eta'], rec['p_nl_mw'])
     f_n = float(getattr(net, 'f_hz', 50.0) or 50.0)
     out.update(p_mw=p + 0.0, q_mvar=q + 0.0, s_mva=s, loading_percent=100.0 * s / rec['s_rated'],
+               q_capability_mvar=math.sqrt(max(rec['s_rated'] ** 2 - p * p, 0.0)),
                vm_pu=float(net.res_bus.at[rec['bus'], 'vm_pu']) if rec['bus'] in net.res_bus.index else None,
                p_dc_mw=p_dc, loss_mw=p_dc - p, frequency_hz=f_n * (1.0 + rec['df_pu']))
     if s > rec['s_rated'] * 1.0001:
@@ -10213,6 +10267,26 @@ def _contingency_worst_by_element(net, contingency_results):
     return {'bus': list(buses.values()), 'line': list(lines.values()), 'transformer': list(trafos.values())}
 
 
+# Each source's kind, as a sentence names it.
+_DER_WORDS = {'Battery': 'battery', 'Flywheel': 'flywheel', 'SOFC': 'SOFC system', 'PV Array': 'PV array',
+              'Supercapacitor': 'supercapacitor'}
+
+
+def _contingency_inverter_sources(net):
+    """
+    The inverter-based sources in the base case: each PCS with its source,
+    its rating, its current limit, and the Q its rating leaves at its power.
+    """
+    out = []
+    for rec in getattr(net, 'electrisim_pcs', None) or []:
+        row = _electrisim_pcs_result(net, rec)
+        row.pop('_source', None)
+        out.append({k: row.get(k) for k in (
+            'name', 'id', 'label', 'control', 'source', 'source_kind', 'in_service', 's_rated_mva',
+            'current_limit_pu', 'p_mw', 'q_mvar', 'q_capability_mvar', 'p_max_mw', 'p_min_mw', 'loading_percent')})
+    return out
+
+
 def contingency_analysis(net, contingency_params):
     """
     Perform contingency analysis on the network.
@@ -10284,7 +10358,7 @@ def contingency_analysis(net, contingency_params):
         if element_type == 'generator' or element_type == 'all':
             # Add generator contingencies
             for gen_idx in net.gen.index:
-                if net.gen.loc[gen_idx, 'in_service']:
+                if net.gen.loc[gen_idx, 'in_service'] and not _electrisim_is_pcs(net.gen, gen_idx):
                     gen_name = _contingency_friendly_name(net, net.gen.loc[gen_idx, 'name'])
                     contingency_cases.append({
                         'name': f"Gen_{gen_name}",
@@ -10295,7 +10369,8 @@ def contingency_analysis(net, contingency_params):
             # Static generators too - PV, wind - which were never taken out:
             # the transmission grid's 2 MW wind farm among them.
             for gen_idx in net.sgen.index:
-                if net.sgen.loc[gen_idx, 'in_service']:
+                if (net.sgen.loc[gen_idx, 'in_service'] and not _electrisim_is_pcs(net.sgen, gen_idx)
+                        and not _electrisim_is_aux(net.sgen, gen_idx)):
                     gen_name = _contingency_friendly_name(net, net.sgen.loc[gen_idx, 'name'])
                     contingency_cases.append({
                         'name': f"Sgen_{gen_name}",
@@ -10304,6 +10379,18 @@ def contingency_analysis(net, contingency_params):
                         'description': f"Outage of generator {gen_name}"
                     })
         
+        # Each PCS, with the source behind it.
+        if element_type == 'generator' or element_type == 'all':
+            for k, rec in enumerate(getattr(net, 'electrisim_pcs', None) or []):
+                if rec['in_service']:
+                    contingency_cases.append({
+                        'name': f"PCS_{rec['label']}",
+                        'type': 'pcs',
+                        'element_idx': k,
+                        'description': f"Outage of PCS {rec['label']} ({_DER_WORDS.get(rec['source']['kind'], '')} "
+                                       f"{rec['source']['label']})"
+                    })
+
         # Results storage
         contingency_results = []
         violations = []
@@ -10336,6 +10423,10 @@ def contingency_analysis(net, contingency_params):
                     net_cont.gen.loc[contingency_case['element_idx'], 'in_service'] = False
                 elif contingency_case['type'] == 'sgen':
                     net_cont.sgen.loc[contingency_case['element_idx'], 'in_service'] = False
+                elif contingency_case['type'] == 'pcs':
+                    rec = net_cont.electrisim_pcs[contingency_case['element_idx']]
+                    rec['in_service'] = False
+                    net_cont[rec['table']].loc[rec['index'], 'in_service'] = False
                 
                 # Run power flow for contingency case
                 _electrisim_runpp(net_cont, algorithm='nr', calculate_voltage_angles=True)
@@ -10644,6 +10735,7 @@ def contingency_analysis(net, contingency_params):
             'contingency_results': contingency_results,
             'worst_case': worst_case.get('name'),
             'worst_by_element': _contingency_worst_by_element(net, contingency_results),
+            'inverter_sources': _contingency_inverter_sources(net),
         }
         
         # Sanitize NaN/Inf so the body is strict JSON (browser JSON.parse rejects NaN tokens).
@@ -10854,6 +10946,8 @@ def optimalPowerFlow(net, opf_params):
                     if pd.isna(v):
                         net.dcline.loc[di, qcol] = qdef
         
+        _electrisim_pcs_opf_costs(net, generator_cost_cp1, sgen_cost_cp1)
+
         # Set up cost functions if specified and not already present
         if cost_function != 'none':
             setup_default_cost_functions(

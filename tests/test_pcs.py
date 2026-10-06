@@ -182,6 +182,34 @@ def test_rating_and_capability(client, quiet):
     assert pcs['cell-p2']['q_mvar'] == pytest.approx(0.3) and pcs['cell-p2']['loading_percent'] == pytest.approx(100)
     w = ' '.join(result['warnings'])
     assert "PCS 'P1': 0.8 MW is more than its rating" in w and "PCS 'P2': its Q (0.4 Mvar) is held to 0.3" in w
+    # Its rating, its current limit, and the Q its rating leaves at its power.
+    assert pcs['cell-p2']['s_rated_mva'] == 0.5 and pcs['cell-p2']['current_limit_pu'] == 1.2
+    assert pcs['cell-p2']['q_capability_mvar'] == pytest.approx(0.3)
+    assert pcs['cell-p1']['q_capability_mvar'] == pytest.approx(0, abs=1e-6)
+
+
+def test_power_window_from_its_source(client, quiet):
+    """
+    The most a PCS can deliver and take: a battery by its C-rates at its
+    OCV, nothing more out at its window's bottom, nothing more in at its
+    top; an SOFC system from its minimum load to its rating less its
+    auxiliary load; a PV array up to its MPP - each through the PCS.
+    """
+    lv_rows = (_der('Battery', 'b1', capacity_kwh=200), _pcs('p1', 'b', 'b1'),
+               _der('Battery', 'b2', capacity_kwh=200, soc_percent=10), _pcs('p2', 'b', 'b2'),
+               _der('Battery', 'b3', capacity_kwh=200, soc_percent=90), _pcs('p3', 'b', 'b3'),
+               _der('SOFC', 'fc', p_rated_kw=100), _pcs('p4', 'b', 'fc', s_rated_mva=0.2),
+               _der('PV Array', 'pv'), _pcs('p5', 'b', 'pv'))
+    pcs = _by_id(_post(client, quiet, _two_buses(*lv_rows))['pcs'])
+    b = der.Battery({'capacity_kwh': 200})
+    i_1c = b.ah
+    assert pcs['cell-p1']['p_max_mw'] == pytest.approx(ETA * i_1c * b.ocv() / 1e6)
+    assert pcs['cell-p1']['p_min_mw'] == pytest.approx(-0.5 * i_1c * b.ocv() / 1e6 / ETA)
+    assert pcs['cell-p2']['p_max_mw'] == 0.0 and pcs['cell-p2']['p_min_mw'] < 0
+    assert pcs['cell-p3']['p_min_mw'] == 0.0 and pcs['cell-p3']['p_max_mw'] > 0
+    assert pcs['cell-p4']['p_min_mw'] == pytest.approx(ETA * 0.03) and pcs['cell-p4']['p_max_mw'] == pytest.approx(
+        ETA * 0.095)
+    assert pcs['cell-p5']['p_max_mw'] == pytest.approx(pcs['cell-p5']['p_mw']) and pcs['cell-p5']['p_min_mw'] == 0.0
 
 
 def test_left_out_with_a_reason(client, quiet):
@@ -257,6 +285,82 @@ def test_iec_short_circuit_counts_storage(client, quiet):
     assert with_st['b']['ikss_ka'] - base['b']['ikss_ka'] == pytest.approx(0.6, rel=1e-6)
 
 
+# --- OPF, contingency and protection --------------------------------------------------------------
+
+OPF = {'typ': 'OptimalPowerFlowPandaPower Parameters', 'opf_type': 'ac', 'frequency': '50', 'ac_algorithm': 'pypower',
+       'dc_algorithm': 'pypower', 'calculate_voltage_angles': 'auto', 'init': 'pf', 'delta': '1e-16',
+       'trafo_model': 't', 'trafo_loading': 'current', 'ac_line_model': 'pi', 'numba': True,
+       'suppress_warnings': True, 'cost_function': 'polynomial', 'cost_currency': 'EUR',
+       'generator_cost_cp1': {}, 'generator_cost_cp2': {}, 'ext_grid_cost_cp1': {'cell-g': 50},
+       'ext_grid_cost_cp2': {}, 'storage_cost_cp1': {}, 'storage_cost_cp2': {}, 'sgen_cost_cp1': {},
+       'sgen_cost_cp2': {}, 'load_cost_cp1': {}, 'load_cost_cp2': {}, 'dcline_cost_cp1': {}, 'dcline_cost_cp2': {},
+       'user_email': 't@t'}
+
+
+def test_opf_respects_a_battery_window_and_an_sofc_minimum_load(client, quiet):
+    """
+    The grid at 50 EUR/MWh. Batteries free to discharge (0 EUR/MWh) or paid
+    to charge (100 EUR/MWh): at their windows' ends they do neither, between
+    them each goes to its C-rate. An SOFC system dearer than the grid (200
+    EUR/MWh) is turned down to its minimum load and no further.
+    """
+    result = _post(client, quiet, _two_buses(
+        _der('Battery', 'lo', capacity_kwh=200, soc_percent=10), _pcs('p1', 'b', 'lo', opf_marginal_cost_eur_per_mwh=0),
+        _der('Battery', 'hi', capacity_kwh=200, soc_percent=90), _pcs('p2', 'b', 'hi', opf_marginal_cost_eur_per_mwh=100),
+        _der('Battery', 'm1', capacity_kwh=200), _pcs('p3', 'b', 'm1', opf_marginal_cost_eur_per_mwh=0),
+        _der('Battery', 'm2', capacity_kwh=200), _pcs('p4', 'b', 'm2', opf_marginal_cost_eur_per_mwh=100),
+        _der('SOFC', 'fc', p_rated_kw=100), _pcs('p5', 'b', 'fc', s_rated_mva=0.2, opf_marginal_cost_eur_per_mwh=200),
+        params=OPF))
+    assert result['opf_converged'] is True
+    p = {r['id']: r['p_mw'] for r in result['staticgenerators']}
+    b = der.Battery({'capacity_kwh': 200})
+    assert p['cell-p1'] == pytest.approx(0, abs=1e-4)                  # at its window's bottom: nothing out
+    assert p['cell-p2'] == pytest.approx(0, abs=1e-4)                  # at its top: nothing in
+    assert p['cell-p3'] == pytest.approx(ETA * b.ah * b.ocv() / 1e6, rel=1e-3)
+    assert p['cell-p4'] == pytest.approx(-0.5 * b.ah * b.ocv() / 1e6 / ETA, rel=1e-3)
+    assert p['cell-p5'] == pytest.approx(ETA * 0.03, rel=1e-3)          # 30 % of 100 kW, through the PCS
+
+
+def test_contingency_takes_out_each_pcs_and_lists_it(client, quiet):
+    """Each PCS is an outage case, named with its source; the results list it with its rating and Q capability."""
+    request = _drawn_request('reference_radial.diagram_contingency_payload.json')
+    lv = _lv(request)
+    result = _post(client, quiet, _with(request, _der('Battery', 'b1'), _pcs('p1', lv, 'b1', p_set_mw=0.3),
+                                        _der('PV Array', 'pv'), _pcs('p2', lv, 'pv', control='grid_forming')))
+    cases = {c['name']: c for c in result['contingency_results']}
+    assert cases['PCS_P1']['description'] == 'Outage of PCS P1 (battery B1)'
+    assert cases['PCS_P2']['description'] == 'Outage of PCS P2 (PV array PV)'
+    assert cases['PCS_P2']['converged'] and 'Sgen_P1' not in cases and 'Gen_P2' not in cases
+    listed = {r['id']: r for r in result['inverter_sources']}
+    p1 = listed['cell-p1']
+    assert (p1['control'], p1['source_kind'], p1['s_rated_mva']) == ('grid_following', 'Battery', 0.5)
+    assert p1['p_mw'] == pytest.approx(0.3) and p1['q_capability_mvar'] == pytest.approx(0.4)
+    assert listed['cell-p2']['control'] == 'grid_forming'
+
+
+def test_protection_names_pcs_as_inverter_sources(client, quiet):
+    """A PCS, grid-following or grid-forming, in a fault's zone: named with the inverter-based sources."""
+    import os
+    from test_protection_inverters import MANUAL, REFERENCE_DIR
+    with open(os.path.join(REFERENCE_DIR, 'reference_radial.diagram_protection_payload.json'),
+              encoding='utf-8') as handle:
+        request = json.load(handle)
+    for element in request.values():
+        if (isinstance(element, dict) and str(element.get('typ', '')).startswith('Switch')
+                and element.get('protection_type') == 'ocr'):
+            element.update(pickup_mode='manual', **MANUAL['reference_radial'].get(
+                element['userFriendlyName'], MANUAL['reference_radial'][None]))
+    lv = _lv(request)
+    result = _post(client, quiet, _with(request, _der('Battery', 'b1'), _pcs('p1', lv, 'b1', p_set_mw=0.1),
+                                        _der('Battery', 'b2'), _pcs('p2', lv, 'b2', control='grid_forming')))
+    lines = [v['userFriendlyName'] for v in request.values()
+             if isinstance(v, dict) and str(v.get('typ', '')).startswith('Line')]
+    zones = {lines[int(sc['sc_line_id'])]: sc for sc in result['scenarios']}
+    assert zones['LA1']['unprotected_inverter_sources'] == ['P1', 'P2', 'Rooftop PV']
+    assert zones['LA1']['unprotected_sources'] == []
+    assert zones['LB1']['unprotected_inverter_sources'] == []
+
+
 # --- The other studies -------------------------------------------------------------------------
 
 @pytest.mark.parametrize('fixture, params', [
@@ -271,6 +375,8 @@ def test_iec_short_circuit_counts_storage(client, quiet):
                                                   'duration_ms': '10'}),
     ('reference_radial.diagram_sc_payload.json', {'typ': 'TransientStabilityAndes Parameters', 'frequency': '50',
                                                   'sn_mva': '100', 'tf': '1', 'fault_enabled': False}),
+    ('reference_radial.diagram_sc_payload.json', {'typ': 'EigenvalueAndes Parameters', 'frequency': '50',
+                                                  'sn_mva': '100'}),
 ])
 def test_other_studies_run_with_a_pcs(client, quiet, fixture, params):
     """None may fail because of a PCS, grid-forming or grid-following."""
