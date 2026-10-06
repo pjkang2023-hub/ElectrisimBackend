@@ -257,6 +257,8 @@ class Vsc:
 
     def _start(self, v_ph, i_ph, e_ph, c_link, v_link, i_dc):
         """The controller's state for the steady state given: PLL angle, integrators, references."""
+        self.v_ph0, self.i_ph0, self.e_ph0 = v_ph, i_ph, e_ph   # its steady state, for a grid-forming control
+        self.v_dc_ref_fn = getattr(self, 'v_dc_ref_fn', None)  # (t, v_dc, i_load) -> its DC voltage set point (MPPT)
         self.theta = float(np.angle(v_ph))                   # its angle at the last step: t = 0
         self.w = self.w0
         v_pk = abs(v_ph)
@@ -383,6 +385,8 @@ class Vsc:
         vd_ = max(v_d, 0.05 * self.v_nom_peak)
         # Outer loops.
         if self.mode_dc.startswith('vm'):
+            if self.v_dc_ref_fn is not None:
+                self.v_dc_ref = self.v_dc_ref_fn(t_s, v_dc, i_load)
             err = self.v_dc_ref - v_dc
             p_in = v_dc * (i_load + self.kp_v * err + self.int_v)
         else:
@@ -444,6 +448,127 @@ class Vsc:
         # Its power: P its mean since the last sample (every step's, if it samples each); Q at the fundamental, as its controls hold it.
         q_out = 1.5 * (v_q * i_d - v_d * i_q)
         self.trace.append((t_s, p_now, q_out, v_dc, math.hypot(i_d, i_q)))
+        return 'soft' if changed else False
+
+
+class GridFormingVsc(Vsc):
+    """
+    A grid-forming VSC: it sets its bridge's voltage itself - no PLL, no
+    current loop - at the frequency and amplitude its droops give from the
+    power and reactive power it delivers, each measured through a first-order
+    filter (tau, 20 ms):
+        w = w0 - m_p (P_f - P_set),   m_p = droop_pf w0 / S_rated
+        E = E0 - n_q (Q_f - Q_set),   n_q = droop_qv V_peak / S_rated
+    its angle the integral of w. P_set, Q_set and E0 are its load flow's, so it
+    starts at w0 and holds its steady state. Above its current limit the
+    voltage across its reactor is scaled back by the limit over its current,
+    holding its current there (a virtual impedance growing with the overload):
+    the reactor's current that its reference voltage would drive, estimated
+    from the reactor's impedance.
+    Its DC side draws what its bridge delivers, as an averaged VSC's.
+    """
+
+    def __init__(self, builder, label, ac_bus, bus_dc, term, r_dc, block_pu, *, droop_pf=0.02, droop_qv=0.05,
+                 tau_f=0.02, **kw):
+        super().__init__(builder, label, ac_bus, bus_dc, term, r_dc, block_pu, **kw)
+        self._gf_start(droop_pf, droop_qv, tau_f)
+
+    @classmethod
+    def standalone(cls, droop_pf=0.02, droop_qv=0.05, tau_f=0.02, **kw):
+        self = super().standalone(**kw)
+        self._gf_start(droop_pf, droop_qv, tau_f)
+        return self
+
+    def _gf_start(self, droop_pf, droop_qv, tau_f):
+        e_ph, v_ph, i_ph = self.e_ph0, self.v_ph0, self.i_ph0
+        self.th_e = float(np.angle(e_ph))
+        self.e0 = abs(e_ph)
+        s0 = 1.5 * v_ph * np.conj(i_ph)
+        self.p_set, self.q_set = float(s0.real), float(s0.imag)
+        self.p_f, self.q_f = self.p_set, self.q_set
+        self.m_p = droop_pf * self.w0 / self.s_rated
+        self.n_q = droop_qv * self.v_nom_peak / self.s_rated
+        self.tau_f = tau_f
+        self.w_gf = self.w0
+        self.freq_trace = []                 # (t, f)
+
+    def control(self, t, state):
+        if self.blocked_at is not None:
+            return False
+        v = state.v[self.ac_nodes]
+        i = np.array([state.i_rl[k] for k in self.k_e])
+        v_dc = float(state.v[self.p_node])
+        i_load = float(state.i_rl[self.k_dc_out])
+        if v_dc < self.block_v or float(np.max(np.abs(i))) > self.block_i:
+            self._block(t, state)
+            return True
+        p_now = _power(v, i)
+        if self.model == 'average' and self.e_held is not None:
+            state.set_source_value(self.k_src, -self._dc_drawn(float(np.dot(self.e_held, i))) / max(v_dc, 1.0))
+        if self.t_sample is not None:
+            v_prev, vdc_prev, load_prev, p_prev = (v, v_dc, i_load, p_now) if self.v_prev is None else self.v_prev
+            h = t - self.t_step
+            self.acc_v += 0.5 * (v_prev + v) * h
+            self.acc_vdc += 0.5 * (vdc_prev + v_dc) * h
+            self.acc_p += 0.5 * (p_prev + p_now) * h
+            self.v_prev, self.t_step = (v, v_dc, i_load, p_now), t
+            if t < self.t_next - 1.5 * getattr(state, 'tol', 0.0) - 1e-12:
+                return False
+        elapsed = t - self.t_last
+        self.t_last = t
+        if elapsed <= 0:
+            return False
+        if self.t_sample is not None:
+            v, v_dc = self.acc_v / elapsed, self.acc_vdc / elapsed
+            p_now = self.acc_p / elapsed
+            self.acc_v, self.acc_vdc, self.acc_load, self.acc_p = np.zeros(3), 0.0, 0.0, 0.0
+            t_s, dt = self.t_next, self.t_sample
+        else:
+            t_s, dt = t, elapsed
+        # Its power and reactive power, filtered; its droops.
+        q_now = ((v[1] - v[2]) * i[0] + (v[2] - v[0]) * i[1] + (v[0] - v[1]) * i[2]) / SQ3
+        a = 1.0 - math.exp(-dt / self.tau_f)
+        self.p_f += (p_now - self.p_f) * a
+        self.q_f += (q_now - self.q_f) * a
+        self.w_gf = self.w0 - self.m_p * (self.p_f - self.p_set)
+        theta = self.th_e + self.w_gf * dt
+        e_mag = self.e0 - self.n_q * (self.q_f - self.q_set)
+        e_d, e_q = e_mag, 0.0
+        # Its current limit: the voltage across its reactor scaled back to what drives its limit through it -
+        # the current its reference would drive, |e - v| / |r + j w l|, not the one it measured (which the last
+        # sample's scaling set, and would chase).
+        i_d, i_q = park(i, theta)
+        i_mag = math.hypot(i_d, i_q)
+        v_d, v_q = park(v, theta)
+        i_est = math.hypot(e_d - v_d, e_q - v_q) / math.hypot(self.r, self.w_gf * self.l)
+        if i_est > self.i_max:
+            k = self.i_max / i_est
+            e_d, e_q = v_d + (e_d - v_d) * k, v_q + (e_q - v_q) * k
+            self.limited_time += dt
+        e_max = max(v_dc, 0.0) / SQ3
+        mag = math.hypot(e_d, e_q)
+        if mag > e_max:
+            e_d, e_q = e_d * e_max / mag, e_q * e_max / mag
+        hold = self.t_sample or dt
+        e = inverse_park(e_d, e_q, theta + 0.5 * self.w_gf * hold)
+        self.th_e = theta
+        changed = False
+        if self.model == 'switching':
+            for k_, (up, dn), on, t_x in self._pwm_plan(t_s, e, v_dc):
+                changed = changed or bool(state.sw_closed[up]) != on
+                self._set_leg(state, up, dn, on)
+                if t_x is not None:
+                    state.at(t_x, lambda st, up=up, dn=dn, on=not on: self._set_leg(st, up, dn, on), soft=True)
+        else:
+            for k_ in range(3):
+                state.set_emf(self.k_e[k_], float(e[k_]))
+            self.e_held = e
+            state.set_source_value(self.k_src, -self._dc_drawn(float(np.dot(e, i))) / max(float(state.v[self.p_node]), 1.0))
+        if self.t_sample is not None:
+            self.t_next = t_s + self.t_sample
+            state.at(self.t_next, _breakpoint, soft=None)
+        self.trace.append((t_s, p_now, q_now, v_dc, i_mag))
+        self.freq_trace.append((t_s, self.w_gf / (2 * math.pi)))
         return 'soft' if changed else False
 
 

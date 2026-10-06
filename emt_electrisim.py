@@ -41,7 +41,7 @@ import pandapower_electrisim as pe
 from dc_fault_electrisim import _ac_thevenin, _f, _label, _row_id, _waveform
 from emt_ac import AcBuilder
 import emt_der
-from emt_converters import DcDc, Vsc
+from emt_converters import DcDc, GridFormingVsc, Vsc
 from emt_solver import R_BIAS, Circuit, dc_load_current
 
 
@@ -104,6 +104,7 @@ class _EmtBuilder:
         self._loads()
         self._ders()
         self._converters()
+        self._pcs()
         self._dc_dc_converters()
         self._ssts()
         if 'b2b_vsc' in net and len(net.b2b_vsc):
@@ -135,6 +136,10 @@ class _EmtBuilder:
                 continue
             self.dcdc_plan.append(rec)
             self.skip.update(p for p in parts if p[1] is not None)
+        # The PCS: their load-flow generators left out, their EMT models standing for them.
+        for rec in getattr(net, 'electrisim_pcs', None) or []:
+            if rec['in_service'] and rec['index'] is not None:
+                self.skip.add((rec['table'], rec['index']))
         # The sources and stores: their load-flow stand-ins left out.
         for rec in getattr(net, 'electrisim_ders', None) or []:
             parts = rec['parts']
@@ -323,6 +328,51 @@ class _EmtBuilder:
             model = emt_der.build(self.ckt, rec['obj'], rec['label'], self.bus_node[bus], v, p / max(v, 1e-6))
             model.id = rec['id']
             self.ders.append((rec, model))
+
+    def _pcs(self):
+        """
+        Each PCS: its source's EMT model on its DC link, and the VSC between
+        that link and its AC bus - grid-forming, or grid-following in power
+        mode (a PV array's on its DC voltage, which its MPPT moves) - rated as
+        the PCS, its reactor 0.15 pu, its current limit its own.
+        """
+        net = self.net
+        block = _f(self.params.get('vsc_block_pu'), 0.8)
+        for rec in getattr(net, 'electrisim_pcs', None) or []:
+            if not rec['in_service'] or rec['bus'] not in self.ac.nodes:
+                continue
+            res = net[f"res_{rec['table']}"]
+            if rec['index'] not in res.index:
+                continue
+            p_ac, q_ac = _f(res.at[rec['index'], 'p_mw']), _f(res.at[rec['index'], 'q_mvar'])
+            src = rec['source']
+            obj = src['obj']
+            p_dc = pe._electrisim_dc_dc_input_power(p_ac, rec['eta'], rec['p_nl_mw'])
+            v_dc, _ = pe._electrisim_der_dc_point(obj, p_dc * 1e6)
+            key = ('pcs', rec['name'])
+            self.vn[key], self.v_bus[key] = obj.v_nominal(), v_dc
+            term = self.ckt.node(f"{rec['label']} DC terminals", v_dc)
+            model = emt_der.build(self.ckt, obj, src['label'], term, v_dc, p_dc * 1e6 / max(v_dc, 1e-6))
+            model.id = src['id']
+            self.ders.append(({'id': src['id'], 'coupling': 'pcs', 'bus': None, 'label': src['label']}, model))
+            z = self.ac.vn[rec['bus']] ** 2 / (rec['s_rated'] * 1e6)
+            kw = dict(p=-p_ac, q=-q_ac, p_dc=p_dc, rated_mva=rec['s_rated'], limit_pu=rec['k'], r_ohm=0.01 * z,
+                      x_ohm=0.15 * z, mode_ac='q_mvar', model='average', eta=rec['eta'], p_nl_mw=rec['p_nl_mw'],
+                      input_side='dc')
+            if rec['table'] == 'gen':
+                conv = GridFormingVsc(self, rec['label'], rec['bus'], key, term, 1e-4, block, mode_dc='p_mw',
+                                      droop_pf=rec['droop_pf'], droop_qv=rec['droop_qv'], **kw)
+                conv.control_mode = 'grid_forming'
+            else:
+                pv = obj.kind == 'PV Array'
+                conv = Vsc(self, rec['label'], rec['bus'], key, term, 1e-4, block,
+                           mode_dc='vm_pu' if pv else 'p_mw', **kw)
+                if pv:
+                    conv.v_dc_ref_fn = emt_der.VscMppt(model, v_dc)
+                    conv.mppt = conv.v_dc_ref_fn
+                conv.control_mode = 'grid_following'
+            conv.pcs = True
+            self._add_vsc(conv, rec['id'])
 
     def _der_on(self, bus):
         return next((m for r, m in self.ders if r['bus'] == bus and r['coupling'] == 'converter'), None)
@@ -543,6 +593,8 @@ class _EmtBuilder:
         if self.ac.profiled:
             self.ac.follow_profiles(t, state)
         changed = False
+        if self.ac.island is not None and self.ac.island_control(t, state):
+            changed = True
         for _, model in self.ders:
             model.control(t, state)
         for conv in self.vscs + self.dcdcs:
@@ -731,6 +783,10 @@ def emt_study(net, params, in_data=None):
             ckt.at(t_pv, lambda st, ms=pvs, g=g: [m.step_irradiance(g) for m in ms])
             event_times.append(t_pv)
 
+    # Islanding: the external grids' breakers open, each phase at its current's zero.
+    if b.ac.island is not None:
+        event_times.append(b.ac.island['t'])
+
     # A fault on an AC bus.
     ac_fault = None
     ac_bus = str(params.get('ac_fault_bus') or 'none')
@@ -825,6 +881,9 @@ def emt_study(net, params, in_data=None):
         result['breakers'].append(out)
     result['ac'] = _ac_results(sim, b.ac, net, t_fine, ac_fault)
     result['ders'] = [_der_result(rec, m) for rec, m in b.ders]
+    if b.ac.island is not None:
+        result['island'] = {'t_ms': _round(b.ac.island['t'] * 1e3),
+                            'opened_ms': [_round(x * 1e3) if x is not None else None for x in b.ac.island['opened']]}
     for conv, sm in b.smoothers:
         tr = np.array(sm.trace) if sm.trace else np.zeros((0, 3))
         row = next(r for r in result['converters'] if r['label'] == conv.label)
@@ -946,7 +1005,8 @@ def _converter_result(conv, t_event):
     run: its P and Q over its first cycle (before the first event) and its last.
     """
     tr = np.array(conv.trace) if conv.trace else np.zeros((0, 5))
-    out = {'label': conv.label, 'id': getattr(conv, 'id', ''), 'kind': 'VSC', 'model': conv.model,
+    out = {'label': conv.label, 'id': getattr(conv, 'id', ''), 'kind': 'PCS' if getattr(conv, 'pcs', False) else 'VSC',
+           'control': getattr(conv, 'control_mode', None), 'model': conv.model,
            'switching_khz': _round(conv.f_sw / 1e3) if getattr(conv, 'f_sw', None) else None,
            'rated_mva': _round(conv.s_rated / 1e6), 'current_limit_ka': _round(conv.i_max / SQ2 / 1e3),
            'blocked_ms': _round(conv.blocked_at * 1e3) if conv.blocked_at is not None else None,
@@ -962,6 +1022,14 @@ def _converter_result(conv, t_event):
                    q_end_mvar=_round(float(np.mean(tr[last, 2])) / 1e6),
                    v_dc_min_kv=_round(float(np.min(tr[:, 3])) / 1e3), v_dc_end_kv=_round(tr[-1, 3] / 1e3),
                    i_peak_ka=_round(float(np.max(tr[:, 4])) / SQ2 / 1e3))
+        # Its rms current over its last cycle: at a fault, its current limit.
+        out['i_end_ka'] = _round(float(np.mean(tr[last, 4])) / SQ2 / 1e3)
+    if getattr(conv, 'freq_trace', None):
+        f = np.array(conv.freq_trace)
+        out.update(f_min_hz=_round(float(np.min(f[:, 1]))), f_max_hz=_round(float(np.max(f[:, 1]))),
+                   f_end_hz=_round(float(f[-1, 1])))
+        k = max(1, len(f) // 400)
+        out['frequency'] = {'t_ms': [_round(x * 1e3) for x in f[::k, 0]], 'f_hz': [_round(x) for x in f[::k, 1]]}
     return out
 
 

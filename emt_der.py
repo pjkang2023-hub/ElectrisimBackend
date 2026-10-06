@@ -44,7 +44,17 @@ class _Model:
     def _dt(self, t):
         dt = t - self.t_last
         self.t_last = t
+        # A sliver of a step - the solver landing on an event or the run's end - is integrated, not traced:
+        # its currents, a fraction of a step after the last, are not the steady values the trace reports.
+        prev = getattr(self, 'dt_prev', None)
+        self.sliver = prev is not None and 0 < dt < 0.1 * prev
+        if dt > 0 and not self.sliver:
+            self.dt_prev = dt
         return dt
+
+    def _trace(self, row):
+        if not getattr(self, 'sliver', False):
+            self.trace.append(row)
 
     def soc_percent(self):
         return None
@@ -72,7 +82,7 @@ class BatteryEmt(_Model):
         charge = i * dt if i >= 0 else i * obj.eta_charge * dt
         obj.soc0 = min(max(obj.soc0 - charge / (obj.ah * 3600.0), 0.0), 1.0)
         state.set_emf(self.k, obj.ocv())
-        self.trace.append((t, float(state.v[self.node]), i, obj.soc0))
+        self._trace((t, float(state.v[self.node]), i, obj.soc0))
         return False
 
     def soc_percent(self):
@@ -97,7 +107,7 @@ class SupercapacitorEmt(_Model):
         if self._dt(t) <= 0:
             return False
         self.obj.v0 = float(state.v[self.cap])
-        self.trace.append((t, float(state.v[self.node]), float(state.i_rl[self.k]), self.obj.v0))
+        self._trace((t, float(state.v[self.node]), float(state.i_rl[self.k]), self.obj.v0))
         return False
 
     def soc_percent(self):
@@ -155,7 +165,7 @@ class FlywheelEmt(_Model):
             self.int_v += self.ki * err * dt
         self.p_m = p
         state.set_source_value(self.k_src, p / v)
-        self.trace.append((t, float(state.v[self.node]), i_out, o.s0))
+        self._trace((t, float(state.v[self.node]), i_out, o.s0))
         return False
 
     def soc_percent(self):
@@ -213,7 +223,7 @@ class SofcEmt(_Model):
         state.set_emf(self.k, self.nernst() * o.n_series)
         v_stack = max(float(state.v[self.inner]), 1.0)
         state.set_source_value(self.k_aux, self.aux_w / v_stack)
-        self.trace.append((t, float(state.v[self.node]), float(state.i_rl[self.k_out]), self.p_h2))
+        self._trace((t, float(state.v[self.node]), float(state.i_rl[self.k_out]), self.p_h2))
         return False
 
 
@@ -251,7 +261,7 @@ class PvEmt(_Model):
         if self._dt(t) <= 0:
             return False
         v = float(state.v[self.node])
-        self.trace.append((t, v, -self.current(v, t)[0], self.obj.g))
+        self._trace((t, v, -self.current(v, t)[0], self.obj.g))
         return False
 
 
@@ -311,6 +321,39 @@ class Mppt:
         i_draw = i_in + self.kp * err + self.int_i
         self.int_i += self.ki * err * dt
         return v_in * i_draw            # the power its input draws (its stage loss taken by the converter)
+
+
+class VscMppt:
+    """
+    Perturb and observe for a PV array on a grid-following PCS's DC link: the
+    PCS holds its DC voltage at a reference, which moves a step every period -
+    the same way if the array's power rose, back if it fell.
+    """
+
+    def __init__(self, pv, v_ref, period_s=0.02, step_frac=0.005):
+        self.pv, self.v_ref = pv, v_ref
+        self.period, self.step = period_s, step_frac * pv.obj.n_s * pv.obj.v_oc_t
+        self.dir = -1.0
+        self.t_next = period_s
+        self.p_last = None
+        self.acc_p, self.acc_t, self.t_last = 0.0, 0.0, 0.0
+        self.trace = []
+
+    def __call__(self, t, v_dc, i_load):
+        dt = t - self.t_last
+        self.t_last = t
+        self.acc_p += -v_dc * i_load * max(dt, 0.0)       # the array feeds the link: its current from the terminals
+        self.acc_t += max(dt, 0.0)
+        if t >= self.t_next - 1e-12 and self.acc_t > 0:
+            p = self.acc_p / self.acc_t
+            if self.p_last is not None and p < self.p_last:
+                self.dir = -self.dir
+            self.p_last = p
+            self.v_ref += self.dir * self.step
+            self.acc_p = self.acc_t = 0.0
+            self.t_next += self.period
+            self.trace.append((t, self.v_ref, p))
+        return self.v_ref
 
 
 class Smoothing:

@@ -119,6 +119,9 @@ class AcBuilder:
         self.skip = set()        # (table, index): elements a converter's EMT model stands for
         self.profiles = {}       # load index -> its profile's plan (emt_electrisim._plan_profiles)
         self.profiled = []       # loads following a profile: their nodes, correction sources and plan
+        t_island = _f(params.get('island_time_ms'), -1.0) if str(params.get('island_time_ms') or '').strip() else -1.0
+        # Islanding: {'t', 'switches': per grid phase, 'opened': its time, 'last': its last current}.
+        self.island = {'t': t_island * 1e-3, 'switches': [], 'opened': [], 'last': []} if t_island >= 0 else None
 
     # --- buses and the phase shifts ------------------------------------------------
 
@@ -255,7 +258,15 @@ class AcBuilder:
             i_ph = self._injection_phasor(b, p, q)
             e_ph = self._v_phasor(b) + complex(r1, x1) * i_ph
             amp, ph = self._three(e_ph)
-            g = ckt.add_coupled([0, 0, 0], self.nodes[b], _matrix(rs, rm), _matrix(ls, lm), ac=(amp, w, ph))
+            ends = self.nodes[b]
+            if self.island is not None:
+                # Its breaker, between it and its bus: opened by the islanding, each phase at its current's zero.
+                ends = [ckt.node(f"{_label(net, 'ext_grid', gi)} breaker {p}") for p in 'abc']
+                for k in range(3):
+                    self.island['switches'].append(ckt.add_switch(ends[k], self.nodes[b][k], closed=True))
+                    self.island['opened'].append(None)
+                    self.island['last'].append(None)
+            g = ckt.add_coupled([0, 0, 0], ends, _matrix(rs, rm), _matrix(ls, lm), ac=(amp, w, ph))
             label = _label(net, 'ext_grid', gi)
             self.series.append(('External grid', label, _row_id(net, 'ext_grid', gi), label,
                                 [('i_cp', g, k, 1.0) for k in range(3)]))
@@ -444,6 +455,8 @@ class AcBuilder:
             b = int(net.gen.at[i, 'bus'])
             if not bool(net.gen.at[i, 'in_service']) or b not in self.nodes or i not in net.res_gen.index:
                 continue
+            if ('gen', i) in self.skip:
+                continue
             vn = self.vn[b]
             sn = _f(net.gen.at[i, 'sn_mva'], 0.0) if 'sn_mva' in net.gen.columns else 0.0
             sn = sn if sn > 0 else max(abs(_f(net.res_gen.at[i, 'p_mw'])), 1.0) * 1.2
@@ -459,6 +472,24 @@ class AcBuilder:
             g = ckt.add_coupled([star] * 3, self.nodes[b], np.eye(3) * r, np.eye(3) * x / w, ac=(amp, w, ph))
             label = _label(net, 'gen', i)
             self.series.append(('Generator', label, _row_id(net, 'gen', i), label, [('i_cp', g, k, 1.0) for k in range(3)]))
+
+    def island_control(self, t, state):
+        """From the islanding time, each grid breaker's phase opens as its current passes zero; True if one did."""
+        isl = self.island
+        if t < isl['t'] - 1e-12:
+            return False
+        changed = False
+        for n, k in enumerate(isl['switches']):
+            if isl['opened'][n] is not None:
+                continue
+            i = float(state.i_sw[k])
+            last = isl['last'][n]
+            isl['last'][n] = i
+            if last is not None and (i == 0.0 or (i > 0) != (last > 0)):
+                state.set_switch(k, False)
+                isl['opened'][n] = t
+                changed = True
+        return changed
 
     # --- a fault -------------------------------------------------------------------------
 

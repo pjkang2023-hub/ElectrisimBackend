@@ -331,8 +331,8 @@ def test_emt_study_with_every_source_and_store(client, quiet):
     emt = result['emt']
     assert not emt['converters_blocked']
     ders = {d['label']: d for d in emt['ders']}
-    assert ders['BT']['p_start_mw'] == pytest.approx(0.05 / 0.98, rel=1e-6)
-    assert ders['FC']['p_start_mw'] == pytest.approx(0.06, rel=1e-6)
+    assert ders['BT']['p_start_mw'] == pytest.approx(0.05 / 0.98, abs=1e-6)          # results to six decimals
+    assert ders['FC']['p_start_mw'] == pytest.approx(0.06, abs=1e-6)
     assert ders['FC']['p_end_mw'] == pytest.approx(0.06, rel=1e-3)
     assert ders['PV']['irradiance_wm2_end'] == 500 and ders['PV']['p_end_mw'] < 0.6 * ders['PV']['p_start_mw']
     assert ders['SC']['p_start_mw'] == pytest.approx(0, abs=1e-9)

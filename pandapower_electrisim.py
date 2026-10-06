@@ -2648,6 +2648,12 @@ def _electrisim_pcs_islands(net):
         if len(net.gen) and 'slack' in net.gen.columns else set()
     islands = {}
     for rec in gf:
+        if rec['bus'] in grid_buses:
+            # On the grid's own bus the grid holds its voltage: it takes the grid's set point, and no Q-V droop.
+            g = net.ext_grid.index[(net.ext_grid['bus'] == rec['bus']) & (net.ext_grid['in_service'] == True)][0]
+            net.gen.at[rec['index'], 'vm_pu'] = float(net.ext_grid.at[g, 'vm_pu'])
+            rec['vm_set_pu'] = float(net.ext_grid.at[g, 'vm_pu'])
+            rec['droop_qv_lf'] = 0.0
         comp = frozenset(top.connected_component(graph, rec['bus']))
         if comp & (grid_buses | slack_gens):
             continue
@@ -2701,7 +2707,8 @@ def _electrisim_pcs_sc_islands(net):
 def _electrisim_pcs_to_settle(net):
     return [r for r in getattr(net, 'electrisim_pcs', None) or []
             if r['in_service'] and r['table'] in ('gen', 'sgen')
-            and (r['table'] == 'gen' and (r['island'] is not None or r['droop_qv'] > 0) or r['q_mode'] == 'qv')]
+            and (r['table'] == 'gen' and (r['island'] is not None or r.get('droop_qv_lf', r['droop_qv']) > 0)
+                 or r['q_mode'] == 'qv')]
 
 
 def _electrisim_secant(rec, key, x, g, x_min, x_max):
@@ -2741,7 +2748,7 @@ def _electrisim_settle_pcs(net):
             net.gen.at[rec['index'], 'p_mw'] = target
     # Q-V droop of the grid-forming PCS: its voltage set point lowered by its Q.
     for rec in recs:
-        if rec['table'] == 'gen' and rec['droop_qv'] > 0 and rec['index'] in net.res_gen.index:
+        if rec['table'] == 'gen' and rec.get('droop_qv_lf', rec['droop_qv']) > 0 and rec['index'] in net.res_gen.index:
             q = float(net.res_gen.at[rec['index'], 'q_mvar'])
             v_set = float(net.gen.at[rec['index'], 'vm_pu'])
             g = v_set - (rec['vm_set_pu'] - rec['droop_qv'] * q / rec['s_rated'])
