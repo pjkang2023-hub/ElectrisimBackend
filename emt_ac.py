@@ -119,6 +119,8 @@ class AcBuilder:
         self.skip = set()        # (table, index): elements a converter's EMT model stands for
         self.profiles = {}       # load index -> its profile's plan (emt_electrisim._plan_profiles)
         self.profiled = []       # loads following a profile: their nodes, correction sources and plan
+        self.gen_rows = {}       # generator name -> its diagram row (its rotor, governor and exciter data)
+        self.machines = []       # emt_machine.SynchronousMachine, one per generator modelled as a machine
         t_island = _f(params.get('island_time_ms'), -1.0) if str(params.get('island_time_ms') or '').strip() else -1.0
         # Islanding: {'t', 'switches': per grid phase, 'opened': its time, 'last': its last current}.
         self.island = {'t': t_island * 1e-3, 'switches': [], 'opened': [], 'last': []} if t_island >= 0 else None
@@ -486,12 +488,18 @@ class AcBuilder:
                 label = _label(net, table, i)
                 self.series.append(('Static generator' if table == 'sgen' else 'Storage', label,
                                     _row_id(net, table, i), label, [('i_src', k, None, 1.0) for k in ks]))
-        # Synchronous: their voltage behind their subtransient reactance.
+        # Synchronous: their voltage behind their subtransient reactance; or, as machines, with their rotor,
+        # governor and exciter (emt_machine) - by the study's generator_model, the machine when it islands.
+        mode = str(self.params.get('generator_model') or 'auto').strip().lower()
+        as_machine = mode == 'machine' or (mode == 'auto' and self.island is not None)
         for i in net.gen.index:
             b = int(net.gen.at[i, 'bus'])
             if not bool(net.gen.at[i, 'in_service']) or b not in self.nodes or i not in net.res_gen.index:
                 continue
             if ('gen', i) in self.skip:
+                continue
+            if as_machine:
+                self._machine(i, b)
                 continue
             vn = self.vn[b]
             sn = _f(net.gen.at[i, 'sn_mva'], 0.0) if 'sn_mva' in net.gen.columns else 0.0
@@ -508,6 +516,24 @@ class AcBuilder:
             g = ckt.add_coupled([star] * 3, self.nodes[b], np.eye(3) * r, np.eye(3) * x / w, ac=(amp, w, ph))
             label = _label(net, 'gen', i)
             self.series.append(('Generator', label, _row_id(net, 'gen', i), label, [('i_cp', g, k, 1.0) for k in range(3)]))
+
+    def _machine(self, i, b):
+        """Generator i as a synchronous machine with its rotor, governor and exciter."""
+        import emt_machine
+        from andes_electrisim import _EXCITER_DEFAULTS, _GOVERNOR_DEFAULTS
+        net = self.net
+        name = str(net.gen.at[i, 'name'])
+        sn = _f(net.gen.at[i, 'sn_mva'], 0.0) if 'sn_mva' in net.gen.columns else 0.0
+        sn = sn if sn > 0 else max(abs(_f(net.res_gen.at[i, 'p_mw'])), 1.0) * 1.2
+        data = emt_machine.machine_data(self.gen_rows.get(name), _GOVERNOR_DEFAULTS, _EXCITER_DEFAULTS)
+        label = _label(net, 'gen', i)
+        i_ph = self._injection_phasor(b, _f(net.res_gen.at[i, 'p_mw']), _f(net.res_gen.at[i, 'q_mvar']))
+        m = emt_machine.SynchronousMachine(self.ckt, label, self.nodes[b], self.w, self._v_phasor(b), i_ph,
+                                           sn * 1e6, self.vn[b], r_bias=R_BIAS, **data)
+        m.row_id = _row_id(net, 'gen', i)
+        self.ckt.add_controller(m.control)
+        self.machines.append(m)
+        self.series.append(('Generator', label, m.row_id, label, [('i_rl', k, None, 1.0) for k in m.k_e]))
 
     def island_control(self, t, state):
         """From the islanding time, each grid breaker's phase opens as its current passes zero; True if one did."""

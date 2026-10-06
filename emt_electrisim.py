@@ -56,6 +56,8 @@ def _round(x, nd=6):
 
 
 class _EmtBuilder:
+    in_data = None           # the diagram's rows: a generator's rotor, governor and exciter data
+
     def __init__(self, net, params, warnings_out, profiles=None):
         self.net, self.params, self.warnings = net, params, warnings_out
         self.profiles = profiles or {}   # (table, index) -> the load's profile plan (_plan_profiles)
@@ -96,6 +98,8 @@ class _EmtBuilder:
         self._plan_converters()
         ac = AcBuilder(ckt, net, self.params, self.warnings, self.f_hz)
         ac.skip = self.skip
+        ac.gen_rows = {str(r.get('name')): r for r in (self.in_data or {}).values()
+                       if isinstance(r, dict) and str(r.get('typ', '')).startswith('Generator')}
         ac.profiles = {i: plan for (table, i), plan in self.profiles.items() if table == 'load'}
         self.ac = ac.build()
         self._cables()
@@ -727,7 +731,9 @@ def emt_study(net, params, in_data=None):
     warnings_out.extend(getattr(net, 'warnings', []) or [])
     if not len(net.bus) and ('bus_dc' not in net or not len(net.bus_dc)):
         return json.dumps({'error': True, 'message': 'There is no network to study.', 'warnings': warnings_out})
-    b = _EmtBuilder(net, params, warnings_out, profiles).build()
+    builder = _EmtBuilder(net, params, warnings_out, profiles)
+    builder.in_data = in_data
+    b = builder.build()
     ckt = b.ckt
     if b.ac.nodes:
         ckt.start_in_ac_steady_state(b.ac.w)
@@ -880,6 +886,8 @@ def emt_study(net, params, in_data=None):
             warnings_out.append(f"DC breaker {rec['label']} opened but its current had not reached zero by the end of the run.")
         result['breakers'].append(out)
     result['ac'] = _ac_results(sim, b.ac, net, t_fine, ac_fault)
+    if b.ac.machines:
+        result['machines'] = [_machine_result(m) for m in b.ac.machines]
     result['ders'] = [_der_result(rec, m) for rec, m in b.ders]
     if b.ac.island is not None:
         result['island'] = {'t_ms': _round(b.ac.island['t'] * 1e3),
@@ -997,6 +1005,22 @@ def _ac_results(sim, ac, net, t_fine, fault):
                                         'i_sym_ka': _round(i_sym * 1e-3) if i_sym is not None else None,
                                         'waveform': _waveform(t, i, None, t_fine)})
     return {'buses': buses, 'branches': branches, 'fault': fault_out}
+
+
+def _machine_result(m):
+    """A synchronous machine: its power, frequency, rotor angle, internal voltage and mechanical power."""
+    tr = np.array(m.trace) if m.trace else np.zeros((0, 7))
+    out = {'label': m.label, 'id': m.row_id, 'governor': bool(m.gov), 'exciter': bool(m.exc)}
+    if not len(tr):
+        return out
+    out.update(p_start_mw=_round(tr[0, 1]), p_end_mw=_round(tr[-1, 1]), q_end_mvar=_round(tr[-1, 2]),
+               f_end_hz=_round(tr[-1, 3]), f_min_hz=_round(float(np.min(tr[:, 3]))), f_max_hz=_round(float(np.max(tr[:, 3]))),
+               delta_end_deg=_round(math.degrees(tr[-1, 4] - tr[0, 4])), e_end_pu=_round(tr[-1, 5]),
+               pm_start_mw=_round(tr[0, 6]), pm_end_mw=_round(tr[-1, 6]),
+               trace={'t_ms': [_round(x * 1e3) for x in tr[::max(1, len(tr) // 400), 0]],
+                      'p_mw': [_round(x) for x in tr[::max(1, len(tr) // 400), 1]],
+                      'f_hz': [_round(x) for x in tr[::max(1, len(tr) // 400), 3]]})
+    return out
 
 
 def _converter_result(conv, t_event):
