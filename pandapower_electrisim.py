@@ -5351,11 +5351,15 @@ def create_other_elements(in_data,net,x, Busbars):
             if 'id' not in net.vsc.columns:
                 net.vsc['id'] = ''
             net.vsc.at[vsc_idx, 'id'] = in_data[x].get('id', '')
-            # For the EMT study: its rating, DC link and current limit (0: from its load flow)
-            for col, default in (('rated_mva', 0.0), ('dc_link_mf', 0.0), ('current_limit_pu', 1.2)):
+            # For the EMT study: its rating, DC link and current limit (0: from its load flow), its model
+            for col, default in (('rated_mva', 0.0), ('dc_link_mf', 0.0), ('current_limit_pu', 1.2),
+                                 ('switching_khz', 5.0)):
                 if col not in net.vsc.columns:
                     net.vsc[col] = default
                 net.vsc.at[vsc_idx, col] = safe_float(in_data[x].get(col, default), default)
+            if 'emt_model' not in net.vsc.columns:
+                net.vsc['emt_model'] = 'average'
+            net.vsc.at[vsc_idx, 'emt_model'] = 'switching' if in_data[x].get('emt_model') == 'switching' else 'average'
             
             # Store user-friendly name for VSC
             vsc_name = in_data[x]['name']

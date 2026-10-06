@@ -39,7 +39,7 @@ import numpy as np
 import pandapower_electrisim as pe
 from dc_fault_electrisim import _ac_thevenin, _f, _label, _row_id, _waveform
 from emt_ac import AcBuilder
-from emt_converters import VscAverage
+from emt_converters import Vsc
 from emt_solver import R_BIAS, Circuit, dc_load_current
 
 
@@ -257,7 +257,7 @@ class _EmtBuilder:
             term = self._terminal('vsc', vi, bus, -i0)
             if not aux and int(net.vsc.at[vi, 'bus']) in self.ac.nodes:
                 # On the AC network: its average-value model, with its controls.
-                conv = VscAverage(self, vi, label, bus, term, r_dc, block)
+                conv = Vsc(self, vi, label, bus, term, r_dc, block)
                 conv.id = _row_id(net, 'vsc', vi)
                 self.vscs.append(conv)
                 self.series.append(('VSC', label, conv.id, f'{label} (DC side)', ('i_rl', conv.k_dc_out), -1.0))
@@ -463,7 +463,10 @@ def emt_study(net, params, in_data=None):
     ckt.add_controller(b.controller)
     t_fine = min(t_end, (max(event_times) if event_times else 0.0) + 0.01)
     with np.errstate(all='ignore'):
-        sim = ckt.simulate(t_end, dt, dt_coarse=min(10 * dt, 2e-5), t_fine=t_fine)
+        # A switching converter keeps its fine step throughout: fifty to its switching period at most.
+        t_sw = min((1.0 / c.f_sw for c in b.vscs if c.model == 'switching'), default=None)
+        dt_coarse = min(10 * dt, 2e-5) if t_sw is None else max(dt, min(10 * dt, 2e-5, t_sw / 50))
+        sim = ckt.simulate(t_end, dt, dt_coarse=dt_coarse, t_fine=t_fine)
     t = sim['t']
     t_last = max(event_times) if event_times else 0.0
 
@@ -486,7 +489,7 @@ def emt_study(net, params, in_data=None):
     result = {'method': METHOD, 'buses': buses, 'branches': branches, 'breakers': [], 'loads': [], 'fault': None,
               'converters_blocked': [{'label': blk['label'], 't_ms': _round(blk['t'] * 1e3)} for blk in b.blockers if blk['t'] is not None]
               + [{'label': c.label, 't_ms': _round(c.blocked_at * 1e3)} for c in b.vscs if c.blocked_at is not None],
-              'converters': [_converter_result(c) for c in b.vscs],
+              'converters': [_converter_result(c, min(event_times, default=t_end)) for c in b.vscs],
               'settings': {'time_step_us': dt * 1e6, 'duration_ms': t_end * 1e3,
                            'max_section_km': _f(params.get('max_section_km'), 1.0),
                            'vsc_block_pu': _f(params.get('vsc_block_pu'), 0.8)}}
@@ -625,16 +628,26 @@ def _ac_results(sim, ac, net, t_fine, fault):
     return {'buses': buses, 'branches': branches, 'fault': fault_out}
 
 
-def _converter_result(conv):
-    """A VSC's active and reactive power out, DC voltage and current through the run."""
+def _converter_result(conv, t_event):
+    """
+    A VSC's active and reactive power out, DC voltage and current through the
+    run: its P and Q over its first cycle (before the first event) and its last.
+    """
     tr = np.array(conv.trace) if conv.trace else np.zeros((0, 5))
-    out = {'label': conv.label, 'id': getattr(conv, 'id', ''), 'model': 'average',
+    out = {'label': conv.label, 'id': getattr(conv, 'id', ''), 'model': conv.model,
+           'switching_khz': _round(conv.f_sw / 1e3) if getattr(conv, 'f_sw', None) else None,
            'rated_mva': _round(conv.s_rated / 1e6), 'current_limit_ka': _round(conv.i_max / SQ2 / 1e3),
            'blocked_ms': _round(conv.blocked_at * 1e3) if conv.blocked_at is not None else None,
            'limited_ms': _round(conv.limited_time * 1e3)}
     if len(tr):
-        out.update(p_start_mw=_round(tr[0, 1] / 1e6), p_end_mw=_round(tr[-1, 1] / 1e6),
-                   q_start_mvar=_round(tr[0, 2] / 1e6), q_end_mvar=_round(tr[-1, 2] / 1e6),
+        # P and Q over its first and its last cycle: a switching model's samples carry its ripple.
+        cycle = 2 * math.pi / conv.w0
+        first = tr[:, 0] <= max(min(tr[0, 0] + cycle, t_event), tr[0, 0])
+        last = tr[:, 0] >= tr[-1, 0] - cycle
+        out.update(p_start_mw=_round(float(np.mean(tr[first, 1])) / 1e6),
+                   p_end_mw=_round(float(np.mean(tr[last, 1])) / 1e6),
+                   q_start_mvar=_round(float(np.mean(tr[first, 2])) / 1e6),
+                   q_end_mvar=_round(float(np.mean(tr[last, 2])) / 1e6),
                    v_dc_min_kv=_round(float(np.min(tr[:, 3])) / 1e3), v_dc_end_kv=_round(tr[-1, 3] / 1e3),
                    i_peak_ka=_round(float(np.max(tr[:, 4])) / SQ2 / 1e3))
     return out

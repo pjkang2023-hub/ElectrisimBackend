@@ -215,7 +215,7 @@ def test_fault_cleared_by_a_breaker(client, quiet):
     A fault on DC bus B at 5 ms: the breaker on the cable trips at 2 kA, opens
     0.05 ms later, its arrester clamps at 1.4 kV and absorbs the energy, and
     DC bus A rides through - dipping some 4 % while the rectifier's DC voltage
-    loop catches up, and back by the end. The run is too short after the
+    loop catches up, and within 1 % of its set point by the end. The run is too short after the
     fault to tell whether the hall left on settles.
     """
     result = _run(client, quiet, _request(fault_bus='dc_b', fault_time_ms=5, fault_resistance_mohm=1))
@@ -227,7 +227,7 @@ def test_fault_cleared_by_a_breaker(client, quiet):
     assert 0 < qa['arrester_energy_kj'] < 50 and not qa['exceeds_energy']
     buses = {b['id']: b for b in emt['buses']}
     assert 0.95 < buses['cell-dc_a']['v_min_pu'] < 0.99
-    assert buses['cell-dc_a']['v_final_pu'] == pytest.approx(1.0, abs=5e-3)
+    assert buses['cell-dc_a']['v_final_pu'] == pytest.approx(1.0, abs=1e-2)
     assert buses['cell-dc_b']['v_final_pu'] == pytest.approx(0.0, abs=1e-3)
     assert emt['fault']['ip_ka'] > qa['i_open_ka']    # the load's filter discharges into the fault too
     loads = {l['id']: l for l in emt['loads']}

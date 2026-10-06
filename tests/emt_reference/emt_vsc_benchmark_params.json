@@ -15,6 +15,10 @@
     "description": "A resistor r_load on its DC side; a second, r_step, switched in parallel at t_step: 50 % more power.",
     "r_load": 4.2666666666666666, "r_step": 8.5333333333333333, "t_step": 0.01
   },
+  "switching": {
+    "description": "The same VSC as a switching model: a two-level bridge, each leg's switches to the DC link's poles (the negative pole the reference), by regular-sampled PWM at f_sw - a triangular carrier rising from its valley at t = 0, the controller sampling at each peak and valley, its voltages and DC load current averaged since its last sample. The grid's and filter capacitors' star point floats, held by r_bias to the reference. Electrisim steps dt; the waveforms are compared every dt_out.",
+    "f_sw": 5000.0, "r_bias": 1e6, "dt": 2e-6, "dt_out": 5e-6, "t_end": 0.06
+  },
   "switch_r_on": 1e-5,
   "switch_r_off": 1e7,
   "dt": 5e-6,

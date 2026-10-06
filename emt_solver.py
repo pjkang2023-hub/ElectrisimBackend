@@ -14,7 +14,8 @@ Branches, each with its current from node a to node b:
 - C:  i = C d(v_a - v_b)/dt;
 - R:  i = (v_a - v_b) / R;
 - diode, anode a and cathode b: R_ON conducting, R_OFF not;
-- switch: R closed or open, set by events and controllers;
+- switch: R closed or open, set by events and controllers (a converter's
+  legs, by its PWM);
 - surge arrester: R_OFF until |v| reaches its clamping voltage, then that
   voltage behind a small resistance (a piecewise-linear metal-oxide arrester);
 - nonlinear: i = f(v, t), Newton-iterated within each step (constant-power loads);
@@ -26,8 +27,11 @@ Branches, each with its current from node a to node b:
   set i0 of.
 
 The state at t = 0 is each RL branch's current and each capacitor's voltage.
+Events land on the time grid exactly: those given before the run, and those a
+controller schedules during it (a PWM's switching instants).
 """
 
+import heapq
 import math
 
 import numpy as np
@@ -46,7 +50,9 @@ class Circuit:
         self.v0 = [0.0]           # each node's voltage at t = 0: the first guess for nonlinear elements
         self.rl, self.c, self.r, self.d = [], [], [], []
         self.rl_controlled = []
+        self.e_start = {}         # controlled RL branches' e held from t = 0, where not their AC value then
         self.sw, self.arr, self.nl = [], [], []
+        self.sw_phasor = []       # each switch's state in the AC steady state, if not as it starts
         self.cp = []              # coupled RL groups: (a list, b list, R, L, i0, e0, amp, om, ph)
         self.isrc = []            # current sources: [a, b, i0, amp, om, ph, on]
         self.events = []          # (t, action(state))
@@ -84,9 +90,15 @@ class Circuit:
         self.d.append((anode, cathode))
         return len(self.d) - 1
 
-    def add_switch(self, a, b, closed=True, r_on=SW_R_ON, r_off=SW_R_OFF):
+    def add_switch(self, a, b, closed=True, r_on=SW_R_ON, r_off=SW_R_OFF, phasor_closed=None):
+        """``phasor_closed``: its state in the AC steady state (start_in_ac_steady_state), if not ``closed``."""
         self.sw.append([a, b, bool(closed), r_on, r_off])
+        self.sw_phasor.append(None if phasor_closed is None else bool(phasor_closed))
         return len(self.sw) - 1
+
+    def hold_emf(self, k, e):
+        """A controlled RL branch's e from t = 0 until its controller first sets it."""
+        self.e_start[k] = float(e)
 
     def add_arrester(self, a, b, v_clamp, r_on=ARR_R_ON, r_off=ARR_R_OFF):
         self.arr.append((a, b, float(v_clamp), r_on, r_off))
@@ -120,7 +132,10 @@ class Circuit:
         return len(self.nl) - 1
 
     def at(self, t, action):
-        """Run ``action(state)`` once the simulation reaches ``t``; the step after it is backward Euler."""
+        """
+        Run ``action(state)`` once the simulation reaches ``t``; the step after it
+        is backward Euler. A controller schedules one during a run by state.at.
+        """
         self.events.append((float(t), action))
 
     def add_controller(self, fn):
@@ -165,7 +180,8 @@ class Circuit:
             stamp(a, b, 1.0 / r)
         for a, b in self.d:
             stamp(a, b, 1.0 / R_OFF)
-        for a, b, closed, r_on, r_off in self.sw:
+        for (a, b, closed, r_on, r_off), ph_closed in zip(self.sw, self.sw_phasor):
+            closed = closed if ph_closed is None else ph_closed
             stamp(a, b, 1.0 / (r_on if closed else r_off))
         for a, b, _vc, _r_on, r_off in self.arr:
             stamp(a, b, 1.0 / r_off)
@@ -266,38 +282,9 @@ class Circuit:
         def coupled_emf(tt):
             return e0_cp + amp_cp * np.cos(om_cp * tt + ph_cp)
 
-        # The time grid, landing on each event.
-        event_times = sorted({t for t, _ in self.events if 0 < t < t_end})
-        steps = []
-        t = 0.0
         t_fine = t_end if t_fine is None else t_fine
-        k_ev = 0
-        while t < t_end - 1e-15:
-            h_nom = dt if t < t_fine - 1e-15 else (dt_coarse or dt)
-            h = min(h_nom, t_end - t)
-            if t_end - (t + h) < 0.01 * h_nom:
-                h = t_end - t          # no sliver of a last step: rounding would make a tiny one ring
-            # An event within a sliver of now is taken now; the grid lands on the next.
-            while k_ev < len(event_times) and event_times[k_ev] <= t + 0.01 * h_nom:
-                k_ev += 1
-            if k_ev < len(event_times) and t + h > event_times[k_ev] - 0.01 * h_nom:
-                h = event_times[k_ev] - t if t + h > event_times[k_ev] else h
-                if event_times[k_ev] - (t + h) < 0.01 * h_nom:
-                    h = event_times[k_ev] - t
-            steps.append(h)
-            t += h
-        N = len(steps)
-        times = np.concatenate([[0.0], np.cumsum(steps)])
-
-        out = {
-            't': times, 'v': np.zeros((N + 1, n)), 'i_rl': np.zeros((N + 1, len(R))),
-            'i_c': np.zeros((N + 1, len(C))), 'i_r': np.zeros((N + 1, len(Gr))),
-            'i_d': np.zeros((N + 1, len(da))), 'i_sw': np.zeros((N + 1, len(sa))),
-            'i_arr': np.zeros((N + 1, len(aa))), 'i_nl': np.zeros((N + 1, len(self.nl))),
-            'sw_closed': np.zeros((N + 1, len(sa)), dtype=bool),
-            'i_cp_all': np.zeros((N + 1, M)),
-            'i_src': np.zeros((N + 1, len(ia_))),
-        }
+        out = {'t': [0.0], 'v': [], 'i_rl': [], 'i_c': [], 'i_r': [], 'i_d': [], 'i_sw': [], 'i_arr': [],
+               'i_nl': [], 'sw_closed': [], 'i_cp_all': [], 'i_src': []}
 
         ctrl = np.array(self.rl_controlled, dtype=bool)
 
@@ -310,6 +297,19 @@ class Circuit:
         state.src_on = np.array([x[6] for x in self.isrc], dtype=bool)
         state.i_src0 = i_dc.copy()
         state.e_ctrl = e0 + eamp * np.cos(eph)
+        for k, e_k in self.e_start.items():
+            state.e_ctrl[k] = e_k
+        # Events, by time: those given, and those controllers schedule as the run goes.
+        queue = []
+        seq = [0]
+
+        def schedule(t_ev, action):
+            seq[0] += 1
+            heapq.heappush(queue, (float(t_ev), seq[0], action))
+
+        for t_ev, action in self.events:
+            schedule(t_ev, action)
+        state.at = schedule
         i_now = rl[:, 4].copy()
         icp_now = np.concatenate([c[4] for c in cps]).astype(float) if M else np.zeros(0)
         w_now = cc[:, 3].copy()
@@ -317,10 +317,17 @@ class Circuit:
         v_now = np.array(self.v0, dtype=float)
         d_on = np.zeros(len(da), dtype=bool)
         a_st = np.zeros(len(aa), dtype=int)      # 0 off, +1 / -1 clamping
-        out['i_rl'][0] = i_now
-        out['i_cp_all'][0] = icp_now
-        out['v'][0] = v_now
-        out['sw_closed'][0] = state.sw_closed
+        out['v'].append(v_now.copy())
+        out['i_rl'].append(i_now.copy())
+        out['i_cp_all'].append(icp_now.copy())
+        out['i_c'].append(np.zeros(len(C)))
+        out['i_r'].append(np.zeros(len(Gr)))
+        out['i_d'].append(np.zeros(len(da)))
+        out['i_sw'].append(np.zeros(len(sa)))
+        out['i_arr'].append(np.zeros(len(aa)))
+        out['i_nl'].append(np.zeros(len(self.nl)))
+        out['sw_closed'].append(state.sw_closed.copy())
+        out['i_src'].append(np.zeros(len(ia_)))
         cache = {}
 
         def stamp(a, b, g, Y):
@@ -348,20 +355,29 @@ class Circuit:
                 cache[key] = (Y, factor)
             return cache[key]
 
-        iterations = np.zeros(N, dtype=int)   # solves per step, for diagnosis
-        out['iterations'] = iterations
-        pending = sorted(self.events, key=lambda e: e[0])
-        k_pending = 0
+        iterations = []                       # solves per step, for diagnosis
         be_next = True
         t = 0.0
-        for s, h in enumerate(steps):
-            # Events due now change switches or loads; the step after them is backward Euler.
-            while k_pending < len(pending) and pending[k_pending][0] <= t + 0.01 * (dt_coarse or dt):
+        while t < t_end - 1e-15:
+            h_nom = dt if t < t_fine - 1e-15 else (dt_coarse or dt)
+            tol = 0.01 * h_nom
+            # Events due now - within a sliver of it - change switches or loads; the step after them is backward Euler.
+            while queue and queue[0][0] <= t + tol:
+                _, _, action = heapq.heappop(queue)
                 state.t = t
-                pending[k_pending][1](state)
-                k_pending += 1
+                action(state)
                 be_next = True
+            # The step: its nominal length, landing on the end and on the next event, leaving no sliver.
+            h = min(h_nom, t_end - t)
+            if t_end - (t + h) < tol:
+                h = t_end - t          # no sliver of a last step: rounding would make a tiny one ring
+            if queue and t + h > queue[0][0] - tol:
+                t_ev = queue[0][0]
+                if t + h > t_ev or t_ev - (t + h) < tol:
+                    h = t_ev - t
             t1 = t + h
+            iterations.append(0)
+            s = len(iterations) - 1
 
             def solve(method, h_, t0):
                 """One step of length h_ from t0, with diodes, arresters and loads iterated to agree."""
@@ -448,28 +464,37 @@ class Circuit:
             v, d_on, a_st, i_now, w_now, ic_now, icp_now = sol
             v_now = v
             t = t1
-            out['v'][s + 1] = v
-            out['i_rl'][s + 1] = i_now
-            out['i_cp_all'][s + 1] = icp_now
-            if len(ia_):
-                out['i_src'][s + 1] = np.where(state.src_on, state.i_src0 + i_amp * np.cos(i_om * t + i_ph), 0.0)
-            out['i_c'][s + 1] = ic_now
-            out['i_r'][s + 1] = Gr * (v[xa] - v[xb])
-            out['i_d'][s + 1] = np.where(d_on, 1.0 / R_ON, 1.0 / R_OFF) * (v[da] - v[db])
-            out['i_sw'][s + 1] = np.where(state.sw_closed, s_on, s_off) * (v[sa] - v[sb])
+            out['t'].append(t)
+            out['v'].append(v)
+            out['i_rl'].append(i_now)
+            out['i_cp_all'].append(icp_now)
+            out['i_src'].append(np.where(state.src_on, state.i_src0 + i_amp * np.cos(i_om * t + i_ph), 0.0)
+                                if len(ia_) else np.zeros(0))
+            out['i_c'].append(ic_now)
+            out['i_r'].append(Gr * (v[xa] - v[xb]))
+            out['i_d'].append(np.where(d_on, 1.0 / R_ON, 1.0 / R_OFF) * (v[da] - v[db]))
+            out['i_sw'].append(np.where(state.sw_closed, s_on, s_off) * (v[sa] - v[sb]))
             va = v[aa] - v[ab]
-            out['i_arr'][s + 1] = np.where(a_st != 0, a_gon, a_goff) * va + np.where(
-                a_st > 0, -a_vc * a_gon, np.where(a_st < 0, a_vc * a_gon, 0.0))
+            out['i_arr'].append(np.where(a_st != 0, a_gon, a_goff) * va + np.where(
+                a_st > 0, -a_vc * a_gon, np.where(a_st < 0, a_vc * a_gon, 0.0)))
             if self.nl:
                 vn = v[na_] - v[nb_]
-                out['i_nl'][s + 1] = [func(vn[j], t)[0] for j, (_, _, func) in enumerate(self.nl)]
+                out['i_nl'].append(np.array([func(vn[j], t)[0] for j, (_, _, func) in enumerate(self.nl)]))
+            else:
+                out['i_nl'].append(np.zeros(0))
             be_next = damp_next
-            state.t, state.v = t, v
-            state.i_rl, state.i_sw = out['i_rl'][s + 1], out['i_sw'][s + 1]
+            state.t, state.v, state.tol = t, v, tol
+            state.i_rl, state.i_sw = out['i_rl'][-1], out['i_sw'][-1]
             for fn in self.controllers:
                 if fn(t, state):
                     be_next = True
-            out['sw_closed'][s + 1] = state.sw_closed
+            out['sw_closed'].append(state.sw_closed)
+        widths = {'v': n, 'i_rl': len(R), 'i_c': len(C), 'i_r': len(Gr), 'i_d': len(da), 'i_sw': len(sa),
+                  'i_arr': len(aa), 'i_nl': len(self.nl), 'sw_closed': len(sa), 'i_cp_all': M, 'i_src': len(ia_)}
+        for key, width in widths.items():
+            out[key] = np.array(out[key], dtype=bool if key == 'sw_closed' else float).reshape(len(out[key]), width)
+        out['t'] = np.array(out['t'])
+        out['iterations'] = np.array(iterations, dtype=int)
         out['i_cp'] = [out['i_cp_all'][:, bounds[g]:bounds[g + 1]] for g in range(len(cps))]
         return out
 
@@ -493,6 +518,7 @@ class _State:
     def __init__(self, circuit, n):
         self.circuit = circuit
         self.t = 0.0
+        self.tol = 0.0            # how near an event's time counts as at it, this step
         self.v = np.zeros(n)
         self.i_rl = None
         self.i_sw = None
