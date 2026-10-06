@@ -1,6 +1,8 @@
 """
-EMT study of the DC networks: their voltages and currents in time through a
-fault or a load step, from the load-flow state.
+EMT study of the AC and DC networks: their voltages and currents in time
+through a fault or a load step, from the load-flow state. The AC network is
+built by emt_ac (three-phase, from the circuit's own AC steady state); this
+module builds the DC networks and the converters between them.
 
 The circuit (emt_solver.Circuit):
 - DC cables as one or more pi sections (R, L, C), so a long cable carries its
@@ -14,13 +16,17 @@ The circuit (emt_solver.Circuit):
   with a surge arrester. A breaker trips when its current passes its trip
   current, opens after its opening time, and its arrester clamps the voltage
   that forces the current to zero, absorbing the energy;
-- VSCs, until the converter models of the next phase: a stiff source at
-  their load-flow DC voltage, which blocks when their DC voltage falls below
-  a threshold - their diodes then feed a fault from the AC grid, behind its
-  short-circuit impedance. DC/DC converters' and SSTs' output stages are
-  stiff sources that block the same way; their inputs, constant-power loads.
+- VSCs, until the converter models of the next phase: on the DC side a
+  stiff source at their load-flow DC voltage, on the AC side a current at
+  their load-flow power - both stopping when their DC voltage falls below a
+  threshold and they block. Their diodes then rectify the AC network into
+  the DC side, through an isolating converter transformer whose leakage is
+  the VSC's reactor (the AC network's ground and the DC negative pole are the
+  same reference node; the transformer keeps them apart). DC/DC converters'
+  and SSTs' output stages are stiff sources that block the same way; their
+  inputs, constant-power loads.
 
-Pole-to-pole faults; the AC network itself is the next part of the study.
+DC faults pole to pole; AC faults of any kind.
 """
 
 import copy
@@ -32,6 +38,7 @@ import numpy as np
 
 import pandapower_electrisim as pe
 from dc_fault_electrisim import _ac_thevenin, _f, _label, _row_id, _waveform
+from emt_ac import AcBuilder
 from emt_solver import R_BIAS, Circuit, dc_load_current
 
 
@@ -75,6 +82,7 @@ class _EmtBuilder:
         for rec in getattr(net, 'electrisim_dc_breakers', None) or []:
             if rec['closed'] and rec['target'] is not None:
                 self._breakers_by_target.setdefault(rec['target'], []).append(rec)
+        self.ac = AcBuilder(ckt, net, self.params, self.warnings, self.f_hz).build()
         self._cables()
         self._capacitors()
         self._sources()
@@ -249,10 +257,15 @@ class _EmtBuilder:
             src = ckt.node(f'{label} source', self.v_bus[bus])
             ckt.add_rl(0, src, r_dc, 0.0, e0=self.v_bus[bus] + r_dc * i0)
             k_sw = ckt.add_switch(src, term, closed=True)
-            self.blockers.append({'label': label, 'sw': k_sw, 'node': term, 'v_block': block * self.vn[bus], 't': None})
+            blocker = {'label': label, 'sw': k_sw, 'node': term, 'v_block': block * self.vn[bus], 't': None, 'sources': []}
+            self.blockers.append(blocker)
             self.series.append(('Converter output' if aux else 'VSC', label, '' if aux else _row_id(net, 'vsc', vi),
                                 label, ('i_sw', k_sw), 1.0))
             if aux:
+                continue
+            ac_bus = int(net.vsc.at[vi, 'bus'])
+            if ac_bus in self.ac.nodes:
+                self._vsc_on_ac_network(vi, label, bus, term, r_dc, blocker)
                 continue
             # Blocked, its diodes rectify the AC grid into the DC side.
             if thevenin is None:
@@ -272,6 +285,36 @@ class _EmtBuilder:
                 ckt.add_diode(0, x)
             ckt.add_rl(p_node, term, r_dc, 0.0)
 
+    def _vsc_on_ac_network(self, vi, label, bus, term, r_dc, blocker):
+        """
+        A VSC whose AC bus is in the model: on the AC side, its load-flow power
+        as a current; its diodes on that bus through an isolating converter
+        transformer - 1:1, its leakage the VSC's reactor - the bridge's side
+        floating about the DC link's midpoint.
+        """
+        net, ckt, ac = self.net, self.ckt, self.ac
+        w = ac.w
+        ac_bus = int(net.vsc.at[vi, 'bus'])
+        p, q = (_f(net.res_vsc.at[vi, 'p_mw']), _f(net.res_vsc.at[vi, 'q_mvar'])) if vi in net.res_vsc.index else (0.0, 0.0)
+        amp, ph = ac._three(ac._injection_phasor(ac_bus, -p, -q))     # its results use the load convention
+        for k in range(3):
+            blocker['sources'].append(ckt.add_isrc(0, ac.nodes[ac_bus][k], ac=(amp[k], w, ph[k])))
+        r_ac, x_ac = max(_f(net.vsc.at[vi, 'r_ohm']), 1e-6), max(_f(net.vsc.at[vi, 'x_ohm']), 1e-6)
+        l_leak = x_ac / w
+        l_mag = 1000.0 * l_leak
+        r_m = np.diag([0.0, r_ac])
+        l_m = np.array([[l_mag, l_mag], [l_mag, l_mag + l_leak]])
+        p_node = ckt.node(f'{label} DC+', self.v_bus[bus])
+        mid = ckt.node(f'{label} bridge star point', self.v_bus[bus] / 2)
+        ckt.add_r(mid, p_node, R_BIAS)
+        ckt.add_r(mid, 0, R_BIAS)
+        for k in range(3):
+            x = ckt.node(f'{label} bridge {"abc"[k]}', self.v_bus[bus] / 2)
+            ckt.add_coupled([ac.nodes[ac_bus][k], x], [0, mid], r_m, l_m)
+            ckt.add_diode(x, p_node)
+            ckt.add_diode(0, x)
+        ckt.add_rl(p_node, term, r_dc, 0.0)
+
     # --- events and protection ----------------------------------------------------
 
     def controller(self, t, state):
@@ -280,6 +323,8 @@ class _EmtBuilder:
             if blk['t'] is None and state.v[blk['node']] < blk['v_block']:
                 blk['t'] = t
                 state.set_switch(blk['sw'], False)
+                for k in blk.get('sources', []):
+                    state.set_source(k, False)
                 changed = True
         for brk in self.breakers:
             if brk['t_open'] is not None:
@@ -314,7 +359,7 @@ def _oscillation_verdict(t, v, t_from, vn):
     return 'oscillates'
 
 
-METHOD = ("A time-domain simulation of the DC networks from their load-flow state: cables as pi sections, "
+METHOD = ("A time-domain simulation of the AC and DC networks from their load-flow state. AC: three-phase, grids behind their positive- and zero-sequence impedance, lines as coupled pi sections, transformers by their vector group, loads as constant impedance, inverter-based generation as constant current, generators behind their subtransient reactance, started in their own steady state; an AC fault clears at each phase's current zero. DC: cables as pi sections, "
           "DC loads by their load-flow model behind their input filters, breakers that trip on overcurrent and "
           "open into their surge arresters. Until the converter models of the next phase, VSCs and converter "
           "outputs are stiff sources that block on undervoltage, a VSC's diodes then feeding a fault from the AC "
@@ -333,11 +378,12 @@ def emt_study(net, params, in_data=None):
     except Exception as exc:   # noqa: BLE001
         return json.dumps({'error': True, 'message': f'The load flow the EMT study starts from did not solve: {exc}'})
     warnings_out.extend(getattr(net, 'warnings', []) or [])
-    if 'bus_dc' not in net or not len(net.bus_dc):
-        return json.dumps({'error': True, 'message': 'The EMT study covers the DC networks so far, and there is none.',
-                           'warnings': warnings_out})
+    if not len(net.bus) and ('bus_dc' not in net or not len(net.bus_dc)):
+        return json.dumps({'error': True, 'message': 'There is no network to study.', 'warnings': warnings_out})
     b = _EmtBuilder(net, params, warnings_out).build()
     ckt = b.ckt
+    if b.ac.nodes:
+        ckt.start_in_ac_steady_state(b.ac.w)
     dt = max(_f(params.get('time_step_us'), 1.0), 0.01) * 1e-6
     t_end = max(_f(params.get('duration_ms'), 50.0), 0.5) * 1e-3
     event_times = []
@@ -374,6 +420,24 @@ def emt_study(net, params, in_data=None):
             factor = 1.0 + _f(params.get('step_percent'), 10.0) / 100.0
             ckt.at(t_s, lambda st, pw=load['p'], f=factor: pw.__setitem__(0, pw[0] * f))
             event_times.append(t_s)
+
+    # A fault on an AC bus.
+    ac_fault = None
+    ac_bus = str(params.get('ac_fault_bus') or 'none')
+    if ac_bus not in ('none', ''):
+        hit = [k for k in b.ac.nodes if ac_bus in (str(net.bus.at[k, 'name']), str(_row_id(net, 'bus', k)))]
+        kind = str(params.get('ac_fault_type') or 'abcg').lower()
+        if not hit:
+            warnings_out.append(f'No AC bus {ac_bus} to fault: the study runs without an AC fault.')
+        elif kind not in ('ag', 'bg', 'cg', 'ab', 'bc', 'ca', 'abg', 'bcg', 'cag', 'abc', 'abcg'):
+            warnings_out.append(f'No AC fault of kind {kind}: the study runs without one.')
+        else:
+            t_on = _f(params.get('ac_fault_time_ms'), 20.0) * 1e-3
+            dur = _f(params.get('ac_fault_duration_ms'), 0.0) * 1e-3
+            r_f = max(_f(params.get('ac_fault_resistance_ohm'), 0.0), 1e-4)
+            ac_fault = b.ac.fault(hit[0], kind, r_f, r_f, t_on, t_on + dur if dur > 0 else None)
+            ac_fault.update(bus=hit[0], kind=kind, t=t_on, t_off=t_on + dur if dur > 0 else None)
+            event_times.append(t_on + (dur if dur > 0 else 0.0))
 
     ckt.add_controller(b.controller)
     t_fine = min(t_end, (max(event_times) if event_times else 0.0) + 0.01)
@@ -442,6 +506,7 @@ def emt_study(net, params, in_data=None):
         if brk['t_open'] is not None and cleared is None:
             warnings_out.append(f"DC breaker {rec['label']} opened but its current had not reached zero by the end of the run.")
         result['breakers'].append(out)
+    result['ac'] = _ac_results(sim, b.ac, net, t_fine, ac_fault)
     for load in b.loads:
         v = sim['v'][:, load['node']]
         result['loads'].append({'label': load['label'], 'id': load['id'], 'constant_power': load['constant_power'],
@@ -457,6 +522,79 @@ def emt_study(net, params, in_data=None):
         names = ', '.join(blk['label'] for blk in b.blockers if blk['t'] is not None)
         warnings_out.append(f'Blocked on undervoltage: {names}.')
     return json.dumps({'emt': result, 'warnings': warnings_out})
+
+
+def _rms(t, y, period):
+    """The rms over the last period at each time (nan for the first)."""
+    sq = np.concatenate([[0.0], np.cumsum(0.5 * (y[1:] ** 2 + y[:-1] ** 2) * np.diff(t))])
+    back = np.interp(t - period, t, sq, left=np.nan)
+    return np.sqrt(np.maximum((sq - back) / period, 0.0))
+
+
+def _ac_results(sim, ac, net, t_fine, fault):
+    """Three-phase bus voltages with their lowest rms over a cycle, phase currents, the fault's."""
+    if not ac.nodes:
+        return None
+    t = sim['t']
+    period = 1.0 / ac.f_hz
+    buses = []
+    for b, nodes in ac.nodes.items():
+        v_ph = ac.vn[b] / math.sqrt(3.0)
+        waves, rms_min, t_min, rms_end = {}, np.inf, None, []
+        for k, p in enumerate('abc'):
+            v = sim['v'][:, nodes[k]]
+            waves[f'v_{p}_kv'] = _waveform(t, v, None, t_fine)['i_ka']
+            waves['t_ms'] = _waveform(t, v, None, t_fine)['t_ms']
+            r = _rms(t, v, period)
+            ok = np.isfinite(r)
+            if ok.any():
+                j = int(np.nanargmin(np.where(ok, r, np.nan)))
+                if r[j] < rms_min:
+                    rms_min, t_min = float(r[j]), float(t[j])
+                rms_end.append(float(r[-1]))
+        buses.append({'name': str(net.bus.at[b, 'name']), 'id': _row_id(net, 'bus', b), 'label': _label(net, 'bus', b),
+                      'vn_kv': ac.vn[b] / 1e3,
+                      'v_rms_min_pu': _round(rms_min / v_ph) if np.isfinite(rms_min) else None,
+                      't_min_ms': _round(t_min * 1e3) if t_min is not None else None,
+                      'v_rms_final_pu': _round(min(rms_end) / v_ph) if rms_end else None,
+                      'waveform': waves})
+    branches = []
+    for kind, name, cid, label, phases in ac.series:
+        out = {'kind': kind, 'name': name, 'id': cid, 'label': label}
+        peak = 0.0
+        for k, terms in enumerate(phases):
+            terms = terms if isinstance(terms, list) else [terms]
+            i = np.zeros(len(t))
+            for arr, g, col, sign in terms:
+                i = i + sign * (sim[arr][g][:, col] if arr == 'i_cp' else sim[arr][:, g])
+            w = _waveform(t, i, None, t_fine)
+            out['t_ms'] = w['t_ms']
+            out[f'i_{"abc"[k]}_ka'] = w['i_ka']
+            peak = max(peak, float(np.max(np.abs(i))))
+        out['i_peak_ka'] = _round(peak * 1e-3)
+        branches.append(out)
+    fault_out = None
+    if fault:
+        fault_out = {'bus': _label(net, 'bus', fault['bus']), 'id': _row_id(net, 'bus', fault['bus']), 'kind': fault['kind'],
+                     't_ms': fault['t'] * 1e3, 't_off_ms': fault['t_off'] * 1e3 if fault['t_off'] else None, 'phases': []}
+        during = (t >= fault['t']) & (t <= (fault['t_off'] or t[-1]))
+        for ph, k in zip(fault['phases'], fault['switches']):
+            i = sim['i_sw'][:, k]
+            r = _rms(t, i, period)
+            sel = during & np.isfinite(r) & (t >= fault['t'] + period)
+            # Its symmetrical current: the 50 Hz component over the fault's last cycle, the DC offset aside.
+            last = during & (t >= (fault['t_off'] or t[-1]) - period)
+            i_sym = None
+            if last.sum() > 8 and t[last][-1] - t[last][0] > 0.9 * period:
+                x = np.column_stack([np.cos(2 * math.pi * ac.f_hz * t[last]), np.sin(2 * math.pi * ac.f_hz * t[last]),
+                                     np.ones(last.sum())])
+                coef, *_ = np.linalg.lstsq(x, i[last], rcond=None)
+                i_sym = math.hypot(coef[0], coef[1]) / math.sqrt(2.0)
+            fault_out['phases'].append({'phase': 'abc'[ph], 'i_peak_ka': _round(float(np.max(np.abs(i[during]))) * 1e-3) if during.any() else None,
+                                        'i_rms_ka': _round(float(r[sel][-1]) * 1e-3) if sel.any() else None,
+                                        'i_sym_ka': _round(i_sym * 1e-3) if i_sym is not None else None,
+                                        'waveform': _waveform(t, i, None, t_fine)})
+    return {'buses': buses, 'branches': branches, 'fault': fault_out}
 
 
 def _volts(w):
