@@ -2200,6 +2200,12 @@ def build_model():
     if options.get('include_model', True):
         # Serialised before solving, so result tables never reach the diagram.
         body['model'] = pandapower_net_to_json(net)
+        layer = electrisim_sld.electrisim_elements(net)
+        if layer:
+            # The DC and microgrid layer is Electrisim's, not pandapower's: drawn by its own routine.
+            model = json.loads(body['model'])
+            model['_object']['electrisim_elements'] = {'_object': json.dumps(layer)}
+            body['model'] = json.dumps(model)
     if options.get('run_power_flow'):
         def _limit(key, default):
             try:

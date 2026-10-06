@@ -13,7 +13,9 @@ Units: kV, MW, MVAr, MVA, km, per-unit (`_pu`), percent (`_percent`), degrees.
 | `name` | network name |
 | `frequency_hz` | 50 (default) or 60 |
 | `layout` | `transmission`, `radial` or `auto` - see Layout below |
-| `buses`, `external_grids`, `transformers`, `three_winding_transformers`, `lines`, `loads`, `generators`, `static_generators`, `shunts`, `storage`, `motors`, `switches` | lists of elements |
+| `buses`, `external_grids`, `transformers`, `three_winding_transformers`, `lines`, `loads`, `generators`, `static_generators`, `shunts`, `storage`, `motors`, `switches` | lists of AC elements |
+| `dc_buses`, `dc_lines`, `dc_loads`, `dc_sources`, `dc_capacitors`, `vscs`, `ssts`, `dc_dc_converters`, `dc_breakers`, `batteries`, `supercapacitors`, `flywheels`, `sofcs`, `pv_arrays`, `pcs`, `grounding_transformers` | lists of DC and microgrid elements - see below |
+| `load_profiles` | the diagram's load-profile library - see below |
 
 Any other top-level key is rejected.
 
@@ -120,10 +122,116 @@ the operating ones), `name`, `in_service`. A load in the power flow, drawing
 locked-rotor contribution, and motor starting starts it.
 
 **switches** - `id`, **`bus`**, **`element`**, `et` (`line` default,
-`transformer`, `three_winding_transformer`, or `bus`), `closed` (true), `name`.
+`transformer`, `three_winding_transformer`, `bus`, or `grounding_transformer`),
+`closed` (true), `name`.
 - `et: line` / `transformer` / `three_winding_transformer`: `element` is that
   element's id, and `bus` must be one of its terminals.
 - `et: bus`: a bus coupler; `element` is the other bus's id.
+- `et: grounding_transformer`: the breaker of a grounding transformer;
+  `element` is its id, `bus` its bus.
+
+## DC and microgrid elements
+
+These are Electrisim's own elements. Each takes its dialog's fields, by the
+dialog's names (the symbol in brackets after each field label); a field the
+dialog does not have is refused, listing the ones it does. Anything not given
+takes the dialog's default. Connections name other elements by id: an AC bus
+from `buses`, a DC bus from `dc_buses`. They are drawn below the AC network,
+each converter, PCS and grounding transformer under its AC bus with what it
+feeds beneath it. `check_network` reports them under their ids: `dc_buses`,
+`dc_lines`, `vscs`, `ssts`, `dc_dc_converters`, `sources_and_stores`, `pcs`,
+`grounding_transformers`.
+
+**dc_buses** - `id`, **`vn_kv`** (DC, e.g. 0.8 for an 800 V bus), `name`, `in_service`.
+
+**dc_lines** - a DC cable. `id`, **`from_bus`**, **`to_bus`** (DC buses),
+`length_km`, `r_ohm_per_km`, `max_i_ka`, `l_mh_per_km`, `c_uf_per_km`.
+
+**dc_loads** - `id`, **`bus`** (DC), `p_mw`, `load_model` and its shares
+(`share_p_percent`, `share_i_percent`, `share_r_percent`), `v_min_pu`,
+`filter_l_mh`, `filter_c_uf`, `load_profile_id` (a power profile).
+
+**dc_sources** - an ideal DC source. `id`, **`bus`** (DC), `vm_pu`, `r_sc_mohm`, `l_sc_uh`.
+
+**dc_capacitors** - `id`, **`bus`** (DC), `c_mf`, `esr_mohm`, `esl_uh`.
+
+**vscs** - an AC/DC converter. `id`, **`bus`** (AC), **`bus_dc`** (DC),
+`r_ohm`, `x_ohm`, `r_dc_ohm`, `control_mode_ac` (`vm_pu` or `q_mvar`) with
+`control_value_ac`, `control_mode_dc` (`vm_pu` or `p_mw`) with
+`control_value_dc`, `rated_mva`, `dc_link_mf`, `current_limit_pu`, `emt_model`,
+`switching_khz`. A VSC needs at least sqrt(2) times its AC line voltage on its
+DC side: 0.48 kV AC for an 800 V bus.
+
+**ssts** - a solid-state transformer, MV AC to LV DC (and optionally LV AC).
+`id`, **`bus_mv`** (AC), **`bus_lv_dc`** (DC), `bus_lv_ac` (AC), and its
+stages: `vn_mv_kv`, `vn_lv_dc_kv`, `vn_lv_ac_kv`, `link_kv`, `q_mv_mvar`,
+`rect_rated_mw`, `rect_efficiency_percent`, `rect_no_load_kw`,
+`dcdc_rated_mw`, `dcdc_efficiency_percent`, `dcdc_no_load_kw`, `vm_lv_dc_pu`,
+`inverter_mode`, `inv_rated_mw`, `inv_efficiency_percent`, `inv_no_load_kw`,
+`p_ac_mw`, `q_ac_mvar`, `vm_lv_ac_pu`, `emt_model`, `switching_khz`,
+`dcdc_switching_khz`, `current_limit_pu`.
+
+**dc_dc_converters** - `id`, **`bus_in`**, **`bus_out`** (DC), `control_mode`
+(`voltage`, `power`, `droop`, `dispatch`, `mppt`, `follower` or `smoothing`),
+`vm_out_pu`, `p_set_mw`, `rated_mw`, `vn_in_kv`, `vn_out_kv`,
+`efficiency_percent`, `no_load_loss_kw`, `bidirectional`, `droop_percent`,
+`smoothing_tau_s`, `soc_ref_percent`, `soc_gain`, `emt_model`,
+`switching_khz`, `current_limit_pu`, `c_out_mf`.
+
+**dc_breakers** - `id`, **`bus`** (DC), **`element`** (the DC bus, line, load,
+source, VSC or DC/DC converter it switches), `closed`, `breaker_type`,
+`rated_voltage_kv`, `rated_current_ka`, `breaking_capacity_ka`,
+`trip_current_ka`, `opening_time_ms`, `limiting_inductance_mh`,
+`arrester_clamp_kv`, `arrester_energy_kj`.
+
+**batteries** - `id`, `bus` (a DC bus, or none when behind a PCS), `sizing`
+(`ratings` or `cells`), `vn_v`, `capacity_kwh`, `r0_mohm`, `cells_series`,
+`strings_parallel`, `cell_v`, `cell_ah`, `cell_r_mohm`, `r1_percent`, `tau1_s`,
+`soc_percent`, `soc_min_percent`, `soc_max_percent`, `c_rate_discharge`,
+`c_rate_charge`, `coulombic_efficiency_percent`, `ocv_table`, `l_uh`.
+
+**supercapacitors** - `id`, `bus`, `coupling`, `sizing`, `c_f`, `v_rated`,
+`esr_mohm`, `esl_uh`, `module_c_f`, `module_v`, `module_esr_mohm`,
+`module_esl_uh`, `modules_series`, `strings_parallel`, `v0_percent`,
+`v_min_percent`, `p_rated_kw`, `r_leak_ohm`.
+
+**flywheels** - `id`, `bus`, `v_dc`, `p_rated_kw`, `e_max_kwh`, `speed_percent`,
+`speed_min_percent`, `speed_base_percent`, `efficiency_percent`,
+`standby_loss_percent_h`, `r_dc_mohm`, `p_set_kw`.
+
+**sofcs** - `id`, `bus`, `p_rated_kw`, `v_rated`, `p_set_kw`,
+`fuel_utilisation_percent`, `min_load_percent`, `aux_load_percent`, `ramp_percent_s`.
+
+**pv_arrays** - `id`, `bus`, `module_pmpp_w`, `module_vmpp`, `module_impp`,
+`module_voc`, `module_isc`, `module_cells_series`, `alpha_isc_percent_k`,
+`beta_voc_percent_k`, `noct_c`, `modules_series`, `strings_parallel`,
+`loss_percent`, `irradiance_wm2`, `ambient_c`, `irradiance_profile_id` (an
+irradiance profile), `temperature_profile_id` (a temperature profile).
+
+A source or store goes on a DC bus (behind a DC/DC converter on a bus of its
+own, or directly on a network bus), or behind a PCS - then give it no `bus`.
+
+**pcs** - a power conversion system joining one source or store to an AC bus.
+`id`, **`bus`** (AC), and its DC side: `source` (a battery, supercapacitor,
+flywheel, SOFC or PV array id) or `bus_dc` (a DC bus with its source alone on
+it). `control` (`grid_following` or `grid_forming`), `s_rated_mva`,
+`vn_ac_kv`, `efficiency_percent`, `no_load_loss_kw`, `p_set_mw`, `q_mode`
+(`q`, `pf` or `qv`), `q_set_mvar`, `pf`, `qv_droop_percent`, `vm_set_pu`,
+`droop_pf_percent`, `droop_qv_percent`, `current_limit_pu`,
+`opf_marginal_cost_eur_per_mwh`. Draw its transformer to the network as an
+ordinary transformer between its own LV bus and the network bus.
+
+**grounding_transformers** - a zigzag grounding transformer. `id`, **`bus`**
+(AC), `vn_kv`, `i_rated_a` (400), `t_rated_s` (10), `r_n_ohm` (neutral
+resistor; blank: V_ph / `i_rated_a`), `x_n_ohm`, `x0_ohm`, `r0_ohm`. Its
+breaker is a switch with `et: grounding_transformer`.
+
+**load_profiles** - the library elements follow: a list of `id`, `name`,
+`kind` (`power` - per unit of the load's P -, `irradiance` in W/m², or
+`temperature` in °C), **`values`**, and either `dt_s` (the step between
+values, with `t0_s`, 0) or `t_s` (each value's time). A `load_profile_id`,
+`irradiance_profile_id` or `temperature_profile_id` must name one of the
+right kind.
 
 ## Optimal power flow
 

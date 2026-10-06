@@ -35,6 +35,8 @@ import re
 
 import pandapower as pp
 
+import electrisim_spec_layer
+
 
 # --- defaults ------------------------------------------------------------
 #
@@ -209,12 +211,10 @@ def build_network(spec):
     problems = []
     report = _Report()
 
-    unknown = set(spec) - set(_ELEMENT_TABLES) - {'name', 'frequency_hz', 'layout'}
+    known = _ELEMENT_TABLES + electrisim_spec_layer.TOP_LEVEL + ('name', 'frequency_hz', 'layout')
+    unknown = set(spec) - set(known)
     for key in sorted(unknown):
-        problems.append(
-            f'unknown top-level key {key!r}; expected one of: '
-            + ', '.join(sorted(_ELEMENT_TABLES + ('name', 'frequency_hz', 'layout')))
-        )
+        problems.append(f'unknown top-level key {key!r}; expected one of: ' + ', '.join(sorted(known)))
 
     f_hz = _num(spec.get('frequency_hz'), 'frequency_hz', 'spec', problems,
                 default=50.0, positive=True)
@@ -678,17 +678,24 @@ def build_network(spec):
     }
     by_id = {table: {ident: idx for idx, ident in ids[table].items()}
              for table, _, _ in switched.values()}
+    grounding_switches = []
     for i, row in enumerate(_as_list(spec, 'switches', problems)):
+        et_raw = str(row.get('et') or row.get('element_type') or 'line').lower()
+        if et_raw == 'grounding_transformer':
+            # A grounding transformer is the DC and microgrid layer's, not pandapower's.
+            if isinstance(row, dict) and row.get('id'):
+                used_ids.add(str(row['id']).strip())
+            grounding_switches.append((i, row))
+            continue
         ident = _ident(row, i, 'Sw', problems, used_ids)
         where = f'switches[{i}] ({ident})'
         bus = bus_of(row, 'bus', where)
-        et_raw = str(row.get('et') or row.get('element_type') or 'line').lower()
         et = {'line': 'l', 'l': 'l', 'trafo': 't', 'transformer': 't', 't': 't',
               'three_winding_transformer': 't3', 'trafo3w': 't3', 't3': 't3',
               'bus': 'b', 'b': 'b'}.get(et_raw)
         if et is None:
             problems.append(f'{where}: et={et_raw!r} must be one of line, transformer, '
-                            f'three_winding_transformer, bus')
+                            f'three_winding_transformer, bus, grounding_transformer')
             continue
         element = str(row.get('element') or '').strip()
         if bus is None:
@@ -725,6 +732,11 @@ def build_network(spec):
                                name=str(row.get('name') or ident))
         record('switch', idx, ident)
 
+    # --- the DC and microgrid layer ----------------------------------------
+    ac_buses = {ident: (str(net.bus.at[idx, 'name']), bus_kv[ident]) for ident, idx in bus_index.items()}
+    layer = electrisim_spec_layer.check(spec, ac_buses, used_ids, problems, _num)
+    electrisim_spec_layer.grounding_switch_rows(grounding_switches, ac_buses, layer, problems)
+
     if problems:
         raise SpecError(problems)
 
@@ -736,6 +748,12 @@ def build_network(spec):
         )
 
     connected = set()
+    # A bus a converter or PCS of the layer joins is connected through it.
+    for element in layer['elements']:
+        for link in element['connections'].values():
+            if link['id'] in bus_index and len(net.bus.index) > 1 and element['kind'] in (
+                    'VSC', 'Solid-State Transformer', 'PCS'):
+                connected.add(int(bus_index[link['id']]))
     for table, cols in (('line', ('from_bus', 'to_bus')), ('trafo', ('hv_bus', 'lv_bus')),
                         ('trafo3w', ('hv_bus', 'mv_bus', 'lv_bus'))):
         df = getattr(net, table)
@@ -753,6 +771,9 @@ def build_network(spec):
     net.user_friendly_names = friendly
     # Read back by solve(); pandapower ignores keys it does not know.
     net['electrisim_ids'] = ids
+    # The layer is built onto a copy when solved; the net itself stays what the canvas draws.
+    net['electrisim_layer'] = layer
+    net['electrisim_bus_index'] = {ident: int(idx) for ident, idx in bus_index.items()}
     report.layout = str(layout).lower() if layout is not None else None
     report.counts = {
         'bus': len(net.bus), 'line': len(net.line), 'trafo': len(net.trafo),
@@ -760,8 +781,17 @@ def build_network(spec):
         'load': len(net.load), 'gen': len(net.gen), 'sgen': len(net.sgen),
         'ext_grid': len(net.ext_grid), 'shunt': len(net.shunt),
         'storage': len(net.storage), 'motor': len(net.motor), 'switch': len(net.switch),
+        **{k: v for k, v in layer['counts'].items()},
     }
     return net, report.as_dict()
+
+
+def electrisim_elements(net):
+    """The layer as the canvas draws it: its elements, their connections, and the load-profile library."""
+    layer = net.get('electrisim_layer') if hasattr(net, 'get') else None
+    if not layer or not (layer['elements'] or layer['load_profiles']):
+        return None
+    return {'elements': layer['elements'], 'load_profiles': layer['load_profiles']}
 
 
 def _r(value, digits):
@@ -784,12 +814,25 @@ def solve(net, vm_min_pu=0.95, vm_max_pu=1.05, max_loading_percent=100.0):
     enforced.
     """
     ids = net.get('electrisim_ids') or {}
+    layer = net.get('electrisim_layer') or {}
+    if layer.get('rows'):
+        # The DC and microgrid layer, built by Electrisim's own builders, solved by its own load flow.
+        import pandapower_electrisim
+        net = electrisim_spec_layer.with_layer(net, layer, net.get('electrisim_bus_index') or {})
+        run = pandapower_electrisim._electrisim_runpp
+    else:
+        run = pp.runpp
 
     def ident(table, idx):
         return (ids.get(table) or {}).get(int(idx), f'{table}{int(idx)}')
 
+    def spec_rows(table, res):
+        # Only the spec's own elements: the layer adds converter parts the spec never named.
+        known = ids.get(table) or {}
+        return [(idx, row) for idx, row in res.iterrows() if not known or int(idx) in known]
+
     try:
-        pp.runpp(net)
+        run(net)
     except UserWarning as exc:
         # pandapower raises (not warns) when it cannot even start - most often
         # "No reference bus is available". Its own message is the best hint.
@@ -804,7 +847,7 @@ def solve(net, vm_min_pu=0.95, vm_max_pu=1.05, max_loading_percent=100.0):
         }
 
     buses = []
-    for idx, row in net.res_bus.iterrows():
+    for idx, row in spec_rows('bus', net.res_bus):
         buses.append({
             'id': ident('bus', idx),
             'vn_kv': _r(net.bus.at[idx, 'vn_kv'], 3),
@@ -819,7 +862,7 @@ def solve(net, vm_min_pu=0.95, vm_max_pu=1.05, max_loading_percent=100.0):
         'q_from_mvar': _r(row['q_from_mvar'], 4),
         'i_ka': _r(row['i_ka'], 4),
         'losses_mw': _r(row['pl_mw'], 5),
-    } for idx, row in net.res_line.iterrows()]
+    } for idx, row in spec_rows('line', net.res_line)]
 
     trafos = [{
         'id': ident('trafo', idx),
@@ -827,7 +870,7 @@ def solve(net, vm_min_pu=0.95, vm_max_pu=1.05, max_loading_percent=100.0):
         'p_hv_mw': _r(row['p_hv_mw'], 4),
         'q_hv_mvar': _r(row['q_hv_mvar'], 4),
         'losses_mw': _r(row['pl_mw'], 5),
-    } for idx, row in net.res_trafo.iterrows()]
+    } for idx, row in spec_rows('trafo', net.res_trafo)]
 
     trafos3w = [{
         'id': ident('trafo3w', idx),
@@ -836,13 +879,13 @@ def solve(net, vm_min_pu=0.95, vm_max_pu=1.05, max_loading_percent=100.0):
         'p_mv_mw': _r(row['p_mv_mw'], 4),
         'p_lv_mw': _r(row['p_lv_mw'], 4),
         'losses_mw': _r(row['pl_mw'], 5),
-    } for idx, row in net.res_trafo3w.iterrows()]
+    } for idx, row in spec_rows('trafo3w', net.res_trafo3w)]
 
     grids = [{
         'id': ident('ext_grid', idx),
         'p_mw': _r(row['p_mw'], 4),
         'q_mvar': _r(row['q_mvar'], 4),
-    } for idx, row in net.res_ext_grid.iterrows()]
+    } for idx, row in spec_rows('ext_grid', net.res_ext_grid)]
 
     voltage_issues = [
         {'id': b['id'], 'vm_pu': b['vm_pu'],
@@ -858,13 +901,15 @@ def solve(net, vm_min_pu=0.95, vm_max_pu=1.05, max_loading_percent=100.0):
         if e['loading_percent'] is not None and e['loading_percent'] > max_loading_percent
     ]
 
-    load_mw = float(net.res_load['p_mw'].sum()) if len(net.res_load) else 0.0
-    load_mw += float(net.res_motor['p_mw'].sum()) if len(net.res_motor) else 0.0
-    losses_mw = float(net.res_line['pl_mw'].sum() + net.res_trafo['pl_mw'].sum()
-                      + net.res_trafo3w['pl_mw'].sum())
+    def total(table, res, col):
+        return sum(float(row[col]) for _, row in spec_rows(table, res) if math.isfinite(float(row[col])))
+
+    load_mw = total('load', net.res_load, 'p_mw') + total('motor', net.res_motor, 'p_mw')
+    losses_mw = (total('line', net.res_line, 'pl_mw') + total('trafo', net.res_trafo, 'pl_mw')
+                 + total('trafo3w', net.res_trafo3w, 'pl_mw'))
     vms = [b['vm_pu'] for b in buses if b['vm_pu'] is not None]
 
-    return {
+    out = {
         'converged': True,
         'summary': {
             'buses': len(buses),
@@ -883,3 +928,6 @@ def solve(net, vm_min_pu=0.95, vm_max_pu=1.05, max_loading_percent=100.0):
         'three_winding_transformers': trafos3w,
         'external_grids': grids,
     }
+    if layer.get('rows'):
+        out.update(electrisim_spec_layer.results(net, _r))
+    return out
