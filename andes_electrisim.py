@@ -90,13 +90,26 @@ _PSS_DEFAULTS = {"IEEEST": {"A1": 0.1, "A2": 0.1, "A3": 0.1, "A4": 0.1, "A5": 0.
 _RENEWABLE_DEFAULTS: Dict[str, Dict[str, float]] = {
     "REGCA1": {"Tg": 0.02, "Lvplsw": 1.0, "Volim": 1.2, "Lvpnt0": 0.4, "Iolim": -1.5},
     "REECA1": {"Vref0": 1.0, "dbd1": -0.02, "dbd2": 0.02},
-    "REPCA1": {"dbd1": -0.02, "dbd2": 0.02},
+    "REPCA1": {"dbd1": -0.02, "dbd2": 0.02, "Kp": 1.0},
     "WTDTA1": {"H": 3.0, "DAMP": 0.0, "Htfrac": 0.5, "Freq1": 1.0, "Dshaft": 1.0},
     "WTARA1": {},
     "WTPTA1": {},
     "WTTQA1": {},
     "PVD1": {},
     "ESD1": {},
+}
+
+# Mode flags ANDES 2.0 makes mandatory (no default), so a device added without
+# them is rejected. Values follow ANDES' own ieee14_wt3 case: the electrical
+# controller takes its Q from the plant controller, which regulates voltage with
+# no frequency response; Q priority at the current limit; WTTQA1 on speed error.
+# A wind plant's power order is speed dependent (REECA1 PFLAG = 1).
+_RENEWABLE_FLAGS: Dict[str, Dict[str, int]] = {
+    "REECA1": {"PFFLAG": 0, "VFLAG": 0, "QFLAG": 0, "PFLAG": 0, "PQFLAG": 0},
+    "REPCA1": {"VCFlag": 1, "RefFlag": 1, "Fflag": 0, "PLflag": 0},
+    "WTTQA1": {"Tflag": 0},
+    "PVD1": {"pqflag": 0},
+    "ESD1": {"pqflag": 0},
 }
 
 
@@ -132,15 +145,46 @@ def _add_model_safe(ss: Any, model: str, defaults_applied: List[str], label: str
     """
     Add an optional ANDES model without making a diagram unusable on another ANDES
     release. ANDES validates both model availability and parameter names in ss.add().
+    A rejected device is taken back out, so the system is as it was before.
     """
+    mdl = getattr(ss, model, None)
+    n0 = getattr(mdl, "n", 0)
     try:
-        ss.add(model, **kwargs)
-        return str(kwargs["idx"])
+        idx = ss.add(model, **kwargs)
     except Exception as exc:
+        if mdl is not None and mdl.n != n0:
+            _discard_partial_add(mdl, n0)
         defaults_applied.append(
             f"{label}: could not add {model} ({exc}); continuing without that optional dynamic model."
         )
         return None
+    if idx is None:  # ANDES only logs an unknown model
+        defaults_applied.append(
+            f"{label}: this ANDES release has no {model}; continuing without that optional dynamic model."
+        )
+        return None
+    return str(idx)
+
+
+def _discard_partial_add(mdl: Any, n0: int) -> None:
+    """
+    Undo a device add that raised part-way. ANDES appends each parameter's
+    value in turn and registers the device with its group only at the end, so
+    a failure leaves the model counting a device whose later parameters are
+    missing; TDS initialisation then fails on the mismatched array lengths.
+    """
+    for param in mdl.params.values():
+        v = getattr(param, "v", None)
+        if isinstance(v, list):
+            del v[n0:]
+        elif isinstance(v, np.ndarray) and v.size > n0:
+            param.v = v[:n0]
+    dropped = [k for k, u in mdl.uid.items() if u >= n0]
+    for k in dropped:
+        del mdl.uid[k]
+    for idxes in getattr(mdl, "_param_corrections", {}).values():
+        idxes[:] = [i for i in idxes if i not in dropped]
+    mdl.n = n0
 
 
 def _model_kwargs(
@@ -1175,13 +1219,14 @@ def build_system(
                     ss, "REECA1", defaults_applied, f"Static Generator '{ufname}'",
                     idx=f"REECA1_{static_count}", name=f"REECA1_{ufname}", reg=reg_idx,
                     **_model_kwargs(el, "dyn_ree_", _RENEWABLE_DEFAULTS["REECA1"]),
+                    **dict(_RENEWABLE_FLAGS["REECA1"], PFLAG=int(plant_kind == "WIND")),
                 )
                 model_ids["ree_idx"] = ree_idx
                 if ree_idx:
                     model_ids["repca_idx"] = _add_model_safe(
                         ss, "REPCA1", defaults_applied, f"Static Generator '{ufname}'",
                         idx=f"REPCA1_{static_count}", name=f"REPCA1_{ufname}", ree=ree_idx,
-                        **_model_kwargs(el, "dyn_repca_", _RENEWABLE_DEFAULTS["REPCA1"]),
+                        **_model_kwargs(el, "dyn_repca_", _RENEWABLE_DEFAULTS["REPCA1"]), **_RENEWABLE_FLAGS["REPCA1"],
                     )
                     if plant_kind == "WIND":
                         wt_idx = _add_model_safe(
@@ -1208,14 +1253,23 @@ def build_system(
                                     model_ids["wttqa_idx"] = _add_model_safe(
                                         ss, "WTTQA1", defaults_applied, f"Static Generator '{ufname}'",
                                         idx=f"WTTQA1_{static_count}", name=f"WTTQA1_{ufname}", rep=pitch_idx,
-                                        **_model_kwargs(el, "dyn_wtt_", _RENEWABLE_DEFAULTS["WTTQA1"]),
+                                        **_model_kwargs(el, "dyn_wtt_", _RENEWABLE_DEFAULTS["WTTQA1"]), **_RENEWABLE_FLAGS["WTTQA1"],
                                     )
         else:
             dg_model = plant_kind
+            # The dialog's DG Tg is the converter's current lag, active (tip) and reactive (tiq)
+            # alike. A lag of zero would leave its state undefined, so the model's own stands.
+            tg = _dyn_value(el, "dyn_dg_Tg", 0.0)
+            lag = {"tip": tg, "tiq": tg} if tg > 0 else {}
+            if tg <= 0 and str(el.get("dyn_dg_Tg") or "").strip().lower() not in ("", "none", "null"):
+                defaults_applied.append(
+                    f"Static Generator '{ufname}': DG Tg must be positive; used the {dg_model} default."
+                )
             model_ids["dg_idx"] = _add_model_safe(
                 ss, dg_model, defaults_applied, f"Static Generator '{ufname}'",
                 idx=f"{dg_model}_{static_count}", name=f"{dg_model}_{ufname}", bus=bus, gen=static_idx, Sn=sn_mva,
-                **_model_kwargs(el, "dyn_dg_", _RENEWABLE_DEFAULTS[dg_model]),
+                **_model_kwargs(el, "dyn_dg_", _RENEWABLE_DEFAULTS[dg_model]), **_RENEWABLE_FLAGS[dg_model],
+                **lag,
             )
 
         if any(model_ids.values()):
