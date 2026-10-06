@@ -128,11 +128,14 @@ class AcBuilder:
     def build(self):
         net, ckt = self.net, self.ckt
         aux = net.bus['electrisim_aux'] == True if 'electrisim_aux' in net.bus.columns else None
+        grounding = net.bus['electrisim_grounding'] == True if 'electrisim_grounding' in net.bus.columns else None
         for b in net.bus.index:
             if not bool(net.bus.at[b, 'in_service']) or b not in net.res_bus.index:
                 continue
             if aux is not None and aux.at[b]:
                 continue
+            if grounding is not None and grounding.at[b]:
+                continue          # a grounding transformer's delta: the zigzag is built as itself
             if not np.isfinite(net.res_bus.at[b, 'vm_pu']):
                 continue
             label = _label(net, 'bus', b)
@@ -145,6 +148,7 @@ class AcBuilder:
         self._grids()
         self._lines()
         self._trafos()
+        self._grounding()
         self._loads()
         self._generation()
         for table in ('trafo3w', 'impedance', 'ward', 'xward', 'dcline'):
@@ -307,9 +311,41 @@ class AcBuilder:
             self.series.append(('Line', label, _row_id(net, 'line', li), f'{label} (from end)',
                                 [('i_cp', first, k, 1.0) for k in range(3)]))
 
+    def _grounding(self):
+        """
+        Each zigzag grounding transformer: from its bus's phases to its star
+        point, a coupled branch whose zero-sequence impedance is its Z0 and
+        whose positive sequence is its magnetising impedance (taken as 10^4 x
+        its zero-sequence one: it passes no balanced current); its star point
+        to ground through its neutral resistor and reactor.
+        """
+        net, ckt, w = self.net, self.ckt, self.w
+        if 'electrisim_grounding' not in net.trafo.columns:
+            return
+        for ti in net.trafo.index[net.trafo['electrisim_grounding'] == True]:
+            b = int(net.trafo.at[ti, 'hv_bus'])
+            if not bool(net.trafo.at[ti, 'in_service']) or b not in self.nodes or ('trafo', ti) in self._open_switches:
+                continue
+            r0, x0 = _f(net.trafo.at[ti, 'electrisim_gt_r0']), _f(net.trafo.at[ti, 'electrisim_gt_x0'])
+            r_n, x_n = _f(net.trafo.at[ti, 'electrisim_gt_r_n']), _f(net.trafo.at[ti, 'electrisim_gt_x_n'])
+            x1 = 1e4 * max(abs(complex(r0 + 3 * r_n, x0 + 3 * x_n)), 1.0)
+            rs, rm = _sequence_to_phase(r0, r0)
+            ls, lm = _sequence_to_phase(x1 / w, max(x0, 1e-6) / w)
+            label = _label(net, 'trafo', ti)
+            star = ckt.node(f'{label} star point')
+            g = ckt.add_coupled(self.nodes[b], [star] * 3, _matrix(rs, rm), _matrix(ls, lm))
+            if r_n > 0 or x_n > 0:
+                n = ckt.add_rl(star, 0, max(r_n, 0.0), max(x_n, 0.0) / w)
+            else:
+                n = ckt.add_rl(star, 0, 1e-4, 0.0)
+            self.series.append(('Grounding transformer', label, _row_id(net, 'trafo', ti), f'{label} (neutral)',
+                                [('i_rl', n, None, 1.0)]))
+
     def _trafos(self):
         net, ckt, w = self.net, self.ckt, self.w
         for ti in net.trafo.index:
+            if 'electrisim_grounding' in net.trafo.columns and net.trafo.at[ti, 'electrisim_grounding'] == True:
+                continue          # built by _grounding
             hv, lv = int(net.trafo.at[ti, 'hv_bus']), int(net.trafo.at[ti, 'lv_bus'])
             if not bool(net.trafo.at[ti, 'in_service']) or hv not in self.nodes or lv not in self.nodes or ('trafo', ti) in self._open_switches:
                 continue

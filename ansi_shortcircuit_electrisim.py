@@ -412,6 +412,16 @@ def _build_zero_sequence_y(net, prefault_v: float):
             y0 = _z_to_y_pu(r0, x0, base_z)
             for bp in (f_ppc, t_ppc):
                 _y_add_shunt(ppci0, int(bp), y0)
+    # Grounding transformers: Z0 + 3 Z_N from their bus to ground.
+    if "electrisim_grounding" in net.trafo.columns:
+        for _, row in net.trafo[(net.trafo["electrisim_grounding"] == True) & net.trafo.in_service].iterrows():
+            bp = _ppc_bus(net, int(row["hv_bus"]))
+            if bp is None:
+                continue
+            vn = float(net.bus.at[int(row["hv_bus"]), "vn_kv"])
+            r = _f(row.get("electrisim_gt_r0"), 0.0) + 3.0 * _f(row.get("electrisim_gt_r_n"), 0.0)
+            x = _f(row.get("electrisim_gt_x0"), 0.0) + 3.0 * _f(row.get("electrisim_gt_x_n"), 0.0)
+            _y_add_shunt(ppci0, int(bp), _z_to_y_pu(r, x, vn * vn / ppci0["baseMVA"]))
     _add_ext_grid_ansi(net, ppci0, prefault_v)
     _calc_ybus(ppci0)
     _calc_zbus(net, ppci0)

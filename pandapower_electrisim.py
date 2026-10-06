@@ -136,6 +136,8 @@ def isolated_buses_message(net, advice="Check your network connectivity."):
     """The studies' refusal of buses no source supplies, naming them as the
     diagram does, then the advice; None when every bus is supplied."""
     isolated_buses = top.unsupplied_buses(net)
+    # A grounding transformer's own delta is cut off with it when its breaker opens: not a fault in the network.
+    isolated_buses = {b for b in isolated_buses if not _electrisim_is_grounding(net.bus, b)}
     if len(isolated_buses) == 0:
         return None
     isolated_refs = resolve_element_refs(net, 'bus', isolated_buses)
@@ -2477,6 +2479,126 @@ def _electrisim_der_report(net, rec, out, v, p):
     return out
 
 
+# --- Grounding transformers ----------------------------------------------------------------
+#
+# A zigzag grounding transformer gives a three-wire network its ground: no
+# positive- or negative-sequence current (its magnetising impedance), its
+# zero-sequence impedance Z0 per phase to its star point, and its star point to
+# ground through a neutral resistor (or reactor) Z_N. A ground fault then sees
+# Z0 + 3 Z_N from it. pandapower has no such element; a YNd unit whose delta is
+# left unloaded has exactly that zero-sequence path, so the grounding
+# transformer is one, on a bus of its own (its delta, flagged and kept out of
+# the results). Z0 + 3 Z_N is its vk0 / vkr0. IEC 60909 corrects transformer
+# impedances by K_T = 0.95 c_max / (1 + 0.6 x_T) but not 3 Z_N: its positive
+# sequence is set to x_T = 7.5 % with its delta above 1 kV (c_max 1.1), so
+# K_T = 1 and pandapower corrects neither. Unloaded, it carries nothing in a
+# balanced load flow.
+
+GT_X_T_PERCENT = 7.5          # K_T = 0.95 x 1.1 / (1 + 0.6 x 0.075) = 1
+
+
+def _electrisim_is_grounding(df, index):
+    """Whether a transformer or bus row is a grounding transformer's own, reported with it."""
+    return 'electrisim_grounding' in df.columns and index in df.index and df.at[index, 'electrisim_grounding'] == True
+
+
+def _electrisim_grounding_params(el, vn_kv):
+    """
+    Its zero-sequence data (ohm): its neutral resistor by default the one that
+    passes its rated neutral current, V_ph / I_rated; its own Z0 by default
+    12 % of that, X/R 10.
+    """
+    v_ph = vn_kv * 1e3 / math.sqrt(3.0)
+    i_rated = safe_float(el.get('i_rated_a'), 400.0)
+    i_rated = i_rated if i_rated and i_rated > 0 else 400.0
+    r_n = safe_float(el.get('r_n_ohm'), float('nan'))
+    r_n = v_ph / i_rated if not np.isfinite(r_n) else max(r_n, 0.0)
+    x_n = max(safe_float(el.get('x_n_ohm'), 0.0) or 0.0, 0.0)
+    x0 = safe_float(el.get('x0_ohm'), float('nan'))
+    x0 = 0.12 * v_ph / i_rated if not np.isfinite(x0) else max(x0, 0.0)
+    r0 = safe_float(el.get('r0_ohm'), float('nan'))
+    r0 = 0.1 * x0 if not np.isfinite(r0) else max(r0, 0.0)
+    return {'r0': r0, 'x0': x0, 'r_n': r_n, 'x_n': x_n, 'i_rated_a': i_rated,
+            't_rated_s': safe_float(el.get('t_rated_s'), 10.0)}
+
+
+def _electrisim_build_grounding_transformer(net, el, Busbars, TrafoDict, in_data):
+    name = el.get('name')
+    label = el.get('userFriendlyName') or name
+    bus = Busbars.get(el.get('bus')) if el.get('bus') is not None else None
+    if bus is None:
+        # Behind its breaker: the bus the switch wired to it stands on.
+        for row in in_data.values():
+            if (isinstance(row, dict) and str(row.get('typ', '')).startswith('Switch')
+                    and row.get('element') == name and Busbars.get(row.get('bus')) is not None):
+                bus = Busbars[row['bus']]
+                break
+    if bus is None:
+        _electrisim_warn(net, f"Grounding transformer '{label}' is not connected to a bus, so it is left out.")
+        return None
+    vn = float(net.bus.at[bus, 'vn_kv'])
+    vn_rated = safe_float(el.get('vn_kv'), 0.0)
+    if vn_rated and vn_rated > 0 and abs(vn_rated - vn) > 0.1 * vn:
+        _electrisim_warn(net, f"Grounding transformer '{label}' is rated {vn_rated:g} kV on a {vn:g} kV bus.")
+    z = _electrisim_grounding_params(el, vn)
+    r_tot, x_tot = z['r0'] + 3.0 * z['r_n'], z['x0'] + 3.0 * z['x_n']
+    sn = 1.0
+    vn_delta = max(vn, 1.1)                    # its delta above 1 kV, so c_max = 1.1 there
+    z_base = vn * vn / sn
+    delta = pp.create_bus(net, vn_kv=vn_delta, name=f'{label} delta', in_service=True)
+    net.bus.at[delta, 'electrisim_grounding'] = True
+    idx = pp.create_transformer_from_parameters(
+        net, hv_bus=bus, lv_bus=delta, sn_mva=sn, vn_hv_kv=vn, vn_lv_kv=vn_delta,
+        vk_percent=GT_X_T_PERCENT, vkr_percent=0.0, pfe_kw=0.0, i0_percent=0.0,
+        vk0_percent=100.0 * math.hypot(r_tot, x_tot) / z_base, vkr0_percent=100.0 * r_tot / z_base,
+        mag0_percent=1e6, mag0_rx=0.0, si0_hv_partial=0.9, vector_group='YNd', shift_degree=0.0,
+        name=name, in_service=_electrisim_in_service(el))
+    net.trafo.at[idx, 'id'] = el.get('id', '')
+    net.trafo.at[idx, 'electrisim_grounding'] = True
+    for k in ('r0', 'x0', 'r_n', 'x_n', 'i_rated_a', 't_rated_s'):
+        net.trafo.at[idx, f'electrisim_gt_{k}'] = z[k]
+    TrafoDict[name] = idx
+    if el.get('userFriendlyName') not in (None, '') and str(el['userFriendlyName']) != str(name):
+        TrafoDict[str(el['userFriendlyName'])] = idx
+    if not hasattr(net, 'user_friendly_names'):
+        net.user_friendly_names = {}
+    net.user_friendly_names[name] = label
+    return idx
+
+
+def _electrisim_grounding_follow_breakers(net):
+    """A grounding transformer whose breaker is open, or out of service, takes its delta out with it."""
+    if 'electrisim_grounding' not in net.trafo.columns:
+        return
+    for i in net.trafo.index[net.trafo['electrisim_grounding'] == True]:
+        sw = net.switch[(net.switch['et'] == 't') & (net.switch['element'] == i)]
+        on = bool(net.trafo.at[i, 'in_service']) and bool(sw['closed'].all() if len(sw) else True)
+        net.trafo.at[i, 'in_service'] = on
+        net.bus.at[int(net.trafo.at[i, 'lv_bus']), 'in_service'] = on
+
+
+def _electrisim_grounding_results(net):
+    """Each grounding transformer: its bus, its zero-sequence data and its rating."""
+    out = []
+    if 'electrisim_grounding' not in net.trafo.columns:
+        return out
+    for i in net.trafo.index[net.trafo['electrisim_grounding'] == True]:
+        row = net.trafo.loc[i]
+        name = row['name']
+        bus = int(row['hv_bus'])
+        out.append({
+            'name': name, 'id': row.get('id', ''), 'label': getattr(net, 'user_friendly_names', {}).get(name, name),
+            'bus': net.bus.at[bus, 'name'], 'in_service': bool(row['in_service']),
+            'r0_ohm': float(row['electrisim_gt_r0']), 'x0_ohm': float(row['electrisim_gt_x0']),
+            'r_n_ohm': float(row['electrisim_gt_r_n']), 'x_n_ohm': float(row['electrisim_gt_x_n']),
+            'i_rated_a': float(row['electrisim_gt_i_rated_a']), 't_rated_s': float(row['electrisim_gt_t_rated_s']),
+            # Its neutral current for a bolted ground fault at its own bus, alone on an otherwise ungrounded network.
+            'i_ground_alone_a': float(3.0 * float(net.bus.at[bus, 'vn_kv']) * 1e3 / math.sqrt(3.0) / abs(complex(
+                row['electrisim_gt_r0'] + 3 * row['electrisim_gt_r_n'], row['electrisim_gt_x0'] + 3 * row['electrisim_gt_x_n']))),
+        })
+    return out
+
+
 # --- Power conversion systems (PCS) --------------------------------------------------------
 #
 # A PCS joins one source or store (der_electrisim) to an AC bus: the source wired straight to
@@ -3259,7 +3381,7 @@ def _electrisim_drop_uncoupled_dc(net, quiet=False):
                           "through a converter.")
 
 
-def _electrisim_set_aside_dc_network(net, study):
+def _electrisim_set_aside_dc_network(net, study, why="pandapower's optimal power flow does not model VSCs or DC networks"):
     """
     Leave a DC network out of a study that cannot model it, and say so.
 
@@ -3301,8 +3423,7 @@ def _electrisim_set_aside_dc_network(net, study):
             setattr(net, records, [])
     _electrisim_warn(net, f"{study} leaves the DC network out ({n_bus} DC bus{'es' if n_bus != 1 else ''}"
                           + (f", {n_load} DC load{'s' if n_load != 1 else ''} of {p_load:.3g} MW" if n_load else '')
-                          + "): pandapower's optimal power flow does not model VSCs or DC networks, "
-                          "so this result does not include them.")
+                          + f"): {why}, so this result does not include them.")
 
 
 def _electrisim_row_id(df, index):
@@ -5218,6 +5339,9 @@ def create_other_elements(in_data,net,x, Busbars):
             #si0_hv_partial** - zero sequence short circuit impedance  distribution in hv side
             #vk0_percent=in_data[x]['vk0_percent'], vkr0_percent=in_data[x]['vkr0_percent'], mag0_percent=in_data[x]['mag0_percent'], si0_hv_partial=in_data[x]['si0_hv_partial'],
         _typ = in_data[x].get('typ') or ''
+        if _typ.startswith("Grounding Transformer"):
+            _electrisim_build_grounding_transformer(net, in_data[x], Busbars, TrafoDict, in_data)
+            continue
         if (_typ.startswith("Transformer") or _typ.startswith("Two Winding Transformer")) and not _typ.startswith("Three Winding Transformer"):
             # Get values with default fallbacks and proper type conversion
             parallel_value = safe_int(in_data[x].get('parallel', 1), 1)
@@ -6292,6 +6416,7 @@ def create_other_elements(in_data,net,x, Busbars):
                 net.user_friendly_names = {}
             net.user_friendly_names[dcline_name] = element_name
 
+    _electrisim_grounding_follow_breakers(net)
     _electrisim_build_dc_dc_converters(net)
     _electrisim_build_ssts(net, Busbars)
     _electrisim_build_pcs(net, Busbars, study)
@@ -8644,8 +8769,8 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                 
                 #Bus
                 for index, row in net.res_bus.iterrows():
-                    if _electrisim_is_aux(net.bus, index):
-                        continue   # a DC/DC converter's auxiliary AC bus
+                    if _electrisim_is_aux(net.bus, index) or _electrisim_is_grounding(net.bus, index):
+                        continue   # a DC/DC converter's auxiliary AC bus; a grounding transformer's delta
                     p_mw = row['p_mw']
                     q_mvar = row['q_mvar']
                     denom_pf = math.sqrt(math.pow(p_mw, 2) + math.pow(q_mvar, 2))
@@ -8834,6 +8959,8 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                 if not net.trafo.empty:
                     res_tf = getattr(net, 'res_trafo', None)
                     for trafo_index in net.trafo.index:
+                        if _electrisim_is_grounding(net.trafo, trafo_index):
+                            continue   # reported under groundingtransformers
                         t_name = net.trafo._get_value(trafo_index, 'name')
                         t_raw_id = net.trafo._get_value(trafo_index, 'id')
                         t_name_s = str(t_name) if t_name is not None and not pd.isna(t_name) else str(trafo_index)
@@ -9259,6 +9386,9 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                     result = {**result, 'ders': ders_out}
                 if pcs_out:
                     result = {**result, 'pcs': pcs_out}
+                gts = _electrisim_grounding_results(net)
+                if gts:
+                    result = {**result, 'groundingtransformers': gts}
 
                 # DC/DC converters: input and output power, losses, loading, both port voltages.
                 if getattr(net, 'electrisim_dc_dc_converters', None):
@@ -9511,7 +9641,12 @@ def _three_phase_kappa(net, case, bus, tk_s, r_fault_ohm, x_fault_ohm, iec_optio
                check_connectivity=True, branch_results=False, **(iec_options or {}))
     index = net.res_bus_sc.index
     rows = net3['_pd2ppc_lookups']['bus'][index.values]
-    return pd.Series(net3['_ppc']['bus'][rows, KAPPA], index=index)
+    ppc_bus = net3['_ppc']['bus']
+    # A bus out of service (an open grounding transformer's delta, say) is not in pandapower's model: no kappa.
+    ok = (rows >= 0) & (rows < ppc_bus.shape[0])
+    kappa = np.full(len(index), np.nan)
+    kappa[ok] = ppc_bus[rows[ok], KAPPA]
+    return pd.Series(kappa, index=index)
 
 
 def _iec_thermal_m(kappa, tk_s, f_hz):
@@ -9739,6 +9874,13 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
         # Long-standing defaults for grids whose zero-sequence columns are
         # absent come first, so only an explicit zero is reported below.
         ensure_ext_grid_zero_sequence_min(net)
+        if fault_type == '1ph':
+            # A three-wire converter has no zero-sequence path, and pandapower's
+            # zero-sequence model fails on a VSC.
+            _electrisim_set_aside_dc_network(
+                net, 'The single-phase short circuit',
+                why="pandapower's zero-sequence model has no VSC (a three-wire converter adds no zero-sequence "
+                    "path; its own fault current is held to its limit)")
         _electrisim_sc_storage_as_current_sources(net)
         missing_machine_data = _sc_missing_machine_data(net)
         if fault_type == '1ph':
@@ -9859,6 +10001,8 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
     busbarList: List[BusbarOut] = []
 
     for index, row in net.res_bus_sc.iterrows():
+        if _electrisim_is_grounding(net.bus, index):
+            continue   # a grounding transformer's delta
 
         # Handle ip_ka column (might not exist if ip=False)
         if 'ip_ka' in row and not math.isnan(row['ip_ka']):
@@ -9998,6 +10142,8 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
         trafos_sc_list = []
         for idx, row in res_trafo_sc_grouped.iterrows():
             trafo_entry = {}
+            if _electrisim_is_grounding(net.trafo, idx):
+                continue   # a grounding transformer: no branch current of its own in pandapower's results
 
             if idx in net.trafo.index:
                 trafo_entry["name"] = _clean_value(net.trafo.at[idx, "name"]) if "name" in net.trafo.columns else str(idx)
@@ -10333,9 +10479,9 @@ def contingency_analysis(net, contingency_params):
                     })
         
         if element_type == 'transformer' or element_type == 'all':
-            # Add transformer contingencies
+            # Add transformer contingencies (a grounding transformer carries no load: its outage changes nothing here)
             for trafo_idx in net.trafo.index:
-                if net.trafo.loc[trafo_idx, 'in_service']:
+                if net.trafo.loc[trafo_idx, 'in_service'] and not _electrisim_is_grounding(net.trafo, trafo_idx):
                     trafo_name = _contingency_friendly_name(net, net.trafo.loc[trafo_idx, 'name'])
                     contingency_cases.append({
                         'name': f"Trafo_{trafo_name}",

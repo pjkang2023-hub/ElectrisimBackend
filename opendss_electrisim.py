@@ -1192,6 +1192,8 @@ def create_other_elements(in_data, dss, BusbarsDictVoltage, BusbarsDictConnectio
                 create_transformer_1ph_element(dss, element_data, element_name, element_id, BusbarsDictVoltage, BusbarsDictConnectionToName, TransformersDict, TransformersDictId, created_elements, execute_dss_command)
             elif (element_type.startswith("Transformer") or element_type.startswith("Two Winding Transformer")) and not element_type.startswith("Three Winding Transformer"):
                 create_transformer_element(dss, element_data, element_name, element_id, BusbarsDictVoltage, BusbarsDictConnectionToName, TransformersDict, TransformersDictId, created_elements, execute_dss_command)
+            elif element_type.startswith("Grounding Transformer"):
+                create_grounding_transformer_element(dss, element_data, element_name, element_id, in_data, BusbarsDictVoltage, BusbarsDictConnectionToName, TransformersDict, TransformersDictId, created_elements, execute_dss_command)
         except ValueError as ve:
             raise
         except Exception as e:
@@ -2902,6 +2904,56 @@ def create_transformer_element(dss, element_data, element_name, element_id, Busb
                 pass
     else:
         pass
+def grounding_transformer_dss_command(name, bus, kv, z, neutral_node=4):
+    """
+    A zigzag grounding transformer in OpenDSS: a wye-delta unit with its delta
+    left floating. Its zero-sequence impedance is its leakage (XHL, %R, on a
+    1 MVA base) and its neutral resistor or reactor is the wye winding's own
+    rneut / xneut, so a ground fault sees Z0 + 3 Z_N, as in pandapower. Its
+    neutral is a node of its own on the bus (``neutral_node``): left on the
+    bus's node 0 it would be solidly grounded and rneut ignored.
+    ``z``: r0, x0, r_n, x_n in ohm (pandapower_electrisim._electrisim_grounding_params).
+    """
+    z_base = kv * kv / 1.0
+    x_pct = max(100.0 * z['x0'] / z_base, 1e-6)
+    r_pct = 100.0 * z['r0'] / z_base
+    return (f"New Transformer.{name} Phases=3 Windings=2 XHL={x_pct} "
+            f"wdg=1 bus={bus}.1.2.3.{neutral_node} conn=wye kV={kv} kVA=1000 %R={r_pct / 2} "
+            f"rneut={z['r_n']} xneut={z['x_n']} "
+            f"wdg=2 bus={name}_delta conn=delta kV={kv} kVA=1000 %R={r_pct / 2}")
+
+
+def create_grounding_transformer_element(dss, element_data, element_name, element_id, in_data, BusbarsDictVoltage,
+                                         BusbarsDictConnectionToName, TransformersDict, TransformersDictId,
+                                         created_elements, execute_dss_command=None):
+    """A zigzag grounding transformer: on its bus, or behind the breaker that joins it to one."""
+    from pandapower_electrisim import _electrisim_grounding_params
+    if element_name in created_elements:
+        return
+    ref = element_data.get('bus')
+    if ref not in BusbarsDictConnectionToName:
+        ref = next((row.get('bus') for row in in_data.values()
+                    if isinstance(row, dict) and str(row.get('typ', '')).startswith('Switch')
+                    and row.get('element') == element_data.get('name')
+                    and row.get('bus') in BusbarsDictConnectionToName), None)
+    if ref is None:
+        return
+    bus = BusbarsDictConnectionToName[ref]
+    kv = float(BusbarsDictVoltage.get(bus))
+    z = _electrisim_grounding_params(element_data, kv)
+    run = execute_dss_command or dss.Text.Command
+    node = 4 + sum(1 for e in created_elements if str(e).startswith('__gt_'))
+    run(grounding_transformer_dss_command(element_name, bus, kv, z, neutral_node=node))
+    created_elements.add(f'__gt_{element_name}')
+    if str(element_data.get('in_service', True)).lower() in ('false', 'no', '0'):
+        run(f'Transformer.{element_name}.enabled=no')
+    TransformersDict[element_name] = element_name
+    if element_data.get('name') not in (None, '') and element_data.get('name') != element_name:
+        TransformersDict[element_data['name']] = element_name
+    TransformersDictId[element_name] = element_id
+    created_elements.add(element_name)
+
+
 def create_shunt_reactor_element(dss, element_data, element_name, element_id, BusbarsDictVoltage, BusbarsDictConnectionToName, ShuntsDict, ShuntsDictId, created_elements, execute_dss_command=None):
     """Create a shunt reactor element in OpenDSS"""
     
