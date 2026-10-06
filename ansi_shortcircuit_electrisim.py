@@ -14,13 +14,20 @@ from __future__ import annotations
 import copy
 import json
 import math
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import pandapower as pp
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components
 from pandapower.auxiliary import _add_auxiliary_elements
 from pandapower.pd2ppc import _pd2ppc, _ppc2ppci
+from pandapower.pypower.idx_brch import (
+    BR_B, BR_B_ASYM, BR_G, BR_G_ASYM, BR_R, BR_R_ASYM, BR_STATUS, BR_X, BR_X_ASYM,
+    F_BUS, SHIFT, T_BUS, TAP,
+)
 from pandapower.pypower.idx_bus import BASE_KV, BS, GS
 from pandapower.pypower.idx_bus_sc import C_MAX, C_MIN
 from pandapower.pypower.idx_brch_sc import K_T, K_ST
@@ -213,6 +220,7 @@ def _init_ansi_ppc(net, prefault_v: float = 1.0):
     # and load impedances are only added when use_pre_fault_voltage is set.
     ppci["bus"][:, GS] = 0.0
     ppci["bus"][:, BS] = 0.0
+    _remove_iec_kt(net, ppci)
     ppci["bus"][:, C_MAX] = prefault_v
     ppci["bus"][:, C_MIN] = prefault_v
     if ppci["branch"].shape[1] > K_T:
@@ -225,6 +233,54 @@ def _init_ansi_ppc(net, prefault_v: float = 1.0):
     branch_is = ppci["internal"].get("branch_is") if ppci.get("internal") else None
     ppci["internal"] = {} if branch_is is None else {"branch_is": branch_is}
     return ppc, ppci
+
+
+def _remove_iec_kt(net, ppci):
+    """Divide IEC 60909's transformer correction K_T back out of the branches.
+
+    In sc mode pandapower multiplies two- and three-winding transformer R and X
+    by K_T while building the ppc (the K_T column is only a record), so
+    resetting the column does not undo it. ANSI has no such correction. Runs
+    before C_MAX is overwritten: two-winding K_T uses the LV bus's c_max.
+    """
+    from pandapower.build_branch import (
+        _transformer_correction_factor, wye_delta_vector, z_br_to_bus_vector,
+    )
+    branch = ppci["branch"]
+    bus_lookup = net["_pd2ppc_lookups"]["bus"]
+    rows = _ppci_branch_rows(net, ppci, "trafo")
+    if rows:
+        # Only transformers in ppci: an out-of-service one's LV bus may not be.
+        tr = net.trafo.loc[list(rows)]
+        cmax = ppci["bus"][bus_lookup[tr["lv_bus"].values.astype(np.int64)], C_MAX]
+        kt = np.asarray(_transformer_correction_factor(
+            tr, tr["vk_percent"], tr["vkr_percent"], tr["sn_mva"], cmax), dtype=float)
+        for idx, k in zip(tr.index, np.broadcast_to(kt, (len(tr),))):
+            if k > 0:
+                branch[rows[idx], BR_R] /= k
+                branch[rows[idx], BR_X] /= k
+    legs = _ppci_branch_rows(net, ppci, "trafo3w", n_sides=3) if hasattr(net, "trafo3w") else {}
+    if legs:
+        # K_T scales each winding pair's vk / vkr before the star conversion,
+        # so each leg's R and X go back by the ratio of the uncorrected to the
+        # corrected star value.
+        t3 = net.trafo3w
+        sides = ("hv", "mv", "lv")
+        vk = np.stack([t3[f"vk_{s}_percent"].values for s in sides]).astype(float)
+        vkr = np.stack([t3[f"vkr_{s}_percent"].values for s in sides]).astype(float)
+        sn = np.stack([t3[f"sn_{s}_mva"].values for s in sides]).astype(float)
+        kt = np.asarray(_transformer_correction_factor(t3, vk, vkr, sn, 1.1), dtype=float)
+        vk_d, vkr_d = z_br_to_bus_vector(vk, sn), z_br_to_bus_vector(vkr, sn)
+        vki_d = np.sqrt(vk_d ** 2 - vkr_d ** 2)
+        r_ratio = wye_delta_vector(vkr_d, sn), wye_delta_vector(kt * vkr_d, sn)
+        x_ratio = wye_delta_vector(vki_d, sn), wye_delta_vector(kt * vki_d, sn)
+        for pos, idx in enumerate(t3.index):
+            for k, row in enumerate(legs.get(int(idx), ())):
+                if row is None:
+                    continue
+                for col, (true, built) in ((BR_R, r_ratio), (BR_X, x_ratio)):
+                    if abs(built[k, pos]) > 1e-12:
+                        branch[row, col] *= true[k, pos] / built[k, pos]
 
 
 def _y_add_shunt(ppci, bus_ppc: int, y_pu: complex):
@@ -253,23 +309,27 @@ def _ppc_bus(net, pp_bus_idx) -> Optional[int]:
         return None
 
 
+def _ext_grid_z1_ohm(net, row) -> Tuple[float, float, float]:
+    """(vn_kv, R1, X1) of an external grid: Z1 = Un^2 / S_sc, no voltage factor."""
+    vn = float(net.bus.at[int(row["bus"]), "vn_kv"])
+    s_sc = _f(row.get("s_sc_max_mva"), 10000.0)
+    if s_sc <= 0:
+        s_sc = 10000.0
+    rx = _f(row.get("rx_max"), 0.1)
+    z_abs = vn * vn / s_sc
+    # rx_max is R/X, so X = |Z|/sqrt(1+(R/X)^2) and R = (R/X)*X.
+    x = z_abs / math.sqrt(1.0 + rx * rx)
+    return vn, rx * x, x
+
+
 def _add_ext_grid_ansi(net, ppci, prefault_v: float):
     if net.ext_grid.empty:
         return
     for _, row in net.ext_grid[net.ext_grid.in_service].iterrows():
-        bus = int(row["bus"])
-        bus_ppc = _ppc_bus(net, bus)
+        bus_ppc = _ppc_bus(net, int(row["bus"]))
         if bus_ppc is None:
             continue
-        vn = float(net.bus.at[bus, "vn_kv"])
-        s_sc = _f(row.get("s_sc_max_mva"), 10000.0)
-        if s_sc <= 0:
-            s_sc = 10000.0
-        rx = _f(row.get("rx_max"), 0.1)
-        z_abs = vn * vn / s_sc
-        # rx_max is R/X, so X = |Z|/sqrt(1+(R/X)^2) and R = (R/X)*X.
-        x = z_abs / math.sqrt(1.0 + rx * rx)
-        r = rx * x
+        vn, r, x = _ext_grid_z1_ohm(net, row)
         base_z = vn * vn / ppci["baseMVA"]
         _y_add_shunt(ppci, bus_ppc, _z_to_y_pu(r, x, base_z))
 
@@ -392,39 +452,318 @@ def _add_storage_ansi(net, ppci, network: str):
         _y_add_shunt(ppci, bus_ppc, _z_to_y_pu(r_ohm, x_ohm, base_z))
 
 
+# ---------------------------------------------------------------------------
+# Zero-sequence network for line-to-ground faults
+# ---------------------------------------------------------------------------
+
+_GROUNDED_WINDINGS = ("yn", "zn")
+
+
+def _finite(v) -> Optional[float]:
+    """The value as a float when it is a finite number, else None."""
+    x = _f(v, float("nan"))
+    return x if math.isfinite(x) else None
+
+
+def _windings(vector_group, count: int) -> Optional[List[str]]:
+    """Winding connections of a vector group, HV first: 'YNd11' -> ['yn', 'd'].
+
+    None when the group does not spell exactly `count` windings, so the
+    transformer is left open in the zero-sequence network.
+    """
+    text = re.sub(r"[^a-z]", "", str(vector_group or "").lower())
+    parts = re.findall(r"yn|zn|y|z|d", text)
+    if len(parts) != count or "".join(parts) != text:
+        return None
+    return parts
+
+
+def _z_percent(vk: float, vkr: float) -> complex:
+    """Complex short-circuit voltage in percent from |vk| and its real part."""
+    vk = abs(vk)
+    vkr = min(abs(vkr), vk)
+    return complex(vkr, math.sqrt(vk * vk - vkr * vkr))
+
+
+def _zero_seq_vk(row, vk_col: str, vkr_col: str, vk0_col: str, vkr0_col: str) -> complex:
+    """Zero-sequence vk in percent, each of vk0 / vkr0 falling back to its
+    positive-sequence value when not given (zero or blank), as pandapower does."""
+    vk0 = _finite(row.get(vk0_col))
+    vkr0 = _finite(row.get(vkr0_col))
+    vk = vk0 if vk0 is not None and vk0 > 0 else _f(row.get(vk_col), 0.0)
+    vkr = vkr0 if vkr0 is not None and vkr0 > 0 else _f(row.get(vkr_col), 0.0)
+    return _z_percent(vk, vkr)
+
+
+def _neutral_ohm(row) -> complex:
+    """Neutral grounding impedance R_N + jX_N in ohm (rn_ohm / xn_ohm)."""
+    return complex(max(_f(row.get("rn_ohm"), 0.0), 0.0), max(_f(row.get("xn_ohm"), 0.0), 0.0))
+
+
+def _y_pu_from_ohm(z_ohm: complex, base_kv: float, base_mva: float) -> complex:
+    return _z_to_y_pu(z_ohm.real, z_ohm.imag, base_kv * base_kv / base_mva)
+
+
+def _open_branch(ppci0, row: int):
+    branch = ppci0["branch"]
+    branch[row, BR_STATUS] = 0
+    # makeYbus divides the status by R + jX under errstate(raise).
+    if branch[row, BR_R] == 0 and branch[row, BR_X] == 0:
+        branch[row, BR_X] = 1.0
+
+
+def _set_series_branch(ppci0, row: int, z_pu: complex):
+    branch = ppci0["branch"]
+    branch[row, BR_R] = z_pu.real
+    branch[row, BR_X] = z_pu.imag
+    branch[row, [BR_G, BR_B, BR_R_ASYM, BR_X_ASYM, BR_G_ASYM, BR_B_ASYM, SHIFT]] = 0.0
+    branch[row, BR_STATUS] = 1
+
+
+def _zero_seq_lines(net, ppci0):
+    """Lines as series branches with R0 / X0 / C0. R0 or X0 not given falls
+    back to its positive-sequence value; C0 not given is zero."""
+    if net.line.empty:
+        return
+    base_mva = ppci0["baseMVA"]
+    omega = 2.0 * math.pi * _f(net.get("f_hz"), 50.0)
+    for idx, row in _ppci_branch_rows(net, ppci0, "line").items():
+        line = net.line.loc[idx]
+        length = _f(line.get("length_km"), 1.0)
+        parallel = _f(line.get("parallel"), 1.0) or 1.0
+        r1 = _f(line.get("r_ohm_per_km"), 0.0)
+        x1 = _f(line.get("x_ohm_per_km"), 0.0)
+        r0 = _finite(line.get("r0_ohm_per_km"))
+        x0 = _finite(line.get("x0_ohm_per_km"))
+        r0 = r1 if r0 is None else r0
+        x0 = x1 if x0 is None else x0
+        if r0 == 0 and x0 == 0:
+            r0, x0 = r1, x1
+        c0 = _finite(line.get("c0_nf_per_km")) or 0.0
+        base_kv = float(np.real(ppci0["bus"][int(np.real(ppci0["branch"][row, F_BUS])), BASE_KV]))
+        base_z = base_kv * base_kv / base_mva
+        _set_series_branch(ppci0, row, complex(r0, x0) * length / parallel / base_z)
+        ppci0["branch"][row, BR_B] = omega * c0 * 1e-9 * length * parallel * base_z
+
+
+def _zero_seq_ext_grids(net, ppci0):
+    """External grids: X0 = (X0/X1) X1, R0 = (R0/X0) X0 from x0x_max / r0x0_max.
+    An ungrounded source (X0/X1 very large) then adds next to nothing. X0/X1
+    blank or not positive (the diagram's default is 0, which IEC rejects) is
+    taken as 1, R0/X0 blank as 0.1 - ensure_ext_grid_zero_sequence_min's
+    defaults."""
+    if net.ext_grid.empty:
+        return
+    for _, row in net.ext_grid[net.ext_grid.in_service].iterrows():
+        bus_ppc = _ppc_bus(net, int(row["bus"]))
+        if bus_ppc is None:
+            continue
+        vn, _, x1 = _ext_grid_z1_ohm(net, row)
+        x0x = _finite(row.get("x0x_max"))
+        r0x0 = _finite(row.get("r0x0_max"))
+        x0 = (x0x if x0x is not None and x0x > 0 else 1.0) * x1
+        r0 = abs(0.1 if r0x0 is None else r0x0) * x0
+        _y_add_shunt(ppci0, bus_ppc, _y_pu_from_ohm(complex(r0, x0), vn, ppci0["baseMVA"]))
+
+
+def _zero_seq_gens(net, ppci0):
+    """Generators with zero-sequence data (x0_pu, optional r0_pu, on the
+    machine's own rating) as a grounded-wye source through 3 Z_N
+    (rn_ohm / xn_ohm). Without x0_pu the machine is taken as ungrounded or
+    behind a delta winding and adds nothing, as in pandapower."""
+    if net.gen.empty or "x0_pu" not in net.gen.columns:
+        return
+    for _, row in net.gen[net.gen.in_service].iterrows():
+        x0 = _f(row.get("x0_pu"), 0.0)
+        if x0 <= 0:
+            continue
+        bus = int(row["bus"])
+        bus_ppc = _ppc_bus(net, bus)
+        if bus_ppc is None:
+            continue
+        vn_bus = float(net.bus.at[bus, "vn_kv"])
+        vn_gen = _f(row.get("vn_kv"), vn_bus) or vn_bus
+        sn = _f(row.get("sn_mva"), 100.0) or 100.0
+        r0 = _f(row.get("r0_pu"), 0.0)
+        z_ohm = complex(r0, x0) * vn_gen * vn_gen / sn + 3.0 * _neutral_ohm(row)
+        _y_add_shunt(ppci0, bus_ppc, _y_pu_from_ohm(z_ohm, vn_bus, ppci0["baseMVA"]))
+
+
+def _zero_seq_trafos(net, ppci0):
+    """Two-winding transformers by vector group.
+
+    The neutral impedance Z_N (rn_ohm / xn_ohm, ohm at the voltage of the
+    grounded winding) adds 3 Z_N to that winding's zero-sequence path:
+      YN-d, ZN-any        shunt Z0 + 3 Z_N at the HV bus
+      D-yn, any-zn        shunt Z0 + 3 Z_N at the LV bus
+      YN-yn               series Z0 + 3 Z_N (Z_N taken on the LV neutral); with
+                          mag0_percent the T model with its magnetizing branch
+      YN-y, Y-yn          shunt Z0 + Z_m0 at the grounded side when mag0_percent
+                          is given, else open
+      Y-d, D-y, D-d, Y-y  open
+    Grounding transformers (electrisim_grounding) are a shunt Z0 + 3 Z_N at
+    their bus from their own data.
+    """
+    if net.trafo.empty:
+        return
+    base_mva = ppci0["baseMVA"]
+    grounding = net.trafo["electrisim_grounding"] == True if "electrisim_grounding" in net.trafo.columns else None
+    for idx, row in _ppci_branch_rows(net, ppci0, "trafo").items():
+        tr = net.trafo.loc[idx]
+        _open_branch(ppci0, row)
+        hv_bus, lv_bus = int(tr["hv_bus"]), int(tr["lv_bus"])
+        hv_ppc, lv_ppc = _ppc_bus(net, hv_bus), _ppc_bus(net, lv_bus)
+        vn_hv_bus = float(net.bus.at[hv_bus, "vn_kv"])
+        vn_lv_bus = float(net.bus.at[lv_bus, "vn_kv"])
+        if grounding is not None and bool(grounding.at[idx]):
+            z = complex(_f(tr.get("electrisim_gt_r0"), 0.0) + 3.0 * _f(tr.get("electrisim_gt_r_n"), 0.0),
+                        _f(tr.get("electrisim_gt_x0"), 0.0) + 3.0 * _f(tr.get("electrisim_gt_x_n"), 0.0))
+            if hv_ppc is not None:
+                _y_add_shunt(ppci0, hv_ppc, _y_pu_from_ohm(z, vn_hv_bus, base_mva))
+            continue
+        groups = _windings(tr.get("vector_group"), 2)
+        sn = _f(tr.get("sn_mva"), 0.0)
+        if groups is None or sn <= 0 or hv_ppc is None or lv_ppc is None:
+            continue
+        hv, lv = groups
+        parallel = _f(tr.get("parallel"), 1.0) or 1.0
+        z_pct = _zero_seq_vk(tr, "vk_percent", "vkr_percent", "vk0_percent", "vkr0_percent")
+        z_n = 3.0 * _neutral_ohm(tr)
+        mag0 = _f(tr.get("mag0_percent"), 0.0)
+        mag0_rx = _f(tr.get("mag0_rx"), 0.0)
+
+        def z0_ohm(vn_kv):
+            return z_pct / 100.0 * vn_kv * vn_kv / sn
+
+        def zm0_ohm(vn_kv):
+            # As pandapower: |Z_m0| = mag0_percent x |Z0| (a ratio, despite
+            # the name) at the angle of its R/X, mag0_rx.
+            return abs(z0_ohm(vn_kv)) * mag0 * complex(mag0_rx, 1.0) / math.sqrt(1.0 + mag0_rx * mag0_rx)
+
+        vn_hv_t = _f(tr.get("vn_hv_kv"), vn_hv_bus) or vn_hv_bus
+        vn_lv_t = _f(tr.get("vn_lv_kv"), vn_lv_bus) or vn_lv_bus
+        hv_grounded, lv_grounded = hv in _GROUNDED_WINDINGS, lv in _GROUNDED_WINDINGS
+        if hv == "zn" or (hv_grounded and lv == "d"):
+            z = (z0_ohm(vn_hv_t) + z_n) / parallel
+            _y_add_shunt(ppci0, hv_ppc, _y_pu_from_ohm(z, vn_hv_bus, base_mva))
+        elif lv == "zn" or (lv_grounded and hv == "d"):
+            z = (z0_ohm(vn_lv_t) + z_n) / parallel
+            _y_add_shunt(ppci0, lv_ppc, _y_pu_from_ohm(z, vn_lv_bus, base_mva))
+        elif hv_grounded and lv_grounded:
+            # Referred to the LV side, where pypower puts a branch's series
+            # impedance (the off-nominal ratio stays in TAP).
+            z0 = z0_ohm(vn_lv_t)
+            base_z = vn_lv_bus * vn_lv_bus / base_mva
+            if mag0 > 0:
+                # pandapower's T model: Z0 split si0_hv_partial : 1 - si0 about
+                # a magnetizing branch Z_m0, star-delta to a pi.
+                si0 = min(max(_f(tr.get("si0_hv_partial"), 0.5), 0.0), 1.0)
+                z_a, z_b, z_m = si0 * z0, (1.0 - si0) * z0 + z_n, zm0_ohm(vn_lv_t)
+                z_t = z_a * z_b + z_b * z_m + z_a * z_m
+                z_series = z_t / z_m
+                y_hv, y_lv = z_b / z_t, z_a / z_t
+            else:
+                z_series, y_hv, y_lv = z0 + z_n, 0j, 0j
+            _set_series_branch(ppci0, row, z_series / parallel / base_z)
+            tap = float(np.real(ppci0["branch"][row, TAP])) or 1.0
+            # A shunt at the internal (LV-side) node of the ideal transformer
+            # appears at the HV bus divided by tap^2.
+            _y_add_shunt(ppci0, hv_ppc, y_hv * parallel * base_z / (tap * tap))
+            _y_add_shunt(ppci0, lv_ppc, y_lv * parallel * base_z)
+        elif (hv_grounded or lv_grounded) and mag0 > 0:
+            vn_t, vn_b, bus_ppc = (vn_hv_t, vn_hv_bus, hv_ppc) if hv_grounded else (vn_lv_t, vn_lv_bus, lv_ppc)
+            z = (z0_ohm(vn_t) + zm0_ohm(vn_t) + z_n) / parallel
+            _y_add_shunt(ppci0, bus_ppc, _y_pu_from_ohm(z, vn_b, base_mva))
+
+
+def _zero_seq_trafo3w(net, ppci0):
+    """Three-winding transformers: the star equivalent of vk0_*/vkr0_* about
+    the internal star bus, each leg by its winding: a grounded star (yn/zn)
+    joins its bus to the star point, a delta grounds the star point through
+    its leg, an ungrounded star is open."""
+    if not hasattr(net, "trafo3w") or net.trafo3w.empty:
+        return
+    base_mva = ppci0["baseMVA"]
+    legs = _ppci_branch_rows(net, ppci0, "trafo3w", n_sides=3)
+    for idx, rows in legs.items():
+        t3 = net.trafo3w.loc[idx]
+        for row in rows:
+            if row is not None:
+                _open_branch(ppci0, row)
+        groups = _windings(t3.get("vector_group"), 3)
+        if groups is None or rows[0] is None:
+            continue
+        sn = [_f(t3.get(f"sn_{s}_mva"), 0.0) for s in ("hv", "mv", "lv")]
+        if min(sn) <= 0:
+            continue
+        # Pairwise HV-MV, MV-LV, HV-LV on the smaller rating, to the HV rating.
+        pairs = [
+            _zero_seq_vk(t3, f"vk_{s}_percent", f"vkr_{s}_percent", f"vk0_{s}_percent", f"vkr0_{s}_percent")
+            for s in ("hv", "mv", "lv")
+        ]
+        z_hm = pairs[0] * sn[0] / min(sn[0], sn[1])
+        z_ml = pairs[1] * sn[0] / min(sn[1], sn[2])
+        z_hl = pairs[2] * sn[0] / min(sn[0], sn[2])
+        star = (0.5 * (z_hm + z_hl - z_ml), 0.5 * (z_hm + z_ml - z_hl), 0.5 * (z_hl + z_ml - z_hm))
+        vn_t = [_f(t3.get(f"vn_{s}_kv"), 0.0) for s in ("hv", "mv", "lv")]
+        star_ppc = int(np.real(ppci0["branch"][rows[0], T_BUS]))
+        star_kv = float(np.real(ppci0["bus"][star_ppc, BASE_KV]))
+        for k, (winding, row) in enumerate(zip(groups, rows)):
+            if row is None:
+                continue
+            if winding in _GROUNDED_WINDINGS:
+                # The leg's impedance sits on its T side: the star bus for the
+                # HV leg, the MV / LV bus for the others.
+                t_kv = float(np.real(ppci0["bus"][int(np.real(ppci0["branch"][row, T_BUS])), BASE_KV]))
+                z_ohm = star[k] / 100.0 * vn_t[k] * vn_t[k] / sn[0]
+                _set_series_branch(ppci0, row, z_ohm / (t_kv * t_kv / base_mva))
+            elif winding == "d":
+                z_ohm = star[k] / 100.0 * vn_t[0] * vn_t[0] / sn[0]
+                _y_add_shunt(ppci0, star_ppc, _y_pu_from_ohm(z_ohm, star_kv, base_mva))
+
+
+def _ungrounded_buses(ppci0) -> np.ndarray:
+    """Mask of buses in zero-sequence islands with no path to ground.
+
+    Their Ybus is singular. A ground fault there draws no current (no line
+    capacitance given), so they get a token shunt to make Ybus invertible and
+    are reported with zero current.
+    """
+    n = ppci0["bus"].shape[0]
+    branch = ppci0["branch"]
+    live = np.real(branch[:, BR_STATUS]) > 0
+    f = np.real(branch[live, F_BUS]).astype(np.int64)
+    t = np.real(branch[live, T_BUS]).astype(np.int64)
+    shunt = np.abs(ppci0["bus"][:, GS] + 1j * ppci0["bus"][:, BS]) > 0
+    charging = np.abs(branch[live, BR_G] + 1j * branch[live, BR_B]) > 0
+    shunt[f[charging]] = True
+    shunt[t[charging]] = True
+    graph = csr_matrix((np.ones(len(f)), (f, t)), shape=(n, n))
+    n_comp, labels = connected_components(graph, directed=False)
+    grounded = np.zeros(n_comp, dtype=bool)
+    grounded[np.unique(labels[shunt])] = True
+    return ~grounded[labels]
+
+
 def _build_zero_sequence_y(net, prefault_v: float):
-    """Approximate zero-sequence Y for LG faults."""
+    """Zero-sequence Ybus / Zbus on the same bus indexing as the positive
+    sequence: lines, transformers by vector group with their neutral
+    impedance, external grids, grounded generators and grounding
+    transformers. Motors, static generators and storage (ungrounded or
+    behind a delta) add no zero-sequence path. Other branch kinds keep their
+    positive-sequence impedance."""
     _, ppci0 = _init_ansi_ppc(net, prefault_v)
-    if not net.line.empty:
-        for _, row in net.line[net.line.in_service].iterrows():
-            f_ppc = _ppc_bus(net, int(row["from_bus"]))
-            t_ppc = _ppc_bus(net, int(row["to_bus"]))
-            if f_ppc is None or t_ppc is None:
-                continue
-            from_bus = int(row["from_bus"])
-            vn = float(net.bus.at[from_bus, "vn_kv"])
-            length = _f(row.get("length_km"), 1.0) or 1.0
-            r0 = _f(row.get("r0_ohm_per_km"), _f(row.get("r_ohm_per_km"), 0.0)) * length
-            x0 = _f(row.get("x0_ohm_per_km"), _f(row.get("x_ohm_per_km"), 0.0)) * length
-            if r0 == 0 and x0 == 0:
-                x0 = _f(row.get("x_ohm_per_km"), 0.0) * length
-            base_z = vn * vn / ppci0["baseMVA"]
-            y0 = _z_to_y_pu(r0, x0, base_z)
-            for bp in (f_ppc, t_ppc):
-                _y_add_shunt(ppci0, int(bp), y0)
-    # Grounding transformers: Z0 + 3 Z_N from their bus to ground.
-    if "electrisim_grounding" in net.trafo.columns:
-        for _, row in net.trafo[(net.trafo["electrisim_grounding"] == True) & net.trafo.in_service].iterrows():
-            bp = _ppc_bus(net, int(row["hv_bus"]))
-            if bp is None:
-                continue
-            vn = float(net.bus.at[int(row["hv_bus"]), "vn_kv"])
-            r = _f(row.get("electrisim_gt_r0"), 0.0) + 3.0 * _f(row.get("electrisim_gt_r_n"), 0.0)
-            x = _f(row.get("electrisim_gt_x0"), 0.0) + 3.0 * _f(row.get("electrisim_gt_x_n"), 0.0)
-            _y_add_shunt(ppci0, int(bp), _z_to_y_pu(r, x, vn * vn / ppci0["baseMVA"]))
-    _add_ext_grid_ansi(net, ppci0, prefault_v)
+    _zero_seq_lines(net, ppci0)
+    _zero_seq_trafos(net, ppci0)
+    _zero_seq_trafo3w(net, ppci0)
+    _zero_seq_ext_grids(net, ppci0)
+    _zero_seq_gens(net, ppci0)
+    floating = _ungrounded_buses(ppci0)
+    if floating.any():
+        ppci0["bus"][floating, GS] += ppci0["baseMVA"]
     _calc_ybus(ppci0)
     _calc_zbus(net, ppci0)
+    ppci0["internal"]["z0_floating"] = floating
     return ppci0
 
 
@@ -449,34 +788,35 @@ def _fault_currents_ka(
     i_sym = np.zeros(n, dtype=float)
     r_eq = np.zeros(n, dtype=float)
     x_eq = np.zeros(n, dtype=float)
+    z0_diag = None
+    floating = np.zeros(n, dtype=bool)
+    if fault == "1ph" and ppci0 is not None:
+        z0_diag = np.diag(ppci0["internal"]["Zbus"]).astype(np.complex128)
+        floating = ppci0["internal"].get("z0_floating", floating)
 
     for b in range(n):
-        z_th = z_diag[b]
-        if r_fault_ohm > 0 or x_fault_ohm > 0:
-            z_th = z_th + complex(r_fault_ohm, x_fault_ohm) / base_z[b]
+        z_f = complex(r_fault_ohm, x_fault_ohm) / base_z[b]
+        z_th = z_diag[b] + z_f
+        if z0_diag is not None and not floating[b]:
+            # Line-to-ground: I = 3 E / |Z1 + Z2 + Z0 + 3 Zf| with Z2 = Z1. The
+            # equivalent per-phase impedance (2 Z1 + Z0) / 3 + Zf gives that
+            # current as E / |Z| and the C37.010 ground-fault X/R,
+            # (2 X1 + X0) / (2 R1 + R0).
+            z_th = (2.0 * z_diag[b] + z0_diag[b]) / 3.0 + z_f
         r_eq[b] = z_th.real * base_z[b]
         x_eq[b] = z_th.imag * base_z[b]
         z_abs = abs(z_th)
         if z_abs < 1e-12:
             z_abs = 1e-12
         v = prefault_v
-        if fault == "3ph":
-            i_pu = v / z_abs
-        elif fault == "2ph":
+        if fault == "2ph":
             # Line-to-line fault: I2 = sqrt(3)/2 * I3ph in this per-unit system,
             # since I2 = Un/|Z1+Z2| on the line-to-line voltage.
             i_pu = math.sqrt(3.0) * v / (2.0 * z_abs)
-        elif fault == "1ph":
-            z0 = complex(1e-6, 1e-6)
-            if ppci0 is not None:
-                try:
-                    z0 = np.diag(ppci0["internal"]["Zbus"])[b]
-                except Exception:
-                    pass
-            z_seq = z_th + z_th + z0
-            if abs(z_seq) < 1e-12:
-                z_seq = 1e-12 + 0j
-            i_pu = 3.0 * v / abs(z_seq)
+        elif fault == "1ph" and floating[b]:
+            # No zero-sequence path to ground: no ground-fault current. X/R
+            # stays the positive sequence's.
+            i_pu = 0.0
         else:
             i_pu = v / z_abs
         i_sym[b] = abs(i_pu) * base_i[b]
@@ -547,12 +887,16 @@ def _branch_currents_ka(
     return max_f, max_t
 
 
-def _ppci_branch_rows(net, ppci, element: str) -> Dict[int, int]:
+def _ppci_branch_rows(net, ppci, element: str, n_sides: int = 1) -> Dict[int, Any]:
     """Map pandapower element index -> ppci branch row for a branch element.
 
     The pd2ppc branch lookup gives a contiguous [start, stop) range of *ppc*
     rows, while ppci keeps only the in-service ones. branch_is is the mask that
     relates the two.
+
+    With n_sides = 3 (trafo3w: its HV legs, then its MV legs, then its LV
+    legs) each element maps to a tuple of its three rows, None where a leg
+    is not in ppci.
     """
     try:
         start, stop = net["_pd2ppc_lookups"]["branch"][element]
@@ -573,11 +917,16 @@ def _ppci_branch_rows(net, ppci, element: str) -> Dict[int, int]:
             if branch_is[i]
         }
 
-    out: Dict[int, int] = {}
+    out: Dict[int, Any] = {}
+    n = len(table.index)
     for pos, elm_idx in enumerate(table.index):
-        row = ppc_to_ppci.get(int(start) + pos)
-        if row is not None and row >= 0:
-            out[int(elm_idx)] = row
+        rows = [ppc_to_ppci.get(int(start) + side * n + pos) for side in range(n_sides)]
+        rows = [r if r is not None and r >= 0 else None for r in rows]
+        if n_sides == 1:
+            if rows[0] is not None:
+                out[int(elm_idx)] = rows[0]
+        elif any(r is not None for r in rows):
+            out[int(elm_idx)] = tuple(rows)
     return out
 
 

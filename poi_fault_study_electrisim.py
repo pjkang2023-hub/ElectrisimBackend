@@ -179,7 +179,6 @@ def _merge_duty_pre_post(pre: dict, post: dict) -> List[dict]:
 
 
 def _source_contributions(net, poi_idx: int, freq_hz: float) -> List[dict]:
-    apply_ngr_to_net(net)
     base_net = copy.deepcopy(net)
     set_all_onsite_out_of_service(base_net, True)
     i_utility = _poi_ikss_ansi(base_net, poi_idx, freq_hz, "3ph")
@@ -345,13 +344,14 @@ def run_poi_fault_study(net, in_data: dict, in_data_full=None) -> str:
         "fault_bus_mode": "all",
     }
 
+    # ANSI reads the transformers' rn_ohm / xn_ohm itself; folding them into
+    # vk0_percent as well (apply_ngr_to_net, for the IEC rows) would count
+    # them twice.
     net_post = copy.deepcopy(net)
-    apply_ngr_to_net(net_post)
     post_ansi = json.loads(ansi_sc.shortcircuit_ansi(net_post, ansi_params))
 
     net_pre = copy.deepcopy(net)
     set_all_onsite_out_of_service(net_pre, True)
-    apply_ngr_to_net(net_pre)
     pre_ansi = json.loads(ansi_sc.shortcircuit_ansi(net_pre, ansi_params))
 
     breaker_duties = _merge_duty_pre_post(pre_ansi, post_ansi)
