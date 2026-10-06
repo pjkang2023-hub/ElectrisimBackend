@@ -513,6 +513,58 @@ def _settle_pcs_set_points(ss, meta: Dict[str, Any], rounds: int = 30) -> bool:
     return True
 
 
+# --- The DC network, through its converters ----------------------------------------------------
+
+_DC_CONVERTERS = ("VSC", "B2B VSC", "Solid-State Transformer")
+
+
+def _converter_ac_loads(in_data: Dict[str, Any], freq: float, warnings: List[str]) -> List[Tuple[str, float, float, str]]:
+    """
+    Each converter joining the DC network to an AC bus, as the load it is on
+    that bus: (bus name, P MW, Q Mvar, label) - what Electrisim's own load
+    flow, which solves the DC network and settles its sources and stores,
+    gives at its AC side. A VSC or back-to-back VSC draws P and Q; a
+    solid-state transformer draws its MV power and, from its LV AC port,
+    gives its inverter's (a negative load). ANDES has no DC network: without
+    this a data hall's load vanished from the study.
+    """
+    if not any(typ.startswith(k) for _, _, typ in _iter_elements(in_data) for k in _DC_CONVERTERS):
+        return []
+    import pandapower as pp
+    import pandapower_electrisim as pe
+    rows = {k: v for k, v in in_data.items() if isinstance(v, dict) and "Parameters" not in str(v.get("typ", ""))}
+    rows["__andes_lf"] = {"typ": "PowerFlowPandaPower Parameters"}
+    try:
+        net = pp.create_empty_network(f_hz=freq)
+        busbars = pe.create_busbars(rows, net)
+        pe.create_other_elements(rows, net, "__andes_lf", busbars)
+        pe._electrisim_runpp(net)
+    except Exception as exc:
+        warnings.append(f"The DC network's converters are left out: its load flow failed ({exc}).")
+        return []
+    out = []
+    name = lambda b: str(net.bus.at[int(b), "name"])
+    label = lambda table, i: str(getattr(net, "user_friendly_names", {}).get(net[table].at[i, "name"], net[table].at[i, "name"]))
+    for table in ("vsc", "b2b_vsc"):
+        df, res = net.get(table), net.get(f"res_{table}")
+        if df is None or not len(df) or res is None:
+            continue
+        for i in df.index:
+            if pe._electrisim_is_aux(df, i) or i not in res.index or not bool(df.at[i, "in_service"]):
+                continue     # a DC/DC converter's own, on its hidden bus
+            p, q = float(res.at[i, "p_mw"]), float(res.at[i, "q_mvar"])
+            if np.isfinite(p) and np.isfinite(q):
+                out.append((name(df.at[i, "bus"]), p, q, label(table, i)))
+    for rec in getattr(net, "electrisim_ssts", None) or []:
+        r = pe._electrisim_sst_result(net, rec)
+        if not rec.get("in_service", True):
+            continue
+        out.append((name(rec["bus_mv"]), r["p_mv_mw"], r["q_mv_mvar"], f"{rec['label']} (MV)"))
+        if rec.get("bus_lvac") is not None and r.get("p_lv_ac_mw") is not None:
+            out.append((name(rec["bus_lvac"]), -r["p_lv_ac_mw"], -(r.get("q_lv_ac_mvar") or 0.0), f"{rec['label']} (LV AC)"))
+    return out
+
+
 def build_system(
     in_data: Dict[str, Any],
     params: Optional[Dict[str, Any]] = None,
@@ -559,8 +611,7 @@ def build_system(
     bus_counter = 1
     for _, el, typ in _iter_elements(in_data):
         if "DC Bus" in typ:
-            warnings.append(f"Skipped DC Bus '{el.get('userFriendlyName', el.get('name'))}' (not supported in ANDES MVP).")
-            continue
+            continue          # the DC network enters through its converters (_converter_ac_loads)
         if "Bus" not in typ:
             continue
         name = el.get("name")
@@ -598,7 +649,7 @@ def build_system(
         if not typ.startswith("Line") or typ.startswith("Load"):
             continue
         if "DC" in typ:
-            warnings.append(f"Skipped DC Line '{el.get('userFriendlyName', el.get('name'))}' (AC lines only in MVP).")
+            continue          # the DC network enters through its converters
             continue
         name = el.get("name")
         bus1 = bus_map.get(el.get("busFrom"))
@@ -821,6 +872,21 @@ def build_system(
             Vn=bus_vn.get(bus, 110.0),
             u=u,
         )
+
+    # --- The DC network: each converter the load its AC side is in the load flow ---
+    converter_loads = _converter_ac_loads(in_data, freq, warnings)
+    for bus_name, p_mw, q_mvar, label in converter_loads:
+        bus = bus_map.get(bus_name)
+        if bus is None:
+            continue
+        pq_i += 1
+        ss.add("PQ", idx=f"PQ_{pq_i}", name=f"{label} (DC network)", bus=bus, Vn=bus_vn.get(bus, 110.0),
+               p0=p_mw / sn_base, q0=q_mvar / sn_base)
+    if converter_loads:
+        warnings.append(
+            "The DC network is in this study as its converters' AC power from the load flow, held through the run "
+            "(as loads are): " + ", ".join(f"{label} {p:.4g} MW" for _, p, _, label in converter_loads)
+            + ". The DC network's own dynamics are the EMT study's.")
 
     # --- Storage: a fixed P/Q, positive while charging (pandapower's sign) ---
     for _, el, typ in _iter_elements(in_data):
