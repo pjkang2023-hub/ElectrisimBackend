@@ -103,6 +103,14 @@ def test_open_breaker_leaves_an_ungrounded_network_without_ground_fault_current(
     assert a['i_first_sym_ka'] < 1e-3
 
 
+@pytest.mark.parametrize('fault', ['1ph', '3ph'])
+def test_grounding_transformer_kept_out_of_the_results(client, quiet, fault):
+    """As in the IEC study: its delta bus is not a busbar, it is not a transformer."""
+    result = _post(client, quiet, _network({**ANSI_1PH, 'fault_type': fault}, True, _zigzag(), _breaker('zz')))
+    assert [b['name'] for b in result['busbars']] == ['a']
+    assert not result['trafos_sc']
+
+
 @pytest.mark.parametrize('grounded', [False, True])
 def test_grounding_transformer_matches_iec_at_c_1(iec_c1, grounded):
     import pandapower_electrisim as pe

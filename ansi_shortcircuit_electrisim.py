@@ -930,6 +930,13 @@ def _ppci_branch_rows(net, ppci, element: str, n_sides: int = 1) -> Dict[int, An
     return out
 
 
+def _is_grounding(table, idx) -> bool:
+    """A grounding transformer's own row: its transformer, or the delta bus
+    behind it. Like the IEC study, the results leave both out."""
+    return ("electrisim_grounding" in table.columns and idx in table.index
+            and table.at[idx, "electrisim_grounding"] == True)
+
+
 def _xr_ratio(r_ohm: float, x_ohm: float) -> float:
     r = max(abs(r_ohm), 1e-6)
     x = max(abs(x_ohm), 1e-6)
@@ -1115,7 +1122,7 @@ def _branch_result_rows(
     rows: List[dict] = []
     for idx in table.index:
         i = int(idx)
-        if i not in first:
+        if i not in first or _is_grounding(table, idx):
             continue
         i_f, i_t = first[i]
         i_first = max(i_f, i_t)
@@ -1181,6 +1188,8 @@ def shortcircuit_ansi(net, in_data, in_data_full=None) -> str:
         bi = int(bus_idx)
         if fault_pp_buses is not None and bi not in fault_pp_buses:
             continue
+        if _is_grounding(net.bus, bus_idx):
+            continue   # a grounding transformer's delta
         if bi not in rx_first:
             continue
         i_fc_sym, r_ohm, x_ohm = rx_first[bi]
