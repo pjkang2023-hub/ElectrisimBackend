@@ -36,6 +36,7 @@ import warnings
 
 import numpy as np
 
+import load_profiles_electrisim as lp
 import pandapower_electrisim as pe
 from dc_fault_electrisim import _ac_thevenin, _f, _label, _row_id, _waveform
 from emt_ac import AcBuilder
@@ -54,8 +55,9 @@ def _round(x, nd=6):
 
 
 class _EmtBuilder:
-    def __init__(self, net, params, warnings_out):
+    def __init__(self, net, params, warnings_out, profiles=None):
         self.net, self.params, self.warnings = net, params, warnings_out
+        self.profiles = profiles or {}   # (table, index) -> the load's profile plan (_plan_profiles)
         self.ckt = Circuit()
         self.f_hz = float(getattr(net, 'f_hz', 50.0) or 50.0)
         self.bus_node, self.v_bus, self.vn = {}, {}, {}
@@ -89,6 +91,7 @@ class _EmtBuilder:
         self._plan_converters()
         ac = AcBuilder(ckt, net, self.params, self.warnings, self.f_hz)
         ac.skip = self.skip
+        ac.profiles = {i: plan for (table, i), plan in self.profiles.items() if table == 'load'}
         self.ac = ac.build()
         self._cables()
         self._capacitors()
@@ -258,7 +261,16 @@ class _EmtBuilder:
                     v_min = _DEFAULT_V_MIN   # P / v grows without bound as a fault takes v to zero
                 p_model = _f(ld.at[li, 'electrisim_p_rated_mw'], p) if 'electrisim_p_rated_mw' in ld.columns else p
             pw = [p_model]
-            func = dc_load_current(pw, vn / 1e3, *shares, v_min)
+            plan = self.profiles.get(('load_dc', li))
+            scale = [1.0]                # a load step's factor on its profile
+            power = None
+            if plan is not None:
+                # Its power follows its profile, at each solve's own time.
+                def power(t, plan=plan, scale=scale):
+                    return plan['p_set'] * plan['follower'](t) * scale[0]
+            func = dc_load_current(pw, vn / 1e3, *shares, v_min, power=power)
+            if plan is not None:
+                plan['measure'] = ('dc', None, None, None)      # its node and current, below
             i_load = p * 1e6 / self.v_bus[bus]
             term = self._terminal('load_dc', li, bus, i_load)
             c = _f(ld.at[li, 'filter_c_uf']) * 1e-6 if 'filter_c_uf' in ld.columns else 0.0
@@ -275,10 +287,13 @@ class _EmtBuilder:
                 if c > 0:
                     ckt.add_c(0, node, c, w0=-self.v_bus[bus])
             k = ckt.add_nonlinear(node, 0, func)
+            if plan is not None:
+                plan['measure'] = ('dc', node, k, None)
             label = _label(net, 'load_dc', li)
             if not aux:
                 self.loads.append({'label': label, 'id': _row_id(net, 'load_dc', li), 'node': node, 'p': pw,
-                                   'bus': bus, 'vn': vn, 'constant_power': shares[0] > 0})
+                                   'bus': bus, 'vn': vn, 'constant_power': shares[0] > 0,
+                                   'scale': scale if plan is not None else None})
                 self.series.append(('DC load', label, _row_id(net, 'load_dc', li), label, ('i_nl', k), 1.0))
             elif role == 'input':
                 self.series.append(('Converter input', label, '', label, ('i_nl', k), 1.0))
@@ -477,9 +492,16 @@ class _EmtBuilder:
     # --- events and protection ----------------------------------------------------
 
     def controller(self, t, state):
+        # AC loads following a profile: their impedance's change for the next step.
+        if self.ac.profiled:
+            self.ac.follow_profiles(t, state)
         changed = False
         for conv in self.vscs + self.dcdcs:
-            changed = conv.control(t, state) or changed
+            r = conv.control(t, state)
+            if r == 'soft':
+                changed = changed or 'soft'
+            elif r:
+                changed = True
         for blk in self.blockers:
             if blk['t'] is None and state.v[blk['node']] < blk['v_block']:
                 blk['t'] = t
@@ -541,9 +563,60 @@ METHOD = ("A time-domain simulation of the AC and DC networks from their load-fl
           "Pole-to-pole faults.")
 
 
+def _plan_profiles(net, params, in_data, warnings_out):
+    """
+    The loads that follow a profile from the diagram's library, AC and DC:
+    each set, for the load flow the run starts from, to its profile's value
+    profile_start_s into it, so the run starts in steady state. Returns
+    {(table, index): plan} - its set power, its profile as a function of the
+    run's time, its name.
+    """
+    library, problems = lp.library_from_params(params)
+    warnings_out.extend(problems)
+    if not library:
+        return {}
+    t0 = max(_f(params.get('profile_start_s'), 0.0), 0.0)
+    repeat = params.get('profile_repeat', True) not in (False, 'false', 'False', 0, '0')
+    plan = {}
+    for table, assignments in (('load', lp.load_assignments(in_data)), ('load_dc', lp.dc_load_assignments(in_data))):
+        if table not in net or not len(net[table]):
+            continue
+        df = net[table]
+        for name, a in assignments.items():
+            prof = library.get(a['profile_id'])
+            if prof is None:
+                warnings_out.append(f"{a['display_name']}: its load profile is not in the library, so it does not follow one.")
+                continue
+            hit = df.index[df['name'].astype(str) == name]
+            if not len(hit):
+                continue
+            i = int(hit[0])
+            follower = lp.Follower(prof['t'], prof['p'], t0, repeat)
+            f0 = follower(0.0)
+            if table == 'load':
+                p_set, q_set = _f(df.at[i, 'p_mw']), _f(df.at[i, 'q_mvar'])
+                df.at[i, 'p_mw'] = p_set * f0
+                df.at[i, 'q_mvar'] = q_set * f0 if a['q_mode'] == 'pf' else q_set
+                item = {'p_set': p_set, 'q_set': q_set, 'q_mode': a['q_mode']}
+            else:
+                rated = 'electrisim_p_rated_mw' in df.columns and np.isfinite(_f(df.at[i, 'electrisim_p_rated_mw'], np.nan))
+                p_set = _f(df.at[i, 'electrisim_p_rated_mw']) if rated else _f(df.at[i, 'p_dc_mw'])
+                df.at[i, 'p_dc_mw'] = p_set * f0
+                if rated:
+                    df.at[i, 'electrisim_p_rated_mw'] = p_set * f0
+                item = {'p_set': p_set}
+            item.update(follower=follower, profile=prof['name'], label=a['display_name'], f0=f0)
+            plan[(table, i)] = item
+    if plan:
+        warnings_out.append(f'Loads following a profile start {t0:g} s into it, at its value there; '
+                            + ('it repeats after its end.' if repeat else 'it holds its last value after its end.'))
+    return plan
+
+
 def emt_study(net, params, in_data=None):
     params = params or {}
     warnings_out = []
+    profiles = _plan_profiles(net, params, in_data, warnings_out)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
@@ -553,7 +626,7 @@ def emt_study(net, params, in_data=None):
     warnings_out.extend(getattr(net, 'warnings', []) or [])
     if not len(net.bus) and ('bus_dc' not in net or not len(net.bus_dc)):
         return json.dumps({'error': True, 'message': 'There is no network to study.', 'warnings': warnings_out})
-    b = _EmtBuilder(net, params, warnings_out).build()
+    b = _EmtBuilder(net, params, warnings_out, profiles).build()
     ckt = b.ckt
     if b.ac.nodes:
         ckt.start_in_ac_steady_state(b.ac.w)
@@ -591,7 +664,11 @@ def emt_study(net, params, in_data=None):
         else:
             t_s = _f(params.get('step_time_ms'), 5.0) * 1e-3
             factor = 1.0 + _f(params.get('step_percent'), 10.0) / 100.0
-            ckt.at(t_s, lambda st, pw=load['p'], f=factor: pw.__setitem__(0, pw[0] * f))
+            if load.get('scale') is not None:
+                # Following a profile: the step scales it.
+                ckt.at(t_s, lambda st, sc=load['scale'], f=factor: sc.__setitem__(0, sc[0] * f))
+            else:
+                ckt.at(t_s, lambda st, pw=load['p'], f=factor: pw.__setitem__(0, pw[0] * f))
             event_times.append(t_s)
 
     # A fault on an AC bus.
@@ -641,6 +718,7 @@ def emt_study(net, params, in_data=None):
     result = {'method': METHOD, 'buses': buses, 'branches': branches, 'breakers': [], 'loads': [], 'fault': None,
               'converters_blocked': [{'label': blk['label'], 't_ms': _round(blk['t'] * 1e3)} for blk in b.blockers if blk['t'] is not None]
               + [{'label': c.label, 't_ms': _round(c.blocked_at * 1e3)} for c in b.vscs + b.dcdcs if c.blocked_at is not None],
+              'profiled_loads': [_profile_result(plan, sim, net, key, b.ac.w) for key, plan in profiles.items()],
               'converters': [_converter_result(c, min(event_times, default=t_end)) for c in b.vscs]
               + [_dcdc_result(c, min(event_times, default=t_end)) for c in b.dcdcs],
               'settings': {'time_step_us': dt * 1e6, 'duration_ms': t_end * 1e3,
@@ -688,11 +766,17 @@ def emt_study(net, params, in_data=None):
     result['ac'] = _ac_results(sim, b.ac, net, t_fine, ac_fault)
     # A VSC's DC voltage loop, some 30 Hz, swings slower than the network: two of its periods to tell.
     min_span = VSC_VERDICT_SPAN if b.vscs else 1e-3
+    # Loads following a profile keep the voltages moving: whether a swing settles cannot be told from them.
+    judge = not profiles
+    if profiles and any(load['constant_power'] for load in b.loads):
+        warnings_out.append('Constant-power loads: no stability verdict while loads follow a profile, which keeps '
+                            'their voltages moving; run without profiles, with a load step, to see whether they settle.')
     for load in b.loads:
         v = sim['v'][:, load['node']]
         result['loads'].append({'label': load['label'], 'id': load['id'], 'constant_power': load['constant_power'],
                                 'v_min_pu': _round(float(np.min(v)) / load['vn']),
-                                'verdict': _oscillation_verdict(t, v, t_last, load['vn'], min_span) if load['constant_power'] else None})
+                                'verdict': _oscillation_verdict(t, v, t_last, load['vn'], min_span)
+                                if load['constant_power'] and judge else None})
         if load['constant_power'] and result['loads'][-1]['verdict'] == 'oscillates, growing':
             warnings_out.append(f"DC load {load['label']}: its voltage swings ever wider - a constant-power load "
                                 "beyond its stability limit; more DC-link capacitance or a stiffer supply steadies it.")
@@ -804,6 +888,43 @@ def _converter_result(conv, t_event):
                    v_dc_min_kv=_round(float(np.min(tr[:, 3])) / 1e3), v_dc_end_kv=_round(tr[-1, 3] / 1e3),
                    i_peak_ka=_round(float(np.max(tr[:, 4])) / SQ2 / 1e3))
     return out
+
+
+def _profile_result(plan, sim, net, key, w):
+    """
+    A load following a profile: its profile's power at the run's start, its
+    least and most through the run, and over the run's last cycle both its
+    profile's mean and the power it drew.
+    """
+    table, i = key
+    t = sim['t']
+    last = t >= t[-1] - 2 * math.pi / w
+    times = np.linspace(0.0, t[-1], 401)
+    p = plan['p_set'] * np.array([plan['follower'](x) for x in times])
+    p_last = plan['p_set'] * np.array([plan['follower'](x) for x in t[last]])
+    out = {'label': plan['label'], 'id': _row_id(net, table, i), 'kind': 'DC load' if table == 'load_dc' else 'Load',
+           'profile': plan['profile'], 'p_set_mw': _round(plan['p_set']), 'p_start_mw': _round(p[0]),
+           'p_min_mw': _round(float(p.min())), 'p_max_mw': _round(float(p.max())),
+           'p_end_mw': _round(_mean(t[last], p_last)), 'p_drawn_end_mw': None}
+    kind, node, k, parts = plan.get('measure', (None, None, None, None))
+    if kind == 'dc' and node is not None:
+        drawn = sim['v'][:, node] * sim['i_nl'][:, k]
+    elif kind == 'ac':
+        phase = sim['v'][:, node] - sim['v'][:, [k]]
+        current = np.zeros_like(phase)
+        for arr, ks in parts.items():
+            for j, kk in enumerate(ks):
+                current[:, j] += sim[arr][:, kk]
+        drawn = np.sum(phase * current, axis=1)
+    else:
+        return out
+    out['p_drawn_end_mw'] = _round(_mean(t[last], drawn[last]) / 1e6)
+    return out
+
+
+def _mean(t, y):
+    """y's time-weighted mean over t (its value, for a single sample)."""
+    return float(np.trapezoid(y, t) / (t[-1] - t[0])) if len(t) > 1 and t[-1] > t[0] else float(y[-1])
 
 
 def _dcdc_result(conv, t_event):

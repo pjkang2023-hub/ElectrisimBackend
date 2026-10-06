@@ -117,6 +117,8 @@ class AcBuilder:
         self.trafos = []
         self.left_out = set()
         self.skip = set()        # (table, index): elements a converter's EMT model stands for
+        self.profiles = {}       # load index -> its profile's plan (emt_electrisim._plan_profiles)
+        self.profiled = []       # loads following a profile: their nodes, correction sources and plan
 
     # --- buses and the phase shifts ------------------------------------------------
 
@@ -358,20 +360,48 @@ class AcBuilder:
             self.series.append(('Transformer', label, _row_id(net, 'trafo', ti), f'{label} (HV side)', phases))
             self.trafos.append({'label': label, 'clock': clock, 'groups': groups})
 
-    def _impedance_load(self, b, p_mw, q_mvar, label):
-        """Constant impedance at its load-flow power, ungrounded star."""
+    def _impedance_load(self, b, p_mw, q_mvar, label, profile=None):
+        """
+        Constant impedance at its load-flow power, ungrounded star. Following a
+        profile, its impedance changes with it: a current source per phase
+        carries the change in its conductance and susceptance from their
+        starting values, by its phase voltage and (for the susceptance) the
+        line voltage a quarter cycle behind it.
+        """
         ckt, w = self.ckt, self.w
         v_ll = float(self.net.res_bus.at[b, 'vm_pu']) * self.vn[b]
         star = ckt.node(f'{label} star point')
         ckt.add_r(star, 0, R_BIAS)
+        parts = {'i_r': [], 'i_rl': [], 'i_c': []}       # its branches, phase by phase, for its measured power
         for k in range(3):
             node = self.nodes[b][k]
             if p_mw > 1e-12:
-                ckt.add_r(node, star, v_ll * v_ll / (p_mw * 1e6))
+                parts['i_r'].append(ckt.add_r(node, star, v_ll * v_ll / (p_mw * 1e6)))
             if q_mvar > 1e-12:
-                ckt.add_rl(node, star, 0.0, v_ll * v_ll / (q_mvar * 1e6) / w)
+                parts['i_rl'].append(ckt.add_rl(node, star, 0.0, v_ll * v_ll / (q_mvar * 1e6) / w))
             elif q_mvar < -1e-12:
-                ckt.add_c(node, star, -q_mvar * 1e6 / (w * v_ll * v_ll))
+                parts['i_c'].append(ckt.add_c(node, star, -q_mvar * 1e6 / (w * v_ll * v_ll)))
+        if profile is not None:
+            parts['i_src'] = [ckt.add_isrc(self.nodes[b][k], star) for k in range(3)]
+            self.profiled.append({'nodes': self.nodes[b], 'star': star, 'v2': v_ll * v_ll,
+                                  'p0': p_mw * 1e6, 'q0': q_mvar * 1e6, 'plan': profile,
+                                  'ks': parts['i_src'], 'parts': parts})
+            profile['measure'] = ('ac', self.nodes[b], star, parts)
+
+    def follow_profiles(self, t, state):
+        """Each profiled load's change in conductance and susceptance, as the currents its sources draw."""
+        for ld in self.profiled:
+            plan = ld['plan']
+            f = plan['follower'](t)
+            p = plan['p_set'] * f * 1e6
+            q = (plan['q_set'] * f if plan['q_mode'] == 'pf' else plan['q_set']) * 1e6
+            dg, db = (p - ld['p0']) / ld['v2'], (q - ld['q0']) / ld['v2']
+            v = state.v[ld['nodes']]
+            phase = v - state.v[ld['star']]
+            behind = np.array([v[1] - v[2], v[2] - v[0], v[0] - v[1]]) / math.sqrt(3.0)
+            i = dg * phase + db * behind
+            for k in range(3):
+                state.set_source_value(ld['ks'][k], float(i[k]))
 
     def _loads(self):
         net = self.net
@@ -384,7 +414,8 @@ class AcBuilder:
                     continue
                 if (table, i) in self.skip:
                     continue
-                self._impedance_load(b, _f(net[res].at[i, 'p_mw']), _f(net[res].at[i, 'q_mvar']), _label(net, table, i))
+                self._impedance_load(b, _f(net[res].at[i, 'p_mw']), _f(net[res].at[i, 'q_mvar']), _label(net, table, i),
+                                     self.profiles.get(i) if table == 'load' else None)
         if 'asymmetric_load' in net and len(net.asymmetric_load):
             self.left_out.add('asymmetric loads')
 

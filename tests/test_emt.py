@@ -145,6 +145,34 @@ def test_constant_power_load_stability_matches_simscape(frac, verdict):
     assert np.sqrt(np.mean((v - v_ref) ** 2)) <= 0.02 * swing(v_ref, 0.0, 0.15)
 
 
+def test_constant_power_load_following_a_training_cycle_matches_simscape():
+    """
+    A 50 kW constant-power load following a training-cycle profile - from 0.9
+    to 0.75 pu in its first 10 ms, up to 1.0 pu, down to a 0.3 pu checkpoint
+    and back - on 2 mF behind 0.05 ohm and 1 mH, against Simscape's load drawing
+    P(t) / v from a lookup table: the load's voltage within 0.05 % of 800 V
+    throughout, its dips at the profile's rises and its rise at the
+    checkpoint the same in both.
+    """
+    import load_profiles_electrisim as lp
+    q = P['cpl_profile']
+    f = lp.Follower(np.arange(len(q['profile'])) * q['dt_profile'], q['profile'], 0.0, repeat=False)
+    p0 = q['p_set'] * f(0.0)
+    v0 = (q['E'] + math.sqrt(q['E'] ** 2 - 4 * q['R'] * p0)) / 2
+    ckt = es.Circuit()
+    n = ckt.node('load', v0)
+    ckt.add_rl(0, n, q['R'], q['L'], i0=p0 / v0, e0=q['E'])
+    ckt.add_c(0, n, q['C'], w0=-v0)
+    power = lambda t: q['p_set'] * f(t) / 1e6       # noqa: E731 - its power, at each solve's own time
+    ckt.add_nonlinear(n, 0, es.dc_load_current([p0 / 1e6], q['E'] / 1e3, 1.0, 0.0, 0.0, 0.0, power=power))
+    sim = ckt.simulate(q['t_end'], 1e-5)
+    ref = _ref('cpl_profile')
+    v = np.interp(ref['t'], sim['t'], sim['v'][:, n])
+    assert np.max(np.abs(v - ref['v_load'])) < 5e-4 * q['E']
+    assert np.ptp(ref['v_load']) > 0.01 * q['E']                    # the profile moves it
+    assert np.argmin(v) == pytest.approx(np.argmin(ref['v_load']), abs=2)
+
+
 @pytest.mark.parametrize('case', ['solid_state', 'mechanical'])
 def test_breaker_clearing_a_fault_matches_simscape(case):
     q, c = P['breaker'], P['breaker']['cases'][case]
@@ -250,3 +278,76 @@ def test_loads_without_input_filters_are_given_one(client, quiet):
             el['filter_c_uf'] = '0'
     result = _run(client, quiet, request)
     assert any('input capacitance of 4 ms' in w and 'Server hall B' in w for w in result['warnings'])
+
+
+# --- Loads following a profile -----------------------------------------------------
+
+CYCLE = [0.9, 0.75, 0.75, 0.75, 0.85, 0.95, 1.0, 1.0, 1.0, 0.3, 0.3, 0.75]   # 10 ms apart
+
+
+def _profiled(dc=True, ac=True, profile_id='profile_1', **params):
+    """The drawn network, Server hall B (DC) and Village A (AC) following a training cycle, at a 10 us step."""
+    request = _request(**{'time_step_us': 10, 'duration_ms': 85, **params})
+    for el in request.values():
+        if not isinstance(el, dict):
+            continue
+        if dc and el.get('name') == 'ld_b':
+            el['load_profile_id'] = profile_id
+        if ac and el.get('userFriendlyName') == 'Village A':
+            el.update(load_profile_id=profile_id, load_profile_q_mode='pf')
+    key = next(k for k, v in request.items() if isinstance(v, dict) and 'EmtStudy' in str(v.get('typ', '')))
+    request[key]['load_profiles'] = {'profile_1': {'name': 'Training cycle', 'dt': 0.01, 'p': CYCLE}}
+    return request
+
+
+def _by_label(rows):
+    return {r['label']: r for r in rows}
+
+
+def test_loads_follow_their_profiles(client, quiet):
+    """
+    Server hall B (0.1 MW, DC) and Village A (1.5 MW, AC) on a training cycle:
+    each starts at its profile's first value - the load flow too - and draws
+    its profile through the run: over the last cycle, the DC load's power its
+    profile's within 0.1 %, the AC load's - an impedance following it, its
+    power with its voltage - within 0.5 %.
+    """
+    result = _run(client, quiet, _profiled())
+    loads = _by_label(result['emt']['profiled_loads'])
+    hall, village = loads['Server hall B'], loads['Village A']
+    assert hall['kind'] == 'DC load' and village['kind'] == 'Load' and hall['profile'] == 'Training cycle'
+    assert hall['p_start_mw'] == pytest.approx(0.09) and village['p_start_mw'] == pytest.approx(1.35)
+    # Its least at the run's end, 85 ms, halfway down to the checkpoint; its most at 1.0 pu.
+    assert hall['p_min_mw'] == pytest.approx(0.065, rel=1e-3) and hall['p_max_mw'] == pytest.approx(0.1, rel=1e-3)
+    assert hall['p_drawn_end_mw'] == pytest.approx(hall['p_end_mw'], rel=1e-3)
+    assert village['p_drawn_end_mw'] == pytest.approx(village['p_end_mw'], rel=5e-3)
+    assert any('start 0 s into it' in w for w in result['warnings'])
+    # The profiles keep the voltages moving: no stability verdict, and no warning of growing swings.
+    assert all(l['verdict'] is None for l in result['emt']['loads'])
+    assert not any('swings ever wider' in w for w in result['warnings'])
+
+
+def test_loads_start_where_asked_in_their_profile(client, quiet):
+    """
+    Started 0.085 s into the cycle - halfway down to its checkpoint, at 0.65
+    pu - the network starts in the load flow at that power and holds while
+    the profile falls on (DC bus B within 0.2 % over the first 2 ms).
+    """
+    result = _run(client, quiet, _profiled(ac=False, profile_start_s=0.085, duration_ms=2))
+    (hall,) = result['emt']['profiled_loads']
+    assert hall['p_start_mw'] == pytest.approx(0.065, rel=1e-6)
+    bus_b = next(b for b in result['emt']['buses'] if b['label'] == 'DC bus B')
+    assert bus_b['v_max_pu'] - bus_b['v_min_pu'] < 2e-3
+
+
+def test_load_step_scales_a_profile(client, quiet):
+    """A 50 % step in Server hall B at 40 ms, while it follows its profile: the profile, scaled from then on."""
+    result = _run(client, quiet, _profiled(ac=False, step_load='ld_b', step_percent=50, step_time_ms=40))
+    (hall,) = result['emt']['profiled_loads']
+    assert hall['p_drawn_end_mw'] == pytest.approx(1.5 * hall['p_end_mw'], rel=2e-3)
+
+
+def test_a_profile_not_in_the_library_is_warned_about(client, quiet):
+    result = _run(client, quiet, _profiled(ac=False, profile_id='profile_9', duration_ms=1))
+    assert result['emt']['profiled_loads'] == []
+    assert any('Server hall B' in w and 'not in the library' in w for w in result['warnings'])

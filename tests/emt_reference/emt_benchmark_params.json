@@ -14,6 +14,12 @@
     "description": "A constant-power load on a capacitor C, behind a source's R and L, at 95 % and 105 % of its stability limit R C v0^2 / L, starting at its equilibrium; its power steps up 1 % at 2 ms.",
     "E": 800.0, "R": 0.05, "L": 1e-3, "C": 2e-3, "fractions": [0.95, 1.05], "step": 0.01, "t_step": 2e-3, "t_end": 0.15
   },
+  "cpl_profile": {
+    "description": "A constant-power load following a training-cycle profile - its power p_set times the profile, linearly interpolated between samples dt_profile apart, holding its last value - on a capacitor C behind a source's R and L, starting in its steady state at the profile's first value: its opening step from 0.9 to 0.75 pu, a ramp to 1.0 pu, a checkpoint at 0.3 pu, and back.",
+    "E": 800.0, "R": 0.05, "L": 1e-3, "C": 2e-3, "p_set": 50000.0, "dt_profile": 0.01,
+    "profile": [0.9, 0.75, 0.75, 0.75, 0.85, 0.95, 1.0, 1.0, 1.0, 0.3, 0.3, 0.3, 0.75, 0.75, 0.9, 1.0, 1.0, 1.0, 1.0, 1.0],
+    "t_end": 0.2
+  },
   "breaker": {
     "description": "A source behind R and L feeds, from rest, a breaker (limiting inductor, switch and surge arrester), a cable and a resistive load; the load end is faulted at 1 ms and the breaker opens at a set time.",
     "E": 800.0, "Rs": 0.005, "Ls": 2e-5, "L_lim": 1e-4, "Vc": 1400.0,

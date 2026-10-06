@@ -1,4 +1,4 @@
-function simscape_emt_benchmarks()
+function simscape_emt_benchmarks(which)
 % SIMSCAPE_EMT_BENCHMARKS  Reference waveforms for the EMT study of DC networks.
 %
 % Builds each case in emt_benchmark_params.json as a Simscape (Foundation
@@ -11,6 +11,10 @@ function simscape_emt_benchmarks()
 %   cpl_95, cpl_105     a constant-power load at 95 % and 105 % of its stability limit
 %   breaker_solid_state, breaker_mechanical
 %                       a breaker opening into its surge arrester, early and late
+%   cpl_profile         a constant-power load following a training-cycle profile
+%
+% simscape_emt_benchmarks('cpl_profile') runs that case alone (the names:
+% long_cable, cpl, breaker, cpl_profile).
 %
 % Switches and arresters are as Electrisim's: a switch is R_on closed and
 % R_off open; an arrester is R_off until its clamping voltage, then that
@@ -20,13 +24,20 @@ function simscape_emt_benchmarks()
 
 here = fileparts(mfilename('fullpath'));
 p = jsondecode(fileread(fullfile(here, 'emt_benchmark_params.json')));
-long_cable(p, here);
-for frac = p.cpl.fractions'
-    cpl(p, frac, here);
+if nargin < 1, which = {'long_cable', 'cpl', 'breaker', 'cpl_profile'}; end
+if ischar(which), which = {which}; end
+if any(strcmp(which, 'long_cable')), long_cable(p, here); end
+if any(strcmp(which, 'cpl'))
+    for frac = p.cpl.fractions'
+        cpl(p, frac, here);
+    end
 end
-for name = fieldnames(p.breaker.cases)'
-    breaker(p, name{1}, here);
+if any(strcmp(which, 'breaker'))
+    for name = fieldnames(p.breaker.cases)'
+        breaker(p, name{1}, here);
+    end
 end
+if any(strcmp(which, 'cpl_profile')), cpl_profile(p, here); end
 end
 
 % --- the cases ------------------------------------------------------------------
@@ -87,6 +98,28 @@ write(here, sprintf('emt_cpl_%d.csv', round(100 * frac)), t, {'v_load'}, {m.seri
 m.done();
 end
 
+function cpl_profile(p, here)
+% Its load's power: p_set times the profile, interpolated linearly in time,
+% holding its last value; it starts in its steady state at the first.
+q = p.cpl_profile;
+f = q.profile(:)';
+t_bp = (0:numel(f) - 1) * q.dt_profile;
+P0 = q.p_set * f(1);
+v0 = (q.E + sqrt(q.E ^ 2 - 4 * q.R * P0)) / 2;
+m = Model('emt_cpl_profile');
+src = m.node(); mid = m.node(); n = m.node();
+m.two(m.dcsrc(q.E), src, m.gnd);
+m.two(m.res(q.R), src, mid);
+m.two(m.ind(q.L, P0 / v0), mid, n);
+c = m.cap(q.C, v0);
+m.two(c, n, m.gnd);
+m.cpl_profile_load(n, t_bp, q.p_set * f);
+log = m.run(q.t_end, 1e-5);
+t = unique([0:1e-5:q.t_end])';
+write(here, 'emt_cpl_profile.csv', t, {'v_load'}, {m.series(log, c, 'v', t)});
+m.done();
+end
+
 function breaker(p, name, here)
 q = p.breaker; c = q.cases.(name);
 m = Model(['emt_breaker_' name]);
@@ -138,6 +171,7 @@ m.dcsrc = @dcsrc;
 m.switch_at = @switch_at;
 m.arrester = @arrester;
 m.cpl_load = @cpl_load;
+m.cpl_profile_load = @cpl_profile_load;
 m.run = @run;
 m.series = @series;
 m.done = @done;
@@ -243,6 +277,30 @@ connect(m.gnd, ports(solver).RConn(1));
         ip = ports(isrc);
         add_line(name, dp.RConn(1), ip.RConn(1), 'autorouting', 'off');
         % The current flows from its tail (bottom) to its head (top): the node on the tail.
+        connect(n, ip.RConn(2));
+        connect(m.gnd, ip.LConn(1));
+    end
+    function cpl_profile_load(n, t_bp, p_bp)
+        % i = P(t) / v from node n to the reference: P(t) a table over time, linear between its points.
+        sense = place('fl_lib/Electrical/Electrical Sensors/Voltage Sensor');
+        sp = ports(sense);
+        connect(n, sp.LConn(1));
+        connect(m.gnd, sp.RConn(2));
+        clk = place('simulink/Sources/Clock');
+        tbl = place('simulink/Lookup Tables/1-D Lookup Table');
+        set_param(tbl, 'BreakpointsForDimension1', mat2str(t_bp, 17), 'Table', mat2str(p_bp, 17), ...
+            'InterpMethod', 'Linear point-slope', 'ExtrapMethod', 'Clip');
+        add_line(name, ports(clk).Outport(1), ports(tbl).Inport(1), 'autorouting', 'off');
+        conv = place('nesl_utility/Simulink-PS Converter');
+        set_param(conv, 'Unit', 'W');
+        add_line(name, ports(tbl).Outport(1), ports(conv).Inport(1), 'autorouting', 'off');
+        div = place('fl_lib/Physical Signals/Functions/PS Divide');
+        dp = ports(div);
+        add_line(name, ports(conv).RConn(1), dp.LConn(1), 'autorouting', 'off');
+        add_line(name, sp.RConn(1), dp.LConn(2), 'autorouting', 'off');
+        isrc = place([src 'Controlled Current Source']);
+        ip = ports(isrc);
+        add_line(name, dp.RConn(1), ip.RConn(1), 'autorouting', 'off');
         connect(n, ip.RConn(2));
         connect(m.gnd, ip.LConn(1));
     end

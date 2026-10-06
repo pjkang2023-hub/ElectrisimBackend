@@ -579,7 +579,7 @@ class _State:
         self.sw_closed[k] = bool(closed)
 
 
-def dc_load_current(p_mw, vn_kv, share_p, share_i, share_r, v_min_pu):
+def dc_load_current(p_mw, vn_kv, share_p, share_i, share_r, v_min_pu, power=None):
     """
     A DC load's current (A) as a function of its voltage (V), with its
     derivative - the load flow's model in time: constant-power, constant-
@@ -588,13 +588,14 @@ def dc_load_current(p_mw, vn_kv, share_p, share_i, share_r, v_min_pu):
     no current at reverse voltage, so the power and current parts stop below
     0 - reached linearly over the last 5 % of nominal voltage, where a step
     would leave Newton's method flipping between the two.
-    ``p_mw`` is a one-element list, so an event can step it.
+    ``p_mw`` is a one-element list, so an event can step it; ``power``, a
+    function of time (MW), stands for it - a load following a profile.
     """
     vn = vn_kv * 1e3
     v_eps = _RAMP_PU * vn
 
     def func(v, t):
-        p = p_mw[0] * 1e6
+        p = (power(t) if power is not None else p_mw[0]) * 1e6
         g_r = share_r * p / (vn * vn)
         i, g = g_r * v, g_r
         if v <= 0:

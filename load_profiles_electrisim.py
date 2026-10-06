@@ -246,3 +246,37 @@ def load_assignments(in_data):
             'display_name': str(el.get('userFriendlyName') or el.get('name')),
         }
     return out
+
+
+def dc_load_assignments(in_data):
+    """{DC load name: {'profile_id', 'display_name'}} for the DC loads that follow a library profile."""
+    out = {}
+    for el in (in_data or {}).values():
+        if not isinstance(el, dict) or not str(el.get('typ', '')).startswith('Load DC'):
+            continue
+        pid = str(el.get('load_profile_id') or '').strip()
+        if pid:
+            out[str(el.get('name'))] = {'profile_id': pid,
+                                        'display_name': str(el.get('userFriendlyName') or el.get('name'))}
+    return out
+
+
+class Follower:
+    """
+    A profile as a function of a simulation's time: its value at t0 + t,
+    linearly interpolated between its samples, repeating or holding its last
+    value after its end - a load's power, per unit of its set power, through
+    an EMT run that starts t0 into the profile.
+    """
+
+    def __init__(self, t, p, t0=0.0, repeat=True):
+        t = np.asarray(t, dtype=float)
+        self.t, self.p = (_one_period(t - t[0], p) if repeat else (t - t[0], np.asarray(p, dtype=float)))
+        self.t0, self.repeat = float(t0), bool(repeat)
+        self.span = float(self.t[-1] - self.t[0])
+
+    def __call__(self, t):
+        x = self.t0 + t
+        if self.repeat and x > self.t[-1]:
+            x = np.mod(x, self.span)
+        return float(np.interp(x, self.t, self.p))
