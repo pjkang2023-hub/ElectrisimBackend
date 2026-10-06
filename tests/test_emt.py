@@ -214,7 +214,9 @@ def test_fault_cleared_by_a_breaker(client, quiet):
     """
     A fault on DC bus B at 5 ms: the breaker on the cable trips at 2 kA, opens
     0.05 ms later, its arrester clamps at 1.4 kV and absorbs the energy, and
-    DC bus A rides through.
+    DC bus A rides through - dipping some 4 % while the rectifier's DC voltage
+    loop catches up, and back by the end. The run is too short after the
+    fault to tell whether the hall left on settles.
     """
     result = _run(client, quiet, _request(fault_bus='dc_b', fault_time_ms=5, fault_resistance_mohm=1))
     emt = result['emt']
@@ -224,17 +226,21 @@ def test_fault_cleared_by_a_breaker(client, quiet):
     assert qa['i_open_ka'] > 2 and qa['arrester_v_peak_kv'] == pytest.approx(1.4, rel=0.01)
     assert 0 < qa['arrester_energy_kj'] < 50 and not qa['exceeds_energy']
     buses = {b['id']: b for b in emt['buses']}
-    assert buses['cell-dc_a']['v_min_pu'] > 0.99
+    assert 0.95 < buses['cell-dc_a']['v_min_pu'] < 0.99
+    assert buses['cell-dc_a']['v_final_pu'] == pytest.approx(1.0, abs=5e-3)
     assert buses['cell-dc_b']['v_final_pu'] == pytest.approx(0.0, abs=1e-3)
     assert emt['fault']['ip_ka'] > qa['i_open_ka']    # the load's filter discharges into the fault too
     loads = {l['id']: l for l in emt['loads']}
-    assert loads['cell-ld_b']['verdict'] == 'lost supply' and loads['cell-ld_a']['verdict'] == 'settles'
+    assert loads['cell-ld_b']['verdict'] == 'lost supply' and loads['cell-ld_a']['verdict'] == 'too short to tell'
+    assert any('run at least 60 ms after the last event' in w for w in result['warnings'])
 
 
 def test_load_step_settles(client, quiet):
-    result = _run(client, quiet, _request(step_load='ld_b', step_percent=20, step_time_ms=2, duration_ms=30))
+    """Server hall B steps up 20 %: run long enough for the rectifier's DC voltage loop, both halls settle."""
+    result = _run(client, quiet, _request(step_load='ld_b', step_percent=20, step_time_ms=2, duration_ms=100,
+                                          time_step_us=5))
     loads = {l['id']: l for l in result['emt']['loads']}
-    assert loads['cell-ld_b']['verdict'] == 'settles'
+    assert loads['cell-ld_b']['verdict'] == 'settles' and loads['cell-ld_a']['verdict'] == 'settles'
 
 
 def test_loads_without_input_filters_are_given_one(client, quiet):

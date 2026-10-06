@@ -273,12 +273,17 @@ class Circuit:
         t_fine = t_end if t_fine is None else t_fine
         k_ev = 0
         while t < t_end - 1e-15:
-            h = dt if t < t_fine - 1e-15 else (dt_coarse or dt)
-            h = min(h, t_end - t)
-            while k_ev < len(event_times) and event_times[k_ev] <= t + 1e-15:
+            h_nom = dt if t < t_fine - 1e-15 else (dt_coarse or dt)
+            h = min(h_nom, t_end - t)
+            if t_end - (t + h) < 0.01 * h_nom:
+                h = t_end - t          # no sliver of a last step: rounding would make a tiny one ring
+            # An event within a sliver of now is taken now; the grid lands on the next.
+            while k_ev < len(event_times) and event_times[k_ev] <= t + 0.01 * h_nom:
                 k_ev += 1
-            if k_ev < len(event_times) and t + h > event_times[k_ev] + 1e-15:
-                h = event_times[k_ev] - t
+            if k_ev < len(event_times) and t + h > event_times[k_ev] - 0.01 * h_nom:
+                h = event_times[k_ev] - t if t + h > event_times[k_ev] else h
+                if event_times[k_ev] - (t + h) < 0.01 * h_nom:
+                    h = event_times[k_ev] - t
             steps.append(h)
             t += h
         N = len(steps)
@@ -351,7 +356,7 @@ class Circuit:
         t = 0.0
         for s, h in enumerate(steps):
             # Events due now change switches or loads; the step after them is backward Euler.
-            while k_pending < len(pending) and pending[k_pending][0] <= t + 1e-15:
+            while k_pending < len(pending) and pending[k_pending][0] <= t + 0.01 * (dt_coarse or dt):
                 state.t = t
                 pending[k_pending][1](state)
                 k_pending += 1

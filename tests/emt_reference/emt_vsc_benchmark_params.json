@@ -1,0 +1,22 @@
+{
+  "description": "EMT benchmark for the VSC's average-value model and its controls: a rectifier holding its DC link at 800 V, fed from a 400 V grid, through a DC load step. simscape_emt_vsc_benchmark.m builds it in Simscape, with the controller in a MATLAB Function block, and tests/test_emt_converters.py builds it with Electrisim's solver and controller, both from this file. Both start in its steady state, which tests/test_emt_converters.py computes and writes into 'start'. SI units; phasors are amplitudes, phase a = cos(w t + angle).",
+  "f_hz": 50.0,
+  "grid": {
+    "description": "A three-phase source, star-grounded, behind R_g and L_g, L_g damped by R_p across it.",
+    "v_ll": 400.0, "s_sc": 5e6, "xr": 10.0, "r_p": 0.3
+  },
+  "c_f": 5e-5,
+  "vsc": {
+    "description": "Averaged phase voltages, star-grounded, behind its reactor r, l onto the filter capacitors c_f at its AC bus. Rated s_rated, its current limited to i_limit_pu. Its DC link c_link at v_dc; its DC load behind r_dc, l_dc.",
+    "s_rated": 2e5, "i_limit_pu": 1.2, "r": 0.005, "l": 3e-4, "block_pu": 0.8,
+    "v_dc": 800.0, "c_link": 2.5e-3, "r_dc": 0.01, "l_dc": 1e-5
+  },
+  "load": {
+    "description": "A resistor r_load on its DC side; a second, r_step, switched in parallel at t_step: 50 % more power.",
+    "r_load": 4.2666666666666666, "r_step": 8.5333333333333333, "t_step": 0.01
+  },
+  "switch_r_on": 1e-5,
+  "switch_r_off": 1e7,
+  "dt": 5e-6,
+  "t_end": 0.1
+}

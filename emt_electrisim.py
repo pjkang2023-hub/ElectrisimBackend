@@ -39,6 +39,7 @@ import numpy as np
 import pandapower_electrisim as pe
 from dc_fault_electrisim import _ac_thevenin, _f, _label, _row_id, _waveform
 from emt_ac import AcBuilder
+from emt_converters import VscAverage
 from emt_solver import R_BIAS, Circuit, dc_load_current
 
 
@@ -63,6 +64,7 @@ class _EmtBuilder:
         self.loads = []         # (label, id, bus, node, func-array, nominal V)
         self.breakers = []      # dict per breaker
         self.blockers = []      # (label, switch index, node, threshold V)
+        self.vscs = []          # VSCs on the AC network: average-value models with their controls
         self._breakers_by_target = {}
         self.default_filters = []
 
@@ -253,6 +255,15 @@ class _EmtBuilder:
             i0 = -p * 1e6 / self.v_bus[bus]
             r_dc = max(_f(net.vsc.at[vi, 'r_dc_ohm']), 1e-6)
             term = self._terminal('vsc', vi, bus, -i0)
+            if not aux and int(net.vsc.at[vi, 'bus']) in self.ac.nodes:
+                # On the AC network: its average-value model, with its controls.
+                conv = VscAverage(self, vi, label, bus, term, r_dc, block)
+                conv.id = _row_id(net, 'vsc', vi)
+                self.vscs.append(conv)
+                self.series.append(('VSC', label, conv.id, f'{label} (DC side)', ('i_rl', conv.k_dc_out), -1.0))
+                self.ac.series.append(('VSC', label, conv.id, f'{label} (AC side)',
+                                       [[('i_rl', k, None, 1.0)] for k in conv.k_e]))
+                continue
             # Its controlled stage: a stiff source at its DC voltage, until it blocks.
             src = ckt.node(f'{label} source', self.v_bus[bus])
             ckt.add_rl(0, src, r_dc, 0.0, e0=self.v_bus[bus] + r_dc * i0)
@@ -319,6 +330,8 @@ class _EmtBuilder:
 
     def controller(self, t, state):
         changed = False
+        for conv in self.vscs:
+            changed = conv.control(t, state) or changed
         for blk in self.blockers:
             if blk['t'] is None and state.v[blk['node']] < blk['v_block']:
                 blk['t'] = t
@@ -339,8 +352,12 @@ class _EmtBuilder:
         return changed
 
 
-def _oscillation_verdict(t, v, t_from, vn):
-    """Whether a load's voltage settles after the last event, keeps swinging, swings ever wider - or is lost."""
+def _oscillation_verdict(t, v, t_from, vn, min_span=1e-3):
+    """
+    Whether a load's voltage settles after the last event, keeps swinging,
+    swings ever wider - or is lost. ``min_span``: the run after the last event
+    it needs to tell - a few periods of the slowest control loop there.
+    """
     T = t[-1]
     if T - t_from < 1e-3:
         return None
@@ -351,6 +368,8 @@ def _oscillation_verdict(t, v, t_from, vn):
         return None
     if abs(float(v[-1])) < 0.5 * vn:
         return 'lost supply'      # cut off, or on the faulted bus: its swing says nothing of its stability
+    if span < min_span:
+        return 'too short to tell'
     a_early, a_late = float(np.ptp(v[early])), float(np.ptp(v[late]))
     if a_late < 1e-4 * vn or a_late < 0.9 * a_early:
         return 'settles'
@@ -361,9 +380,11 @@ def _oscillation_verdict(t, v, t_from, vn):
 
 METHOD = ("A time-domain simulation of the AC and DC networks from their load-flow state. AC: three-phase, grids behind their positive- and zero-sequence impedance, lines as coupled pi sections, transformers by their vector group, loads as constant impedance, inverter-based generation as constant current, generators behind their subtransient reactance, started in their own steady state; an AC fault clears at each phase's current zero. DC: cables as pi sections, "
           "DC loads by their load-flow model behind their input filters, breakers that trip on overcurrent and "
-          "open into their surge arresters. Until the converter models of the next phase, VSCs and converter "
-          "outputs are stiff sources that block on undervoltage, a VSC's diodes then feeding a fault from the AC "
-          "grid; converter inputs are constant-power loads. A constant-power load with no minimum voltage set "
+          "open into their surge arresters. A VSC on the AC network is an average-value model behind its reactor "
+          "and isolating transformer, with its DC link, under its controls - PLL, dq current control, its DC "
+          "voltage or power, its reactive power or AC voltage - limited to its current limit, and blocking, its "
+          "diodes left, on DC undervoltage or overcurrent. DC/DC converter and SST outputs are stiff sources "
+          "that block on undervoltage; converter inputs are constant-power loads. A constant-power load with no minimum voltage set "
           "draws constant current below 0.8 pu; one with no input capacitance is given 4 ms x P / V^2. "
           "Pole-to-pole faults.")
 
@@ -463,7 +484,9 @@ def emt_study(net, params, in_data=None):
                          'i_peak_ka': _round(abs(i[j]) * 1e-3), 't_peak_ms': _round(t[j] * 1e3),
                          'waveform': _waveform(t, i, j, t_fine)})
     result = {'method': METHOD, 'buses': buses, 'branches': branches, 'breakers': [], 'loads': [], 'fault': None,
-              'converters_blocked': [{'label': blk['label'], 't_ms': _round(blk['t'] * 1e3)} for blk in b.blockers if blk['t'] is not None],
+              'converters_blocked': [{'label': blk['label'], 't_ms': _round(blk['t'] * 1e3)} for blk in b.blockers if blk['t'] is not None]
+              + [{'label': c.label, 't_ms': _round(c.blocked_at * 1e3)} for c in b.vscs if c.blocked_at is not None],
+              'converters': [_converter_result(c) for c in b.vscs],
               'settings': {'time_step_us': dt * 1e6, 'duration_ms': t_end * 1e3,
                            'max_section_km': _f(params.get('max_section_km'), 1.0),
                            'vsc_block_pu': _f(params.get('vsc_block_pu'), 0.8)}}
@@ -507,14 +530,19 @@ def emt_study(net, params, in_data=None):
             warnings_out.append(f"DC breaker {rec['label']} opened but its current had not reached zero by the end of the run.")
         result['breakers'].append(out)
     result['ac'] = _ac_results(sim, b.ac, net, t_fine, ac_fault)
+    # A VSC's DC voltage loop, some 30 Hz, swings slower than the network: two of its periods to tell.
+    min_span = VSC_VERDICT_SPAN if b.vscs else 1e-3
     for load in b.loads:
         v = sim['v'][:, load['node']]
         result['loads'].append({'label': load['label'], 'id': load['id'], 'constant_power': load['constant_power'],
                                 'v_min_pu': _round(float(np.min(v)) / load['vn']),
-                                'verdict': _oscillation_verdict(t, v, t_last, load['vn']) if load['constant_power'] else None})
+                                'verdict': _oscillation_verdict(t, v, t_last, load['vn'], min_span) if load['constant_power'] else None})
         if load['constant_power'] and result['loads'][-1]['verdict'] == 'oscillates, growing':
             warnings_out.append(f"DC load {load['label']}: its voltage swings ever wider - a constant-power load "
                                 "beyond its stability limit; more DC-link capacitance or a stiffer supply steadies it.")
+    if any(l['verdict'] == 'too short to tell' for l in result['loads']):
+        warnings_out.append(f'Constant-power loads: run at least {VSC_VERDICT_SPAN * 1e3:.0f} ms after the last event to tell '
+                            "whether they settle - the VSCs' DC voltage loops swing at some 30 Hz.")
     if b.default_filters:
         warnings_out.append('Given an input capacitance of 4 ms x P / V^2, as they have none: '
                             + ', '.join(b.default_filters) + '. Enter their input filters for their own values.')
@@ -595,6 +623,25 @@ def _ac_results(sim, ac, net, t_fine, fault):
                                         'i_sym_ka': _round(i_sym * 1e-3) if i_sym is not None else None,
                                         'waveform': _waveform(t, i, None, t_fine)})
     return {'buses': buses, 'branches': branches, 'fault': fault_out}
+
+
+def _converter_result(conv):
+    """A VSC's active and reactive power out, DC voltage and current through the run."""
+    tr = np.array(conv.trace) if conv.trace else np.zeros((0, 5))
+    out = {'label': conv.label, 'id': getattr(conv, 'id', ''), 'model': 'average',
+           'rated_mva': _round(conv.s_rated / 1e6), 'current_limit_ka': _round(conv.i_max / SQ2 / 1e3),
+           'blocked_ms': _round(conv.blocked_at * 1e3) if conv.blocked_at is not None else None,
+           'limited_ms': _round(conv.limited_time * 1e3)}
+    if len(tr):
+        out.update(p_start_mw=_round(tr[0, 1] / 1e6), p_end_mw=_round(tr[-1, 1] / 1e6),
+                   q_start_mvar=_round(tr[0, 2] / 1e6), q_end_mvar=_round(tr[-1, 2] / 1e6),
+                   v_dc_min_kv=_round(float(np.min(tr[:, 3])) / 1e3), v_dc_end_kv=_round(tr[-1, 3] / 1e3),
+                   i_peak_ka=_round(float(np.max(tr[:, 4])) / SQ2 / 1e3))
+    return out
+
+
+SQ2 = math.sqrt(2.0)
+VSC_VERDICT_SPAN = 0.06    # s: two periods of a VSC's DC voltage loop
 
 
 def _volts(w):
