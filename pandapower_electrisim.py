@@ -882,7 +882,8 @@ def _append_electrisim_sgen_setup_python(lines, net):
         for idx, row in net.sgen.iterrows():
             if has_ids:
                 sid = row.get('id')
-                if sid is not None and str(sid).strip():
+                # An sgen Electrisim builds (an SST's inverter) has none: NaN, which was written as nan.
+                if sid is not None and sid == sid and str(sid).strip():
                     lines.append(f"net.sgen.at[{idx}, 'id'] = {sid!r}")
             if has_sn:
                 sn = row.get('sn_mva')
@@ -955,6 +956,14 @@ _EXPORT_EXTRA_COLS = {
     'load': ('in_service',),
     'shunt': ('in_service', 'vn_kv', 'step', 'max_step'),
     'ext_grid': ('in_service',),
+    # The DC side, as pandapower 3.3 names its columns (the EMT study's line data rides along).
+    'bus_dc': ('type', 'zone', 'max_vm_pu', 'min_vm_pu', 'in_service'),
+    'load_dc': ('scaling', 'type', 'controllable', 'in_service'),
+    'source_dc': ('type', 'in_service'),
+    'line_dc': ('g_us_per_km', 'df', 'parallel', 'type', 'max_loading_percent', 'alpha',
+                'temperature_degree_celsius', 'l_mh_per_km', 'c_uf_per_km', 'in_service'),
+    'vsc': ('pl_dc_mw', 'controllable', 'in_service'),
+    'b2b_vsc': ('pl_dc_mw', 'controllable', 'in_service'),
 }
 
 
@@ -964,6 +973,80 @@ def _export_extra_kwargs(table, row):
     return ''.join(
         f", {col}={_export_py_literal(row[col])}" for col in _EXPORT_EXTRA_COLS[table]
         if col in row.index and not pd.isnull(row[col]))
+
+
+def _export_vsc_control_kwargs(row):
+    """A VSC's (or back-to-back VSC's) impedances and AC and DC control, as create_vsc takes them."""
+    return ', '.join(f"{col}={_export_py_literal(row[col])}" for col in (
+        'r_ohm', 'x_ohm', 'r_dc_ohm', 'control_mode_ac', 'control_value_ac', 'control_mode_dc', 'control_value_dc'))
+
+
+def _export_text(row, col):
+    """A text column's value, or None when the row has none."""
+    value = row.get(col) if col in row.index else None
+    return value if isinstance(value, str) and value else None
+
+
+def _export_load_dc_notes(row):
+    """Comment lines for a DC load Electrisim built or settles: what it stands for."""
+    name = row.get('name')
+    role = _export_text(row, 'electrisim_dcdc_role')
+    conv = _export_text(row, 'electrisim_dcdc_name')
+    if role == 'input':
+        eta = row.get('electrisim_dcdc_eta')
+        p_nl = row.get('electrisim_dcdc_p_nl_mw')
+        return [f"# {name}: DC/DC converter {conv}'s input - what its output delivers over its efficiency "
+                f"({100 * float(eta):g} %) plus its no-load loss ({float(p_nl):g} MW), as settled"]
+    if role == 'output':
+        return [f"# {name}: DC/DC converter {conv}'s output in power mode - its set power, injected"]
+    if role == 'der':
+        return [f"# {name}: a source's output - the power its curve gives at its bus's settled voltage"]
+    if role == 'frozen':
+        return [f"# {name}: a converter's or source's power from a settled load flow"]
+    share_p = row.get('electrisim_share_p') if 'electrisim_share_p' in row.index else None
+    if share_p is None or pd.isnull(share_p):
+        return []
+    v_min = float(row.get('electrisim_v_min_pu') or 0.0)
+    if share_p >= 1.0 - 1e-12 and not v_min > 0:
+        return []
+    shares = ', '.join(f"{100 * float(row.get(col)):g} % {kind}" for col, kind in (
+        ('electrisim_share_p', 'constant power'), ('electrisim_share_i', 'constant current'),
+        ('electrisim_share_r', 'constant resistance')) if float(row.get(col) or 0.0) > 0)
+    below = (f"; below {v_min:g} p.u. its constant-power part draws constant current" if v_min > 0 else '')
+    return [f"# {name}: a voltage-dependent DC load, rated {float(row.get('electrisim_p_rated_mw')):g} MW "
+            f"({shares}){below}.",
+            "# pandapower's DC load draws a fixed power: this is the power it settled at."]
+
+
+def _export_settled_notes(net):
+    """
+    Comment lines for the exported load flow when Electrisim settles some
+    elements by repeating the load flow, which a single pp.runpp cannot.
+    """
+    settled = []
+    if _electrisim_has_dc_load_models(net):
+        settled.append("voltage-dependent DC loads at the power their voltage gives")
+    convs = getattr(net, 'electrisim_dc_dc_converters', None) or []
+    if convs or _electrisim_dc_dc_rows(net):
+        settled.append("DC/DC converters' inputs at what their outputs deliver over their efficiency")
+    if any(c.get('control') == 'droop' for c in convs):
+        settled.append("DC/DC converters in droop at the voltage (or power) their droop gives")
+    if getattr(net, 'electrisim_ders', None):
+        settled.append("sources and stores at their terminal voltage and the power their curves give")
+    if getattr(net, 'electrisim_ssts', None):
+        settled.append("solid-state transformers' stages")
+    if _electrisim_pcs_to_settle(net):
+        settled.append("PCS set points")
+    if not settled:
+        return []
+    return ["# Note: Electrisim repeats the load flow until these agree with the voltages it",
+            "# gives, which this script cannot do:",
+            *[f"#   - {item}" for item in settled],
+            "# Their powers and set points above are the settled ones from Electrisim's last",
+            "# load flow, held fixed, so this single load flow reproduces that operating point.",
+            "# Change the network and they no longer follow it: a DC load stays at its power,",
+            "# a converter's input no longer follows its output.",
+            ""]
 
 
 def _export_float_from_payload(val):
@@ -1346,10 +1429,10 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
     if hasattr(net, 'bus_dc') and not net.bus_dc.empty:
         lines.append("# Create DC buses")
         for idx, row in net.bus_dc.iterrows():
-            name = row['name'] if 'name' in row else f"BusDC_{idx}"
-            vn_kv = row.get('vn_kv', 0.0)
-            in_service = row.get('in_service', True)
-            lines.append(f"bus_dc_{idx} = pp.create_dc_bus(net, vn_kv={vn_kv}, name='{name}', in_service={in_service})")
+            if _electrisim_is_hidden(net.bus_dc, idx):
+                lines.append(f"# {row['name']!s}: a battery's cells, at their open-circuit voltage")
+            lines.append(f"bus_dc_{idx} = pp.create_bus_dc(net, vn_kv={_export_py_literal(row['vn_kv'])}, "
+                         f"name={_export_py_literal(row.get('name'))}{_export_extra_kwargs('bus_dc', row)})")
         lines.append("")
     
     # Create asymmetric static generators
@@ -1515,26 +1598,41 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
                         f"controllable={controllable}, in_service={in_service})")
         lines.append("")
     
+    # Create DC lines (cables between two DC buses)
+    if hasattr(net, 'line_dc') and not net.line_dc.empty:
+        lines.append("# Create DC lines")
+        for idx, row in net.line_dc.iterrows():
+            if _electrisim_is_hidden(net.line_dc, idx):
+                lines.append(f"# {row['name']!s}: a battery's internal resistance, from its cells to its bus")
+            elif 'electrisim_dc_breaker' in row.index and row['electrisim_dc_breaker'] == True:
+                lines.append(f"# DC breaker {row['name']!s}: a low-resistance coupler, in service when closed")
+            lines.append(f"pp.create_line_dc_from_parameters(net, from_bus_dc=bus_dc_{int(row['from_bus_dc'])}, "
+                         f"to_bus_dc=bus_dc_{int(row['to_bus_dc'])}, length_km={_export_py_literal(row['length_km'])}, "
+                         f"r_ohm_per_km={_export_py_literal(row['r_ohm_per_km'])}, "
+                         f"max_i_ka={_export_py_literal(row['max_i_ka'])}, name={_export_py_literal(row.get('name'))}"
+                         f"{_export_extra_kwargs('line_dc', row)})")
+        lines.append("")
+
     # Create load DC elements
     if hasattr(net, 'load_dc') and not net.load_dc.empty:
         lines.append("# Create DC load elements")
+        lines.append("# Each with its index: pandapower 3.3's create_load_dc takes a new index from")
+        lines.append("# net.source_dc, so without one each DC load overwrote the first. (So the DC")
+        lines.append("# loads come before the DC sources, whose indices it checks them against.)")
         for idx, row in net.load_dc.iterrows():
-            bus = row['bus']
-            name = row['name'] if 'name' in row else f"LoadDC_{idx}"
-            p_mw = row.get('p_mw', 0.0)
-            in_service = row.get('in_service', True)
-            lines.append(f"pp.create_load_dc(net, bus=bus_{bus}, name='{name}', p_mw={p_mw}, in_service={in_service})")
+            lines.extend(_export_load_dc_notes(row))
+            lines.append(f"pp.create_load_dc(net, bus_dc=bus_dc_{int(row['bus_dc'])}, "
+                         f"p_dc_mw={_export_py_literal(row['p_dc_mw'])}, name={_export_py_literal(row.get('name'))}, "
+                         f"index={int(idx)}{_export_extra_kwargs('load_dc', row)})")
         lines.append("")
-    
+
     # Create source DC elements
     if hasattr(net, 'source_dc') and not net.source_dc.empty:
         lines.append("# Create DC source elements")
         for idx, row in net.source_dc.iterrows():
-            bus = row['bus']
-            name = row['name'] if 'name' in row else f"SourceDC_{idx}"
-            vm_pu = row.get('vm_pu', 1.0)
-            in_service = row.get('in_service', True)
-            lines.append(f"pp.create_source_dc(net, bus=bus_{bus}, name='{name}', vm_pu={vm_pu}, in_service={in_service})")
+            lines.append(f"pp.create_source_dc(net, bus_dc=bus_dc_{int(row['bus_dc'])}, "
+                         f"vm_pu={_export_py_literal(row['vm_pu'])}, name={_export_py_literal(row.get('name'))}"
+                         f"{_export_extra_kwargs('source_dc', row)})")
         lines.append("")
     
     # Create switch elements (no in_service - Switch is always in service)
@@ -1557,38 +1655,24 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
     if hasattr(net, 'vsc') and not net.vsc.empty:
         lines.append("# Create VSC (Voltage Source Converter) elements")
         for idx, row in net.vsc.iterrows():
-            bus = row['bus']
-            bus_dc = row.get('bus_dc')
-            name = row['name'] if 'name' in row else f"VSC_{idx}"
-            p_mw = row.get('p_mw', 0.0)
-            vm_pu = row.get('vm_pu', 1.0)
-            sn_mva = row.get('sn_mva', 0.0)
-            rx = row.get('rx', 0.1)
-            max_ik_ka = row.get('max_ik_ka', 0.0)
-            in_service = row.get('in_service', True)
-            # bus_dc refers to a DC bus index, so use bus_dc_{bus_dc} variable name
-            bus_dc_var = f"bus_dc_{bus_dc}" if bus_dc is not None else "None"
-            lines.append(f"pp.create_vsc(net, bus=bus_{bus}, bus_dc={bus_dc_var}, name='{name}', "
-                        f"p_mw={p_mw}, vm_pu={vm_pu}, sn_mva={sn_mva}, rx={rx}, max_ik_ka={max_ik_ka}, in_service={in_service})")
+            if _electrisim_is_aux(net.vsc, idx):
+                lines.append(f"# {row['name']!s}: an Electrisim DC/DC converter's or source's output stage - a "
+                             "near-lossless VSC from its own auxiliary AC bus and grid, holding its DC bus voltage")
+            ref_bus = row.get('ref_bus')   # an AC bus (not pd here: the storage block imports it locally)
+            ref_part = f", ref_bus=bus_{int(ref_bus)}" if ref_bus is not None and ref_bus == ref_bus else ''
+            lines.append(f"pp.create_vsc(net, bus=bus_{int(row['bus'])}, bus_dc=bus_dc_{int(row['bus_dc'])}, "
+                         f"{_export_vsc_control_kwargs(row)}, name={_export_py_literal(row.get('name'))}"
+                         f"{ref_part}{_export_extra_kwargs('vsc', row)})")
         lines.append("")
-    
+
     # Create B2B VSC elements
     if hasattr(net, 'b2b_vsc') and not net.b2b_vsc.empty:
         lines.append("# Create B2B VSC (Back-to-Back Voltage Source Converter) elements")
         for idx, row in net.b2b_vsc.iterrows():
-            bus1 = row['bus1']
-            bus2 = row['bus2']
-            name = row['name'] if 'name' in row else f"B2BVSC_{idx}"
-            p_mw = row.get('p_mw', 0.0)
-            vm1_pu = row.get('vm1_pu', 1.0)
-            vm2_pu = row.get('vm2_pu', 1.0)
-            sn_mva = row.get('sn_mva', 0.0)
-            rx = row.get('rx', 0.1)
-            max_ik_ka = row.get('max_ik_ka', 0.0)
-            in_service = row.get('in_service', True)
-            lines.append(f"pp.create_b2b_vsc(net, bus1=bus_{bus1}, bus2=bus_{bus2}, name='{name}', "
-                        f"p_mw={p_mw}, vm1_pu={vm1_pu}, vm2_pu={vm2_pu}, sn_mva={sn_mva}, "
-                        f"rx={rx}, max_ik_ka={max_ik_ka}, in_service={in_service})")
+            lines.append(f"pp.create_b2b_vsc(net, bus=bus_{int(row['bus'])}, "
+                         f"bus_dc_plus=bus_dc_{int(row['bus_dc_plus'])}, bus_dc_minus=bus_dc_{int(row['bus_dc_minus'])}, "
+                         f"{_export_vsc_control_kwargs(row)}, name={_export_py_literal(row.get('name'))}"
+                         f"{_export_extra_kwargs('b2b_vsc', row)})")
         lines.append("")
     
     # Create DC line elements
@@ -1693,6 +1777,7 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
         )
         lines.append("")
 
+    lines.extend(_export_settled_notes(net))
     lines.append("# Run power flow")
     run_kwargs = [
         f"algorithm='{algorithm}'",
@@ -1712,6 +1797,13 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
     lines.append("print(net.res_bus)")
     lines.append("print('\\nLine Results:')")
     lines.append("print(net.res_line)")
+    if hasattr(net, 'bus_dc') and not net.bus_dc.empty:
+        lines.append("print('\\nDC Bus Results:')")
+        lines.append("print(net.res_bus_dc)")
+        for table, title in (('vsc', 'VSC'), ('line_dc', 'DC Line'), ('load_dc', 'DC Load')):
+            if table in net and len(net[table]):
+                lines.append(f"print('\\n{title} Results:')")
+                lines.append(f"print(net.res_{table})")
     lines.append("if hasattr(net, 'controller') and net.controller is not None and not net.controller.empty:")
     lines.append("    print('\\nControllers:')")
     lines.append("    print(net.controller)")

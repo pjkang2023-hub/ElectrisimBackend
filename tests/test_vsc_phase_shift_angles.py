@@ -98,15 +98,15 @@ def test_vsc_with_phase_shifting_transformers_in_series(client, quiet, init):
     assert not any('collapsed' in w for w in result.get('warnings', []))
 
 
+@pytest.mark.parametrize('facts', ['vsc', 'ssc'])
 @pytest.mark.parametrize('init', ['auto', 'dc', 'flat'])
-def test_exported_script_starts_from_the_same_angles(client, quiet, init):
+def test_exported_script_starts_from_the_same_angles(client, quiet, init, facts):
     """
     "Export Pandapower Python Code" gives a script with the backend's angle start,
     which gets the backend's answer; a flat start is exported as chosen, with a note.
-    A STATCOM stands in for the VSC: the export does not yet write DC networks
-    pandapower can build.
+    With the VSC, the script builds its DC side too and gets the route's VSC result.
     """
-    request = _request(init, facts='ssc')
+    request = _request(init, facts=facts)
     request['simulation-parameters']['exportPython'] = True
     result = _solve(client, quiet, request)
     code = result.get('pandapower_python')
@@ -114,16 +114,28 @@ def test_exported_script_starts_from_the_same_angles(client, quiet, init):
     if init == 'flat':
         assert 'facts_angle_start' not in code and 'collapsed solution' in code
         return
-    assert 'init_va_degree=va_start' in code
+    assert 'def facts_angle_start(net):' in code
+    assert 'va_start = facts_angle_start(net)' in code and 'init_va_degree=va_start' in code
+    if facts == 'vsc':
+        assert 'pp.create_bus_dc(' in code and 'pp.create_vsc(' in code and 'pp.create_load_dc(' in code
 
     namespace = {}
     with quiet():
         exec(compile(code, 'vsc_phase_shift_export.py', 'exec'), namespace)
     net = namespace['net']
-    got = dict(zip(net.bus.loc[net.res_bus.index, 'name'], net.res_bus['vm_pu']))
+    names = net.bus.loc[net.res_bus.index, 'name']
+    vm, va = dict(zip(names, net.res_bus['vm_pu'])), dict(zip(names, net.res_bus['va_degree']))
     for row in result['busbars']:
-        assert got[row['name']] == pytest.approx(float(row['vm_pu']), abs=1e-6), row['name']
-    assert got['Load 0.48 kV'] == pytest.approx(0.9635, abs=1e-3)
+        assert vm[row['name']] == pytest.approx(float(row['vm_pu']), abs=1e-6), row['name']
+        assert va[row['name']] == pytest.approx(float(row['va_degree']), abs=1e-4), row['name']
+    assert vm['Load 0.48 kV'] == pytest.approx(0.9635, abs=1e-3)
+    if facts == 'vsc':
+        ((_, got),) = net.res_vsc.iterrows()
+        (vsc,) = result['vscs']
+        for col in ('p_mw', 'q_mvar', 'p_dc_mw', 'vm_dc_pu'):
+            assert got[col] == pytest.approx(vsc[col], abs=1e-6), col
+        (dc,) = result['dcbuses']
+        assert net.res_bus_dc['vm_pu'].iloc[0] == pytest.approx(dc['vm_pu'], abs=1e-9)
 
 
 def test_flat_start_is_kept_and_warned_about(client, quiet):
