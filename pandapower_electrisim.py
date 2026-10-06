@@ -1753,14 +1753,15 @@ def _electrisim_runpp(net, max_rounds=60, tolerance_mw=1e-9, **kwargs):
     they agree. Without them, _electrisim_runpp_converters alone.
     """
     droop = any(c.get('control') == 'droop' for c in getattr(net, 'electrisim_dc_dc_converters', None) or [])
-    if not getattr(net, 'electrisim_ders', None) and not droop:
+    pcs = _electrisim_pcs_to_settle(net)
+    if not getattr(net, 'electrisim_ders', None) and not droop and not pcs:
         return _electrisim_runpp_converters(net, max_rounds, tolerance_mw, **kwargs)
-    for _ in range(40):
+    for _ in range(60):
         _electrisim_runpp_converters(net, max_rounds, tolerance_mw, **kwargs)
-        if _electrisim_settle_ders(net) <= 1e-9:
+        if max(_electrisim_settle_ders(net), _electrisim_settle_pcs(net)) <= 1e-8:
             return None
         kwargs = {**kwargs, 'init': 'results'}
-    _electrisim_warn(net, 'The sources and stores had not settled after 40 load flows: '
+    _electrisim_warn(net, 'The sources, stores and PCS had not settled after 60 load flows: '
                           'their voltages and powers are those of the last one.')
     return None
 
@@ -1876,6 +1877,11 @@ def _electrisim_warn(net, message):
 
 _DCDC_AUX_R_PU, _DCDC_AUX_X_PU, _DCDC_AUX_RDC_PU = 1e-4, 1e-3, 1e-6
 _DCDC_CONTROLS = ('voltage', 'power', 'droop', 'dispatch', 'mppt', 'follower', 'smoothing')
+
+
+def _electrisim_is_pcs(df, index):
+    """Whether a generator or static generator row is a PCS, reported with the PCS."""
+    return 'electrisim_pcs' in df.columns and index in df.index and df.at[index, 'electrisim_pcs'] == True
 
 
 def _electrisim_is_hidden(df, index):
@@ -2448,6 +2454,12 @@ def _electrisim_der_result(net, rec):
     if not obj.in_service or res_bus is None or bus not in res_bus.index or not np.isfinite(res_bus.at[bus, 'vm_pu']):
         return out
     v, p = _electrisim_der_power(net, rec)
+    return _electrisim_der_report(net, rec, out, v, p)
+
+
+def _electrisim_der_report(net, rec, out, v, p):
+    """``out`` with its power ``p`` (W) at voltage ``v`` (V), its state, and its notes warned about."""
+    obj = rec['obj']
     i = p / max(v, 1e-6)
     out.update(p_mw=p / 1e6 + 0.0, v_kv=v / 1e3, i_ka=i / 1e3 + 0.0)
     if rec['kind'] == 'Supercapacitor' and obj.direct:
@@ -2462,6 +2474,368 @@ def _electrisim_der_result(net, rec):
     for note in obj.notes:
         _electrisim_warn(net, f"{rec['kind']} '{rec['label']}': {note}.")
     obj.notes = []
+    return out
+
+
+# --- Power conversion systems (PCS) --------------------------------------------------------
+#
+# A PCS joins one source or store (der_electrisim) to an AC bus: the source wired straight to
+# its DC side, or alone on a DC bus its DC side reaches (that bus is then the PCS's own, and
+# not reported). Grid-following, it is a current source (pandapower sgen) at the power its
+# source gives - a PV array's maximum power, an SOFC's set power, a battery's or flywheel's set
+# power - and a Q by set point, power factor or Q(V). Grid-forming, it holds its bus's voltage
+# (pandapower gen); on the grid it delivers its set power, islanded the grid-forming PCS of an
+# island share its imbalance by their P-f droops - each takes S_rated / droop of it - one of
+# them the island's reference (slack), its frequency f_n (1 - droop (P - P_set) / S_rated). A
+# Q-V droop lowers its voltage set point with its Q. Its DC side is its source at the power
+# it draws: the AC power over its efficiency, plus its no-load loss.
+#
+# In the short-circuit studies each is a current source at its current limit (k x I_rated),
+# grid-forming or grid-following; an island no grid or machine feeds has its largest
+# grid-forming PCS as a source giving that current at its own bus.
+
+_PCS_SC_STUDIES = ('ShortCircuit', 'ArcFlash', 'ProtectionCoordination', 'PoiFault', 'FuseCharacteristic')
+
+
+def _electrisim_build_pcs(net, Busbars, study):
+    pending = getattr(net, '_electrisim_pending_pcs', None) or []
+    net.electrisim_pcs = []
+    if not pending:
+        return
+    ders = getattr(net, '_electrisim_pending_der', None) or []
+    convs = getattr(net, 'electrisim_dc_dc_converters', None) or []
+    sc_study = any(k in str(study) for k in _PCS_SC_STUDIES)
+    for el in pending:
+        name = el.get('name')
+        label = el.get('userFriendlyName') or name
+        bus = Busbars.get(el.get('bus')) if el.get('bus') is not None else None
+        if bus is None:
+            _electrisim_warn(net, f"PCS '{label}' needs an AC bus on its AC side, so it is left out.")
+            continue
+        # Its source: wired to its DC side, or alone on the DC bus its DC side reaches.
+        src = next((d for d in ders if el.get('der') and d.get('name') == el.get('der')), None)
+        bus_dc = _electrisim_dc_bus(net, el.get('bus_dc')) if el.get('bus_dc') else None
+        if src is None and bus_dc is not None:
+            on_bus = [d for d in ders if _electrisim_dc_bus(net, d.get('bus')) == bus_dc]
+            alone = (len(on_bus) == 1 and not _electrisim_dc_bus_has_network(net, bus_dc)
+                     and not any(bus_dc in (c['bus_in'], c['bus_out']) for c in convs))
+            if not alone:
+                _electrisim_warn(net, f"PCS '{label}' is left out: its DC side must be one source or store, alone on "
+                                      "its DC bus. A DC network joins an AC bus through a VSC.")
+                continue
+            src = on_bus[0]
+        if src is None:
+            _electrisim_warn(net, f"PCS '{label}' has no battery, flywheel, SOFC system or PV array on its DC side, "
+                                  "so it is left out.")
+            continue
+        ders.remove(src)
+        kind = der_electrisim.kind_of(src.get('typ'))
+        src_label = src.get('userFriendlyName') or src.get('name')
+        if bus_dc is not None and bus_dc in net.bus_dc.index:
+            net.bus_dc.drop(bus_dc, inplace=True)       # the PCS's own DC link: its source's terminals
+        if kind == 'Supercapacitor':
+            _electrisim_warn(net, f"PCS '{label}' is left out: a supercapacitor connects to a DC bus, "
+                                  f"directly or through a DC/DC converter ('{src_label}').")
+            continue
+        try:
+            obj = der_electrisim.build(src)
+        except ValueError as e:
+            _electrisim_warn(net, f"PCS '{label}' is left out: {e}")
+            continue
+        on = _electrisim_in_service(el) and obj.in_service
+        s_rated = safe_float(el.get('s_rated_mva'), 1.0)
+        if s_rated <= 0:
+            s_rated = 1.0
+        eta = safe_float(el.get('efficiency_percent'), 98.0) / 100.0
+        if not 0 < eta <= 1:
+            eta = 1.0
+        control = 'grid_forming' if str(el.get('control') or '').strip().lower() == 'grid_forming' else 'grid_following'
+        vn = float(net.bus.at[bus, 'vn_kv'])
+        rec = {
+            'name': name, 'id': el.get('id', ''), 'label': label, 'bus': int(bus), 'vn_kv': vn,
+            'control': control, 'in_service': on, 's_rated': s_rated, 'eta': eta,
+            'p_nl_mw': safe_float(el.get('no_load_loss_kw'), 0.0) / 1e3,
+            'p_set_mw': safe_float(el.get('p_set_mw'), 0.0),
+            'q_mode': str(el.get('q_mode') or 'q'), 'q_set_mvar': safe_float(el.get('q_set_mvar'), 0.0),
+            'pf': safe_float(el.get('pf'), 1.0), 'qv_droop': safe_float(el.get('qv_droop_percent'), 5.0) / 100.0,
+            'vm_set_pu': safe_float(el.get('vm_set_pu'), 1.0),
+            'droop_pf': max(safe_float(el.get('droop_pf_percent'), 2.0), 1e-3) / 100.0,
+            'droop_qv': max(safe_float(el.get('droop_qv_percent'), 5.0), 0.0) / 100.0,
+            'k': safe_float(el.get('current_limit_pu'), 1.2),
+            'source': {'obj': obj, 'kind': kind, 'name': src.get('name'), 'label': src_label, 'id': src.get('id', ''),
+                       'coupling': 'pcs', 'parts': {}, 'bus': None},
+            'table': None, 'index': None, 'island': None, 'reference': False, 'df_pu': 0.0, 'qv_hist': None,
+        }
+        vn_ac = safe_float(el.get('vn_ac_kv'), 0.0)
+        if vn_ac > 0 and abs(vn_ac - vn) > 0.1 * vn:
+            _electrisim_warn(net, f"PCS '{label}': its AC side is rated {vn_ac:g} kV, its bus is {vn:g} kV - "
+                                  "draw its transformer between them.")
+        p_ac, q = _electrisim_pcs_set_point(net, rec)
+        rec['p_set_ac'] = p_ac
+        i_rated_ka = s_rated / (math.sqrt(3.0) * vn)
+        common = dict(name=name, id=el.get('id', ''), in_service=on, sn_mva=s_rated, controllable=False)
+        if sc_study or control == 'grid_following':
+            idx = pp.create_sgen(net, bus, p_mw=p_ac, q_mvar=q, k=rec['k'], rx=0.1, generator_type='current_source',
+                                 current_source=True, type='PCS', **common)
+            # Its short-circuit data, as the IEC (k, sn_mva) and ANSI (max_ik_ka) studies read them.
+            for col, value in (('k', rec['k']), ('rx', 0.1), ('current_source', True),
+                               ('generator_type', 'current_source'), ('max_ik_ka', rec['k'] * i_rated_ka)):
+                net.sgen.at[idx, col] = value
+            rec.update(table='sgen', index=int(idx))
+        else:
+            idx = pp.create_gen(net, bus, p_mw=p_ac, vm_pu=rec['vm_set_pu'], max_q_mvar=s_rated, min_q_mvar=-s_rated,
+                                max_p_mw=s_rated, min_p_mw=-s_rated, **common)
+            rec.update(table='gen', index=int(idx))
+        net[rec['table']].at[rec['index'], 'electrisim_pcs'] = True
+        net.electrisim_pcs.append(rec)
+        if not hasattr(net, 'user_friendly_names'):
+            net.user_friendly_names = {}
+        net.user_friendly_names[name] = label
+    if sc_study:
+        _electrisim_pcs_sc_islands(net)
+    else:
+        _electrisim_pcs_islands(net)
+
+
+def _electrisim_pcs_set_point(net, rec):
+    """The AC power (MW) and Q (Mvar) a PCS is asked for, within its rating: its source's, or its set power."""
+    src, obj = rec['source'], rec['source']['obj']
+    if src['kind'] == 'PV Array':
+        p_dc = obj.mpp()[2] / 1e6
+        p_ac = _electrisim_stage_output(p_dc, rec['eta'], rec['p_nl_mw'])
+    elif src['kind'] == 'SOFC':
+        p_ac = _electrisim_stage_output(obj.p_operating() / 1e6, rec['eta'], rec['p_nl_mw'])
+    else:
+        p_ac = rec['p_set_mw']
+    s = rec['s_rated']
+    if abs(p_ac) > s:
+        _electrisim_warn(net, f"PCS '{rec['label']}': {p_ac:.4g} MW is more than its rating ({s:g} MVA), "
+                              f"so it delivers {math.copysign(s, p_ac):.4g} MW.")
+        p_ac = math.copysign(s, p_ac)
+    q_max = math.sqrt(max(s * s - p_ac * p_ac, 0.0))
+    if rec['q_mode'] == 'pf':
+        pf = min(max(abs(rec['pf']), 1e-3), 1.0)
+        q = math.copysign(abs(p_ac) * math.tan(math.acos(pf)), rec['pf'])
+    elif rec['q_mode'] == 'qv':
+        q = 0.0
+    else:
+        q = rec['q_set_mvar']
+    if abs(q) > q_max + 1e-12:
+        _electrisim_warn(net, f"PCS '{rec['label']}': its Q ({q:.4g} Mvar) is held to {math.copysign(q_max, q):.4g} "
+                              f"Mvar by its rating, its active power first.")
+        q = math.copysign(q_max, q)
+    rec['q_max'] = q_max
+    return p_ac, q
+
+
+def _electrisim_pcs_weight(rec):
+    return rec['s_rated'] / rec['droop_pf']
+
+
+def _electrisim_pcs_islands(net):
+    """
+    Each grid-forming PCS's island: with an external grid it delivers its set
+    power; without one, the island's grid-forming PCS share its imbalance by
+    droop, the one with the largest S_rated / droop its reference (slack).
+    """
+    gf = [r for r in net.electrisim_pcs if r['table'] == 'gen' and r['in_service']]
+    if not gf:
+        return
+    graph = top.create_nxgraph(net, respect_switches=True)
+    grid_buses = set(int(b) for b in net.ext_grid.loc[net.ext_grid['in_service'] == True, 'bus']) \
+        if len(net.ext_grid) else set()
+    slack_gens = set(int(b) for b in net.gen.loc[(net.gen['slack'] == True) & (net.gen['in_service'] == True), 'bus']) \
+        if len(net.gen) and 'slack' in net.gen.columns else set()
+    islands = {}
+    for rec in gf:
+        comp = frozenset(top.connected_component(graph, rec['bus']))
+        if comp & (grid_buses | slack_gens):
+            continue
+        islands.setdefault(comp, []).append(rec)
+    for n, (comp, recs) in enumerate(islands.items()):
+        ref = max(recs, key=_electrisim_pcs_weight)
+        for rec in recs:
+            rec['island'] = n
+        ref['reference'] = True
+        net.gen.at[ref['index'], 'slack'] = True
+        net.gen.at[ref['index'], 'slack_weight'] = 1.0
+
+
+def _electrisim_pcs_sc_islands(net):
+    """
+    A short-circuit study needs a voltage source in each island: one no grid or
+    machine feeds gets its largest grid-forming PCS as an external grid that
+    gives k x I_rated at its bus - a converter at its current limit.
+    """
+    pcs = [r for r in net.electrisim_pcs if r['in_service']]
+    if not pcs:
+        return
+    graph = top.create_nxgraph(net, respect_switches=True)
+    sources = set(int(b) for b in net.ext_grid.loc[net.ext_grid['in_service'] == True, 'bus']) if len(net.ext_grid) else set()
+    if len(net.gen):
+        real = net.gen[(net.gen['in_service'] == True)]
+        if 'electrisim_pcs' in real.columns:
+            real = real[real['electrisim_pcs'] != True]
+        sources |= set(int(b) for b in real['bus'])
+    done = set()
+    for rec in pcs:
+        comp = frozenset(top.connected_component(graph, rec['bus']))
+        if comp in done or comp & sources:
+            continue
+        done.add(comp)
+        mates = [r for r in pcs if r['bus'] in comp]
+        forming = [r for r in mates if r['control'] == 'grid_forming'] or mates
+        ref = max(forming, key=lambda r: r['k'] * r['s_rated'])
+        s_sc = ref['k'] * ref['s_rated']
+        g = pp.create_ext_grid(net, ref['bus'], vm_pu=1.0, name=f"{ref['name']} (as a source)", s_sc_max_mva=s_sc,
+                               s_sc_min_mva=s_sc, rx_max=0.1, rx_min=0.1, x0x_max=1.0, r0x0_max=0.1,
+                               x0x_min=1.0, r0x0_min=0.1)
+        net.ext_grid.at[g, 'id'] = ref['id']
+        net.sgen.at[ref['index'], 'in_service'] = False
+        ref['as_source'] = int(g)
+        _electrisim_warn(net, f"PCS '{ref['label']}' forms an island no grid or machine feeds: in the short-circuit "
+                              f"study it is a source giving its current limit ({ref['k']:g} x its rated current) at its "
+                              "own bus, the other PCS current sources at theirs.")
+
+
+def _electrisim_pcs_to_settle(net):
+    return [r for r in getattr(net, 'electrisim_pcs', None) or []
+            if r['in_service'] and r['table'] in ('gen', 'sgen')
+            and (r['table'] == 'gen' and (r['island'] is not None or r['droop_qv'] > 0) or r['q_mode'] == 'qv')]
+
+
+def _electrisim_secant(rec, key, x, g, x_min, x_max):
+    """One secant step on g(x) = 0 for a PCS's set point, from the last; bounded."""
+    hist = rec.get(key)
+    rec[key] = (x, g)
+    if hist is not None and abs(x - hist[0]) > 1e-12 and abs(g - hist[1]) > 1e-15:
+        slope = (g - hist[1]) / (x - hist[0])
+        x_new = x - g / slope if slope > 0 else x - 0.5 * g
+    else:
+        x_new = x - 0.5 * g
+    step = max(min(x_new - x, 0.05), -0.05)
+    return min(max(x + step, x_min), x_max)
+
+
+def _electrisim_settle_pcs(net):
+    """One round of settling the PCS after a load flow; the largest change (MW or p.u.)."""
+    worst = 0.0
+    recs = _electrisim_pcs_to_settle(net)
+    if not recs or not hasattr(net, 'res_bus'):
+        return 0.0
+    # Islanded grid-forming PCS: their island's imbalance shared by droop.
+    islands = {}
+    for rec in recs:
+        if rec['table'] == 'gen' and rec['island'] is not None and rec['index'] in net.res_gen.index:
+            islands.setdefault(rec['island'], []).append(rec)
+    for group in islands.values():
+        dp = sum(float(net.res_gen.at[r['index'], 'p_mw']) - r['p_set_ac'] for r in group)
+        w_sum = sum(_electrisim_pcs_weight(r) for r in group)
+        for rec in group:
+            share = _electrisim_pcs_weight(rec) / w_sum * dp
+            rec['df_pu'] = -rec['droop_pf'] * share / rec['s_rated']
+            if rec['reference']:
+                continue
+            target = rec['p_set_ac'] + share
+            worst = max(worst, abs(target - float(net.gen.at[rec['index'], 'p_mw'])))
+            net.gen.at[rec['index'], 'p_mw'] = target
+    # Q-V droop of the grid-forming PCS: its voltage set point lowered by its Q.
+    for rec in recs:
+        if rec['table'] == 'gen' and rec['droop_qv'] > 0 and rec['index'] in net.res_gen.index:
+            q = float(net.res_gen.at[rec['index'], 'q_mvar'])
+            v_set = float(net.gen.at[rec['index'], 'vm_pu'])
+            g = v_set - (rec['vm_set_pu'] - rec['droop_qv'] * q / rec['s_rated'])
+            worst = max(worst, abs(g))
+            if abs(g) > 1e-9:
+                net.gen.at[rec['index'], 'vm_pu'] = _electrisim_secant(rec, 'qv_hist', v_set, g, 0.8, 1.2)
+        elif rec['table'] == 'sgen' and rec['q_mode'] == 'qv' and rec['index'] in net.res_sgen.index:
+            # Grid-following Q(V): Q = -(V - V_set) / droop x S_rated, within its capability.
+            v = float(net.res_bus.at[rec['bus'], 'vm_pu'])
+            q_now = float(net.sgen.at[rec['index'], 'q_mvar'])
+            target = -(v - rec['vm_set_pu']) / max(rec['qv_droop'], 1e-3) * rec['s_rated']
+            target = max(min(target, rec['q_max']), -rec['q_max'])
+            new = q_now + 0.5 * (target - q_now)
+            worst = max(worst, abs(target - q_now))
+            net.sgen.at[rec['index'], 'q_mvar'] = new
+    return worst
+
+
+def _electrisim_der_dc_point(obj, p):
+    """
+    A source's or store's terminal voltage (V) delivering power ``p`` (W) into
+    its PCS: (voltage, note or None).
+    """
+    if obj.kind == 'PV Array':
+        v_mp, _, p_mp = obj.mpp()
+        if p >= p_mp * (1.0 - 1e-9):
+            note = (f"its PCS draws {p / 1e3:.4g} kW, more than its maximum power ({p_mp / 1e3:.4g} kW)"
+                    if p > p_mp * (1.0 + 1e-6) else None)
+            return v_mp, note
+        lo, hi = v_mp, obj.n_s * obj.v_oc_t
+        for _ in range(80):
+            mid = 0.5 * (lo + hi)
+            if mid * obj.i_array(mid) > p:
+                lo = mid
+            else:
+                hi = mid
+        return 0.5 * (lo + hi), None
+    if obj.kind == 'SOFC':
+        i_min = max(obj.p_min_frac * obj.p_rated, 1e-3 * obj.p_rated) / obj.v_rated
+        if p <= i_min * obj.v_terminal(i_min):
+            return obj.v_terminal(i_min), (f"its PCS draws {p / 1e3:.4g} kW, below its minimum load"
+                                           if p < i_min * obj.v_terminal(i_min) * (1 - 1e-6) else None)
+        lo, hi = i_min, 3.0 * obj.i_rated
+        for _ in range(80):
+            mid = 0.5 * (lo + hi)
+            if mid * obj.v_terminal(mid) < p:
+                lo = mid
+            else:
+                hi = mid
+        i = 0.5 * (lo + hi)
+        note = (f"its PCS draws {p / 1e3:.4g} kW, more than its rating less its auxiliary load"
+                if p > obj.p_limits()[0] * (1 + 1e-6) else None)
+        return obj.v_terminal(i), note
+    v = obj.v_nominal()
+    for _ in range(100):
+        v_new = obj.v_terminal(p / max(v, 1e-6))
+        if abs(v_new - v) < 1e-9 * max(abs(v), 1.0):
+            v = v_new
+            break
+        v = v_new
+    note = None
+    if obj.kind == 'Flywheel' and not -obj.p_limits()[1] - 1e-6 <= p <= obj.p_limits()[0] + 1e-6:
+        note = f"its PCS asks {p / 1e3:.4g} kW, beyond its power limit at its speed ({obj.p_limits()[0] / 1e3:.4g} kW)"
+    return v, note
+
+
+def _electrisim_pcs_result(net, rec):
+    """A PCS's AC and DC power, loading, losses and frequency; its source's report, under '_source'."""
+    src = rec['source']
+    out = {'name': rec['name'], 'id': rec['id'], 'label': rec['label'], 'control': rec['control'],
+           'source': src['label'], 'source_kind': src['kind'], 'in_service': rec['in_service'],
+           'islanded': rec['island'] is not None, 'p_mw': None, 'q_mvar': None, 's_mva': None,
+           'loading_percent': None, 'vm_pu': None, 'p_dc_mw': None, 'loss_mw': None, 'frequency_hz': None}
+    res = getattr(net, f"res_{rec['table']}", None)
+    if not rec['in_service'] or res is None or rec['index'] not in res.index:
+        return out
+    p, q = float(res.at[rec['index'], 'p_mw']), float(res.at[rec['index'], 'q_mvar'])
+    if not (np.isfinite(p) and np.isfinite(q)):
+        return out
+    s = math.hypot(p, q)
+    p_dc = _electrisim_dc_dc_input_power(p, rec['eta'], rec['p_nl_mw'])
+    f_n = float(getattr(net, 'f_hz', 50.0) or 50.0)
+    out.update(p_mw=p + 0.0, q_mvar=q + 0.0, s_mva=s, loading_percent=100.0 * s / rec['s_rated'],
+               vm_pu=float(net.res_bus.at[rec['bus'], 'vm_pu']) if rec['bus'] in net.res_bus.index else None,
+               p_dc_mw=p_dc, loss_mw=p_dc - p, frequency_hz=f_n * (1.0 + rec['df_pu']))
+    if s > rec['s_rated'] * 1.0001:
+        _electrisim_warn(net, f"PCS '{rec['label']}' is loaded to {out['loading_percent']:.1f} % of its rating.")
+    v, note = _electrisim_der_dc_point(src['obj'], p_dc * 1e6)
+    if note:
+        src['obj'].notes.append(note)
+    report = {'name': src['name'], 'id': src['id'], 'label': src['label'], 'kind': src['kind'], 'coupling': 'pcs',
+              'pcs': rec['label'], 'in_service': rec['in_service'], 'p_mw': None, 'v_kv': None, 'i_ka': None}
+    out['_source'] = _electrisim_der_report(net, src, report, v, p_dc * 1e6)
+    out['v_dc_v'] = v
     return out
 
 
@@ -5466,6 +5840,13 @@ def create_other_elements(in_data,net,x, Busbars):
             net._electrisim_pending_sst.append(in_data[x])
             continue
 
+        if str(in_data[x]['typ']).startswith("PCS"):
+            # A power conversion system: built once its source and the buses exist, see _electrisim_build_pcs.
+            if not hasattr(net, '_electrisim_pending_pcs'):
+                net._electrisim_pending_pcs = []
+            net._electrisim_pending_pcs.append(in_data[x])
+            continue
+
         if der_electrisim.kind_of(in_data[x]['typ']):
             # A battery, supercapacitor, flywheel, SOFC system or PV array: built once every
             # converter exists, see _electrisim_build_ders.
@@ -5852,6 +6233,7 @@ def create_other_elements(in_data,net,x, Busbars):
 
     _electrisim_build_dc_dc_converters(net)
     _electrisim_build_ssts(net, Busbars)
+    _electrisim_build_pcs(net, Busbars, study)
     _electrisim_build_ders(net)
     _electrisim_apply_dc_breakers(net)
     _electrisim_drop_uncoupled_dc(net)
@@ -5867,7 +6249,8 @@ def create_other_elements(in_data,net,x, Busbars):
     except Exception:
         net._electrisim_export_sgen_q_init = {}
     # A study that does not model DC/DC converters sees each as its input's power.
-    if (getattr(net, 'electrisim_dc_dc_converters', None) or getattr(net, 'electrisim_ssts', None)) and (
+    if (getattr(net, 'electrisim_dc_dc_converters', None) or getattr(net, 'electrisim_ssts', None)
+            or getattr(net, 'electrisim_ders', None)) and (
             'OptimalPowerFlow' in study or not any(k in study for k in _DCDC_STUDIES)):
         _electrisim_freeze_dc_dc(net)
 
@@ -8278,19 +8661,21 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                     pass
                 else:                    
                         for index, row in net.res_gen.iterrows():    
+                            if _electrisim_is_pcs(net.gen, index):
+                                continue   # a PCS: reported with the PCS
                             generator = GeneratorOut(name=net.gen._get_value(index, 'name'), id = net.gen._get_value(index, 'id'), p_mw=row['p_mw'], q_mvar=row['q_mvar'], va_degree=row['va_degree'], vm_pu=row['vm_pu'])        
                             generatorsList.append(generator) 
                             generators = GeneratorsOut(generators = generatorsList)
                         
-                        result = {**result, **generators.__dict__}
+                        result = {**result, **GeneratorsOut(generators = generatorsList).__dict__}
                         
                 #Static Generator                     
                 if(net.res_sgen.empty):
                     pass
                 else:                    
                         for index, row in net.res_sgen.iterrows():    
-                            if _electrisim_is_aux(net.sgen, index):
-                                continue   # a converter stage's own element
+                            if _electrisim_is_aux(net.sgen, index) or _electrisim_is_pcs(net.sgen, index):
+                                continue   # a converter stage's own element, or a PCS
                             staticgenerator = StaticGeneratorOut(name=net.sgen._get_value(index, 'name'), id = net.sgen._get_value(index, 'id'), p_mw=row['p_mw'], q_mvar=row['q_mvar'])        
                             staticgeneratorsList.append(staticgenerator) 
                             staticgenerators = StaticGeneratorsOut(staticgenerators = staticgeneratorsList)
@@ -8803,9 +9188,16 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                 if getattr(net, 'electrisim_ssts', None):
                     result = {**result, 'ssts': [_electrisim_sst_result(net, r) for r in net.electrisim_ssts]}
 
-                # Sources and stores: power, voltage, current and state.
-                if getattr(net, 'electrisim_ders', None):
-                    result = {**result, 'ders': [_electrisim_der_result(net, r) for r in net.electrisim_ders]}
+                # Sources and stores: power, voltage, current and state; the PCS, and those behind them.
+                pcs_out = [_electrisim_pcs_result(net, r) for r in getattr(net, 'electrisim_pcs', None) or []]
+                ders_out = [_electrisim_der_result(net, r) for r in getattr(net, 'electrisim_ders', None) or []]
+                ders_out += [r.pop('_source') for r in pcs_out if r.get('_source')]
+                for r in pcs_out:
+                    r.pop('_source', None)
+                if ders_out:
+                    result = {**result, 'ders': ders_out}
+                if pcs_out:
+                    result = {**result, 'pcs': pcs_out}
 
                 # DC/DC converters: input and output power, losses, loading, both port voltages.
                 if getattr(net, 'electrisim_dc_dc_converters', None):
@@ -9172,6 +9564,28 @@ def _sc_missing_min_case_data(net):
     return out
 
 
+def _electrisim_sc_storage_as_current_sources(net):
+    """
+    pandapower's IEC 60909 calculation leaves the storage table out: a Storage
+    element with a maximum short-circuit current (its converter's limit) is
+    added as a current source giving it - as the ANSI study already counts it.
+    """
+    st = getattr(net, 'storage', None)
+    if st is None or not len(st) or 'max_ik_ka' not in st.columns:
+        return
+    for i in st.index:
+        max_ik = safe_float(st.at[i, 'max_ik_ka'], 0.0)
+        if not bool(st.at[i, 'in_service']) or max_ik <= 0:
+            continue
+        bus = int(st.at[i, 'bus'])
+        sn = math.sqrt(3.0) * float(net.bus.at[bus, 'vn_kv']) * max_ik
+        idx = pp.create_sgen(net, bus, p_mw=0.0, sn_mva=sn, k=1.0, name=f"{st.at[i, 'name']} (short circuit)",
+                             current_source=True, generator_type='current_source')
+        for col, value in (('k', 1.0), ('current_source', True), ('generator_type', 'current_source'),
+                           ('electrisim_aux', True)):
+            net.sgen.at[idx, col] = value
+
+
 def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=None):
     
     # Add diagnostic prints
@@ -9264,6 +9678,7 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
         # Long-standing defaults for grids whose zero-sequence columns are
         # absent come first, so only an explicit zero is reported below.
         ensure_ext_grid_zero_sequence_min(net)
+        _electrisim_sc_storage_as_current_sources(net)
         missing_machine_data = _sc_missing_machine_data(net)
         if fault_type == '1ph':
             missing_machine_data += _sc_missing_zero_sequence_data(net)

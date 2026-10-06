@@ -1448,6 +1448,34 @@ def _run_pq_envelope(net, params, in_data, progress_cb=None):
         return {'error': str(ex)}
 
 
+def _pcs_as_storage(net):
+    """
+    The builder's PCS and Battery pair, as the Storage element the study
+    dispatches: one row of the PCS's name and rating, its battery's energy and
+    state of charge, its P limits the tighter of its rating and its battery's
+    C-rates. Electrisim storage charges at positive P.
+    """
+    for rec in list(getattr(net, 'electrisim_pcs', None) or []):
+        src = rec['source']
+        if src['kind'] != 'Battery':
+            continue
+        bat = src['obj']
+        table, idx = rec['table'], rec['index']
+        if idx in net[table].index:
+            net[table].drop(idx, inplace=True)
+        e_mwh = bat.energy_kwh / 1e3
+        p_dis = min(rec['s_rated'], bat.c_rate_dis * e_mwh)
+        p_chg = min(rec['s_rated'], bat.c_rate_ch * e_mwh)
+        i_rated = rec['s_rated'] / (math.sqrt(3.0) * rec['vn_kv'])
+        st = pp.create_storage(net, rec['bus'], p_mw=-rec['p_set_ac'], max_e_mwh=e_mwh, q_mvar=0.0,
+                               sn_mva=rec['s_rated'], soc_percent=100.0 * bat.soc0, min_e_mwh=0.0,
+                               name=rec['name'], in_service=rec['in_service'], max_p_mw=p_chg, min_p_mw=-p_dis,
+                               max_q_mvar=rec['s_rated'], min_q_mvar=-rec['s_rated'])
+        for col, value in (('id', rec['id']), ('max_ik_ka', rec['k'] * i_rated), ('current_source', True), ('rx', 0.1)):
+            net.storage.at[st, col] = value
+        net.electrisim_pcs.remove(rec)
+
+
 def bess_preliminary_study(net, params, in_data=None):
     """
     Main entry: named cases + ratings + P/Q envelope + tap sweep.
@@ -1459,6 +1487,7 @@ def bess_preliminary_study(net, params, in_data=None):
             progress_cb('Building named load-flow cases…')
 
         params = dict(params or {})
+        _pcs_as_storage(net)
         params['_dc_snapshot'] = _dc_rack_snapshot(net)
         _strip_dc_for_ac_lf(net)
         dropped = _keep_poc_island(net, params)
