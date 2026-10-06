@@ -1671,11 +1671,25 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
     need_seed = bool(getattr(net, '_electrisim_export_park_need_seed', False))
     enforce_q = bool(getattr(net, '_electrisim_enforce_q_lims', False))
 
+    # The backend's angle start for a FACTS device with phase-shifting transformers.
+    init_kwargs = [f"init='{init}'"]
+    if _electrisim_facts_angle_start_applies(
+            net, {'algorithm': algorithm, 'calculate_voltage_angles': calculate_voltage_angles, 'init': init}):
+        if init == 'flat':
+            lines.append("# Note: with a VSC or other FACTS device and phase-shifting transformers, a flat")
+            lines.append("# start can converge to a wrong, collapsed solution - check the bus voltages.")
+        else:
+            lines.extend(_FACTS_ANGLE_START_PY.splitlines())
+            lines.append("")
+            lines.append("va_start = facts_angle_start(net)")
+            init_kwargs = ["init='auto'", "init_va_degree=va_start"] + (["init_vm_pu='flat'"] if init == 'dc' else [])
+        lines.append("")
+
     if need_seed:
         lines.append("# Seed load flow (park cosphi(P)/Q(V) measurements)")
         lines.append(
             f"pp.runpp(net, algorithm='{algorithm}', calculate_voltage_angles={cva_str}, "
-            f"init='{init}', run_control=False)"
+            f"{', '.join(init_kwargs)}, run_control=False)"
         )
         lines.append("")
 
@@ -1683,7 +1697,7 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
     run_kwargs = [
         f"algorithm='{algorithm}'",
         f"calculate_voltage_angles={cva_str}",
-        f"init='{init}'",
+        *init_kwargs,
     ]
     if run_control:
         run_kwargs.append("run_control=True")
@@ -1813,14 +1827,14 @@ def _electrisim_runpp_dc_loads(net, max_rounds=60, tolerance_mw=1e-9, **kwargs):
     back and forth, the bracket still closes on the answer.
     """
     if not _electrisim_has_dc_load_models(net):
-        return pp.runpp(net, **kwargs)
+        return pp.runpp(net, **_electrisim_facts_angle_start(net, kwargs))
     ld = net.load_dc
     rows = [i for i in ld.index if pd.notna(ld.at[i, 'electrisim_share_p'])]
     lo = {i: 0.0 for i in rows}       # powers known to be too low (g < 0)
     hi = {i: None for i in rows}      # powers known to be too high (g > 0), once one is
     for _ in range(max_rounds):
         try:
-            pp.runpp(net, **kwargs)
+            pp.runpp(net, **_electrisim_facts_angle_start(net, kwargs))
         except pp.LoadflowNotConverged:
             for i in rows:
                 p = float(ld.at[i, 'p_dc_mw'])
@@ -1862,6 +1876,164 @@ def _electrisim_warn(net, message):
         net.warnings = []
     net.warnings.append(message)
     print(f"WARNING: {message}")
+
+
+# --- Voltage angles with a VSC or other FACTS device --------------------------------------
+#
+# pandapower 3.3 starts the load flow of a network with an in-service VSC, SSC,
+# SVC or TCSC flat - 0 degrees at every bus - even when it calculates voltage
+# angles (auxiliary._init_runpp_options: init_va_degree is 'dc' only "if
+# calculate_voltage_angles and not with_facts"), since its usual start, a DC
+# load flow, finds the VSC's internal bus isolated and returns NaN. A flat
+# start cannot follow transformer phase shifts: with two 330-degree shifts in
+# series Newton-Raphson converges to a second, collapsed root of the load-flow
+# equations (0.08 p.u. at the load) and reports it as converged. The start
+# pandapower uses without the FACTS devices - its DC load flow, with each VSC
+# holding the AC voltage as an AC slack in its place - is passed instead.
+
+_FACTS_TABLES = ('vsc', 'b2b_vsc', 'ssc', 'svc', 'tcsc')
+
+
+def _electrisim_in_service_rows(df):
+    if df is None or not len(df):
+        return df
+    return df[df['in_service'].fillna(False).astype(bool)] if 'in_service' in df.columns else df
+
+
+def _electrisim_angles_calculated(net, calculate_voltage_angles):
+    """Whether pp.runpp calculates voltage angles: pandapower's own reading of 'auto' (runpp default True)."""
+    if not (isinstance(calculate_voltage_angles, str) and calculate_voltage_angles == 'auto'):
+        return bool(calculate_voltage_angles)
+    is_hv_bus = np.where(net.bus.vn_kv.values > 70)[0]
+    if any(is_hv_bus) > 0:   # as pandapower writes it
+        line_buses = set(net.line.from_bus.values) & set(net.line.to_bus.values)
+        return any(a in line_buses for a in net.bus.index[is_hv_bus])
+    return False
+
+
+def _electrisim_has_phase_shift(net):
+    """An in-service transformer with a phase shift: a vector group's, or a phase-shifting tap's."""
+    trafo = _electrisim_in_service_rows(net.trafo)
+    if trafo is not None and len(trafo):
+        if (np.mod(trafo['shift_degree'].fillna(0.0).astype(float), 360.0) > 1e-9).any():
+            return True
+        if 'tap_step_degree' in trafo.columns:
+            steps = (trafo['tap_pos'].fillna(0) - trafo['tap_neutral'].fillna(0)) * trafo['tap_step_degree'].fillna(0)
+            if (np.abs(steps.astype(float)) > 1e-9).any():
+                return True
+    t3 = _electrisim_in_service_rows(net.trafo3w)
+    if t3 is not None and len(t3):
+        for col in ('shift_mv_degree', 'shift_lv_degree'):
+            if col in t3.columns and (np.mod(t3[col].fillna(0.0).astype(float), 360.0) > 1e-9).any():
+                return True
+    return False
+
+
+def _electrisim_facts_angle_seed(net):
+    """
+    Bus voltage angles (degrees, net.bus order) from pandapower's DC load flow
+    of the network without its FACTS devices: each VSC (or back-to-back VSC)
+    holding its AC bus in slack mode an external grid there, each TCSC a closed
+    bus-bus switch. A bus it leaves unsolved starts at 0, as before.
+    """
+    probe = deepcopy(net)
+    for table in ('vsc', 'b2b_vsc'):
+        df = _electrisim_in_service_rows(getattr(probe, table, None))
+        if df is not None and len(df) and 'control_mode_ac' in df.columns:
+            for bus in df.loc[df['control_mode_ac'] == 'slack', 'bus'].unique():
+                if not (probe.ext_grid['bus'] == bus).any():
+                    pp.create_ext_grid(probe, int(bus), vm_pu=1.0, va_degree=0.0)
+    tcsc = _electrisim_in_service_rows(getattr(probe, 'tcsc', None))
+    if tcsc is not None and len(tcsc):
+        for _, row in tcsc.iterrows():
+            pp.create_switch(probe, int(row['from_bus']), int(row['to_bus']), et='b', closed=True)
+    for table in _FACTS_TABLES:
+        if table in probe and len(probe[table]):
+            probe[table] = probe[table].iloc[0:0]
+    if 'controller' in probe and len(probe.controller):
+        probe.controller = probe.controller.iloc[0:0]
+    pp.rundcpp(probe, calculate_voltage_angles=True)
+    va = probe.res_bus['va_degree'].reindex(net.bus.index).to_numpy(dtype=float)
+    # A list: pandapower 3.3 compares init_va_degree with 'results' and fails on an array.
+    return np.nan_to_num(va, nan=0.0).tolist()
+
+
+# _electrisim_facts_angle_seed as the exported Python script runs it.
+_FACTS_ANGLE_START_PY = '''\
+# Voltage-angle start, as Electrisim runs it: pandapower starts a network with a
+# VSC or other FACTS device flat even when it calculates voltage angles, and with
+# phase-shifting transformers a flat start can converge to a collapsed solution.
+# Start instead from the DC load flow of the network without the FACTS devices,
+# each VSC in AC slack mode an external grid, each TCSC a closed switch.
+def facts_angle_start(net):
+    import copy
+    probe = copy.deepcopy(net)
+    for table in ('vsc', 'b2b_vsc'):
+        df = probe[table][probe[table]['in_service'].fillna(False).astype(bool)]
+        for bus in df.loc[df['control_mode_ac'] == 'slack', 'bus'].unique():
+            if not (probe.ext_grid['bus'] == bus).any():
+                pp.create_ext_grid(probe, int(bus), vm_pu=1.0, va_degree=0.0)
+    tcsc = probe.tcsc[probe.tcsc['in_service'].fillna(False).astype(bool)]
+    for _, row in tcsc.iterrows():
+        pp.create_switch(probe, int(row['from_bus']), int(row['to_bus']), et='b', closed=True)
+    for table in ('vsc', 'b2b_vsc', 'ssc', 'svc', 'tcsc', 'controller'):
+        probe[table] = probe[table].iloc[0:0]
+    pp.rundcpp(probe, calculate_voltage_angles=True)
+    # A list: pandapower 3.3 fails on an array here.
+    return probe.res_bus['va_degree'].reindex(net.bus.index).fillna(0.0).astype(float).tolist()
+'''
+
+
+def _electrisim_facts_angle_start_applies(net, kwargs):
+    """
+    Whether a load flow with these pp.runpp keyword arguments is one the angle
+    start is for: Newton-Raphson, started 'auto', 'dc' or 'flat', on a network
+    with a FACTS device and a phase-shifting transformer, angles calculated.
+    """
+    if (kwargs.get('algorithm', 'nr') != 'nr' or kwargs.get('init', 'auto') not in ('auto', 'dc', 'flat')
+            or kwargs.get('init_va_degree') is not None
+            or not _electrisim_net_has_facts(net)):
+        return False
+    try:
+        return bool(_electrisim_angles_calculated(net, kwargs.get('calculate_voltage_angles', True))
+                    and _electrisim_has_phase_shift(net))
+    except Exception as err:
+        print(f"Angle start for the FACTS devices skipped: {type(err).__name__}: {err}")
+        return False
+
+
+def _electrisim_facts_angle_start(net, kwargs):
+    """
+    pp.runpp keyword arguments with the angle start above, for a network with
+    a FACTS device and a phase-shifting transformer whose voltage angles are
+    calculated. init='auto' (and 'dc', which pandapower cannot run with a VSC)
+    get the start; an explicit flat start is kept, with a warning that it can
+    converge to a collapsed solution.
+    """
+    if not _electrisim_facts_angle_start_applies(net, kwargs):
+        return kwargs
+    init = kwargs.get('init', 'auto')
+    cause = ("Voltage angles are calculated and the network has a VSC or other FACTS device and "
+             "phase-shifting transformers. pandapower 3.3 starts such a load flow flat, which can "
+             "converge to a wrong, collapsed solution")
+    if init == 'flat':
+        message = (cause + " - a flat start (init='flat') was used here: check the bus voltages, or run "
+                           "with Initialization 'Auto' or 'DC', which start from the transformers' angles.")
+    else:
+        try:
+            seed = _electrisim_facts_angle_seed(net)
+        except Exception as err:
+            seed = None
+            message = (cause + f"; its angles could not be estimated for a better start ({type(err).__name__}: "
+                       f"{err}) - check the bus voltages.")
+        if seed is not None:
+            start = {**kwargs, 'init': 'auto', 'init_va_degree': seed}
+            if init == 'dc':
+                start['init_vm_pu'] = 'flat'
+            return start
+    if message not in (getattr(net, 'warnings', None) or []):
+        _electrisim_warn(net, message)
+    return kwargs
 
 
 # --- DC/DC converters --------------------------------------------------------------------
