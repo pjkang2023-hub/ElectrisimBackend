@@ -76,6 +76,7 @@ class _Der:
         self.bus_key = el.get('bus')
         self.in_service = _flag(el.get('in_service'), True)
         self.notes = []
+        self.fields = dict(el)          # its payload: the time series reads a PV array's profiles from it
 
     # What each kind gives.
     def v_terminal(self, i):

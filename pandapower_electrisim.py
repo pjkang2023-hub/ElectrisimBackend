@@ -13024,6 +13024,9 @@ def time_series_simulation(net, timeseries_params):
         prev_converged = False
         storage_state = _ts_storage_state(net)
         all_storages = []
+        # The microgrid's sources and stores: their profiles, states, smoothing and dispatch.
+        import microgrid_ts_electrisim as _mg
+        mg = _mg.MicrogridTs.create(net, timeseries_params, step_s, time_steps)
 
         for t in range(time_steps):
             if orig_load_p is not None:
@@ -13053,7 +13056,13 @@ def time_series_simulation(net, timeseries_params):
                     _ts_set_pq(net.gen, idx, orig_gen_p, orig_gen_q, val, mode)
 
             _ts_dispatch_storage(net, storage_state, t, hours=step_hours)
-            prev_converged = _ts_run_powerflow(net, timeseries_params, t, prev_converged)
+            if mg is not None:
+                mg.before_step(t)
+                was = prev_converged
+                prev_converged = mg.solve(t, lambda: _ts_run_powerflow(net, timeseries_params, t, was))
+                mg.after_step(t, prev_converged)
+            else:
+                prev_converged = _ts_run_powerflow(net, timeseries_params, t, prev_converged)
             _ts_advance_storage(storage_state, hours=step_hours)
             ufn = getattr(net, 'user_friendly_names', {}) or {}
             for idx, st in storage_state.items():
@@ -13267,6 +13276,9 @@ def time_series_simulation(net, timeseries_params):
         timeseries_converged = all(result['converged'] for result in all_results)
 
         notes = list(library_notes)
+        microgrid = mg.results() if mg is not None else None
+        if microgrid:
+            notes += microgrid['notes']
         for idx, st in storage_state.items():
             technical = net.storage.loc[idx, 'name']
             ufn = getattr(net, 'user_friendly_names', {}) or {}
@@ -13303,6 +13315,7 @@ def time_series_simulation(net, timeseries_params):
             'transformers': all_transformers,
             'externalgrids': all_ext_grids,
             'storages': all_storages,
+            'microgrid': microgrid,
             'notes': notes,
             'voltage_statistics': vm_stats,
             'loading_statistics': loading_stats,

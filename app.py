@@ -1369,6 +1369,10 @@ def simulation():
                     'load_profiles': in_data[x].get('load_profiles') or {},
                     'profile_repeat': in_data[x].get('profile_repeat', True),
                     'load_profile_assignments': load_profiles_electrisim.load_assignments(in_data),
+                    # DC loads following the library (rack training cycles), and the microgrid's dispatch.
+                    'dc_load_profile_assignments': load_profiles_electrisim.dc_load_assignments(in_data),
+                    'microgrid_dispatch': in_data[x].get('microgrid_dispatch', False),
+                    'sofc_tau_s': in_data[x].get('sofc_tau_s'),
                 }
 
                 # Create network
