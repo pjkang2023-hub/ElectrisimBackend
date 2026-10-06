@@ -41,7 +41,9 @@ up to 40 -> 12, above -> 14), `vkr_percent` (vk / 25), `pfe_kw` (0.6 x sn_mva),
 `i0_percent` (0.1), `shift_degree` (0), `name`, `in_service`, and zero sequence
 for earth faults: `vector_group` (`Dyn`), `vk0_percent` / `vkr0_percent` (the
 positive-sequence values), `mag0_percent` (100), `mag0_rx` (0),
-`si0_hv_partial` (0.9).
+`si0_hv_partial` (0.9), and the grounded winding's neutral resistor and reactor
+`rn_ohm` / `xn_ohm` (0: solidly grounded) - on the LV winding of a Dyn, Yyn or
+YNyn unit, the HV of a YNd or YNy.
 A warning is raised if `hv_bus` is the lower voltage.
 
 **three_winding_transformers** - one unit joining three voltage levels, e.g.

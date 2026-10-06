@@ -1760,6 +1760,42 @@ def _electrisim_has_dc_load_models(net):
                      | (ld['electrisim_v_min_pu'].fillna(0.0) > 0).any()))
 
 
+def _electrisim_droop_power_mw(conv, vm_pu):
+    """The power (MW) a DC/DC converter in droop delivers at its output voltage, within its rating."""
+    rated = conv['rated_mw'] if conv['rated_mw'] > 0 else 1.0
+    ref = conv['vm_out_pu'] if conv['vm_out_pu'] > 0 else 1.0
+    p = rated * (ref - vm_pu) / (conv['droop_percent'] / 100.0 * ref) if conv['droop_percent'] > 0 else 0.0
+    return float(min(max(p, -rated if conv['bidirectional'] else 0.0), rated))
+
+
+def _electrisim_droop_on_held_buses(net):
+    """
+    A DC/DC converter in droop is a voltage source on its output bus, its
+    voltage lowered with its power. On a bus another converter holds - a
+    supply unit, a rectifier - two voltage sources in parallel have no load
+    flow: there it delivers the power its droop gives at that bus's voltage,
+    settled with the sources and stores. With the bus's holder out of
+    service it holds the bus again.
+    """
+    convs = [c for c in getattr(net, 'electrisim_dc_dc_converters', None) or []
+             if c.get('control') == 'droop' and c.get('vsc') is not None and c['vsc'] in net.vsc.index]
+    droop_vscs = {c['vsc'] for c in convs}
+    for conv in convs:
+        vsc = conv['vsc']
+        holders = net.vsc[(net.vsc['bus_dc'] == conv['bus_out']) & (net.vsc['control_mode_dc'] == 'vm_pu')
+                          & net.vsc['in_service'].astype(bool) & ~net.vsc.index.isin(list(droop_vscs))]
+        if len(holders):
+            v = float(holders['control_value_dc'].mean())
+            if not conv.get('held'):
+                net.vsc.at[vsc, 'control_mode_dc'] = 'p_mw'
+                net.vsc.at[vsc, 'control_value_dc'] = -_electrisim_droop_power_mw(conv, v)
+            conv['held'] = True
+        elif conv.get('held'):
+            net.vsc.at[vsc, 'control_mode_dc'] = 'vm_pu'
+            net.vsc.at[vsc, 'control_value_dc'] = conv['vm_out_pu']
+            conv['held'] = False
+
+
 def _electrisim_runpp(net, max_rounds=60, tolerance_mw=1e-9, **kwargs):
     """
     The load flow, with the microgrid sources and stores settled: each one's
@@ -1769,6 +1805,8 @@ def _electrisim_runpp(net, max_rounds=60, tolerance_mw=1e-9, **kwargs):
     they agree. Without them, _electrisim_runpp_converters alone.
     """
     droop = any(c.get('control') == 'droop' for c in getattr(net, 'electrisim_dc_dc_converters', None) or [])
+    if droop:
+        _electrisim_droop_on_held_buses(net)
     pcs = _electrisim_pcs_to_settle(net)
     if not getattr(net, 'electrisim_ders', None) and not droop and not pcs:
         return _electrisim_runpp_converters(net, max_rounds, tolerance_mw, **kwargs)
@@ -2596,6 +2634,14 @@ def _electrisim_settle_ders(net):
     for conv in getattr(net, 'electrisim_dc_dc_converters', None) or []:
         if conv.get('control') != 'droop' or conv['vsc'] is None or conv['vsc'] not in net.res_vsc.index:
             continue
+        if conv.get('held'):
+            bus = conv['bus_out']
+            if bus not in net.res_bus_dc.index or not np.isfinite(net.res_bus_dc.at[bus, 'vm_pu']):
+                continue
+            p_new = -_electrisim_droop_power_mw(conv, float(net.res_bus_dc.at[bus, 'vm_pu']))
+            worst = max(worst, abs(p_new - float(net.vsc.at[conv['vsc'], 'control_value_dc'])))
+            net.vsc.at[conv['vsc'], 'control_value_dc'] = p_new
+            continue
         p_out = -float(net.res_vsc.at[conv['vsc'], 'p_dc_mw'])
         rated = conv['rated_mw'] if conv['rated_mw'] > 0 else 1.0
         vm_new = conv['vm_out_pu'] * (1.0 - conv['droop_percent'] / 100.0 * p_out / rated)
@@ -2747,6 +2793,47 @@ def _electrisim_grounding_follow_breakers(net):
         on = bool(net.trafo.at[i, 'in_service']) and bool(sw['closed'].all() if len(sw) else True)
         net.trafo.at[i, 'in_service'] = on
         net.bus.at[int(net.trafo.at[i, 'lv_bus']), 'in_service'] = on
+
+
+def _electrisim_fold_neutral_impedance(net, lv_tol_percent=10):
+    """
+    A transformer's neutral resistor and reactor (rn_ohm / xn_ohm) in pandapower's
+    IEC zero sequence, which does not read them: 3 Z_N joins its grounded
+    winding's zero-sequence impedance, on the base pandapower puts it on (the
+    LV winding but for YNd and YNy). IEC 60909 corrects a transformer's
+    impedance by K_T but not 3 Z_N, and pandapower scales the whole of vk0 by
+    K_T, so 3 Z_N / K_T goes in: K_T from its positive sequence and its LV
+    bus's c_max, as pandapower computes it. A winding that is not grounded
+    leaves Z_N with no current; a power station unit takes X_N in pandapower
+    itself. Grounding transformers carry their Z_N in vk0 already.
+    """
+    if net.trafo.empty or not {'rn_ohm', 'xn_ohm'} & set(net.trafo.columns):
+        return []
+    folded = []
+    for i in net.trafo.index:
+        row = net.trafo.loc[i]
+        rn = max(safe_float(row.get('rn_ohm'), 0.0) or 0.0, 0.0)
+        xn = max(safe_float(row.get('xn_ohm'), 0.0) or 0.0, 0.0)
+        if (rn <= 0 and xn <= 0) or _electrisim_is_grounding(net.trafo, i) or bool(row.get('power_station_unit') == True):
+            continue
+        group = re.sub(r'[^a-z]', '', str(row.get('vector_group') or '').lower())
+        if group not in ('dyn', 'yyn', 'ynyn', 'yzn', 'ynd', 'yny'):
+            continue
+        on_hv = group in ('ynd', 'yny')
+        vn = float(row['vn_hv_kv'] if on_hv else row['vn_lv_kv'])
+        sn = float(row['sn_mva'])
+        vk, vkr = float(row['vk_percent']), float(row['vkr_percent'])
+        c_max = 1.1 if float(net.bus.at[int(row['lv_bus']), 'vn_kv']) >= 1.0 else (1.1 if lv_tol_percent == 10 else 1.05)
+        k_t = 0.95 * c_max / (1.0 + 0.6 * math.sqrt(max(vk * vk - vkr * vkr, 0.0)) / 100.0)
+        vk0 = safe_float(row.get('vk0_percent'), 0.0) or 0.0
+        vkr0 = safe_float(row.get('vkr0_percent'), 0.0) or 0.0
+        vk0, vkr0 = (vk0 if vk0 > 0 else vk), (vkr0 if abs(vkr0) > 1e-8 else vkr)
+        z0 = complex(vkr0, math.sqrt(max(vk0 * vk0 - vkr0 * vkr0, 0.0)))
+        z0 += 100.0 * 3.0 * complex(rn, xn) * sn / (vn * vn) / k_t
+        net.trafo.at[i, 'vk0_percent'] = abs(z0)
+        net.trafo.at[i, 'vkr0_percent'] = z0.real
+        folded.append(i)
+    return folded
 
 
 def _electrisim_grounding_results(net):
@@ -10089,6 +10176,8 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
                 + '. Enter it under the element\'s Short circuit parameters, '
                   'or take the element out of service'
             )
+        if fault_type == '1ph':
+            _electrisim_fold_neutral_impedance(net, iec_options['lv_tol_percent'])
         sc.calc_sc(
             net,
             fault=fault_type,

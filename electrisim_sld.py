@@ -360,6 +360,11 @@ def build_network(spec):
             in_service=bool(row.get('in_service', True)),
         )
         record('trafo', idx, ident)
+        # The grounded winding's neutral resistor and reactor (ohm), for earth faults.
+        for field in ('rn_ohm', 'xn_ohm'):
+            if field not in net.trafo.columns:
+                net.trafo[field] = 0.0
+            net.trafo.at[idx, field] = _num(row.get(field), field, where, problems, default=0.0)
 
     # --- three-winding transformers --------------------------------------
     # Short-circuit voltages are named by winding pair. pandapower's own names
@@ -808,7 +813,7 @@ def solve(net, vm_min_pu=0.95, vm_max_pu=1.05, max_loading_percent=100.0):
     Run a balanced AC power flow on a net from build_network() and report it
     under the spec's own ids.
 
-    This is pandapower's runpp at its defaults - Newton-Raphson, the same engine
+    This is pandapower's runpp at the load-flow dialog's defaults - Newton-Raphson, the same engine
     behind Electrisim's load flow - so the numbers match what the app shows for
     a default load-flow run. The limits only decide what is flagged; nothing is
     enforced.
@@ -832,7 +837,9 @@ def solve(net, vm_min_pu=0.95, vm_max_pu=1.05, max_loading_percent=100.0):
         return [(idx, row) for idx, row in res.iterrows() if not known or int(idx) in known]
 
     try:
-        run(net)
+        # Voltage angles as the load-flow dialog's default, 'auto': considered
+        # above 70 kV or across a phase shift that matters, as the app runs it.
+        run(net, calculate_voltage_angles='auto', init='auto')
     except UserWarning as exc:
         # pandapower raises (not warns) when it cannot even start - most often
         # "No reference bus is available". Its own message is the best hint.
@@ -845,6 +852,11 @@ def solve(net, vm_min_pu=0.95, vm_max_pu=1.05, max_loading_percent=100.0):
                      'whose rated voltages do not match its buses, or load far beyond what '
                      'the lines and transformers can carry.'),
         }
+    if not net.get('converged', False):
+        # Electrisim's load flow repeats pandapower's until its converters
+        # settle, and leaves the last one's state rather than raising.
+        return {'converged': False, 'hint': '; '.join(net.get('warnings') or [])
+                or 'The power flow did not converge.'}
 
     buses = []
     for idx, row in spec_rows('bus', net.res_bus):

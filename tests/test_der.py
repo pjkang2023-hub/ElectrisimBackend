@@ -433,3 +433,53 @@ def test_fault_with_a_pv_array_behind_its_converter(client, quiet):
     assert set(faults) == {'cell-dc_a', 'cell-dc_b'}
     assert all(math.isfinite(f['ik_ka']) and f['ik_ka'] > 0 for f in faults.values())
     assert any("PV arrays, SOFC systems and flywheels feed a DC fault" in w for w in result['warnings'])
+
+
+def _droop_spec(vm_out_pu=1.0, sst=True, load_mw=6.0):
+    """A 6 MW, 800 V row group held by an SST, a 1.5 MW battery on it through a DC/DC converter in droop."""
+    import electrisim_sld as sld
+    spec = {
+        'name': 'droop', 'buses': [{'id': 'A', 'vn_kv': 35}],
+        'external_grids': [{'id': 'G', 'bus': 'A', 's_sc_max_mva': 600, 'rx_max': 0.1}],
+        'dc_buses': [{'id': 'RG', 'vn_kv': 0.8}, {'id': 'BD', 'vn_kv': 1.0}],
+        'dc_loads': [{'id': 'LD', 'bus': 'RG', 'p_mw': load_mw}],
+        'batteries': [{'id': 'B', 'bus': 'BD', 'vn_v': 1000, 'capacity_kwh': 750, 'c_rate_discharge': 2,
+                       'c_rate_charge': 2}],
+        'dc_dc_converters': [{'id': 'DD', 'bus_in': 'BD', 'bus_out': 'RG', 'control_mode': 'droop', 'rated_mw': 1.5,
+                              'vm_out_pu': vm_out_pu, 'vn_in_kv': 1.0, 'vn_out_kv': 0.8, 'bidirectional': True,
+                              'droop_percent': 5, 'no_load_loss_kw': 2}],
+    }
+    if sst:
+        spec['ssts'] = [{'id': 'U1', 'bus_mv': 'A', 'bus_lv_dc': 'RG', 'vn_mv_kv': 35, 'vn_lv_dc_kv': 0.8,
+                         'link_kv': 1.5, 'rect_rated_mw': 7, 'dcdc_rated_mw': 7, 'vm_lv_dc_pu': 1.0}]
+    return sld.solve(sld.build_network(spec)[0])
+
+
+@pytest.mark.parametrize('vm_out_pu', [1.0, 1.02])
+def test_droop_on_a_bus_another_converter_holds(quiet, vm_out_pu):
+    """
+    A converter in droop on a bus a supply unit holds: two voltage sources in
+    parallel had no load flow (it never converged). It delivers the power its
+    droop gives at the bus's voltage - rated x (V_set - V) / (droop V_set) -
+    and the supply unit the rest.
+    """
+    with quiet():
+        res = _droop_spec(vm_out_pu)
+    assert res['converged'], res.get('hint')
+    (dd,) = res['dc_dc_converters']
+    (rg,) = [b for b in res['dc_buses'] if b['id'] == 'RG']
+    assert rg['vm_pu'] == pytest.approx(1.0, abs=1e-9)
+    assert dd['p_out_mw'] == pytest.approx(1.5 * (vm_out_pu - 1.0) / (0.05 * vm_out_pu), abs=1e-6)
+    (sst,) = res['ssts']
+    assert sst['stages'][1]['p_out_mw'] == pytest.approx(6.0 - dd['p_out_mw'], abs=1e-5)
+
+
+def test_droop_holds_its_bus_when_nothing_else_does(quiet):
+    """With no supply unit the converter holds the bus again, lowered by its droop: 1 - 0.05 x P / 1.5 MW."""
+    with quiet():
+        res = _droop_spec(sst=False, load_mw=1.0)
+    assert res['converged'], res.get('hint')
+    (dd,) = res['dc_dc_converters']
+    (rg,) = [b for b in res['dc_buses'] if b['id'] == 'RG']
+    assert dd['p_out_mw'] == pytest.approx(1.0, abs=1e-6)
+    assert rg['vm_pu'] == pytest.approx(1.0 - 0.05 * 1.0 / 1.5, abs=1e-5)

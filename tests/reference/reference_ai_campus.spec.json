@@ -1,0 +1,221 @@
+{
+  "name": "Electrisim reference grid - AI campus microgrid",
+  "frequency_hz": 50,
+  "layout": "radial",
+  "buses": [
+    {"id": "UTIL", "vn_kv": 35, "name": "Utility 35 kV"},
+    {"id": "BUS_A", "vn_kv": 35, "name": "35 kV Bus A"},
+    {"id": "BUS_B", "vn_kv": 35, "name": "35 kV Bus B"},
+    {"id": "GT1_13", "vn_kv": 13.8, "name": "GT1 13.8 kV"},
+    {"id": "GT2_13", "vn_kv": 13.8, "name": "GT2 13.8 kV"},
+    {"id": "BESS1_LV", "vn_kv": 0.69, "name": "BESS 1 0.69 kV"},
+    {"id": "BESS2_LV", "vn_kv": 0.69, "name": "BESS 2 0.69 kV"},
+    {"id": "BESS3_LV", "vn_kv": 0.69, "name": "BESS 3 0.69 kV"},
+    {"id": "BESS4_LV", "vn_kv": 0.69, "name": "BESS 4 0.69 kV"},
+    {"id": "PV1_LV", "vn_kv": 0.8, "name": "PV 1 0.8 kV"},
+    {"id": "PV2_LV", "vn_kv": 0.8, "name": "PV 2 0.8 kV"},
+    {"id": "PV3_LV", "vn_kv": 0.8, "name": "PV 3 0.8 kV"},
+    {"id": "FC1_LV", "vn_kv": 0.48, "name": "SOFC 1 0.48 kV"},
+    {"id": "FC2_LV", "vn_kv": 0.48, "name": "SOFC 2 0.48 kV"},
+    {"id": "CA_13", "vn_kv": 13.8, "name": "Campus A 13.8 kV"},
+    {"id": "CA_LV", "vn_kv": 0.48, "name": "Campus A 0.48 kV"},
+    {"id": "CB_13", "vn_kv": 13.8, "name": "Campus B 13.8 kV"},
+    {"id": "CB_LV", "vn_kv": 0.48, "name": "Campus B 0.48 kV"},
+    {"id": "U3_LV", "vn_kv": 0.48, "name": "Hall 1 U3 0.48 kV"},
+    {"id": "U4_LV", "vn_kv": 0.48, "name": "Hall 1 U4 0.48 kV"},
+    {"id": "U6_LV", "vn_kv": 0.48, "name": "Hall 2 U6 0.48 kV"}
+  ],
+  "external_grids": [
+    {"id": "Utility", "bus": "UTIL", "vm_pu": 1.0, "s_sc_max_mva": 600, "rx_max": 0.125, "s_sc_min_mva": 400, "rx_min": 0.125, "x0x_max": 1.0, "r0x0_max": 0.1, "cost_per_mwh": 90}
+  ],
+  "transformers": [
+    {"id": "T_GT1", "hv_bus": "BUS_A", "lv_bus": "GT1_13", "sn_mva": 32, "vk_percent": 10, "vkr_percent": 0.3, "vector_group": "Yd", "shift_degree": 330, "name": "GT1 GSU"},
+    {"id": "T_GT2", "hv_bus": "BUS_B", "lv_bus": "GT2_13", "sn_mva": 32, "vk_percent": 10, "vkr_percent": 0.3, "vector_group": "Yd", "shift_degree": 330, "name": "GT2 GSU"},
+    {"id": "T_BESS1", "hv_bus": "BUS_A", "lv_bus": "BESS1_LV", "sn_mva": 5.5, "vk_percent": 6, "vkr_percent": 0.6, "vector_group": "Yd", "shift_degree": 330, "name": "BESS 1 transformer"},
+    {"id": "T_BESS2", "hv_bus": "BUS_A", "lv_bus": "BESS2_LV", "sn_mva": 5.5, "vk_percent": 6, "vkr_percent": 0.6, "vector_group": "Yd", "shift_degree": 330, "name": "BESS 2 transformer"},
+    {"id": "T_BESS3", "hv_bus": "BUS_A", "lv_bus": "BESS3_LV", "sn_mva": 5.5, "vk_percent": 6, "vkr_percent": 0.6, "vector_group": "Yd", "shift_degree": 330, "name": "BESS 3 transformer"},
+    {"id": "T_BESS4", "hv_bus": "BUS_A", "lv_bus": "BESS4_LV", "sn_mva": 5.5, "vk_percent": 6, "vkr_percent": 0.6, "vector_group": "Yd", "shift_degree": 330, "name": "BESS 4 transformer"},
+    {"id": "T_PV1", "hv_bus": "BUS_B", "lv_bus": "PV1_LV", "sn_mva": 5.5, "vk_percent": 6, "vkr_percent": 0.6, "vector_group": "Yd", "shift_degree": 330, "name": "PV 1 transformer"},
+    {"id": "T_PV2", "hv_bus": "BUS_B", "lv_bus": "PV2_LV", "sn_mva": 5.5, "vk_percent": 6, "vkr_percent": 0.6, "vector_group": "Yd", "shift_degree": 330, "name": "PV 2 transformer"},
+    {"id": "T_PV3", "hv_bus": "BUS_B", "lv_bus": "PV3_LV", "sn_mva": 5.5, "vk_percent": 6, "vkr_percent": 0.6, "vector_group": "Yd", "shift_degree": 330, "name": "PV 3 transformer"},
+    {"id": "T_FC1", "hv_bus": "BUS_A", "lv_bus": "FC1_LV", "sn_mva": 5.5, "vk_percent": 6, "vkr_percent": 0.6, "vector_group": "Yd", "shift_degree": 330, "name": "SOFC 1 transformer"},
+    {"id": "T_FC2", "hv_bus": "BUS_A", "lv_bus": "FC2_LV", "sn_mva": 5.5, "vk_percent": 6, "vkr_percent": 0.6, "vector_group": "Yd", "shift_degree": 330, "name": "SOFC 2 transformer"},
+    {"id": "T_CA", "hv_bus": "BUS_A", "lv_bus": "CA_13", "sn_mva": 16, "vn_hv_kv": 34.125, "vk_percent": 8, "vkr_percent": 0.6, "vector_group": "Dyn", "shift_degree": 330, "rn_ohm": 19.9186, "name": "Campus A transformer"},
+    {"id": "T_CA_LV", "hv_bus": "CA_13", "lv_bus": "CA_LV", "sn_mva": 5, "vk_percent": 6, "vkr_percent": 0.8, "vector_group": "Dyn", "shift_degree": 330, "name": "Campus A LV transformer"},
+    {"id": "T_CB", "hv_bus": "BUS_B", "lv_bus": "CB_13", "sn_mva": 16, "vn_hv_kv": 34.125, "vk_percent": 8, "vkr_percent": 0.6, "vector_group": "Dyn", "shift_degree": 330, "rn_ohm": 19.9186, "name": "Campus B transformer"},
+    {"id": "T_CB_LV", "hv_bus": "CB_13", "lv_bus": "CB_LV", "sn_mva": 5, "vk_percent": 6, "vkr_percent": 0.8, "vector_group": "Dyn", "shift_degree": 330, "name": "Campus B LV transformer"},
+    {"id": "T_U3", "hv_bus": "BUS_A", "lv_bus": "U3_LV", "sn_mva": 7.5, "vk_percent": 7, "vkr_percent": 0.7, "vector_group": "Dd", "shift_degree": 0, "name": "Hall 1 U3 rectifier transformer"},
+    {"id": "T_U4", "hv_bus": "BUS_A", "lv_bus": "U4_LV", "sn_mva": 7.5, "vk_percent": 7, "vkr_percent": 0.7, "vector_group": "Dy", "shift_degree": 330, "name": "Hall 1 U4 rectifier transformer"},
+    {"id": "T_U6", "hv_bus": "BUS_B", "lv_bus": "U6_LV", "sn_mva": 15, "vk_percent": 7, "vkr_percent": 0.6, "vector_group": "Dy", "shift_degree": 330, "name": "Hall 2 rectifier transformer equivalent"}
+  ],
+  "lines": [
+    {"id": "F1", "from_bus": "UTIL", "to_bus": "BUS_A", "length_km": 3.0, "r_ohm_per_km": 0.04, "x_ohm_per_km": 0.0535, "c_nf_per_km": 800, "max_i_ka": 1.2, "r0_ohm_per_km": 0.12, "x0_ohm_per_km": 0.166, "c0_nf_per_km": 800, "name": "Feeder 1"},
+    {"id": "F2", "from_bus": "UTIL", "to_bus": "BUS_B", "length_km": 3.0, "r_ohm_per_km": 0.04, "x_ohm_per_km": 0.0535, "c_nf_per_km": 800, "max_i_ka": 1.2, "r0_ohm_per_km": 0.12, "x0_ohm_per_km": 0.166, "c0_nf_per_km": 800, "name": "Feeder 2"}
+  ],
+  "loads": [
+    {"id": "AUX_A", "bus": "CA_LV", "p_mw": 1.0, "q_mvar": 0.4, "name": "Mechanical auxiliaries A"},
+    {"id": "BLD_A", "bus": "CA_LV", "p_mw": 1.5, "q_mvar": 0.5, "name": "Buildings A"},
+    {"id": "ACIT_A", "bus": "CA_LV", "p_mw": 1.0, "q_mvar": 0.2, "name": "AC IT A"},
+    {"id": "AUX_B", "bus": "CB_LV", "p_mw": 1.0, "q_mvar": 0.4, "name": "Mechanical auxiliaries B"},
+    {"id": "BLD_B", "bus": "CB_LV", "p_mw": 1.5, "q_mvar": 0.5, "name": "Buildings B"},
+    {"id": "ACIT_B", "bus": "CB_LV", "p_mw": 1.0, "q_mvar": 0.2, "name": "AC IT B"}
+  ],
+  "generators": [
+    {"id": "GT1", "bus": "GT1_13", "p_mw": 12, "vm_pu": 1.0, "sn_mva": 31.25, "xdss_pu": 0.15, "rdss_ohm": 0.046, "cos_phi": 0.8, "cost_per_mwh": 60, "name": "Gas turbine 1"},
+    {"id": "GT2", "bus": "GT2_13", "p_mw": 12, "vm_pu": 1.0, "sn_mva": 31.25, "xdss_pu": 0.15, "rdss_ohm": 0.046, "cos_phi": 0.8, "cost_per_mwh": 60, "name": "Gas turbine 2"}
+  ],
+  "motors": [
+    {"id": "CHA1", "bus": "CA_13", "pn_mech_mw": 2.0, "cos_phi": 0.9, "efficiency_percent": 96, "lrc_pu": 6, "rx": 0.1, "name": "Chiller A1"},
+    {"id": "CHA2", "bus": "CA_13", "pn_mech_mw": 2.0, "cos_phi": 0.9, "efficiency_percent": 96, "lrc_pu": 6, "rx": 0.1, "name": "Chiller A2"},
+    {"id": "CHA3", "bus": "CA_13", "pn_mech_mw": 2.0, "cos_phi": 0.9, "efficiency_percent": 96, "lrc_pu": 6, "rx": 0.1, "name": "Chiller A3"},
+    {"id": "CHB1", "bus": "CB_13", "pn_mech_mw": 2.0, "cos_phi": 0.9, "efficiency_percent": 96, "lrc_pu": 6, "rx": 0.1, "name": "Chiller B1"},
+    {"id": "CHB2", "bus": "CB_13", "pn_mech_mw": 2.0, "cos_phi": 0.9, "efficiency_percent": 96, "lrc_pu": 6, "rx": 0.1, "name": "Chiller B2"},
+    {"id": "CHB3", "bus": "CB_13", "pn_mech_mw": 2.0, "cos_phi": 0.9, "efficiency_percent": 96, "lrc_pu": 6, "rx": 0.1, "name": "Chiller B3"}
+  ],
+  "switches": [
+    {"id": "CB_F1", "bus": "UTIL", "element": "F1", "et": "line", "name": "Feeder 1 breaker"},
+    {"id": "CB_F2", "bus": "UTIL", "element": "F2", "et": "line", "name": "Feeder 2 breaker"},
+    {"id": "CB_TIE", "bus": "BUS_A", "element": "BUS_B", "et": "bus", "name": "Bus tie"},
+    {"id": "CB_ZA", "bus": "BUS_A", "element": "ZA", "et": "grounding_transformer", "name": "Zigzag A breaker"},
+    {"id": "CB_ZB", "bus": "BUS_B", "element": "ZB", "et": "grounding_transformer", "name": "Zigzag B breaker"},
+    {"id": "CB_GT1", "bus": "BUS_A", "element": "T_GT1", "et": "transformer", "name": "GT1 breaker"},
+    {"id": "CB_GT2", "bus": "BUS_B", "element": "T_GT2", "et": "transformer", "name": "GT2 breaker"},
+    {"id": "CB_CA", "bus": "BUS_A", "element": "T_CA", "et": "transformer", "name": "Campus A breaker"},
+    {"id": "CB_CB", "bus": "BUS_B", "element": "T_CB", "et": "transformer", "name": "Campus B breaker"}
+  ],
+  "dc_buses": [
+    {"id": "RG1", "vn_kv": 0.8, "name": "Hall 1 row group 1"},
+    {"id": "RG2", "vn_kv": 0.8, "name": "Hall 1 row group 2"},
+    {"id": "RG3", "vn_kv": 0.8, "name": "Hall 1 row group 3"},
+    {"id": "RG4", "vn_kv": 0.8, "name": "Hall 1 row group 4"},
+    {"id": "BESS_RG1_DC", "vn_kv": 1.0, "name": "Hall 1 RG1 battery 1 kV"},
+    {"id": "BESS_RG2_DC", "vn_kv": 1.0, "name": "Hall 1 RG2 battery 1 kV"},
+    {"id": "BESS_RG3_DC", "vn_kv": 1.0, "name": "Hall 1 RG3 battery 1 kV"},
+    {"id": "BESS_RG4_DC", "vn_kv": 1.0, "name": "Hall 1 RG4 battery 1 kV"},
+    {"id": "CL1", "vn_kv": 0.8, "name": "RG1 cluster 1"},
+    {"id": "SC_CL1_DC", "vn_kv": 0.81, "name": "Cluster 1 supercapacitors 0.81 kV"},
+    {"id": "CL2", "vn_kv": 0.8, "name": "RG1 cluster 2"},
+    {"id": "SC_CL2_DC", "vn_kv": 0.81, "name": "Cluster 2 supercapacitors 0.81 kV"},
+    {"id": "CL3", "vn_kv": 0.8, "name": "RG1 cluster 3"},
+    {"id": "SC_CL3_DC", "vn_kv": 0.81, "name": "Cluster 3 supercapacitors 0.81 kV"},
+    {"id": "CL4", "vn_kv": 0.8, "name": "RG1 cluster 4"},
+    {"id": "SC_CL4_DC", "vn_kv": 0.81, "name": "Cluster 4 supercapacitors 0.81 kV"},
+    {"id": "R10_54", "vn_kv": 0.054, "name": "C1 rack 10 54 V"},
+    {"id": "SC_RG2_DC", "vn_kv": 0.81, "name": "RG2 supercapacitors 0.81 kV"},
+    {"id": "SC_RG3_DC", "vn_kv": 0.81, "name": "RG3 supercapacitors 0.81 kV"},
+    {"id": "SC_RG4_DC", "vn_kv": 0.81, "name": "RG4 supercapacitors 0.81 kV"},
+    {"id": "H2", "vn_kv": 0.8, "name": "Hall 2 800 V"},
+    {"id": "BESS_H2_DC", "vn_kv": 1.0, "name": "Hall 2 battery 1 kV"},
+    {"id": "SC_H2_DC", "vn_kv": 0.81, "name": "Hall 2 supercapacitors 0.81 kV"}
+  ],
+  "dc_lines": [
+    {"id": "TIE_12", "from_bus": "RG1", "to_bus": "RG2", "length_km": 0.05, "r_ohm_per_km": 0.01, "max_i_ka": 4, "name": "DC tie RG1-RG2"},
+    {"id": "TIE_34", "from_bus": "RG3", "to_bus": "RG4", "length_km": 0.05, "r_ohm_per_km": 0.01, "max_i_ka": 4, "name": "DC tie RG3-RG4"},
+    {"id": "L_CL1", "from_bus": "RG1", "to_bus": "CL1", "length_km": 0.03, "r_ohm_per_km": 0.02, "max_i_ka": 2.5, "l_mh_per_km": 0.3, "c_uf_per_km": 0.2, "name": "Cluster 1 busway"},
+    {"id": "L_CL2", "from_bus": "RG1", "to_bus": "CL2", "length_km": 0.03, "r_ohm_per_km": 0.02, "max_i_ka": 2.5, "l_mh_per_km": 0.3, "c_uf_per_km": 0.2, "name": "Cluster 2 busway"},
+    {"id": "L_CL3", "from_bus": "RG1", "to_bus": "CL3", "length_km": 0.03, "r_ohm_per_km": 0.02, "max_i_ka": 2.5, "l_mh_per_km": 0.3, "c_uf_per_km": 0.2, "name": "Cluster 3 busway"},
+    {"id": "L_CL4", "from_bus": "RG1", "to_bus": "CL4", "length_km": 0.03, "r_ohm_per_km": 0.02, "max_i_ka": 2.5, "l_mh_per_km": 0.3, "c_uf_per_km": 0.2, "name": "Cluster 4 busway"}
+  ],
+  "dc_loads": [
+    {"id": "RACK1", "bus": "CL1", "p_mw": 0.15, "load_profile_id": "ai_training", "name": "C1 rack 1"},
+    {"id": "RACK2", "bus": "CL1", "p_mw": 0.15, "load_profile_id": "ai_training", "name": "C1 rack 2"},
+    {"id": "RACK3", "bus": "CL1", "p_mw": 0.15, "load_profile_id": "ai_training", "name": "C1 rack 3"},
+    {"id": "RACK4", "bus": "CL1", "p_mw": 0.15, "load_profile_id": "ai_training", "name": "C1 rack 4"},
+    {"id": "RACK5", "bus": "CL1", "p_mw": 0.15, "load_profile_id": "ai_training", "name": "C1 rack 5"},
+    {"id": "RACK6", "bus": "CL1", "p_mw": 0.15, "load_profile_id": "ai_training", "name": "C1 rack 6"},
+    {"id": "RACK7", "bus": "CL1", "p_mw": 0.15, "load_profile_id": "ai_training", "name": "C1 rack 7"},
+    {"id": "RACK8", "bus": "CL1", "p_mw": 0.15, "load_profile_id": "ai_training", "name": "C1 rack 8"},
+    {"id": "RACK9", "bus": "CL1", "p_mw": 0.15, "load_profile_id": "ai_training", "name": "C1 rack 9"},
+    {"id": "RACK10", "bus": "R10_54", "p_mw": 0.15, "load_profile_id": "ai_training", "name": "C1 rack 10 (54 V)"},
+    {"id": "LD_CL2", "bus": "CL2", "p_mw": 1.5, "load_profile_id": "ai_training", "name": "Cluster 2 racks"},
+    {"id": "LD_CL3", "bus": "CL3", "p_mw": 1.5, "load_profile_id": "ai_training", "name": "Cluster 3 racks"},
+    {"id": "LD_CL4", "bus": "CL4", "p_mw": 1.5, "load_profile_id": "ai_training", "name": "Cluster 4 racks"},
+    {"id": "LD_RG2", "bus": "RG2", "p_mw": 6.0, "load_profile_id": "ai_training", "name": "RG2 racks"},
+    {"id": "LD_RG3", "bus": "RG3", "p_mw": 6.0, "load_profile_id": "ai_training_late", "name": "RG3 racks"},
+    {"id": "LD_RG4", "bus": "RG4", "p_mw": 6.0, "load_profile_id": "ai_training_late", "name": "RG4 racks"},
+    {"id": "LD_H2", "bus": "H2", "p_mw": 24.0, "load_profile_id": "ai_training_late", "name": "Hall 2 racks"}
+  ],
+  "vscs": [
+    {"id": "U3", "bus": "U3_LV", "bus_dc": "RG3", "r_ohm": 0.00015, "x_ohm": 0.0046, "r_dc_ohm": 0.0005, "control_mode_ac": "q_mvar", "control_value_ac": 0, "control_mode_dc": "vm_pu", "control_value_dc": 1.0, "rated_mva": 7.5, "name": "Hall 1 rectifier U3"},
+    {"id": "U4", "bus": "U4_LV", "bus_dc": "RG4", "r_ohm": 0.00015, "x_ohm": 0.0046, "r_dc_ohm": 0.0005, "control_mode_ac": "q_mvar", "control_value_ac": 0, "control_mode_dc": "vm_pu", "control_value_dc": 1.0, "rated_mva": 7.5, "name": "Hall 1 rectifier U4"},
+    {"id": "U6", "bus": "U6_LV", "bus_dc": "H2", "r_ohm": 8e-05, "x_ohm": 0.0023, "r_dc_ohm": 0.00025, "control_mode_ac": "q_mvar", "control_value_ac": 0, "control_mode_dc": "p_mw", "control_value_dc": -12.0, "rated_mva": 15, "name": "Hall 2 rectifier equivalent"}
+  ],
+  "ssts": [
+    {"id": "U1", "bus_mv": "BUS_A", "bus_lv_dc": "RG1", "rect_rated_mw": 7, "dcdc_rated_mw": 7, "vn_mv_kv": 35, "vn_lv_dc_kv": 0.8, "link_kv": 1.5, "rect_efficiency_percent": 98.5, "rect_no_load_kw": 14, "dcdc_efficiency_percent": 98, "dcdc_no_load_kw": 14, "vm_lv_dc_pu": 1.0, "name": "Hall 1 SST U1"},
+    {"id": "U2", "bus_mv": "BUS_A", "bus_lv_dc": "RG2", "rect_rated_mw": 7, "dcdc_rated_mw": 7, "vn_mv_kv": 35, "vn_lv_dc_kv": 0.8, "link_kv": 1.5, "rect_efficiency_percent": 98.5, "rect_no_load_kw": 14, "dcdc_efficiency_percent": 98, "dcdc_no_load_kw": 14, "vm_lv_dc_pu": 1.0, "name": "Hall 1 SST U2"},
+    {"id": "U5", "bus_mv": "BUS_B", "bus_lv_dc": "H2", "rect_rated_mw": 13, "dcdc_rated_mw": 13, "vn_mv_kv": 35, "vn_lv_dc_kv": 0.8, "link_kv": 1.5, "rect_efficiency_percent": 98.5, "rect_no_load_kw": 24, "dcdc_efficiency_percent": 98, "dcdc_no_load_kw": 24, "vm_lv_dc_pu": 1.0, "name": "Hall 2 SST equivalent"}
+  ],
+  "dc_dc_converters": [
+    {"id": "DD_BESS_RG1", "bus_in": "BESS_RG1_DC", "bus_out": "RG1", "control_mode": "droop", "rated_mw": 1.5, "vn_in_kv": 1.0, "vn_out_kv": 0.8, "bidirectional": true, "droop_percent": 5, "no_load_loss_kw": 2, "name": "Hall 1 RG1 battery converter"},
+    {"id": "DD_BESS_RG2", "bus_in": "BESS_RG2_DC", "bus_out": "RG2", "control_mode": "droop", "rated_mw": 1.5, "vn_in_kv": 1.0, "vn_out_kv": 0.8, "bidirectional": true, "droop_percent": 5, "no_load_loss_kw": 2, "name": "Hall 1 RG2 battery converter"},
+    {"id": "DD_BESS_RG3", "bus_in": "BESS_RG3_DC", "bus_out": "RG3", "control_mode": "droop", "rated_mw": 1.5, "vn_in_kv": 1.0, "vn_out_kv": 0.8, "bidirectional": true, "droop_percent": 5, "no_load_loss_kw": 2, "name": "Hall 1 RG3 battery converter"},
+    {"id": "DD_BESS_RG4", "bus_in": "BESS_RG4_DC", "bus_out": "RG4", "control_mode": "droop", "rated_mw": 1.5, "vn_in_kv": 1.0, "vn_out_kv": 0.8, "bidirectional": true, "droop_percent": 5, "no_load_loss_kw": 2, "name": "Hall 1 RG4 battery converter"},
+    {"id": "DD_SC_CL1", "bus_in": "SC_CL1_DC", "bus_out": "CL1", "control_mode": "smoothing", "rated_mw": 1.5, "vn_in_kv": 0.81, "vn_out_kv": 0.8, "bidirectional": true, "smoothing_tau_s": 2, "no_load_loss_kw": 1, "name": "Cluster 1 supercapacitors converter"},
+    {"id": "DD_SC_CL2", "bus_in": "SC_CL2_DC", "bus_out": "CL2", "control_mode": "smoothing", "rated_mw": 1.5, "vn_in_kv": 0.81, "vn_out_kv": 0.8, "bidirectional": true, "smoothing_tau_s": 2, "no_load_loss_kw": 1, "name": "Cluster 2 supercapacitors converter"},
+    {"id": "DD_SC_CL3", "bus_in": "SC_CL3_DC", "bus_out": "CL3", "control_mode": "smoothing", "rated_mw": 1.5, "vn_in_kv": 0.81, "vn_out_kv": 0.8, "bidirectional": true, "smoothing_tau_s": 2, "no_load_loss_kw": 1, "name": "Cluster 3 supercapacitors converter"},
+    {"id": "DD_SC_CL4", "bus_in": "SC_CL4_DC", "bus_out": "CL4", "control_mode": "smoothing", "rated_mw": 1.5, "vn_in_kv": 0.81, "vn_out_kv": 0.8, "bidirectional": true, "smoothing_tau_s": 2, "no_load_loss_kw": 1, "name": "Cluster 4 supercapacitors converter"},
+    {"id": "DD_R10", "bus_in": "CL1", "bus_out": "R10_54", "control_mode": "voltage", "vm_out_pu": 1.0, "rated_mw": 0.16, "vn_in_kv": 0.8, "vn_out_kv": 0.054, "efficiency_percent": 97.5, "no_load_loss_kw": 0.5, "name": "Rack 10 power shelf"},
+    {"id": "DD_SC_RG2", "bus_in": "SC_RG2_DC", "bus_out": "RG2", "control_mode": "smoothing", "rated_mw": 6.0, "vn_in_kv": 0.81, "vn_out_kv": 0.8, "bidirectional": true, "smoothing_tau_s": 2, "no_load_loss_kw": 1, "name": "RG2 supercapacitors converter"},
+    {"id": "DD_SC_RG3", "bus_in": "SC_RG3_DC", "bus_out": "RG3", "control_mode": "smoothing", "rated_mw": 6.0, "vn_in_kv": 0.81, "vn_out_kv": 0.8, "bidirectional": true, "smoothing_tau_s": 2, "no_load_loss_kw": 1, "name": "RG3 supercapacitors converter"},
+    {"id": "DD_SC_RG4", "bus_in": "SC_RG4_DC", "bus_out": "RG4", "control_mode": "smoothing", "rated_mw": 6.0, "vn_in_kv": 0.81, "vn_out_kv": 0.8, "bidirectional": true, "smoothing_tau_s": 2, "no_load_loss_kw": 1, "name": "RG4 supercapacitors converter"},
+    {"id": "DD_BESS_H2", "bus_in": "BESS_H2_DC", "bus_out": "H2", "control_mode": "droop", "rated_mw": 6.0, "vn_in_kv": 1.0, "vn_out_kv": 0.8, "bidirectional": true, "droop_percent": 5, "no_load_loss_kw": 2, "name": "Hall 2 battery converter"},
+    {"id": "DD_SC_H2", "bus_in": "SC_H2_DC", "bus_out": "H2", "control_mode": "smoothing", "rated_mw": 24.0, "vn_in_kv": 0.81, "vn_out_kv": 0.8, "bidirectional": true, "smoothing_tau_s": 2, "no_load_loss_kw": 1, "name": "Hall 2 supercapacitors converter"}
+  ],
+  "dc_breakers": [
+    {"id": "DCB_TIE_12", "bus": "RG1", "element": "TIE_12", "closed": false, "rated_voltage_kv": 1, "rated_current_ka": 4, "breaking_capacity_ka": 50, "trip_current_ka": 10, "name": "DC tie breaker RG1-RG2"},
+    {"id": "DCB_TIE_34", "bus": "RG3", "element": "TIE_34", "closed": false, "rated_voltage_kv": 1, "rated_current_ka": 4, "breaking_capacity_ka": 50, "trip_current_ka": 10, "name": "DC tie breaker RG3-RG4"}
+  ],
+  "batteries": [
+    {"id": "BESS1", "name": "BESS 1", "vn_v": 1500, "capacity_kwh": 20000, "soc_percent": 60, "c_rate_discharge": 0.25, "c_rate_charge": 0.25},
+    {"id": "BESS2", "name": "BESS 2", "vn_v": 1500, "capacity_kwh": 20000, "soc_percent": 60, "c_rate_discharge": 0.25, "c_rate_charge": 0.25},
+    {"id": "BESS3", "name": "BESS 3", "vn_v": 1500, "capacity_kwh": 20000, "soc_percent": 60, "c_rate_discharge": 0.25, "c_rate_charge": 0.25},
+    {"id": "BESS4", "name": "BESS 4", "vn_v": 1500, "capacity_kwh": 20000, "soc_percent": 60, "c_rate_discharge": 0.25, "c_rate_charge": 0.25},
+    {"id": "BESS_RG1", "bus": "BESS_RG1_DC", "vn_v": 1000, "capacity_kwh": 750, "soc_percent": 60, "c_rate_discharge": 2, "c_rate_charge": 2, "name": "Hall 1 RG1 battery"},
+    {"id": "BESS_RG2", "bus": "BESS_RG2_DC", "vn_v": 1000, "capacity_kwh": 750, "soc_percent": 60, "c_rate_discharge": 2, "c_rate_charge": 2, "name": "Hall 1 RG2 battery"},
+    {"id": "BESS_RG3", "bus": "BESS_RG3_DC", "vn_v": 1000, "capacity_kwh": 750, "soc_percent": 60, "c_rate_discharge": 2, "c_rate_charge": 2, "name": "Hall 1 RG3 battery"},
+    {"id": "BESS_RG4", "bus": "BESS_RG4_DC", "vn_v": 1000, "capacity_kwh": 750, "soc_percent": 60, "c_rate_discharge": 2, "c_rate_charge": 2, "name": "Hall 1 RG4 battery"},
+    {"id": "BESS_H2", "bus": "BESS_H2_DC", "vn_v": 1000, "capacity_kwh": 3000, "soc_percent": 60, "c_rate_discharge": 2, "c_rate_charge": 2, "name": "Hall 2 battery"}
+  ],
+  "supercapacitors": [
+    {"id": "SC_CL1", "bus": "SC_CL1_DC", "coupling": "converter", "sizing": "modules", "module_c_f": 130, "module_v": 54, "module_esr_mohm": 4, "modules_series": 15, "strings_parallel": 1, "v0_percent": 90, "v_min_percent": 50, "name": "Cluster 1 supercapacitors"},
+    {"id": "SC_CL2", "bus": "SC_CL2_DC", "coupling": "converter", "sizing": "modules", "module_c_f": 130, "module_v": 54, "module_esr_mohm": 4, "modules_series": 15, "strings_parallel": 1, "v0_percent": 90, "v_min_percent": 50, "name": "Cluster 2 supercapacitors"},
+    {"id": "SC_CL3", "bus": "SC_CL3_DC", "coupling": "converter", "sizing": "modules", "module_c_f": 130, "module_v": 54, "module_esr_mohm": 4, "modules_series": 15, "strings_parallel": 1, "v0_percent": 90, "v_min_percent": 50, "name": "Cluster 3 supercapacitors"},
+    {"id": "SC_CL4", "bus": "SC_CL4_DC", "coupling": "converter", "sizing": "modules", "module_c_f": 130, "module_v": 54, "module_esr_mohm": 4, "modules_series": 15, "strings_parallel": 1, "v0_percent": 90, "v_min_percent": 50, "name": "Cluster 4 supercapacitors"},
+    {"id": "SC_R10", "bus": "R10_54", "coupling": "direct", "sizing": "modules", "module_c_f": 130, "module_v": 54, "modules_series": 1, "strings_parallel": 1, "name": "Rack 10 supercapacitor"},
+    {"id": "SC_RG2", "bus": "SC_RG2_DC", "coupling": "converter", "sizing": "modules", "module_c_f": 130, "module_v": 54, "module_esr_mohm": 4, "modules_series": 15, "strings_parallel": 4, "v0_percent": 90, "v_min_percent": 50, "name": "RG2 supercapacitors"},
+    {"id": "SC_RG3", "bus": "SC_RG3_DC", "coupling": "converter", "sizing": "modules", "module_c_f": 130, "module_v": 54, "module_esr_mohm": 4, "modules_series": 15, "strings_parallel": 4, "v0_percent": 90, "v_min_percent": 50, "name": "RG3 supercapacitors"},
+    {"id": "SC_RG4", "bus": "SC_RG4_DC", "coupling": "converter", "sizing": "modules", "module_c_f": 130, "module_v": 54, "module_esr_mohm": 4, "modules_series": 15, "strings_parallel": 4, "v0_percent": 90, "v_min_percent": 50, "name": "RG4 supercapacitors"},
+    {"id": "SC_H2", "bus": "SC_H2_DC", "coupling": "converter", "sizing": "modules", "module_c_f": 130, "module_v": 54, "module_esr_mohm": 4, "modules_series": 15, "strings_parallel": 16, "v0_percent": 90, "v_min_percent": 50, "name": "Hall 2 supercapacitors"}
+  ],
+  "sofcs": [
+    {"id": "FC1", "name": "SOFC 1", "p_rated_kw": 5000, "v_rated": 800, "p_set_kw": 4500, "min_load_percent": 30, "ramp_percent_s": 1},
+    {"id": "FC2", "name": "SOFC 2", "p_rated_kw": 5000, "v_rated": 800, "p_set_kw": 4500, "min_load_percent": 30, "ramp_percent_s": 1}
+  ],
+  "pv_arrays": [
+    {"id": "PV1", "name": "PV 1", "modules_series": 30, "strings_parallel": 379, "irradiance_wm2": 800, "ambient_c": 25, "irradiance_profile_id": "clear_sky", "temperature_profile_id": "ambient_day"},
+    {"id": "PV2", "name": "PV 2", "modules_series": 30, "strings_parallel": 379, "irradiance_wm2": 800, "ambient_c": 25, "irradiance_profile_id": "clear_sky", "temperature_profile_id": "ambient_day"},
+    {"id": "PV3", "name": "PV 3", "modules_series": 30, "strings_parallel": 379, "irradiance_wm2": 800, "ambient_c": 25, "irradiance_profile_id": "clear_sky", "temperature_profile_id": "ambient_day"}
+  ],
+  "pcs": [
+    {"id": "PCS_BESS1", "bus": "BESS1_LV", "source": "BESS1", "control": "grid_forming", "s_rated_mva": 5.5, "vn_ac_kv": 0.69, "name": "BESS 1 PCS", "p_set_mw": 0, "droop_pf_percent": 2, "droop_qv_percent": 5},
+    {"id": "PCS_BESS2", "bus": "BESS2_LV", "source": "BESS2", "control": "grid_forming", "s_rated_mva": 5.5, "vn_ac_kv": 0.69, "name": "BESS 2 PCS", "p_set_mw": 0, "droop_pf_percent": 2, "droop_qv_percent": 5},
+    {"id": "PCS_BESS3", "bus": "BESS3_LV", "source": "BESS3", "control": "grid_forming", "s_rated_mva": 5.5, "vn_ac_kv": 0.69, "name": "BESS 3 PCS", "p_set_mw": 0, "droop_pf_percent": 2, "droop_qv_percent": 5},
+    {"id": "PCS_BESS4", "bus": "BESS4_LV", "source": "BESS4", "control": "grid_forming", "s_rated_mva": 5.5, "vn_ac_kv": 0.69, "name": "BESS 4 PCS", "p_set_mw": 0, "droop_pf_percent": 2, "droop_qv_percent": 5},
+    {"id": "PCS_PV1", "bus": "PV1_LV", "source": "PV1", "control": "grid_following", "s_rated_mva": 5.0, "vn_ac_kv": 0.8, "name": "PV 1 PCS"},
+    {"id": "PCS_PV2", "bus": "PV2_LV", "source": "PV2", "control": "grid_following", "s_rated_mva": 5.0, "vn_ac_kv": 0.8, "name": "PV 2 PCS"},
+    {"id": "PCS_PV3", "bus": "PV3_LV", "source": "PV3", "control": "grid_following", "s_rated_mva": 5.0, "vn_ac_kv": 0.8, "name": "PV 3 PCS"},
+    {"id": "PCS_FC1", "bus": "FC1_LV", "source": "FC1", "control": "grid_following", "s_rated_mva": 5.5, "vn_ac_kv": 0.48, "name": "SOFC 1 PCS"},
+    {"id": "PCS_FC2", "bus": "FC2_LV", "source": "FC2", "control": "grid_following", "s_rated_mva": 5.5, "vn_ac_kv": 0.48, "name": "SOFC 2 PCS"}
+  ],
+  "grounding_transformers": [
+    {"id": "ZA", "bus": "BUS_A", "i_rated_a": 400, "t_rated_s": 10, "r_n_ohm": 50, "name": "Zigzag A"},
+    {"id": "ZB", "bus": "BUS_B", "i_rated_a": 400, "t_rated_s": 10, "r_n_ohm": 50, "name": "Zigzag B"}
+  ],
+  "load_profiles": [
+    {"id": "ai_training", "name": "AI training (3 s / 0.5 s)", "kind": "power", "dt_s": 0.5, "values": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.3]},
+    {"id": "ai_training_late", "name": "AI training, 1.75 s later", "kind": "power", "dt_s": 0.5, "values": [1.0, 1.0, 0.3, 1.0, 1.0, 1.0, 1.0]},
+    {"id": "ai_day", "name": "AI campus IT, a day", "kind": "power", "dt_s": 3600, "values": [0.88, 0.86, 0.85, 0.85, 0.86, 0.88, 0.92, 0.95, 0.97, 0.98, 0.99, 1.0, 1.0, 1.0, 0.99, 0.99, 0.98, 0.97, 0.96, 0.95, 0.94, 0.92, 0.9, 0.89]},
+    {"id": "clear_sky", "name": "Clear-sky irradiance", "kind": "irradiance", "dt_s": 3600, "values": [0, 0, 0, 0, 0, 20, 120, 300, 480, 640, 760, 830, 850, 830, 760, 640, 480, 300, 120, 20, 0, 0, 0, 0]},
+    {"id": "ambient_day", "name": "Ambient temperature", "kind": "temperature", "dt_s": 3600, "values": [18, 17, 16, 16, 15, 15, 16, 18, 21, 24, 27, 29, 31, 32, 33, 33, 32, 30, 27, 24, 22, 21, 20, 19]}
+  ]
+}

@@ -453,11 +453,20 @@ def grounding_switch_rows(switches, ac_buses, layer, problems):
         n += 1
 
 
-def with_layer(net, layer, bus_index):
-    """A copy of the AC ``net`` with the layer built onto it by pandapower_electrisim's own builders."""
+def with_layer(net, layer, bus_index, params=None):
+    """
+    A copy of the AC ``net`` with the layer built onto it by pandapower_electrisim's
+    own builders, for the study ``params`` names (a load flow by default): some
+    elements are built for their study, a grid-forming PCS a source in a load
+    flow and a current source in a short circuit. Each bus carries its spec id,
+    as a drawn bus carries its cell's.
+    """
     import pandapower_electrisim as pe
     full = copy.deepcopy(net)
-    rows = {'0': {'typ': 'PowerFlowPandaPower Parameters'}}
+    ids = (net.get('electrisim_ids') or {}).get('bus') or {}
+    if 'id' not in full.bus.columns:
+        full.bus['id'] = [ids.get(int(i), '') for i in full.bus.index]
+    rows = {'0': dict(params or {'typ': 'PowerFlowPandaPower Parameters'})}
     rows.update({str(k + 1): dict(r) for k, r in enumerate(layer['rows'])})
     dc = {k: r for k, r in rows.items() if str(r.get('typ', '')).startswith('DC Bus')}
     busbars = {ident: int(idx) for ident, idx in bus_index.items()}
