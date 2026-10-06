@@ -51,6 +51,7 @@ import numpy as np
 from emt_solver import R_BIAS
 
 SQ2, SQ3 = math.sqrt(2.0), math.sqrt(3.0)
+V_F = 1.0     # V: a converter diode's forward voltage
 A120 = 2.0 * math.pi / 3.0
 
 
@@ -83,41 +84,70 @@ def _breakpoint(state):
     """An event that changes nothing: it lands the time grid on a controller's sample."""
 
 
+def stage_input(p_out, eta, p_nl):
+    """What a converter stage draws at its input for ``p_out`` delivered: losses either way (as the load flow)."""
+    return p_out / eta + p_nl if p_out >= 0 else p_out * eta + p_nl
+
+
+def stage_output(p_in, eta, p_nl):
+    """What a converter stage delivers for ``p_in`` drawn at its input: stage_input's inverse."""
+    p = p_in - p_nl
+    return p * eta if p >= 0 else p / eta
+
+
 class Vsc:
     """One VSC, built into the circuit, with its controller (``control(t, state)``)."""
 
-    def __init__(self, builder, vi, label, bus_dc, term, r_dc, block_pu):
-        net, ckt, ac = builder.net, builder.ckt, builder.ac
+    @classmethod
+    def from_net(cls, builder, vi, label, bus_dc, term, r_dc, block_pu):
+        """A VSC of the network's VSC table, from its row and its load-flow results."""
+        net = builder.net
+        res = vi in net.res_vsc.index
+        col = lambda c, d: _f(net.vsc.at[vi, c], d) if c in net.vsc.columns else d
+        p, q = (_f(net.res_vsc.at[vi, 'p_mw']), _f(net.res_vsc.at[vi, 'q_mvar'])) if res else (0.0, 0.0)
+        p_dc = _f(net.res_vsc.at[vi, 'p_dc_mw']) if res else p
+        return cls(builder, label, int(net.vsc.at[vi, 'bus']), bus_dc, term, r_dc, block_pu, p=p, q=q, p_dc=p_dc,
+                   rated_mva=col('rated_mva', 0.0), limit_pu=col('current_limit_pu', 1.2),
+                   c_link_mf=col('dc_link_mf', 0.0), r_ohm=col('r_ohm', 0.0), x_ohm=col('x_ohm', 0.0),
+                   mode_dc=str(net.vsc.at[vi, 'control_mode_dc'] if 'control_mode_dc' in net.vsc.columns else 'vm_pu'),
+                   mode_ac=str(net.vsc.at[vi, 'control_mode_ac'] if 'control_mode_ac' in net.vsc.columns else 'q_mvar'),
+                   model=str(net.vsc.at[vi, 'emt_model']) if 'emt_model' in net.vsc.columns else 'average',
+                   switching_khz=col('switching_khz', 5.0))
+
+    def __init__(self, builder, label, ac_bus, bus_dc, term, r_dc, block_pu, *, p, q, p_dc, rated_mva=0.0,
+                 limit_pu=1.2, c_link_mf=0.0, r_ohm=0.0, x_ohm=0.0, mode_dc='vm_pu', mode_ac='q_mvar',
+                 model='average', switching_khz=5.0, eta=1.0, p_nl_mw=0.0, input_side='dc'):
+        """
+        ``p``, ``q``: its load-flow power at its AC bus (the load convention);
+        ``p_dc``: at its DC bus (the load convention). ``eta``, ``p_nl_mw``: a
+        converter stage's efficiency and no-load loss, its input on its
+        ``input_side`` ('ac': a rectifier stage; 'dc': an inverter stage) -
+        losses its DC side carries.
+        """
+        ckt, ac = builder.ckt, builder.ac
         self.label = label
         self.w0 = ac.w
-        ac_bus = int(net.vsc.at[vi, 'bus'])
         self.ac_nodes = ac.nodes[ac_bus]
-        p, q = (_f(net.res_vsc.at[vi, 'p_mw']), _f(net.res_vsc.at[vi, 'q_mvar'])) if vi in net.res_vsc.index else (0.0, 0.0)
-        col = lambda c, d: _f(net.vsc.at[vi, c], d) if c in net.vsc.columns else d
-        s_rated = col('rated_mva', 0.0)
+        self.eta, self.p_nl, self.input_side = (eta if 0 < eta <= 1 else 1.0), p_nl_mw * 1e6, input_side
+        s_rated = rated_mva
         if s_rated <= 0:
             s_rated = max(1.25 * math.hypot(p, q), 0.05)
         self.s_rated = s_rated * 1e6
-        v_ll = float(net.bus.at[ac_bus, 'vn_kv']) * 1e3
+        v_ll = float(builder.net.bus.at[ac_bus, 'vn_kv']) * 1e3
         self.v_nom_peak = SQ2 * v_ll / SQ3
-        limit = col('current_limit_pu', 1.2)
-        self.i_max = (limit if limit > 0 else 1.2) * SQ2 * self.s_rated / (SQ3 * v_ll)
+        self.i_max = (limit_pu if limit_pu > 0 else 1.2) * SQ2 * self.s_rated / (SQ3 * v_ll)
         self.v_dc_nom = builder.vn[bus_dc]
         v_bus = builder.v_bus[bus_dc]
-        c_link = col('dc_link_mf', 0.0) * 1e-3
+        c_link = c_link_mf * 1e-3
         if c_link <= 0:
             c_link = 8e-3 * self.s_rated / self.v_dc_nom ** 2     # 4 ms of its rating stored
-        self.r = max(col('r_ohm', 0.0), 1e-6)
-        self.l = max(col('x_ohm', 0.0), 1e-6) / self.w0
-        self.mode_dc = str(net.vsc.at[vi, 'control_mode_dc'] if 'control_mode_dc' in net.vsc.columns else 'vm_pu')
-        self.mode_ac = str(net.vsc.at[vi, 'control_mode_ac'] if 'control_mode_ac' in net.vsc.columns else 'q_mvar')
+        self.r = max(r_ohm, 1e-6)
+        self.l = max(x_ohm, 1e-6) / self.w0
+        self.mode_dc, self.mode_ac = str(mode_dc), str(mode_ac)
         self.block_v = block_pu * self.v_dc_nom
         self.block_i = 2.5 * self.i_max
-        self.model = str(net.vsc.at[vi, 'emt_model']) if 'emt_model' in net.vsc.columns else 'average'
-        if self.model not in ('average', 'switching'):
-            self.model = 'average'
-        f_khz = col('switching_khz', 5.0)
-        self.f_sw = (f_khz if f_khz > 0 else 5.0) * 1e3
+        self.model = model if model in ('average', 'switching') else 'average'
+        self.f_sw = (switching_khz if switching_khz > 0 else 5.0) * 1e3
         self.t_sample = 0.5 / self.f_sw
         if self.model == 'switching':
             # Its current ripple, about v_dc / (6 L f_sw) peak to peak, against its rated current.
@@ -135,7 +165,6 @@ class Vsc:
         e_ph = v_ph + complex(self.r, self.w0 * self.l) * i_ph
         # Its DC current, as its load flow has it at its DC bus: what its AC side
         # takes, less its reactor's losses.
-        p_dc = _f(net.res_vsc.at[vi, 'p_dc_mw']) if vi in net.res_vsc.index else p
         i_dc = -p_dc * 1e6 / max(v_bus, 1.0)
         v_link = v_bus + r_dc * i_dc
 
@@ -144,7 +173,9 @@ class Vsc:
         self.p_node = ckt.node(f'{label} DC+', v_link)
         ckt.add_c(0, self.p_node, c_link, w0=-v_link)
         self.k_dc_out = ckt.add_rl(self.p_node, term, r_dc, 0.0, i0=i_dc)
-        self.k_src = ckt.add_isrc(0, self.p_node, i0=0.0 if switching else i_dc)
+        # Averaged, its DC current; switching, the current its losses draw (the bridge's is its switches').
+        p_e0 = 1.5 * (e_ph * i_ph.conjugate()).real
+        self.k_src = ckt.add_isrc(0, self.p_node, i0=-(self._dc_drawn(p_e0) - p_e0) / v_link if switching else i_dc)
         mid = ckt.node(f'{label} bridge star point', v_link / 2)
         ckt.add_r(mid, self.p_node, R_BIAS)
         ckt.add_r(mid, 0, R_BIAS)
@@ -167,14 +198,14 @@ class Vsc:
                 self.k_e.append(k_e)
                 self.legs.append((ckt.add_switch(leg, self.p_node, closed=False, phasor_closed=True),
                                   ckt.add_switch(leg, 0, closed=False, phasor_closed=True)))
-                ckt.add_diode(leg, self.p_node)
-                ckt.add_diode(0, leg)
+                ckt.add_diode(leg, self.p_node, V_F)
+                ckt.add_diode(0, leg, V_F)
             else:
                 y = ckt.node(f'{label} switches {"abc"[k]}', v_link / 2)
                 self.k_e.append(ckt.add_rl(mid, y, 1e-6, 0.0, ac=(amp[k], self.w0, ph[k]), controlled=True))
                 self.k_block.append(ckt.add_switch(y, x, closed=True))
-                ckt.add_diode(x, self.p_node)
-                ckt.add_diode(0, x)
+                ckt.add_diode(x, self.p_node, V_F)
+                ckt.add_diode(0, x, V_F)
 
         # Its controller, started in that steady state, and its first half period.
         self._start(v_ph, i_ph, e_ph, c_link, v_link, i_dc)
@@ -195,6 +226,7 @@ class Vsc:
         self = cls.__new__(cls)
         start = {k: kw.pop(k) for k in ('v_ph', 'i_ph', 'e_ph', 'c_link', 'v_link', 'i_dc')}
         self.model, self.t_sample, self.legs, self.k_block = 'average', None, [], []
+        self.eta, self.p_nl, self.input_side = 1.0, 0.0, 'dc'
         for key, value in kw.items():
             setattr(self, key, value)
         self._start(**start)
@@ -210,14 +242,14 @@ class Vsc:
         if self.t_sample is None:
             return
         self.t_next = self.t_sample
-        ckt.at(self.t_next, _breakpoint)
+        ckt.at(self.t_next, _breakpoint, soft=None)
         ang = np.angle(e_ph) + 0.5 * self.w0 * self.t_sample - np.arange(3) * A120
         e = abs(e_ph) * np.cos(ang)
         if self.model == 'switching':
             for k, (up, dn), on, t_x in self._pwm_plan(0.0, e, v_link):
                 ckt.sw[up][2], ckt.sw[dn][2] = on, not on
                 if t_x is not None:
-                    ckt.at(t_x, lambda st, up=up, dn=dn, on=not on: self._set_leg(st, up, dn, on))
+                    ckt.at(t_x, lambda st, up=up, dn=dn, on=not on: self._set_leg(st, up, dn, on), soft=True)
         else:
             self.e_held = e
             for k in range(3):
@@ -286,6 +318,14 @@ class Vsc:
             state.set_switch(up, on)
             state.set_switch(dn, not on)
 
+    def _dc_drawn(self, p_e):
+        """The power its DC side draws for ``p_e`` its bridge delivers to its AC side: its stage losses added."""
+        if self.eta == 1.0 and self.p_nl == 0.0:
+            return p_e
+        if self.input_side == 'dc':
+            return stage_input(p_e, self.eta, self.p_nl)
+        return -stage_output(-p_e, self.eta, self.p_nl)
+
     def _block(self, t, state):
         self.blocked_at = t
         for k in self.k_block:
@@ -310,7 +350,7 @@ class Vsc:
         p_now = _power(v, i)
         if self.model == 'average' and self.e_held is not None:
             # Its DC side takes what its averaged phases deliver, step by step: e . i / v_dc.
-            state.set_source_value(self.k_src, -float(np.dot(self.e_held, i)) / max(v_dc, 1.0))
+            state.set_source_value(self.k_src, -self._dc_drawn(float(np.dot(self.e_held, i))) / max(v_dc, 1.0))
         if self.t_sample is not None:
             v_prev, vdc_prev, load_prev, p_prev = (v, v_dc, i_load, p_now) if self.v_prev is None else self.v_prev
             h = t - self.t_step
@@ -384,21 +424,294 @@ class Vsc:
         self.theta = theta
         changed = False
         if self.model == 'switching':
+            if self.eta != 1.0 or self.p_nl != 0.0:
+                # Its losses, by the power it passed since its last sample.
+                state.set_source_value(self.k_src, -(self._dc_drawn(p_now) - p_now) / max(v_dc, 1.0))
             for k, (up, dn), on, t_x in self._pwm_plan(t_s, e, v_dc):
                 changed = changed or bool(state.sw_closed[up]) != on
                 self._set_leg(state, up, dn, on)
                 if t_x is not None:
-                    state.at(t_x, lambda st, up=up, dn=dn, on=not on: self._set_leg(st, up, dn, on))
+                    state.at(t_x, lambda st, up=up, dn=dn, on=not on: self._set_leg(st, up, dn, on), soft=True)
         else:
             for k in range(3):
                 state.set_emf(self.k_e[k], float(e[k]))
             # Its DC side takes what its AC side delivers.
             self.e_held = e
-            state.set_source_value(self.k_src, -float(np.dot(e, i)) / max(float(state.v[self.p_node]), 1.0))
+            state.set_source_value(self.k_src, -self._dc_drawn(float(np.dot(e, i))) / max(float(state.v[self.p_node]), 1.0))
         if self.t_sample is not None:
             self.t_next = t_s + self.t_sample
-            state.at(self.t_next, _breakpoint)
+            state.at(self.t_next, _breakpoint, soft=None)
         # Its power: P its mean since the last sample (every step's, if it samples each); Q at the fundamental, as its controls hold it.
         q_out = 1.5 * (v_q * i_d - v_d * i_q)
         self.trace.append((t_s, p_now, q_out, v_dc, math.hypot(i_d, i_q)))
+        return 'soft' if changed else False
+
+
+class DcDc:
+    """
+    A DC/DC converter - a dual active bridge - built into the circuit, with its
+    controller (``control(t, state)``).
+
+    Two full bridges and a high-frequency transformer (ratio n = its input's
+    nominal voltage to its output's, its leakage L on its output side, sized
+    for its rating at a 30 degree phase shift): each bridge a square wave at
+    its switching frequency, its output bridge lagging by the phase shift phi,
+    so the power it passes is V1' V2 phi (pi - |phi|) / (2 pi^2 f L), at most
+    at 90 degrees (some 1.8 times its rating).
+    - Average-value: its output current V1' phi (pi - |phi|) / (2 pi^2 f L) into
+      its output capacitor, its input drawing that power and its losses.
+    - Switching: the two bridges switched, each edge at its exact instant, the
+      transformer's currents starting in their periodic steady state; its
+      losses a current its input draws. Its output bridge's edges follow the
+      mean of the phase shift before and after each sample: a step in the
+      phase shift would leave the leakage current a DC offset - one its
+      windings' small resistance hardly damps - which the half step avoids.
+    Its control: its output voltage (a PI loop, its output current fed
+    forward) or its set power, the current its output bridge delivers limited
+    (to its limit, and to zero in reverse unless it is bidirectional), sampled
+    at each of its bridges' half periods, its voltages and output current as
+    their mean since the last sample. It blocks - its bridges' switches open,
+    their diodes left - when its input or output voltage falls below its
+    blocking threshold.
+    """
+
+    def __init__(self, builder, label, bus_in, bus_out, term_in, term_out, *, p_in_mw, p_out_mw, mode='voltage',
+                 vm_out_pu=1.0, p_set_mw=0.0, rated_mw=0.0, eta=1.0, p_nl_mw=0.0, bidirectional=False,
+                 limit_pu=1.2, model='average', switching_khz=20.0, c_out_mf=0.0, block_pu=0.8, r_in=0.0, r_out=0.0,
+                 every_step=False):
+        """
+        ``r_in``, ``r_out``: its terminals' resistance (0: the solver's floor).
+        ``every_step``: its controller acting every step, not twice per period
+        (average-value only: the benchmarks).
+        """
+        ckt = builder.ckt
+        self.label = label
+        self.model = model if model in ('average', 'switching') else 'average'
+        self.mode = 'power' if str(mode).startswith('p') else 'voltage'
+        self.eta, self.p_nl = (eta if 0 < eta <= 1 else 1.0), p_nl_mw * 1e6
+        self.bidirectional = bool(bidirectional)
+        vn_in, vn_out = builder.vn[bus_in], builder.vn[bus_out]
+        v_in, v_out = builder.v_bus[bus_in], builder.v_bus[bus_out]
+        p_out = p_out_mw * 1e6
+        rated = rated_mw * 1e6 if rated_mw > 0 else max(1.25 * abs(p_out), 1e4)
+        self.rated = rated
+        self.i_max = (limit_pu if limit_pu > 0 else 1.2) * rated / vn_out
+        self.f_sw = (switching_khz if switching_khz > 0 else 20.0) * 1e3
+        self.t_sample = None if every_step and self.model == 'average' else 0.5 / self.f_sw
+        self.n = vn_in / vn_out
+        self.l_lk = vn_out ** 2 * 5.0 / (72.0 * self.f_sw * rated)       # its rating at 30 degrees
+        self.vn_out, self.v_ref = vn_out, vm_out_pu * vn_out
+        self.p_set = p_set_mw * 1e6
+        self.block_in, self.block_out = block_pu * vn_in, block_pu * vn_out
+        c_out = c_out_mf * 1e-3 if c_out_mf > 0 else 4e-3 * rated / vn_out ** 2     # 2 ms of its rating stored
+        c_in = 4e-3 * rated / vn_in ** 2
+        self.c_out = c_out
+        w_v = 2 * math.pi * 300.0                            # its output voltage loop
+        self.kp_v, self.ki_v = 2 * 0.7 * w_v * c_out, w_v * w_v * c_out
+
+        # Its steady state: the load flow's power through it.
+        i_out0 = p_out / max(v_out, 1.0)
+        i_in0 = p_in_mw * 1e6 / max(v_in, 1.0)
+        self.phi0 = self._phi(i_out0, v_in)[0]
+
+        # Its terminals: input and output capacitors, the currents to its buses.
+        self.in_node = ckt.node(f'{label} input', v_in)
+        self.out_node = ckt.node(f'{label} output', v_out)
+        self.k_in = ckt.add_rl(term_in, self.in_node, r_in, 0.0, i0=i_in0)
+        ckt.add_c(0, self.in_node, c_in, w0=-v_in)
+        self.k_out = ckt.add_rl(self.out_node, term_out, r_out, 0.0, i0=i_out0)
+        ckt.add_c(0, self.out_node, c_out, w0=-v_out)
+        switching = self.model == 'switching'
+        # Averaged: what its input draws; switching: the current its losses draw.
+        self.k_src_in = ckt.add_isrc(self.in_node, 0, i0=i_in0 - (p_out / max(v_in, 1.0) if switching else 0.0))
+        self.k_src_out = None if switching else ckt.add_isrc(0, self.out_node, i0=i_out0)
+        self.bridges = []
+        if switching:
+            # Its bridges: legs A, B on its input, C, D on its output; each leg's switches to either pole.
+            legs = {}
+            for name, pole, v0 in (('A', self.in_node, v_in), ('B', self.in_node, v_in),
+                                   ('C', self.out_node, v_out), ('D', self.out_node, v_out)):
+                x = ckt.node(f'{label} leg {name}', v0 / 2)
+                legs[name] = (x, ckt.add_switch(x, pole, closed=False), ckt.add_switch(x, 0, closed=False))
+                ckt.add_diode(x, pole, V_F)
+                ckt.add_diode(0, x, V_F)
+            self.bridges = [((legs['A'][1], legs['A'][2]), (legs['B'][1], legs['B'][2])),
+                            ((legs['C'][1], legs['C'][2]), (legs['D'][1], legs['D'][2]))]
+            # Its transformer: magnetising 1000 times its leakage (referred to its input), winding resistance 1e-4 pu.
+            l_m = 1000.0 * self.n ** 2 * self.l_lk
+            r2 = 1e-4 * vn_out ** 2 / rated
+            n = self.n
+            i1, i2 = self._steady_currents(v_in, v_out, self.phi0, l_m)
+            ckt.add_coupled([legs['A'][0], legs['C'][0]], [legs['B'][0], legs['D'][0]],
+                            np.diag([n * n * r2, r2]), np.array([[l_m, l_m / n], [l_m / n, l_m / n ** 2 + self.l_lk]]),
+                            i0=[i1, i2])
+        self._start(v_in, v_out, i_out0)
+        self._prime(ckt)
+
+    # --- its phase shift --------------------------------------------------------------
+
+    def _phi(self, i_ref, v_in):
+        """The phase shift for an output current ``i_ref`` at input voltage ``v_in``, and whether it saturated."""
+        v1 = max(v_in, 1.0) / self.n
+        x = 2.0 * math.pi ** 2 * self.f_sw * self.l_lk * abs(i_ref) / v1
+        if x >= math.pi ** 2 / 4.0:
+            return math.copysign(math.pi / 2.0, i_ref), True
+        return math.copysign(0.5 * (math.pi - math.sqrt(math.pi ** 2 - 4.0 * x)), i_ref), False
+
+    def _current(self, phi, v_in):
+        """Its average output current at phase shift ``phi`` and input voltage ``v_in``."""
+        return max(v_in, 0.0) / self.n * phi * (math.pi - abs(phi)) / (2.0 * math.pi ** 2 * self.f_sw * self.l_lk)
+
+    def _steady_currents(self, v_in, v_out, phi, l_m):
+        """
+        Its transformer's currents at t = 0, its input bridge's rising edge, in
+        their periodic steady state: the leakage current's change over a half
+        period, which half-wave symmetry halves and negates; the magnetising
+        current at its trough.
+        """
+        half = 0.5 / self.f_sw
+        delta = phi / (2.0 * math.pi) * (2.0 * half)
+        v1 = v_in / self.n
+        if delta >= 0:      # its output bridge still negative until delta
+            change = ((v1 + v_out) * delta + (v1 - v_out) * (half - delta)) / self.l_lk
+        else:               # its output bridge positive until half + delta
+            change = ((v1 - v_out) * (half + delta) + (v1 + v_out) * (-delta)) / self.l_lk
+        # L di2/dt = v2 - v1': i2 falls by the change above.
+        i2 = 0.5 * change
+        i_m = -v_in * half / (2.0 * l_m)
+        return -i2 / self.n + i_m, i2
+
+    # --- its controller ------------------------------------------------------------------
+
+    def _start(self, v_in, v_out, i_out0):
+        self.int_v = 0.0
+        self.phi = self.phi_applied = self.phi0
+        self.t_last, self.t_next, self.t_step = 0.0, self.t_sample or 0.0, 0.0
+        self.prev = None
+        self.acc = np.zeros(3)                               # v_in, v_out, its output current: their integrals
+        self.blocked_at = None
+        self.limited_time = 0.0
+        self.trace = []                                      # (t, P in, P out, v_in, v_out, its output bridge's current)
+        self.i_bridge = self._current(self.phi, v_in)
+        self.v_out_last = v_out                              # at its last sample: its output capacitor's charge since
+
+    def _set_bridge(self, state, k, positive):
+        if self.blocked_at is not None:
+            return
+        (a_up, a_dn), (b_up, b_dn) = self.bridges[k]
+        state.set_switch(a_up, positive)
+        state.set_switch(a_dn, not positive)
+        state.set_switch(b_up, not positive)
+        state.set_switch(b_dn, positive)
+
+    def _secondary_plan(self, t, half, phi):
+        """Its output bridge's next edge: (time, its polarity then)."""
+        delta = phi / (2.0 * math.pi) * (2.0 * self.t_sample)
+        if delta >= 0:
+            return t + delta, half % 2 == 0
+        return t + self.t_sample + delta, (half + 1) % 2 == 0
+
+    def _prime(self, ckt):
+        """Its first half period: its sample's breakpoint and, switching, its bridges' states and output edge."""
+        if self.t_sample is None:
+            return
+        ckt.at(self.t_next, _breakpoint, soft=None)
+        if self.model != 'switching':
+            return
+        (a_up, a_dn), (b_up, b_dn) = self.bridges[0]
+        for k, on in ((a_up, True), (a_dn, False), (b_up, False), (b_dn, True)):
+            ckt.sw[k][2] = on
+        t_x, pos = self._secondary_plan(0.0, 0, self.phi)
+        (c_up, c_dn), (d_up, d_dn) = self.bridges[1]
+        start = not pos                                      # before its edge, the other polarity
+        for k, on in ((c_up, start), (c_dn, not start), (d_up, not start), (d_dn, start)):
+            ckt.sw[k][2] = on
+        ckt.at(t_x, lambda st, pos=pos: self._set_bridge(st, 1, pos), soft=True)
+
+    def _block(self, t, state):
+        self.blocked_at = t
+        for bridge in self.bridges:
+            for up, dn in bridge:
+                state.set_switch(up, False)
+                state.set_switch(dn, False)
+        state.set_source_value(self.k_src_in, 0.0)
+        if self.k_src_out is not None:
+            state.set_source_value(self.k_src_out, 0.0)
+
+    def control(self, t, state):
+        if self.blocked_at is not None:
+            return False
+        v_in, v_out = float(state.v[self.in_node]), float(state.v[self.out_node])
+        i_out = float(state.i_rl[self.k_out])
+        if v_in < self.block_in or v_out < self.block_out:
+            self._block(t, state)
+            return True
+        changed = self._sample(t, state, v_in, v_out, i_out)
+        changed = 'soft' if changed else False
+        if self.k_src_out is not None:
+            # Averaged, step by step: its output current at its phase shift, its input drawing that power and its losses.
+            self.i_bridge = self._current(self.phi, v_in)
+            state.set_source_value(self.k_src_out, self.i_bridge)
+            state.set_source_value(self.k_src_in, stage_input(v_out * self.i_bridge, self.eta, self.p_nl) / max(v_in, 1.0))
+        return changed
+
+    def _sample(self, t, state, v_in, v_out, i_out):
+        """Its controller, at its samples: its phase shift, and, switching, its bridges' next edges."""
+        if self.t_sample is None:
+            elapsed = t - self.t_last
+            self.t_last = t
+            if elapsed <= 0:
+                return False
+            v_in_m, v_out_m, i_out_m = v_in, v_out, i_out
+            i_bridge_m = self.i_bridge
+            t_s, dt = t, elapsed
+        else:
+            now = np.array([v_in, v_out, i_out])
+            prev = now if self.prev is None else self.prev
+            self.acc += 0.5 * (prev + now) * (t - self.t_step)
+            self.prev, self.t_step = now, t
+            if t < self.t_next - 1.5 * getattr(state, 'tol', 0.0) - 1e-12:
+                return False
+            elapsed = t - self.t_last
+            self.t_last = t
+            if elapsed <= 0:
+                return False
+            v_in_m, v_out_m, i_out_m = self.acc / elapsed
+            self.acc = np.zeros(3)
+            # Its output bridge's mean current: what reached its bus, and what charged its output capacitor.
+            i_bridge_m = i_out_m + self.c_out * (v_out - self.v_out_last) / elapsed
+            t_s, dt = self.t_next, self.t_sample
+        self.v_out_last = v_out
+        # Its output current: for its output voltage, or its set power; limited.
+        if self.mode == 'voltage':
+            err = self.v_ref - v_out_m
+            i_ref = i_out_m + self.kp_v * err + self.int_v
+        else:
+            err = 0.0
+            i_ref = self.p_set / max(v_out_m, 0.05 * self.vn_out)
+        lo = -self.i_max if self.bidirectional else 0.0
+        limited = not lo <= i_ref <= self.i_max
+        i_ref = min(max(i_ref, lo), self.i_max)
+        self.phi, saturated = self._phi(i_ref, v_in_m)
+        limited = limited or saturated
+        if limited:
+            self.limited_time += dt
+        elif self.mode == 'voltage':
+            self.int_v += self.ki_v * err * dt
+        changed = False
+        if self.model == 'switching':
+            # Its losses, by the power it passed since its last sample.
+            p_out = v_out_m * i_bridge_m
+            state.set_source_value(self.k_src_in, (stage_input(p_out, self.eta, self.p_nl) - p_out) / max(v_in, 1.0))
+            half = int(round(t_s / self.t_sample))
+            self._set_bridge(state, 0, half % 2 == 0)
+            changed = True
+            t_x, pos = self._secondary_plan(t_s, half, 0.5 * (self.phi_applied + self.phi))
+            self.phi_applied = self.phi
+            state.at(t_x, lambda st, pos=pos: self._set_bridge(st, 1, pos), soft=True)
+        if self.t_sample is not None:
+            self.t_next = t_s + self.t_sample
+            state.at(self.t_next, _breakpoint, soft=None)
+        p_out = v_out_m * i_bridge_m
+        self.trace.append((t_s, stage_input(p_out, self.eta, self.p_nl), p_out, v_in_m, v_out_m, i_bridge_m))
         return changed

@@ -116,6 +116,7 @@ class AcBuilder:
         self.series = []         # (kind, name, id, label, [(array, group or index, column or None, sign)] per phase)
         self.trafos = []
         self.left_out = set()
+        self.skip = set()        # (table, index): elements a converter's EMT model stands for
 
     # --- buses and the phase shifts ------------------------------------------------
 
@@ -381,6 +382,8 @@ class AcBuilder:
                 b = int(net[table].at[i, 'bus'])
                 if not bool(net[table].at[i, 'in_service']) or b not in self.nodes or i not in net[res].index:
                     continue
+                if (table, i) in self.skip:
+                    continue
                 self._impedance_load(b, _f(net[res].at[i, 'p_mw']), _f(net[res].at[i, 'q_mvar']), _label(net, table, i))
         if 'asymmetric_load' in net and len(net.asymmetric_load):
             self.left_out.add('asymmetric loads')
@@ -394,6 +397,8 @@ class AcBuilder:
             for i in net[table].index:
                 b = int(net[table].at[i, 'bus'])
                 if not bool(net[table].at[i, 'in_service']) or b not in self.nodes or i not in net[res].index:
+                    continue
+                if (table, i) in self.skip:
                     continue
                 p, q = _f(net[res].at[i, 'p_mw']), _f(net[res].at[i, 'q_mvar'])
                 if table == 'storage':

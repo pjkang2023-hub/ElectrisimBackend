@@ -13,7 +13,9 @@ Branches, each with its current from node a to node b:
   average voltage);
 - C:  i = C d(v_a - v_b)/dt;
 - R:  i = (v_a - v_b) / R;
-- diode, anode a and cathode b: R_ON conducting, R_OFF not;
+- diode, anode a and cathode b: its forward voltage behind R_ON conducting,
+  R_OFF not (a converter's diodes: a volt, so one beside a closed switch stays
+  off, rather than sharing its current and switching at each current zero);
 - switch: R closed or open, set by events and controllers (a converter's
   legs, by its PWM);
 - surge arrester: R_OFF until |v| reaches its clamping voltage, then that
@@ -28,8 +30,14 @@ Branches, each with its current from node a to node b:
 
 The state at t = 0 is each RL branch's current and each capacitor's voltage.
 Events land on the time grid exactly: those given before the run, and those a
-controller schedules during it (a PWM's switching instants).
+controller schedules during it (a PWM's switching instants). A converter's
+switching is a soft event: the step after it restarts the integration with a
+backward Euler step of a hundredth of it, then the trapezoidal rule - a voltage
+jump taken from its new value - rather than the damped half steps a breaker
+needs, whose numerical losses, thousands of times a second, would show as
+losses of some per cent.
 """
+SOFT_BE = 0.01            # a soft event's backward Euler step, as a share of the step
 
 import heapq
 import math
@@ -86,8 +94,9 @@ class Circuit:
         self.r.append((a, b, max(r, R_FLOOR)))
         return len(self.r) - 1
 
-    def add_diode(self, anode, cathode):
-        self.d.append((anode, cathode))
+    def add_diode(self, anode, cathode, v_f=0.0):
+        """``v_f``: its forward voltage, conducting."""
+        self.d.append((anode, cathode, float(v_f)))
         return len(self.d) - 1
 
     def add_switch(self, a, b, closed=True, r_on=SW_R_ON, r_off=SW_R_OFF, phasor_closed=None):
@@ -131,12 +140,14 @@ class Circuit:
         self.nl.append((a, b, func))
         return len(self.nl) - 1
 
-    def at(self, t, action):
+    def at(self, t, action, soft=False):
         """
         Run ``action(state)`` once the simulation reaches ``t``; the step after it
-        is backward Euler. A controller schedules one during a run by state.at.
+        is backward Euler. ``soft``: a converter's switching (True: a short
+        backward Euler step restarts the integration), or (None) only a time
+        the grid lands on. A controller schedules one during a run by state.at.
         """
-        self.events.append((float(t), action))
+        self.events.append((float(t), action, soft))
 
     def add_controller(self, fn):
         """``fn(t, state)`` after every step; it returns True when it changed a switch or a load."""
@@ -178,7 +189,7 @@ class Circuit:
             stamp(a, b, jw * c)
         for a, b, r in self.r:
             stamp(a, b, 1.0 / r)
-        for a, b in self.d:
+        for a, b, _vf in self.d:
             stamp(a, b, 1.0 / R_OFF)
         for (a, b, closed, r_on, r_off), ph_closed in zip(self.sw, self.sw_phasor):
             closed = closed if ph_closed is None else ph_closed
@@ -227,7 +238,8 @@ class Circuit:
         rl = np.array(self.rl, dtype=float).reshape(-1, 9)
         cc = np.array(self.c, dtype=float).reshape(-1, 4)
         rr = np.array(self.r, dtype=float).reshape(-1, 3)
-        dd = np.array(self.d, dtype=int).reshape(-1, 2)
+        dd = np.array([(a, b) for a, b, _ in self.d], dtype=int).reshape(-1, 2)
+        d_vf = np.array([vf for _, _, vf in self.d], dtype=float)
         ra, rb = rl[:, 0].astype(int), rl[:, 1].astype(int)
         R, L = rl[:, 2], rl[:, 3]
         e0, eamp, eom, eph = rl[:, 5], rl[:, 6], rl[:, 7], rl[:, 8]
@@ -303,12 +315,12 @@ class Circuit:
         queue = []
         seq = [0]
 
-        def schedule(t_ev, action):
+        def schedule(t_ev, action, soft=False):
             seq[0] += 1
-            heapq.heappush(queue, (float(t_ev), seq[0], action))
+            heapq.heappush(queue, (float(t_ev), seq[0], action, soft))
 
-        for t_ev, action in self.events:
-            schedule(t_ev, action)
+        for t_ev, action, soft in self.events:
+            schedule(t_ev, action, soft)
         state.at = schedule
         i_now = rl[:, 4].copy()
         icp_now = np.concatenate([c[4] for c in cps]).astype(float) if M else np.zeros(0)
@@ -357,16 +369,22 @@ class Circuit:
 
         iterations = []                       # solves per step, for diagnosis
         be_next = True
+        soft_next = False
         t = 0.0
         while t < t_end - 1e-15:
             h_nom = dt if t < t_fine - 1e-15 else (dt_coarse or dt)
             tol = 0.01 * h_nom
             # Events due now - within a sliver of it - change switches or loads; the step after them is backward Euler.
             while queue and queue[0][0] <= t + tol:
-                _, _, action = heapq.heappop(queue)
+                _, _, action, soft = heapq.heappop(queue)
                 state.t = t
                 action(state)
-                be_next = True
+                if soft is None:
+                    pass                  # only a time to land on
+                elif soft:
+                    soft_next = True
+                else:
+                    be_next = True
             # The step: its nominal length, landing on the end and on the next event, leaving no sliver.
             h = min(h_nom, t_end - t)
             if t_end - (t + h) < tol:
@@ -415,6 +433,9 @@ class Circuit:
                     iterations[s] += 1
                     Ja = np.where(a_state > 0, -a_vc * a_gon, np.where(a_state < 0, a_vc * a_gon, 0.0))
                     rhs = rhs0 + np.bincount(ab, Ja, n) - np.bincount(aa, Ja, n)
+                    if len(da):
+                        Jd = np.where(d_state, d_vf / R_ON, 0.0)      # a conducting diode's forward voltage
+                        rhs += np.bincount(da, Jd, n) - np.bincount(db, Jd, n)
                     Y, factor = base_matrix(method, h_, d_state, state.sw_closed, a_state)
                     if self.nl:
                         Yn = Y.copy()
@@ -429,7 +450,7 @@ class Circuit:
                     v = np.zeros(n)
                     v[1:] = lu_solve(factor, rhs[1:], check_finite=False)
                     vd = v[da] - v[db]
-                    new_d = np.where(d_state, vd > 0.0, vd > 1e-9)
+                    new_d = np.where(d_state, vd > d_vf, vd > d_vf + 1e-9)
                     va = v[aa] - v[ab]
                     new_a = np.where(a_state > 0, np.where(va > a_vc, 1, 0),
                                      np.where(a_state < 0, np.where(va < -a_vc, -1, 0),
@@ -447,7 +468,16 @@ class Circuit:
                 cp_next = coupled_g(method, h_) @ (v[A_cp] - v[B_cp]) + Jcp if M else icp_now
                 return v, d_state, a_state, i_next, w_next, Gc * w_next + Jc, cp_next
 
-            if not be_next:
+            if not be_next and soft_next:
+                # A soft event: a short backward Euler step restarts the integration, the trapezoidal rule the rest.
+                d0, a0 = d_on.copy(), a_st.copy()
+                start = (v_now, d_on, a_st, i_now, w_now, ic_now, icp_now)
+                v_now, d_on, a_st, i_now, w_now, ic_now, icp_now = solve('be', SOFT_BE * h, t)
+                sol = solve('tr', (1.0 - SOFT_BE) * h, t + SOFT_BE * h)
+                if not (np.array_equal(sol[1], d0) and np.array_equal(sol[2], a0)):
+                    v_now, d_on, a_st, i_now, w_now, ic_now, icp_now = start
+                    be_next = True    # an element switched: this step is taken again, damped
+            elif not be_next:
                 sol = solve('tr', h, t)
                 if not (np.array_equal(sol[1], d_on) and np.array_equal(sol[2], a_st)):
                     be_next = True    # an element switched: this step is taken again, damped
@@ -472,7 +502,8 @@ class Circuit:
                                 if len(ia_) else np.zeros(0))
             out['i_c'].append(ic_now)
             out['i_r'].append(Gr * (v[xa] - v[xb]))
-            out['i_d'].append(np.where(d_on, 1.0 / R_ON, 1.0 / R_OFF) * (v[da] - v[db]))
+            vd_out = v[da] - v[db]
+            out['i_d'].append(np.where(d_on, (vd_out - d_vf) / R_ON, vd_out / R_OFF))
             out['i_sw'].append(np.where(state.sw_closed, s_on, s_off) * (v[sa] - v[sb]))
             va = v[aa] - v[ab]
             out['i_arr'].append(np.where(a_st != 0, a_gon, a_goff) * va + np.where(
@@ -483,10 +514,14 @@ class Circuit:
             else:
                 out['i_nl'].append(np.zeros(0))
             be_next = damp_next
+            soft_next = False
             state.t, state.v, state.tol = t, v, tol
             state.i_rl, state.i_sw = out['i_rl'][-1], out['i_sw'][-1]
             for fn in self.controllers:
-                if fn(t, state):
+                changed = fn(t, state)
+                if changed == 'soft':
+                    soft_next = True
+                elif changed:
                     be_next = True
             out['sw_closed'].append(state.sw_closed)
         widths = {'v': n, 'i_rl': len(R), 'i_c': len(C), 'i_r': len(Gr), 'i_d': len(da), 'i_sw': len(sa),

@@ -1944,6 +1944,11 @@ def _electrisim_build_dc_dc_converters(net):
             'bidirectional': _electrisim_flag(el.get('bidirectional'), False),
             'in_service': _electrisim_in_service(el),
             'input': None, 'vsc': None, 'output_load': None, 'aux_bus': None, 'aux_ext_grid': None,
+            # For the EMT study: its model (a dual active bridge), switching frequency, current limit, output capacitor.
+            'emt': {'model': 'switching' if el.get('emt_model') == 'switching' else 'average',
+                    'switching_khz': safe_float(el.get('switching_khz'), 20.0),
+                    'current_limit_pu': safe_float(el.get('current_limit_pu'), 1.2),
+                    'c_out_mf': safe_float(el.get('c_out_mf'), 0.0)},
         }
         for side, bus, key in (('input', b_in, 'vn_in_kv'), ('output', b_out, 'vn_out_kv')):
             rated_kv, vn = safe_float(el.get(key), 0.0), float(net.bus_dc.at[bus, 'vn_kv'])
@@ -2193,7 +2198,12 @@ def _electrisim_build_ssts(net, Busbars):
 
         rec = {'name': name, 'id': el.get('id', ''), 'label': label, 'in_service': on, 'bus_mv': int(b_mv),
                'bus_lvdc': int(b_lvdc), 'bus_lvac': int(b_lvac) if b_lvac is not None else None,
-               'link_kv': safe_float(el.get('link_kv'), 0.0), 'stages': [], 'aux': [], 'inverter_mode': None}
+               'link_kv': safe_float(el.get('link_kv'), 0.0), 'stages': [], 'aux': [], 'inverter_mode': None,
+               # For the EMT study: its stages' model, switching frequencies and current limit.
+               'emt': {'model': 'switching' if el.get('emt_model') == 'switching' else 'average',
+                       'switching_khz': safe_float(el.get('switching_khz'), 5.0),
+                       'dcdc_switching_khz': safe_float(el.get('dcdc_switching_khz'), 20.0),
+                       'current_limit_pu': safe_float(el.get('current_limit_pu'), 1.2)}}
         if rec['link_kv'] <= 0:
             rec['link_kv'] = float(net.bus.at[b_mv, 'vn_kv']) * math.sqrt(2) * 1.1
         for key, bus, vn in (('vn_mv_kv', b_mv, float(net.bus.at[b_mv, 'vn_kv'])),
@@ -2216,7 +2226,8 @@ def _electrisim_build_ssts(net, Busbars):
             net.load.at[mv_load, key] = value
         if 'id' in net.load.columns:
             net.load.at[mv_load, 'id'] = el.get('id', '')
-        rec['stages'].append({'stage': 'rectifier', 'input': ('load', int(mv_load)), 'rated_mw': r_rated})
+        rec['stages'].append({'stage': 'rectifier', 'input': ('load', int(mv_load)), 'rated_mw': r_rated,
+                              'output': ('vsc', int(r_vsc)), 'link': int(link)})
 
         # The DC/DC stage, holding the LV DC port.
         d_eta, d_nl, d_rated = stage_params('dcdc', 98.0, 1.0)
@@ -2224,7 +2235,8 @@ def _electrisim_build_ssts(net, Busbars):
                                                          d_rated, f'{name} DC/DC', on)
         d_in = _electrisim_new_load_dc(net, link, d_nl, f'{name} DC/DC input', on,
                                        **_electrisim_stage_columns(name, d_eta, d_nl, ('vsc', d_vsc)))
-        rec['stages'].append({'stage': 'dcdc', 'input': ('load_dc', int(d_in)), 'rated_mw': d_rated})
+        rec['stages'].append({'stage': 'dcdc', 'input': ('load_dc', int(d_in)), 'rated_mw': d_rated,
+                              'output': ('vsc', int(d_vsc))})
         rec['aux'] = [('vsc', r_vsc), ('ext_grid', r_grid), ('bus', r_bus), ('vsc', d_vsc), ('ext_grid', d_grid),
                       ('bus', d_bus), ('load_dc', int(d_in)), ('bus_dc', int(link))]
 
@@ -2257,6 +2269,8 @@ def _electrisim_build_ssts(net, Busbars):
         if not hasattr(net, 'user_friendly_names'):
             net.user_friendly_names = {}
         net.user_friendly_names[name] = label
+        for part in ('inverter', 'inverter input', 'DC/DC input', 'DC link'):
+            net.user_friendly_names[f'{name} {part}'] = f'{label} {part}'
 
 
 def _electrisim_sst_check_island(net, rec, grid):

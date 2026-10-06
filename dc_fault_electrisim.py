@@ -138,7 +138,11 @@ def _label(net, table, idx):
 
 
 def _row_id(net, table, idx):
-    return net[table].at[idx, 'id'] if 'id' in net[table].columns else str(idx)
+    """Its diagram cell's id: none for an element of the model's own (NaN in the id column)."""
+    if 'id' not in net[table].columns:
+        return str(idx)
+    value = net[table].at[idx, 'id']
+    return '' if value is None or (isinstance(value, float) and not math.isfinite(value)) else value
 
 
 def _ac_thevenin(net, warnings_out):

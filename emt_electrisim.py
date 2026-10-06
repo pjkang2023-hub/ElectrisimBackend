@@ -39,7 +39,7 @@ import numpy as np
 import pandapower_electrisim as pe
 from dc_fault_electrisim import _ac_thevenin, _f, _label, _row_id, _waveform
 from emt_ac import AcBuilder
-from emt_converters import Vsc
+from emt_converters import DcDc, Vsc
 from emt_solver import R_BIAS, Circuit, dc_load_current
 
 
@@ -64,7 +64,9 @@ class _EmtBuilder:
         self.loads = []         # (label, id, bus, node, func-array, nominal V)
         self.breakers = []      # dict per breaker
         self.blockers = []      # (label, switch index, node, threshold V)
-        self.vscs = []          # VSCs on the AC network: average-value models with their controls
+        self.vscs = []          # VSCs on the AC network (an SST's rectifier and inverter among them), with their controls
+        self.dcdcs = []         # DC/DC converters (an SST's DC/DC stage among them): dual active bridges
+        self.skip = set()       # (table, index): load-flow elements a converter's EMT model stands for
         self._breakers_by_target = {}
         self.default_filters = []
 
@@ -84,15 +86,58 @@ class _EmtBuilder:
         for rec in getattr(net, 'electrisim_dc_breakers', None) or []:
             if rec['closed'] and rec['target'] is not None:
                 self._breakers_by_target.setdefault(rec['target'], []).append(rec)
-        self.ac = AcBuilder(ckt, net, self.params, self.warnings, self.f_hz).build()
+        self._plan_converters()
+        ac = AcBuilder(ckt, net, self.params, self.warnings, self.f_hz)
+        ac.skip = self.skip
+        self.ac = ac.build()
         self._cables()
         self._capacitors()
         self._sources()
         self._loads()
         self._converters()
+        self._dc_dc_converters()
+        self._ssts()
         if 'b2b_vsc' in net and len(net.b2b_vsc):
             self.warnings.append('The B2B VSCs are left out of the EMT study: their two-pole DC side is not modelled yet.')
         return self
+
+    def _plan_converters(self):
+        """
+        The DC/DC converters and SSTs modelled as such, and the load-flow
+        elements they stand for (their stages' inputs, auxiliary VSCs, an SST's
+        MV load and its grid-following inverter's current), left out.
+        """
+        net = self.net
+        self.dcdc_plan, self.sst_plan = [], []
+
+        def dc_ok(b):
+            return b is not None and b in self.bus_node
+
+        def ac_ok(b):
+            if b is None or b not in net.bus.index or not bool(net.bus.at[b, 'in_service']) or b not in net.res_bus.index:
+                return False
+            return np.isfinite(net.res_bus.at[b, 'vm_pu'])
+
+        for rec in getattr(net, 'electrisim_dc_dc_converters', None) or []:
+            parts = [('load_dc', rec['input']), ('vsc', rec['vsc']), ('load_dc', rec['output_load'])]
+            if not rec['in_service'] or not dc_ok(rec['bus_in']) or not dc_ok(rec['bus_out']):
+                continue
+            if rec['input'] is None or rec['input'] not in net.load_dc.index or not bool(net.load_dc.at[rec['input'], 'in_service']):
+                continue
+            self.dcdc_plan.append(rec)
+            self.skip.update(p for p in parts if p[1] is not None)
+        for rec in getattr(net, 'electrisim_ssts', None) or []:
+            stages = {s['stage']: s for s in rec['stages']}
+            rect, dcdc = stages.get('rectifier'), stages.get('dcdc')
+            if not rec['in_service'] or rect is None or dcdc is None:
+                continue
+            if not ac_ok(rec['bus_mv']) or not dc_ok(rect['link']) or not dc_ok(rec['bus_lvdc']):
+                continue
+            self.sst_plan.append(rec)
+            self.skip.update([rect['input'], rect['output'], dcdc['input'], dcdc['output']])
+            inv = stages.get('inverter')
+            if inv is not None and rec['inverter_mode'] == 'grid_following' and ac_ok(rec['bus_lvac']):
+                self.skip.update([inv['input'], inv['output']])
 
     def _terminal(self, table, idx, bus, i0):
         """The node an element connects at: its bus, or beyond a breaker in front of it."""
@@ -195,7 +240,7 @@ class _EmtBuilder:
         ld = net.load_dc
         for li in ld.index:
             bus = int(ld.at[li, 'bus_dc'])
-            if not bool(ld.at[li, 'in_service']) or bus not in self.bus_node:
+            if not bool(ld.at[li, 'in_service']) or bus not in self.bus_node or ('load_dc', li) in self.skip:
                 continue
             p = _f(net.res_load_dc.at[li, 'p_dc_mw']) if li in net.res_load_dc.index else _f(ld.at[li, 'p_dc_mw'])
             vn = self.vn[bus]
@@ -247,7 +292,7 @@ class _EmtBuilder:
         w = 2.0 * math.pi * self.f_hz
         for vi in net.vsc.index:
             bus = int(net.vsc.at[vi, 'bus_dc'])
-            if not bool(net.vsc.at[vi, 'in_service']) or bus not in self.bus_node:
+            if not bool(net.vsc.at[vi, 'in_service']) or bus not in self.bus_node or ('vsc', vi) in self.skip:
                 continue
             aux = 'electrisim_aux' in net.vsc.columns and net.vsc.at[vi, 'electrisim_aux'] == True
             label = _label(net, 'vsc', vi)
@@ -257,12 +302,7 @@ class _EmtBuilder:
             term = self._terminal('vsc', vi, bus, -i0)
             if not aux and int(net.vsc.at[vi, 'bus']) in self.ac.nodes:
                 # On the AC network: its average-value model, with its controls.
-                conv = Vsc(self, vi, label, bus, term, r_dc, block)
-                conv.id = _row_id(net, 'vsc', vi)
-                self.vscs.append(conv)
-                self.series.append(('VSC', label, conv.id, f'{label} (DC side)', ('i_rl', conv.k_dc_out), -1.0))
-                self.ac.series.append(('VSC', label, conv.id, f'{label} (AC side)',
-                                       [[('i_rl', k, None, 1.0)] for k in conv.k_e]))
+                self._add_vsc(Vsc.from_net(self, vi, label, bus, term, r_dc, block), _row_id(net, 'vsc', vi))
                 continue
             # Its controlled stage: a stiff source at its DC voltage, until it blocks.
             src = ckt.node(f'{label} source', self.v_bus[bus])
@@ -295,6 +335,114 @@ class _EmtBuilder:
                 ckt.add_diode(x, p_node)
                 ckt.add_diode(0, x)
             ckt.add_rl(p_node, term, r_dc, 0.0)
+
+    def _dc_dc_converters(self):
+        """Each DC/DC converter: a dual active bridge between its buses, with its controls."""
+        net = self.net
+        block = _f(self.params.get('vsc_block_pu'), 0.8)
+        for rec in self.dcdc_plan:
+            res_in = net.res_load_dc
+            p_in = _f(res_in.at[rec['input'], 'p_dc_mw']) if rec['input'] in res_in.index else 0.0
+            if rec['vsc'] is not None:
+                p_out = -_f(net.res_vsc.at[rec['vsc'], 'p_dc_mw']) if rec['vsc'] in net.res_vsc.index else 0.0
+                out = ('vsc', rec['vsc'])
+            else:
+                p_out = rec['p_set_mw']
+                out = ('load_dc', rec['output_load'])
+            b_in, b_out = rec['bus_in'], rec['bus_out']
+            term_in = self._terminal('load_dc', rec['input'], b_in, p_in * 1e6 / self.v_bus[b_in])
+            term_out = self._terminal(out[0], out[1], b_out, -p_out * 1e6 / self.v_bus[b_out])
+            e = rec.get('emt') or {}
+            conv = DcDc(self, rec['label'], b_in, b_out, term_in, term_out, p_in_mw=p_in, p_out_mw=p_out,
+                        mode=rec['mode'], vm_out_pu=rec['vm_out_pu'], p_set_mw=rec['p_set_mw'], rated_mw=rec['rated_mw'],
+                        eta=rec['eta'], p_nl_mw=rec['p_nl_mw'], bidirectional=rec['bidirectional'],
+                        limit_pu=e.get('current_limit_pu', 1.2), model=e.get('model', 'average'),
+                        switching_khz=e.get('switching_khz', 20.0), c_out_mf=e.get('c_out_mf', 0.0), block_pu=block)
+            self._add_dcdc(conv, rec['id'])
+
+    def _add_dcdc(self, conv, row_id):
+        conv.id = row_id
+        self.dcdcs.append(conv)
+        self.series.append(('DC/DC converter', conv.label, row_id, f'{conv.label} (input)', ('i_rl', conv.k_in), 1.0))
+        self.series.append(('DC/DC converter', conv.label, row_id, f'{conv.label} (output)', ('i_rl', conv.k_out), 1.0))
+
+    def _ssts(self):
+        """
+        Each SST: its rectifier, a VSC on its MV bus holding its DC link; its
+        DC/DC stage, a dual active bridge holding its LV DC port; and its
+        grid-following inverter, a VSC delivering its set power to its LV AC
+        port. A grid-forming inverter stays a source behind its impedance, its
+        input a constant-power load.
+        """
+        net = self.net
+        block = _f(self.params.get('vsc_block_pu'), 0.8)
+        for rec in self.sst_plan:
+            e = rec.get('emt') or {}
+            stages = {s['stage']: s for s in rec['stages']}
+            rect, dcdc, inv = stages['rectifier'], stages['dcdc'], stages.get('inverter')
+            limit, model = e.get('current_limit_pu', 1.2), e.get('model', 'average')
+            link = rect['link']
+
+            def stage_loss(inp):
+                table, i = inp
+                df = net[table]
+                return (_f(df.at[i, 'electrisim_dcdc_eta'], 1.0) if 'electrisim_dcdc_eta' in df.columns else 1.0,
+                        _f(df.at[i, 'electrisim_dcdc_p_nl_mw'], 0.0) if 'electrisim_dcdc_p_nl_mw' in df.columns else 0.0)
+
+            def reactor(bus, rated):
+                z = (float(net.bus.at[bus, 'vn_kv']) * 1e3) ** 2 / (max(rated, 1e-3) * 1e6)
+                return 0.005 * z, 0.15 * z
+
+            # Its rectifier.
+            mv_load, r_vsc = rect['input'][1], rect['output'][1]
+            p, q = (_f(net.res_load.at[mv_load, 'p_mw']), _f(net.res_load.at[mv_load, 'q_mvar'])) \
+                if mv_load in net.res_load.index else (0.0, 0.0)
+            p_dc = _f(net.res_vsc.at[r_vsc, 'p_dc_mw']) if r_vsc in net.res_vsc.index else -p
+            eta, p_nl = stage_loss(rect['input'])
+            r_ohm, x_ohm = reactor(rec['bus_mv'], rect['rated_mw'])
+            label = f"{rec['label']} rectifier"
+            conv = Vsc(self, label, rec['bus_mv'], link, self.bus_node[link], 1e-6, block, p=p, q=q, p_dc=p_dc,
+                       rated_mva=rect['rated_mw'], limit_pu=limit, r_ohm=r_ohm, x_ohm=x_ohm, mode_dc='vm_pu',
+                       mode_ac='q_mvar', model=model, switching_khz=e.get('switching_khz', 5.0),
+                       eta=eta, p_nl_mw=p_nl, input_side='ac')
+            self._add_vsc(conv, rec['id'])
+
+            # Its DC/DC stage.
+            d_in, d_vsc = dcdc['input'][1], dcdc['output'][1]
+            p_in = _f(net.res_load_dc.at[d_in, 'p_dc_mw']) if d_in in net.res_load_dc.index else 0.0
+            p_out = -_f(net.res_vsc.at[d_vsc, 'p_dc_mw']) if d_vsc in net.res_vsc.index else 0.0
+            eta, p_nl = stage_loss(dcdc['input'])
+            lv = rec['bus_lvdc']
+            term_out = self._terminal('vsc', d_vsc, lv, -p_out * 1e6 / self.v_bus[lv])
+            vm_out = _f(net.vsc.at[d_vsc, 'control_value_dc'], 1.0) if 'control_value_dc' in net.vsc.columns else 1.0
+            conv = DcDc(self, f"{rec['label']} DC/DC", link, lv, self.bus_node[link], term_out, p_in_mw=p_in,
+                        p_out_mw=p_out, mode='voltage', vm_out_pu=vm_out, rated_mw=dcdc['rated_mw'], eta=eta,
+                        p_nl_mw=p_nl, bidirectional=True, limit_pu=limit, model=model,
+                        switching_khz=e.get('dcdc_switching_khz', 20.0), block_pu=block)
+            self._add_dcdc(conv, rec['id'])
+
+            # Its grid-following inverter.
+            if inv is None or inv['input'] not in self.skip:
+                continue
+            i_in, sgen = inv['input'][1], inv['output'][1]
+            p_s, q_s = (_f(net.res_sgen.at[sgen, 'p_mw']), _f(net.res_sgen.at[sgen, 'q_mvar'])) \
+                if sgen in net.res_sgen.index else (0.0, 0.0)
+            p_dc = _f(net.res_load_dc.at[i_in, 'p_dc_mw']) if i_in in net.res_load_dc.index else p_s
+            eta, p_nl = stage_loss(inv['input'])
+            r_ohm, x_ohm = reactor(rec['bus_lvac'], inv['rated_mw'])
+            term = self._terminal('load_dc', i_in, lv, p_dc * 1e6 / self.v_bus[lv])
+            conv = Vsc(self, f"{rec['label']} inverter", rec['bus_lvac'], lv, term, 1e-6, block, p=-p_s, q=-q_s,
+                       p_dc=p_dc, rated_mva=inv['rated_mw'], limit_pu=limit, r_ohm=r_ohm, x_ohm=x_ohm, mode_dc='p_mw',
+                       mode_ac='q_mvar', model=model, switching_khz=e.get('switching_khz', 5.0),
+                       eta=eta, p_nl_mw=p_nl, input_side='dc')
+            self._add_vsc(conv, rec['id'])
+
+    def _add_vsc(self, conv, row_id):
+        conv.id = row_id
+        self.vscs.append(conv)
+        self.series.append(('VSC', conv.label, row_id, f'{conv.label} (DC side)', ('i_rl', conv.k_dc_out), -1.0))
+        self.ac.series.append(('VSC', conv.label, row_id, f'{conv.label} (AC side)',
+                               [[('i_rl', k, None, 1.0)] for k in conv.k_e]))
 
     def _vsc_on_ac_network(self, vi, label, bus, term, r_dc, blocker):
         """
@@ -330,7 +478,7 @@ class _EmtBuilder:
 
     def controller(self, t, state):
         changed = False
-        for conv in self.vscs:
+        for conv in self.vscs + self.dcdcs:
             changed = conv.control(t, state) or changed
         for blk in self.blockers:
             if blk['t'] is None and state.v[blk['node']] < blk['v_block']:
@@ -383,8 +531,12 @@ METHOD = ("A time-domain simulation of the AC and DC networks from their load-fl
           "open into their surge arresters. A VSC on the AC network is an average-value model behind its reactor "
           "and isolating transformer, with its DC link, under its controls - PLL, dq current control, its DC "
           "voltage or power, its reactive power or AC voltage - limited to its current limit, and blocking, its "
-          "diodes left, on DC undervoltage or overcurrent. DC/DC converter and SST outputs are stiff sources "
-          "that block on undervoltage; converter inputs are constant-power loads. A constant-power load with no minimum voltage set "
+          "diodes left, on DC undervoltage or overcurrent. A DC/DC converter is a dual active bridge holding its "
+          "output voltage or delivering its set power within its current limit, blocking on undervoltage; an SST "
+          "is a VSC rectifier holding its DC link, a dual active bridge holding its LV DC port, and a grid-following "
+          "inverter VSC (a grid-forming one stays a source behind its impedance). Each converter is an average-value "
+          "or a switching model; a switching one switches at exact instants, its controller sampling twice per "
+          "period. A constant-power load with no minimum voltage set "
           "draws constant current below 0.8 pu; one with no input capacitance is given 4 ms x P / V^2. "
           "Pole-to-pole faults.")
 
@@ -464,7 +616,7 @@ def emt_study(net, params, in_data=None):
     t_fine = min(t_end, (max(event_times) if event_times else 0.0) + 0.01)
     with np.errstate(all='ignore'):
         # A switching converter keeps its fine step throughout: fifty to its switching period at most.
-        t_sw = min((1.0 / c.f_sw for c in b.vscs if c.model == 'switching'), default=None)
+        t_sw = min((1.0 / c.f_sw for c in b.vscs + b.dcdcs if c.model == "switching"), default=None)
         dt_coarse = min(10 * dt, 2e-5) if t_sw is None else max(dt, min(10 * dt, 2e-5, t_sw / 50))
         sim = ckt.simulate(t_end, dt, dt_coarse=dt_coarse, t_fine=t_fine)
     t = sim['t']
@@ -488,8 +640,9 @@ def emt_study(net, params, in_data=None):
                          'waveform': _waveform(t, i, j, t_fine)})
     result = {'method': METHOD, 'buses': buses, 'branches': branches, 'breakers': [], 'loads': [], 'fault': None,
               'converters_blocked': [{'label': blk['label'], 't_ms': _round(blk['t'] * 1e3)} for blk in b.blockers if blk['t'] is not None]
-              + [{'label': c.label, 't_ms': _round(c.blocked_at * 1e3)} for c in b.vscs if c.blocked_at is not None],
-              'converters': [_converter_result(c, min(event_times, default=t_end)) for c in b.vscs],
+              + [{'label': c.label, 't_ms': _round(c.blocked_at * 1e3)} for c in b.vscs + b.dcdcs if c.blocked_at is not None],
+              'converters': [_converter_result(c, min(event_times, default=t_end)) for c in b.vscs]
+              + [_dcdc_result(c, min(event_times, default=t_end)) for c in b.dcdcs],
               'settings': {'time_step_us': dt * 1e6, 'duration_ms': t_end * 1e3,
                            'max_section_km': _f(params.get('max_section_km'), 1.0),
                            'vsc_block_pu': _f(params.get('vsc_block_pu'), 0.8)}}
@@ -634,7 +787,7 @@ def _converter_result(conv, t_event):
     run: its P and Q over its first cycle (before the first event) and its last.
     """
     tr = np.array(conv.trace) if conv.trace else np.zeros((0, 5))
-    out = {'label': conv.label, 'id': getattr(conv, 'id', ''), 'model': conv.model,
+    out = {'label': conv.label, 'id': getattr(conv, 'id', ''), 'kind': 'VSC', 'model': conv.model,
            'switching_khz': _round(conv.f_sw / 1e3) if getattr(conv, 'f_sw', None) else None,
            'rated_mva': _round(conv.s_rated / 1e6), 'current_limit_ka': _round(conv.i_max / SQ2 / 1e3),
            'blocked_ms': _round(conv.blocked_at * 1e3) if conv.blocked_at is not None else None,
@@ -650,6 +803,29 @@ def _converter_result(conv, t_event):
                    q_end_mvar=_round(float(np.mean(tr[last, 2])) / 1e6),
                    v_dc_min_kv=_round(float(np.min(tr[:, 3])) / 1e3), v_dc_end_kv=_round(tr[-1, 3] / 1e3),
                    i_peak_ka=_round(float(np.max(tr[:, 4])) / SQ2 / 1e3))
+    return out
+
+
+def _dcdc_result(conv, t_event):
+    """
+    A DC/DC converter's power out over its first cycle (before the first
+    event) and its last, its output voltage and current through the run.
+    """
+    tr = np.array(conv.trace) if conv.trace else np.zeros((0, 6))
+    out = {'label': conv.label, 'id': getattr(conv, 'id', ''), 'kind': 'DC/DC', 'model': conv.model,
+           'switching_khz': _round(conv.f_sw / 1e3), 'rated_mw': _round(conv.rated / 1e6),
+           'current_limit_ka': _round(conv.i_max / 1e3),
+           'blocked_ms': _round(conv.blocked_at * 1e3) if conv.blocked_at is not None else None,
+           'limited_ms': _round(conv.limited_time * 1e3)}
+    if len(tr):
+        cycle = 0.02
+        first = tr[:, 0] <= max(min(tr[0, 0] + cycle, t_event), tr[0, 0])
+        last = tr[:, 0] >= tr[-1, 0] - cycle
+        out.update(p_start_mw=_round(float(np.mean(tr[first, 2])) / 1e6),
+                   p_end_mw=_round(float(np.mean(tr[last, 2])) / 1e6),
+                   v_dc_min_kv=_round(float(np.min(tr[:, 4])) / 1e3), v_dc_end_kv=_round(tr[-1, 4] / 1e3),
+                   v_in_min_kv=_round(float(np.min(tr[:, 3])) / 1e3),
+                   i_peak_ka=_round(float(np.max(np.abs(tr[:, 5]))) / 1e3))
     return out
 
 
