@@ -176,6 +176,7 @@ class _Builder:
         self.breakers = []        # (record, rl index)
         self.cable_caps = []
         self.has_converter = False
+        self.isolated = set()     # DC buses nothing in the fault circuit reaches
 
     def _v(self, bus):
         return self.v_bus[bus]
@@ -188,6 +189,8 @@ class _Builder:
                 continue
             if 'electrisim_aux' in net.bus_dc.columns and net.bus_dc.at[b, 'electrisim_aux'] == True:
                 continue   # a solid-state transformer's internal DC link, inside its blocked stages
+            if pe._electrisim_is_hidden(net.bus_dc, b):
+                continue   # a battery's cells: modelled with it
             self.bus_node[b] = ckt.node(_label(net, 'bus_dc', b))
             self.v_bus[b] = float(res.at[b, 'vm_pu']) * float(net.bus_dc.at[b, 'vn_kv']) * 1e3
         breakers = {}
@@ -200,6 +203,8 @@ class _Builder:
         self._sources()
         self._loads()
         self._converters()
+        self._ders()
+        self._tie_isolated()
         if len(net.b2b_vsc) if 'b2b_vsc' in net else False:
             self.warnings.append('The B2B VSCs are left out of the DC fault study: their two-pole DC side is not modelled yet.')
         return self
@@ -246,6 +251,8 @@ class _Builder:
     def _capacitors(self):
         ckt = self.ckt
         for cap in getattr(self.net, 'electrisim_dc_capacitors', None) or []:
+            if cap.get('electrisim_der'):
+                continue   # a supercapacitor: with the sources and stores
             bus = cap['bus_dc']
             if not cap.get('in_service', True) or bus not in self.bus_node or cap['c_mf'] <= 0:
                 continue
@@ -345,6 +352,62 @@ class _Builder:
             k = ckt.add_rl(p_node, term, _f(net.vsc.at[vi, 'r_dc_ohm']), 0.0)
             self.contributions.append(('VSC (diodes, blocked)', label, _row_id(net, 'vsc', vi), ('rl', k)))
             self.has_converter = True
+
+
+    def _tie_isolated(self):
+        """
+        A DC bus nothing in the fault circuit reaches - a PV array's or SOFC's
+        own bus behind its blocked converter, a converter's output bus with
+        only loads on it - tied to the pole through a large resistance, so
+        its node is defined; a fault there draws nothing, and it is not faulted.
+        """
+        ckt = self.ckt
+        used = set()
+        for branches in (ckt.rl, ckt.c, ckt.r, ckt.d, ckt.sw, ckt.arr, ckt.nl, ckt.isrc):
+            for br in branches:
+                used.update((int(br[0]), int(br[1])))
+        for grp in ckt.cp:
+            used.update(int(n) for n in grp[0])
+            used.update(int(n) for n in grp[1])
+        for bus, node in self.bus_node.items():
+            if node not in used:
+                ckt.add_r(node, 0, R_BIAS)
+                self.isolated.add(bus)
+
+    def _ders(self):
+        """
+        Batteries and supercapacitors on their buses, directly or behind their
+        converters, from their load-flow state: a battery its open-circuit
+        voltage behind R0 (its RC branch, tens of seconds, holding its voltage
+        over the fault), a supercapacitor its capacitance behind its ESR, each
+        with its series inductance. A converter between one and the network
+        blocks, so it feeds a fault on its own bus only. PV arrays, SOFC
+        systems and flywheels feed a fault through converters that limit it,
+        and are left out.
+        """
+        net, ckt = self.net, self.ckt
+        left_out = []
+        for rec in getattr(net, 'electrisim_ders', None) or []:
+            obj, bus = rec['obj'], rec['bus']
+            if not obj.in_service or bus not in self.bus_node:
+                continue
+            if rec['kind'] not in ('Battery', 'Supercapacitor'):
+                left_out.append(rec['label'])
+                continue
+            v, p = pe._electrisim_der_power(net, rec)
+            i0 = p / max(v, 1e-6)
+            if rec['kind'] == 'Battery':
+                # Over a fault's milliseconds its RC branch (tens of seconds) holds its voltage: its
+                # open-circuit voltage less that, behind R0.
+                k = ckt.add_rl(0, self.bus_node[bus], obj.r0, obj.l, i0=i0, e0=v + obj.r0 * i0)
+            else:
+                inner = ckt.node(f"{rec['label']} capacitor")
+                ckt.add_c(0, inner, obj.c, w0=-(v + obj.esr * i0))
+                k = ckt.add_rl(inner, self.bus_node[bus], obj.esr, obj.esl, i0=i0)
+            self.contributions.append((rec['kind'], rec['label'], rec['id'], ('rl', k)))
+        if left_out:
+            self.warnings.append(f"{', '.join(left_out)}: PV arrays, SOFC systems and flywheels feed a DC fault "
+                                 "through converters that limit their current, and are left out of this study.")
 
 
 def _current(sim, port):
@@ -470,7 +533,8 @@ def dc_fault_study(net, params, in_data=None):
                            'warnings': warnings_out})
     chosen = str(params.get('fault_bus') or 'all')
     buses = [b for b in builder.bus_node
-             if chosen in ('all', '') or chosen in (str(net.bus_dc.at[b, 'name']), str(_row_id(net, 'bus_dc', b)))]
+             if (chosen in ('all', '') and b not in builder.isolated)
+             or chosen in (str(net.bus_dc.at[b, 'name']), str(_row_id(net, 'bus_dc', b)))]
     if not buses:
         return json.dumps({'error': True, 'message': f'No DC bus {chosen} to fault.', 'warnings': warnings_out})
     duration = _f(params.get('duration_ms'), 200.0)

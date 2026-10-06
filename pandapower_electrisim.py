@@ -19,6 +19,7 @@ import pandapower.timeseries as ts
 from pandapower.timeseries import DFData
 from copy import deepcopy
 import weakref
+import der_electrisim
 
 from storage_q_capability import resolve_storage_pq
 from sc_fault_location import (
@@ -1745,6 +1746,27 @@ def _electrisim_has_dc_load_models(net):
 
 def _electrisim_runpp(net, max_rounds=60, tolerance_mw=1e-9, **kwargs):
     """
+    The load flow, with the microgrid sources and stores settled: each one's
+    terminal voltage at the current it delivers, each directly connected
+    PV array or SOFC at the power its curve gives at its bus's voltage, each
+    DC/DC converter in droop at the voltage its power gives - repeating until
+    they agree. Without them, _electrisim_runpp_converters alone.
+    """
+    droop = any(c.get('control') == 'droop' for c in getattr(net, 'electrisim_dc_dc_converters', None) or [])
+    if not getattr(net, 'electrisim_ders', None) and not droop:
+        return _electrisim_runpp_converters(net, max_rounds, tolerance_mw, **kwargs)
+    for _ in range(40):
+        _electrisim_runpp_converters(net, max_rounds, tolerance_mw, **kwargs)
+        if _electrisim_settle_ders(net) <= 1e-9:
+            return None
+        kwargs = {**kwargs, 'init': 'results'}
+    _electrisim_warn(net, 'The sources and stores had not settled after 40 load flows: '
+                          'their voltages and powers are those of the last one.')
+    return None
+
+
+def _electrisim_runpp_converters(net, max_rounds=60, tolerance_mw=1e-9, **kwargs):
+    """
     pp.runpp with the DC/DC converters' inputs matched to their outputs, and
     voltage-dependent DC loads settled: plain runpp when there is neither.
 
@@ -1853,6 +1875,12 @@ def _electrisim_warn(net, message):
 # and left out of the results.
 
 _DCDC_AUX_R_PU, _DCDC_AUX_X_PU, _DCDC_AUX_RDC_PU = 1e-4, 1e-3, 1e-6
+_DCDC_CONTROLS = ('voltage', 'power', 'droop', 'dispatch', 'mppt', 'follower', 'smoothing')
+
+
+def _electrisim_is_hidden(df, index):
+    """Whether a row is a source's or store's own part, reported with it."""
+    return 'electrisim_hidden' in df.columns and index in df.index and df.at[index, 'electrisim_hidden'] == True
 
 
 def _electrisim_is_aux(df, index):
@@ -1931,7 +1959,13 @@ def _electrisim_build_dc_dc_converters(net):
             _electrisim_warn(net, f"DC/DC Converter '{label}' needs a DC bus at its input and another at its output, "
                                   "so it is left out.")
             continue
-        mode = 'power' if str(el.get('control_mode') or 'voltage').strip().lower().startswith('p') else 'voltage'
+        # Its control: voltage and power, and the modes its sources need - droop (voltage, lowered
+        # with its power), dispatch (power), MPPT and follower (power: its PV array's maximum
+        # power, its SOFC's set power) and smoothing (power: none in a load flow).
+        control = str(el.get('control_mode') or 'voltage').strip().lower()
+        if control not in _DCDC_CONTROLS:
+            control = 'power' if control.startswith('p') else 'voltage'
+        mode = 'voltage' if control in ('voltage', 'droop') else 'power'
         eta = safe_float(el.get('efficiency_percent'), 98.0) / 100.0
         if not 0 < eta <= 1:
             _electrisim_warn(net, f"DC/DC Converter '{label}': an efficiency of {100 * eta:g} % is taken as 100 %.")
@@ -1943,6 +1977,10 @@ def _electrisim_build_dc_dc_converters(net):
             'vm_out_pu': safe_float(el.get('vm_out_pu'), 1.0), 'p_set_mw': safe_float(el.get('p_set_mw'), 0.0),
             'bidirectional': _electrisim_flag(el.get('bidirectional'), False),
             'in_service': _electrisim_in_service(el),
+            'control': control, 'droop_percent': safe_float(el.get('droop_percent'), 5.0),
+            'smoothing': {'tau_s': safe_float(el.get('smoothing_tau_s'), 10.0),
+                          'soc_ref_percent': safe_float(el.get('soc_ref_percent'), 50.0),
+                          'soc_gain': safe_float(el.get('soc_gain'), 0.1)},
             'input': None, 'vsc': None, 'output_load': None, 'aux_bus': None, 'aux_ext_grid': None,
             # For the EMT study: its model (a dual active bridge), switching frequency, current limit, output capacitor.
             'emt': {'model': 'switching' if el.get('emt_model') == 'switching' else 'average',
@@ -1956,6 +1994,8 @@ def _electrisim_build_dc_dc_converters(net):
                 _electrisim_warn(net, f"DC/DC Converter '{label}': its {side} is rated {rated_kv:g} kV, "
                                       f"its {side} bus is {vn:g} kV.")
         on = rec['in_service']
+        if control == 'smoothing':
+            rec['p_set_mw'] = 0.0      # its store's power follows its loads' swings: none in a load flow
         if mode == 'voltage':
             vsc, aux_bus, aux_grid = _electrisim_aux_dc_source(net, b_out, rec['vm_out_pu'], rec['rated_mw'], name, on)
             rec.update(vsc=vsc, aux_bus=aux_bus, aux_ext_grid=aux_grid)
@@ -2030,8 +2070,10 @@ def _electrisim_freeze_dc_dc(net):
     """
     convs = getattr(net, 'electrisim_dc_dc_converters', None) or []
     ssts = getattr(net, 'electrisim_ssts', None) or []
-    if not convs and not ssts:
+    ders = getattr(net, 'electrisim_ders', None) or []
+    if not convs and not ssts and not ders:
         return
+    solved = None
     try:
         # On a copy: the study starts from a network without load-flow results.
         solved = deepcopy(net)
@@ -2042,6 +2084,9 @@ def _electrisim_freeze_dc_dc(net):
             col = _STAGE_P_COLUMN[table]
             if i in net[table].index:
                 net[table].at[i, col] = float(solved[table].at[i, col])
+        for k, rec in enumerate(ders):
+            if 'load' in rec['parts'] and rec['parts']['load'] in net.load_dc.index:
+                net.load_dc.at[rec['parts']['load'], 'p_dc_mw'] = -_electrisim_der_power(solved, solved.electrisim_ders[k])[1] / 1e6
     except Exception:   # noqa: BLE001 - the inputs keep their first estimate
         _electrisim_warn(net, "The load flow that settles the DC/DC converters' inputs did not solve: "
                               "they draw their no-load loss, or their set power over their efficiency.")
@@ -2072,6 +2117,29 @@ def _electrisim_freeze_dc_dc(net):
         for b in getattr(net, 'electrisim_dc_breakers', None) or []:
             if b['target'] is not None and b['target'][1] not in net[b['target'][0]].index:
                 b['target'] = None
+    # The sources and stores: behind their converters, left out with the networks those held; a battery
+    # directly on a bus, the power it delivered in the load flow.
+    for k, rec in enumerate(ders):
+        parts = rec['parts']
+        if 'line' in parts:
+            p = 0.0
+            if solved is not None:
+                try:
+                    p = _electrisim_der_power(solved, solved.electrisim_ders[k])[1]
+                except Exception:   # noqa: BLE001 - it then delivers nothing
+                    p = 0.0
+            _electrisim_new_load_dc(net, rec['bus'], -p / 1e6, f"{rec['name']} output", rec['obj'].in_service,
+                                    electrisim_aux=True, electrisim_dcdc_role='frozen')
+            if parts['line'] in net.line_dc.index:
+                net.line_dc.drop(parts['line'], inplace=True)
+        for table, key in (('vsc', 'vsc'), ('ext_grid', 'aux_grid'), ('bus', 'aux_bus'),
+                           ('vsc', 'cells'), ('bus_dc', 'inner')):
+            idx = parts.get(key)
+            if idx is not None and idx in net[table].index:
+                net[table].drop(idx, inplace=True)
+    if ders:
+        _electrisim_drop_uncoupled_dc(net, quiet=True)
+    net.electrisim_ders = []
     net.electrisim_dc_dc_converters = []
     net.electrisim_ssts = []
 
@@ -2133,7 +2201,8 @@ def _electrisim_stage_result(net, stage):
 
 
 def _electrisim_dc_dc_result(net, rec):
-    out = {'name': rec['name'], 'id': rec['id'], 'mode': rec['mode'], 'in_service': rec['in_service'],
+    out = {'name': rec['name'], 'id': rec['id'], 'mode': rec['mode'], 'control': rec.get('control', rec['mode']),
+           'in_service': rec['in_service'],
            'rated_mw': rec['rated_mw'], 'p_in_mw': 0.0, 'p_out_mw': 0.0, 'loss_mw': 0.0,
            'efficiency_percent': None, 'loading_percent': 0.0, 'vm_in_pu': None, 'vm_out_pu': None}
     res_bus = getattr(net, 'res_bus_dc', None)
@@ -2155,6 +2224,244 @@ def _electrisim_dc_dc_result(net, rec):
     if rec['rated_mw'] > 0 and out['loading_percent'] and out['loading_percent'] > 100.0:
         _electrisim_warn(net, f"DC/DC Converter '{rec['label']}' is loaded to {out['loading_percent']:.1f} % "
                               "of its rated power.")
+    return out
+
+
+# --- Microgrid sources and stores ----------------------------------------------------------
+#
+# A battery, supercapacitor, flywheel, SOFC system or PV array (der_electrisim) sits on a DC bus:
+# - behind its DC/DC converter, alone on a bus that only converters' terminals reach (its port):
+#   it holds that bus at its terminal voltage, at the current the converter draws - an auxiliary
+#   source as a converter's output is, its voltage settled with the load flow;
+# - directly on a network bus: a battery as its open-circuit voltage behind its resistance (a DC
+#   source on a hidden bus, a cable of that resistance); a supercapacitor as a DC-link capacitor
+#   (no current in a load flow); a flywheel at its set power, its machine converter's; a PV array
+#   or SOFC at the power its curve gives at the bus's voltage.
+
+def _electrisim_build_ders(net):
+    pending = getattr(net, '_electrisim_pending_der', None) or []
+    net.electrisim_ders = []
+    if not pending:
+        return
+    convs = getattr(net, 'electrisim_dc_dc_converters', None) or []
+    held = set()
+    for el in pending:
+        kind = der_electrisim.kind_of(el.get('typ'))
+        label = el.get('userFriendlyName') or el.get('name')
+        bus = _electrisim_dc_bus(net, el.get('bus'))
+        if bus is None:
+            _electrisim_warn(net, f"{kind} '{label}' is not connected to a DC bus, so it is left out.")
+            continue
+        try:
+            obj = der_electrisim.build(el)
+        except ValueError as e:
+            _electrisim_warn(net, f"{kind} '{label}' is left out: {e}")
+            continue
+        on = obj.in_service
+        vn = float(net.bus_dc.at[bus, 'vn_kv']) * 1e3
+        rec = {'obj': obj, 'kind': kind, 'name': el.get('name'), 'label': label, 'id': el.get('id', ''),
+               'bus': int(bus), 'vn': vn, 'coupling': 'direct', 'parts': {}, 'converters': []}
+        terminals = [c for c in convs if bus in (c['bus_in'], c['bus_out'])]
+        rec['converters'] = terminals
+        port = bool(terminals) and not _electrisim_dc_bus_has_network(net, bus)
+        if kind == 'Supercapacitor' and obj.direct:
+            port = False
+        if port and bus in held:
+            _electrisim_warn(net, f"{kind} '{label}' is left out: another source already holds its converter's bus. "
+                                  "Give each its own bus and converter.")
+            continue
+        if not port and not _electrisim_dc_bus_has_network(net, bus) and not terminals:
+            _electrisim_warn(net, f"{kind} '{label}' is on a DC bus nothing else reaches, so it is left out.")
+            continue
+        if abs(obj.v_nominal() - vn) > 0.25 * vn and not (kind == 'Supercapacitor' and not obj.direct):
+            _electrisim_warn(net, f"{kind} '{label}': its voltage ({obj.v_nominal():.4g} V) is far from its bus's "
+                                  f"({vn:.4g} V).")
+        if port and any(c['bus_out'] == bus for c in terminals):
+            _electrisim_warn(net, f"{kind} '{label}' is left out: it is on its DC/DC converter's output. "
+                                  "Draw the converter from the source's bus (its input) to the network (its output).")
+            continue
+        if port:
+            held.add(int(bus))
+            rec['coupling'] = 'converter'
+            rated = max(obj.p_limits()[0], obj.p_limits()[1], 1e3) / 1e6
+            vsc, aux_bus, aux_grid = _electrisim_aux_dc_source(net, bus, obj.v_terminal(0.0) / vn, rated,
+                                                               f"{el.get('name')} terminal", on)
+            rec['parts'] = {'vsc': vsc, 'aux_bus': aux_bus, 'aux_grid': aux_grid}
+            _electrisim_der_set_converters(net, rec)
+        elif kind == 'Supercapacitor':
+            # Directly on its bus: a DC-link capacitor, which the DC fault and EMT studies model.
+            if not hasattr(net, 'electrisim_dc_capacitors'):
+                net.electrisim_dc_capacitors = []
+            net.electrisim_dc_capacitors.append({
+                'name': el.get('name'), 'id': el.get('id', ''), 'bus_dc': int(bus), 'c_mf': obj.c * 1e3,
+                'esr_mohm': obj.esr * 1e3, 'esl_uh': obj.esl * 1e6, 'in_service': on, 'electrisim_der': True})
+        elif kind == 'Battery':
+            # Directly on its bus: its open-circuit voltage on a hidden bus, behind its resistance.
+            # (pandapower holds a DC voltage reliably only through a VSC: an auxiliary one, as a converter's output.)
+            inner = pp.create_bus_dc(net, vn_kv=vn / 1e3, name=f"{el.get('name')} cells", in_service=on)
+            net.bus_dc.at[inner, 'electrisim_hidden'] = True
+            rated = max(obj.p_limits()[0], obj.p_limits()[1], 1e3) / 1e6
+            vsc, aux_bus, aux_grid = _electrisim_aux_dc_source(net, inner, obj.ocv() / vn, rated,
+                                                               f"{el.get('name')} cells", on)
+            line = pp.create_line_dc_from_parameters(net, from_bus_dc=inner, to_bus_dc=bus, length_km=1.0,
+                                                     r_ohm_per_km=max(obj.r0 + obj.r1, 1e-6), max_i_ka=1e3,
+                                                     name=f"{el.get('name')} resistance", in_service=on)
+            net.line_dc.at[line, 'electrisim_hidden'] = True
+            rec['parts'] = {'inner': int(inner), 'cells': vsc, 'aux_bus': aux_bus, 'aux_grid': aux_grid, 'line': int(line)}
+        else:
+            # A flywheel at its set power; a PV array or SOFC on its curve (settled with the load flow).
+            p0 = _f_der_direct_power(obj, vn)
+            ld = _electrisim_new_load_dc(net, bus, -p0 / 1e6, f"{el.get('name')} output", on,
+                                         electrisim_aux=True, electrisim_dcdc_role='der')
+            rec['parts'] = {'load': int(ld)}
+        net.electrisim_ders.append(rec)
+        if not hasattr(net, 'user_friendly_names'):
+            net.user_friendly_names = {}
+        net.user_friendly_names[el.get('name')] = label
+        for part in ('cells', 'resistance', 'output', 'terminal', 'cells output', 'terminal output'):
+            net.user_friendly_names[f"{el.get('name')} {part}"] = f'{label} ({part.split()[0]})'
+
+
+def _electrisim_dc_bus_has_network(net, bus):
+    """Whether something other than DC/DC converters' terminals reaches a DC bus: a cable, a VSC, a source."""
+    for table, cols in (('line_dc', ('from_bus_dc', 'to_bus_dc')), ('source_dc', ('bus_dc',)), ('b2b_vsc', ('bus_dc_plus', 'bus_dc_minus'))):
+        df = net[table] if table in net else None
+        if df is not None and len(df) and df[list(cols)].isin([bus]).any(axis=None):
+            return True
+    if len(net.vsc):
+        real = net.vsc if 'electrisim_aux' not in net.vsc.columns else net.vsc[net.vsc['electrisim_aux'] != True]
+        if (real['bus_dc'] == bus).any():
+            return True
+    ld = net.load_dc
+    if len(ld):
+        real = ld if 'electrisim_dcdc_role' not in ld.columns else ld[ld['electrisim_dcdc_role'].isna()]
+        if (real['bus_dc'] == bus).any():
+            return True
+    return False
+
+
+def _f_der_direct_power(obj, v):
+    """What a directly connected flywheel, PV array or SOFC delivers (W) at its bus voltage ``v`` (V)."""
+    if obj.kind == 'Flywheel':
+        return min(max(obj.p_set, -obj.p_limits()[1]), obj.p_limits()[0])
+    if obj.kind == 'PV Array':
+        return v * obj.i_array(v)
+    if obj.kind == 'SOFC':
+        return v * obj.i_at_voltage(v)[0]
+    return 0.0
+
+
+def _electrisim_der_set_converters(net, rec):
+    """A converter in MPPT or follower mode delivers what its source gives: its PV array's maximum power, its SOFC's set power."""
+    obj = rec['obj']
+    for conv in rec['converters']:
+        if conv['bus_in'] != rec['bus'] or conv['output_load'] is None:
+            continue
+        p_src = None
+        if conv['control'] == 'mppt':
+            p_src = obj.mpp()[2] if obj.kind == 'PV Array' else None
+        elif conv['control'] == 'follower':
+            p_src = obj.p_operating() if obj.kind == 'SOFC' else None
+        if conv['control'] in ('mppt', 'follower') and p_src is None:
+            _electrisim_warn(net, f"DC/DC Converter '{conv['label']}': {conv['control']} mode needs a "
+                                  f"{'PV array' if conv['control'] == 'mppt' else 'SOFC system'} on its input; "
+                                  "it delivers its set power.")
+            continue
+        if p_src is None:
+            continue
+        p_out = _electrisim_stage_output(p_src / 1e6, conv['eta'], conv['p_nl_mw'])
+        conv['p_set_mw'] = p_out
+        net.load_dc.at[conv['output_load'], 'p_dc_mw'] = -p_out
+
+
+def _electrisim_stage_output(p_in, eta, p_nl):
+    """What a stage delivers (MW) for ``p_in`` drawn at its input: _electrisim_dc_dc_input_power's inverse."""
+    p = p_in - p_nl
+    return p * eta if p >= 0 else p / eta
+
+
+def _electrisim_settle_ders(net):
+    """One round of settling the sources and stores after a load flow; the largest change (p.u. or MW)."""
+    worst = 0.0
+    res_bus = net.res_bus_dc
+    for rec in getattr(net, 'electrisim_ders', None) or []:
+        obj, parts, bus = rec['obj'], rec['parts'], rec['bus']
+        if not obj.in_service or bus not in res_bus.index or not np.isfinite(res_bus.at[bus, 'vm_pu']):
+            continue
+        v = float(res_bus.at[bus, 'vm_pu']) * rec['vn']
+        if rec['coupling'] == 'converter':
+            vsc = parts['vsc']
+            if vsc not in net.res_vsc.index:
+                continue
+            i = -float(net.res_vsc.at[vsc, 'p_dc_mw']) * 1e6 / max(v, 1e-6)
+            if obj.kind == 'PV Array':
+                # Its converter takes it to its maximum power point at most: at it in MPPT, where the
+                # array's voltage would be tangent to the power drawn; past it, it cannot give more.
+                if 'mpp' not in rec:
+                    rec['mpp'] = obj.mpp()
+                v_mp, i_mp, p_mp = rec['mpp']
+                rec['beyond_mpp'] = i * v > p_mp * (1.0 + 1e-6)
+                mppt = any(c['control'] == 'mppt' and c['bus_in'] == bus for c in rec['converters'])
+                at_mpp = mppt or i >= i_mp * (1.0 - 1e-9)
+                vm_new = (v_mp if at_mpp else max(obj.v_terminal(i), v_mp)) / rec['vn']
+            else:
+                vm_new = obj.v_terminal(i) / rec['vn']
+            worst = max(worst, abs(vm_new - float(net.vsc.at[vsc, 'control_value_dc'])))
+            net.vsc.at[vsc, 'control_value_dc'] = vm_new
+        elif 'load' in parts and obj.kind in ('PV Array', 'SOFC'):
+            p_new = -_f_der_direct_power(obj, v) / 1e6
+            worst = max(worst, abs(p_new - float(net.load_dc.at[parts['load'], 'p_dc_mw'])))
+            net.load_dc.at[parts['load'], 'p_dc_mw'] = p_new
+    # Converters in droop: their voltage set point lowered with the power they deliver.
+    for conv in getattr(net, 'electrisim_dc_dc_converters', None) or []:
+        if conv.get('control') != 'droop' or conv['vsc'] is None or conv['vsc'] not in net.res_vsc.index:
+            continue
+        p_out = -float(net.res_vsc.at[conv['vsc'], 'p_dc_mw'])
+        rated = conv['rated_mw'] if conv['rated_mw'] > 0 else 1.0
+        vm_new = conv['vm_out_pu'] * (1.0 - conv['droop_percent'] / 100.0 * p_out / rated)
+        worst = max(worst, abs(vm_new - float(net.vsc.at[conv['vsc'], 'control_value_dc'])))
+        net.vsc.at[conv['vsc'], 'control_value_dc'] = vm_new
+    return worst
+
+
+def _electrisim_der_power(net, rec):
+    """A source's or store's bus voltage (V) and the power it delivers into its bus (W), from the last load flow."""
+    parts, bus = rec['parts'], rec['bus']
+    v = float(net.res_bus_dc.at[bus, 'vm_pu']) * rec['vn']
+    p = 0.0
+    if rec['coupling'] == 'converter' and parts['vsc'] in net.res_vsc.index:
+        p = -float(net.res_vsc.at[parts['vsc'], 'p_dc_mw']) * 1e6
+    elif 'line' in parts and parts['line'] in net.res_line_dc.index:
+        # From its cells through its resistance into its bus.
+        p = -float(net.res_line_dc.at[parts['line'], 'p_to_mw']) * 1e6
+    elif 'load' in parts and parts['load'] in net.load_dc.index:
+        p = -float(net.load_dc.at[parts['load'], 'p_dc_mw']) * 1e6
+    return v, p
+
+
+def _electrisim_der_result(net, rec):
+    """A source's or store's power, voltage, current and state; its warnings."""
+    obj, parts, bus = rec['obj'], rec['parts'], rec['bus']
+    out = {'name': rec['name'], 'id': rec['id'], 'label': rec['label'], 'kind': rec['kind'],
+           'coupling': rec['coupling'], 'in_service': obj.in_service, 'p_mw': None, 'v_kv': None, 'i_ka': None}
+    res_bus = getattr(net, 'res_bus_dc', None)
+    if not obj.in_service or res_bus is None or bus not in res_bus.index or not np.isfinite(res_bus.at[bus, 'vm_pu']):
+        return out
+    v, p = _electrisim_der_power(net, rec)
+    i = p / max(v, 1e-6)
+    out.update(p_mw=p / 1e6 + 0.0, v_kv=v / 1e3, i_ka=i / 1e3 + 0.0)
+    if rec['kind'] == 'Supercapacitor' and obj.direct:
+        obj.v0 = v                                   # a capacitor on its bus: at its bus's voltage
+    out.update({k: (float(x) if isinstance(x, (int, float, np.floating)) and x is not None else x)
+                for k, x in obj.state(i, v).items()})
+    if rec['kind'] == 'SOFC' and rec['coupling'] == 'direct' and obj.i_at_voltage(v)[1]:
+        obj.notes.append(f"its bus ({v:.4g} V) is above its voltage at its minimum load: it runs at its minimum load")
+    if rec.get('beyond_mpp'):
+        obj.notes.append(f"its converter draws {p / 1e3:.4g} kW, more than its maximum power "
+                         f"({rec['mpp'][2] / 1e3:.4g} kW) at its irradiance and temperature")
+    for note in obj.notes:
+        _electrisim_warn(net, f"{rec['kind']} '{rec['label']}': {note}.")
+    obj.notes = []
     return out
 
 
@@ -2500,6 +2807,8 @@ def _electrisim_drop_uncoupled_dc(net, quiet=False):
     bus_dc.drop(sorted(drop), inplace=True)
     if getattr(net, 'electrisim_dc_capacitors', None):
         net.electrisim_dc_capacitors = [c for c in net.electrisim_dc_capacitors if c['bus_dc'] not in drop]
+    if getattr(net, 'electrisim_ders', None):
+        net.electrisim_ders = [r for r in net.electrisim_ders if r['bus'] not in drop]
     if getattr(net, 'electrisim_dc_breakers', None):
         # A breaker stays while its own bus does; what it switched may be gone.
         net.electrisim_dc_breakers = [b for b in net.electrisim_dc_breakers if b['bus_dc'] not in drop]
@@ -2552,7 +2861,7 @@ def _electrisim_set_aside_dc_network(net, study):
         net.electrisim_ssts = []
     if getattr(net, 'electrisim_dc_dc_converters', None):
         net.electrisim_dc_dc_converters = []
-    for records in ('electrisim_dc_breakers', 'electrisim_dc_capacitors'):
+    for records in ('electrisim_dc_breakers', 'electrisim_dc_capacitors', 'electrisim_ders'):
         if getattr(net, records, None):
             setattr(net, records, [])
     _electrisim_warn(net, f"{study} leaves the DC network out ({n_bus} DC bus{'es' if n_bus != 1 else ''}"
@@ -5157,6 +5466,14 @@ def create_other_elements(in_data,net,x, Busbars):
             net._electrisim_pending_sst.append(in_data[x])
             continue
 
+        if der_electrisim.kind_of(in_data[x]['typ']):
+            # A battery, supercapacitor, flywheel, SOFC system or PV array: built once every
+            # converter exists, see _electrisim_build_ders.
+            if not hasattr(net, '_electrisim_pending_der'):
+                net._electrisim_pending_der = []
+            net._electrisim_pending_der.append(in_data[x])
+            continue
+
         if (in_data[x]['typ'].startswith("DC/DC Converter")):
             # Built once every DC bus exists: see _electrisim_build_dc_dc_converters.
             if not hasattr(net, '_electrisim_pending_dc_dc'):
@@ -5535,6 +5852,7 @@ def create_other_elements(in_data,net,x, Busbars):
 
     _electrisim_build_dc_dc_converters(net)
     _electrisim_build_ssts(net, Busbars)
+    _electrisim_build_ders(net)
     _electrisim_apply_dc_breakers(net)
     _electrisim_drop_uncoupled_dc(net)
     _electrisim_finish_dc_dc(net)
@@ -8420,8 +8738,8 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                 #DC Bus
                 if(hasattr(net, 'res_bus_dc') and not net.res_bus_dc.empty):
                     for index, row in net.res_bus_dc.iterrows():    
-                        if _electrisim_is_aux(net.bus_dc, index):
-                            continue   # a converter stage's own element
+                        if _electrisim_is_aux(net.bus_dc, index) or _electrisim_is_hidden(net.bus_dc, index):
+                            continue   # a converter stage's own element, or a battery's cells
                         dcbus = DcBusOut(name=net.bus_dc.at[index, 'name'], id=_electrisim_row_id(net.bus_dc, index), vm_pu=row['vm_pu'], p_mw=row['p_mw'])        
                         dcbusesList.append(dcbus) 
                         dcbuses = DcBusesOut(dcbuses = dcbusesList) 
@@ -8442,6 +8760,8 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                     # Its power from what its bus draws: res_source_dc does not give it.
                     src_i = _electrisim_source_dc_currents_ka(net)
                     for index, row in net.res_source_dc.iterrows():    
+                        if _electrisim_is_hidden(net.source_dc, index):
+                            continue   # a battery's cells: reported with it
                         vm_src = _electrisim_source_dc_vm(net, index)
                         p_src = (src_i[index] * vm_src * float(net.bus_dc.at[int(net.source_dc.at[index, 'bus_dc']), 'vn_kv'])
                                  if index in src_i and vm_src is not None else row['p_dc_mw'])
@@ -8454,6 +8774,8 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                 if getattr(net, 'electrisim_dc_capacitors', None) and hasattr(net, 'res_bus_dc'):
                     dccaps = []
                     for cap in net.electrisim_dc_capacitors:
+                        if cap.get('electrisim_der'):
+                            continue   # a supercapacitor: reported with the sources and stores
                         bus = cap['bus_dc']
                         vm = net.res_bus_dc.at[bus, 'vm_pu'] if bus in net.res_bus_dc.index else None
                         v_kv = vm * float(net.bus_dc.at[bus, 'vn_kv']) if vm is not None and np.isfinite(vm) else None
@@ -8480,6 +8802,10 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                 # Solid-state transformers: each stage's power, losses and loading; MV P and Q; port voltages.
                 if getattr(net, 'electrisim_ssts', None):
                     result = {**result, 'ssts': [_electrisim_sst_result(net, r) for r in net.electrisim_ssts]}
+
+                # Sources and stores: power, voltage, current and state.
+                if getattr(net, 'electrisim_ders', None):
+                    result = {**result, 'ders': [_electrisim_der_result(net, r) for r in net.electrisim_ders]}
 
                 # DC/DC converters: input and output power, losses, loading, both port voltages.
                 if getattr(net, 'electrisim_dc_dc_converters', None):
@@ -8563,6 +8889,8 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                     for index, row in net.res_line_dc.iterrows():
                         if 'electrisim_dc_breaker' in net.line_dc.columns and net.line_dc.at[index, 'electrisim_dc_breaker'] == True:
                             continue   # a DC breaker's coupler, reported with the breakers
+                        if _electrisim_is_hidden(net.line_dc, index):
+                            continue   # a battery's resistance, reported with it
                         line_dc_name = net.line_dc.at[index, 'name'] if 'name' in net.line_dc.columns else f'LineDC_{index}'
                         line_dc_id = net.line_dc.at[index, 'id'] if 'id' in net.line_dc.columns else str(index)
                         
@@ -13043,6 +13371,8 @@ def economic_analysis(net, in_data, params):
         if hasattr(net, 'res_line_dc') and not net.res_line_dc.empty:
             for index, row in net.res_line_dc.iterrows():
                 pl_mw = float(row.get('pl_mw', 0) or 0)
+                if _electrisim_is_hidden(net.line_dc, index):
+                    continue   # a battery's own resistance
                 if pl_mw > 0:
                     try:
                         internal = net.line_dc.at[index, 'name'] if hasattr(net, 'line_dc') and index in net.line_dc.index and 'name' in net.line_dc.columns else str(index)

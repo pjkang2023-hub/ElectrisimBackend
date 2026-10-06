@@ -83,8 +83,12 @@ class _EmtBuilder:
             self.vn[b] = float(net.bus_dc.at[b, 'vn_kv']) * 1e3
             self.v_bus[b] = float(res.at[b, 'vm_pu']) * self.vn[b]
             self.bus_node[b] = ckt.node(_label(net, 'bus_dc', b), self.v_bus[b])
-            if not ('electrisim_aux' in net.bus_dc.columns and net.bus_dc.at[b, 'electrisim_aux'] == True):
+            if not ('electrisim_aux' in net.bus_dc.columns and net.bus_dc.at[b, 'electrisim_aux'] == True)                     and not ('electrisim_hidden' in net.bus_dc.columns and net.bus_dc.at[b, 'electrisim_hidden'] == True):
                 self.visible_buses.append(b)
+        if getattr(net, 'electrisim_ders', None):
+            self.warnings.append("The EMT study does not model batteries, supercapacitors, flywheels, SOFC systems or "
+                                 "PV arrays yet: each is a stiff source at its load-flow voltage, as a converter's "
+                                 "output stage is, until it blocks; a supercapacitor directly on a bus is its capacitance.")
         for rec in getattr(net, 'electrisim_dc_breakers', None) or []:
             if rec['closed'] and rec['target'] is not None:
                 self._breakers_by_target.setdefault(rec['target'], []).append(rec)
