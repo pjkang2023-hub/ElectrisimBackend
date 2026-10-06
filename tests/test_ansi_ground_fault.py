@@ -174,6 +174,28 @@ def test_dyn11_with_a_400_a_neutral_resistor():
     assert rows['hv']['i_first_sym_ka'] == pytest.approx(math.sqrt(3) * 69 / abs(3 * z_src), rel=1e-9)
 
 
+@pytest.mark.parametrize('vector_group', ['Dyn', 'YNyn'])
+def test_poi_neutral_resistor_fold_matches_ansi(iec_c1, vector_group):
+    """
+    The POI study's IEC rows fold rn_ohm into vk0 / vkr0 (pandapower does not
+    read it). On the grounded winding's base - the LV for Dyn, where the HV base
+    made a 13.8 kV resistor 25x too small - and as a resistance, the IEC current
+    at c = 1 is ANSI's, which reads rn_ohm itself. YNyn only nearly: folded, 3 Z_N
+    is spread over the T model with Z0 instead of sitting in the LV leg.
+    """
+    from poi_fault_study_electrisim import apply_ngr_to_net
+    net = _substation(vector_group, rn_ohm=13.8e3 / math.sqrt(3) / 400)
+    rows = _ansi_by_name(net)
+    folded = copy.deepcopy(net)
+    apply_ngr_to_net(folded)
+    got = iec_c1(folded)
+    buses, rel = (('hv', 'lv', 'end'), 1e-9) if vector_group == 'Dyn' else (('lv', 'end'), 1e-3)
+    for bus in buses:
+        assert got[bus] == pytest.approx(rows[bus]['i_first_sym_ka'], rel=rel), bus
+    if vector_group == 'Dyn':
+        assert 0.39 < got['lv'] < 0.40
+
+
 def test_fault_resistance_counts_three_times():
     """I = 3 E / |Z1 + Z2 + Z0 + 3 Zf|."""
     z1 = _source_z1_lv() + _zpct(VK, VKR, 13.8)

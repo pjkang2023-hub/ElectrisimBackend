@@ -76,23 +76,33 @@ def classify_buses(net, poi_idx: int) -> Tuple[List[int], List[int], List[int]]:
 
 
 def apply_ngr_to_net(net) -> None:
-    """Fold transformer rn_ohm / xn_ohm into vk0_percent for zero-sequence studies."""
+    """Fold transformer rn_ohm / xn_ohm into vk0_percent / vkr0_percent for
+    pandapower's zero-sequence studies, which do not read them.
+
+    3 Z_N joins the grounded winding's zero-sequence path, so its ohms go to
+    percent on that winding's base, as the ANSI study places it: the LV
+    winding when it is grounded (Dyn, Yyn, YNyn), else the HV (YNd, YNy,
+    ZN-). R_N adds to vkr0 and X_N to the reactive part, not in quadrature to
+    |vk0|, which made a resistor a reactance.
+    """
     if not hasattr(net, "trafo") or net.trafo.empty:
         return
     for idx, row in net.trafo.iterrows():
-        rn = _f(row.get("rn_ohm"), 0.0)
-        xn = _f(row.get("xn_ohm"), 0.0)
+        rn = max(_f(row.get("rn_ohm"), 0.0), 0.0)
+        xn = max(_f(row.get("xn_ohm"), 0.0), 0.0)
         if rn <= 0 and xn <= 0:
             continue
-        zn = math.sqrt(rn * rn + xn * xn)
         sn = _f(row.get("sn_mva"), 1.0) or 1.0
-        vn_hv = _f(row.get("vn_hv_kv"), 20.0) or 20.0
-        z_base = (vn_hv ** 2) / sn
-        if z_base <= 0:
+        groups = ansi_sc._windings(row.get("vector_group"), 2)
+        on_lv = groups is not None and groups[1] in ("yn", "zn") and groups[0] != "zn"
+        vn = _f(row.get("vn_lv_kv" if on_lv else "vn_hv_kv"), 0.0)
+        if vn <= 0:
             continue
-        extra_pct = 100.0 * (3.0 * zn) / z_base
-        vk0 = _f(row.get("vk0_percent"), _f(row.get("vk_percent"), 6.0))
-        net.trafo.at[idx, "vk0_percent"] = math.sqrt(vk0 * vk0 + extra_pct * extra_pct)
+        z_base = vn * vn / sn
+        z0 = ansi_sc._zero_seq_vk(row, "vk_percent", "vkr_percent", "vk0_percent", "vkr0_percent")
+        z0 += 100.0 * 3.0 * complex(rn, xn) / z_base
+        net.trafo.at[idx, "vk0_percent"] = abs(z0)
+        net.trafo.at[idx, "vkr0_percent"] = z0.real
 
 
 def _set_table_out_of_service(net, attr: str, indices: Optional[Set[int]] = None, out: bool = True) -> None:
