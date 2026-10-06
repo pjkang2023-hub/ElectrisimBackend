@@ -7486,9 +7486,32 @@ def _electrisim_attach_park_controllers(net, in_data, algorithm='nr', calculate_
 
 
 
+def _as_calculate_voltage_angles(value):
+    """
+    calculate_voltage_angles from a request as True, False or 'auto'.
+
+    The study dialogs send their radio's value as text: 'auto', 'true' or 'false'.
+    pandapower only special-cases 'auto' and reads anything else by truthiness,
+    so the text 'false' would calculate the angles. A missing value is 'auto'.
+    """
+    if value is None or isinstance(value, bool):
+        return 'auto' if value is None else value
+    if isinstance(value, (int, float, np.integer, np.floating)) and value in (0, 1):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ('', 'auto'):
+        return 'auto'
+    if text in ('true', '1', 'yes', 'on'):
+        return True
+    if text in ('false', '0', 'no', 'off'):
+        return False
+    raise ValueError(f"Calculate voltage angles must be 'auto', true or false, not {value!r}.")
+
+
 def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=False, in_data=None, Busbars=None,
               run_control_trafo2w=False, run_control_trafo3w=False, run_control_shunt=False):
             #pandapower - rozpływ mocy
+            calculate_voltage_angles = _as_calculate_voltage_angles(calculate_voltage_angles)
             # Initialize tap_control_results before try block so it's accessible in else block
             tap_control_results = []
             shunt_control_results = []
@@ -10926,7 +10949,7 @@ def optimalPowerFlow(net, opf_params):
         # Extract OPF parameters
         opf_type = opf_params.get('opf_type', 'ac')
         algorithm = opf_params.get('ac_algorithm', 'pypower') if opf_type == 'ac' else opf_params.get('dc_algorithm', 'pypower')
-        calculate_voltage_angles = opf_params.get('calculate_voltage_angles', 'auto')
+        calculate_voltage_angles = _as_calculate_voltage_angles(opf_params.get('calculate_voltage_angles', 'auto'))
         init = opf_params.get('init', 'pf')
         _electrisim_set_aside_dc_network(net, 'Optimal power flow')
         delta = float(opf_params.get('delta', 1e-8))
@@ -13131,7 +13154,7 @@ def _ts_advance_storage(state, hours=1.0):
 def _ts_run_powerflow(net, timeseries_params, time_index, prev_converged):
     """Run PF for one time step; warm-start from previous step when possible (pandapower timeseries style)."""
     algorithm = timeseries_params.get('algorithm', 'nr')
-    cva = timeseries_params.get('calculate_voltage_angles', 'auto')
+    cva = _as_calculate_voltage_angles(timeseries_params.get('calculate_voltage_angles', 'auto'))
     init_param = timeseries_params.get('init') or timeseries_params.get('initialization') or 'auto'
     pf_kwargs = _electrisim_enforce_q_lims_kw(net)
 
@@ -13914,7 +13937,7 @@ def economic_analysis(net, in_data, params):
         currency = params.get('currency', 'EUR').upper()
         
         algorithm = params.get('algorithm', 'nr')
-        calculate_voltage_angles = params.get('calculate_voltage_angles', 'auto')
+        calculate_voltage_angles = _as_calculate_voltage_angles(params.get('calculate_voltage_angles', 'auto'))
         init = params.get('init', 'dc')
         use_generation_profile = params.get('use_generation_profile', False)
         time_steps = max(1, min(8760, int(params.get('time_steps', 8760))))
