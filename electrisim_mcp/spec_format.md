@@ -44,6 +44,10 @@ positive-sequence values), `mag0_percent` (100), `mag0_rx` (0),
 `si0_hv_partial` (0.9), and the grounded winding's neutral resistor and reactor
 `rn_ohm` / `xn_ohm` (0: solidly grounded) - on the LV winding of a Dyn, Yyn or
 YNyn unit, the HV of a YNd or YNy.
+A tap changer, when any of its fields is given: `tap_side` (`hv`), `tap_pos`
+(= `tap_neutral`), `tap_neutral` (0), `tap_min` / `tap_max` (neutral -/+ 2),
+`tap_step_percent` (2.5) - e.g. an off-load tap at -2.5 % on the HV winding:
+`tap_pos` -1. Without them the transformer has none.
 A warning is raised if `hv_bus` is the lower voltage.
 
 **three_winding_transformers** - one unit joining three voltage levels, e.g.

@@ -257,7 +257,7 @@ def hand_built_ac(spec, equivalents=None, current_sources=None):
             r0_ohm_per_km=r['r0_ohm_per_km'], x0_ohm_per_km=r['x0_ohm_per_km'], c0_nf_per_km=r['c0_nf_per_km'],
             endtemp_degree=80.0)
     for r in spec['transformers']:
-        vn_hv = r.get('vn_hv_kv', next(x['vn_kv'] for x in spec['buses'] if x['id'] == r['hv_bus']))
+        vn_hv = next(x['vn_kv'] for x in spec['buses'] if x['id'] == r['hv_bus'])
         vn_lv = next(x['vn_kv'] for x in spec['buses'] if x['id'] == r['lv_bus'])
         i = pp.create_transformer_from_parameters(
             net, b[r['hv_bus']], b[r['lv_bus']], sn_mva=r['sn_mva'], vn_hv_kv=vn_hv, vn_lv_kv=vn_lv,
@@ -265,6 +265,10 @@ def hand_built_ac(spec, equivalents=None, current_sources=None):
             shift_degree=r['shift_degree'], vector_group=r['vector_group'], vk0_percent=r['vk_percent'],
             vkr0_percent=r['vkr_percent'], mag0_percent=100.0, mag0_rx=0.0, si0_hv_partial=0.9)
         net.trafo.loc[i, ['rn_ohm', 'xn_ohm']] = (r.get('rn_ohm', 0.0), 0.0)
+        if 'tap_pos' in r:                       # an off-load tap: HV side, +/- 2 steps about neutral
+            net.trafo.loc[i, ['tap_side', 'tap_neutral', 'tap_min', 'tap_max', 'tap_step_percent', 'tap_pos',
+                              'tap_step_degree', 'tap_changer_type']] = (
+                'hv', 0, -2, 2, r['tap_step_percent'], r['tap_pos'], 0.0, 'Ratio')
         ids['trafo'][r['id']] = i
     for r in spec['loads']:
         pp.create_load(net, b[r['bus']], p_mw=r['p_mw'], q_mvar=r['q_mvar'])
@@ -480,3 +484,83 @@ def test_build_model_route(client, campus):
     wanted |= {s['id'] for s in spec['switches'] if s['et'] == 'grounding_transformer'}
     assert wanted <= elements, sorted(wanted - elements)
     assert set(drawn['load_profiles']) == {p['id'] for p in spec['load_profiles']}
+
+
+# --- the drawn diagram ----------------------------------------------------------------------
+# Each tests/reference/reference_ai_campus.diagram_*payload.json is the request the
+# browser sent after drawing the spec - /build-model's model through the canvas
+# import, as the MCP server's draw_diagram does - and running the study from its
+# dialog. Recapture after changing the import or a payload builder (see 16b in
+# the design note): the tests say whether the drawing still computes the spec's
+# answers.
+
+def _drawn(name):
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_{name}payload.json'), encoding='utf-8') as handle:
+        return json.load(handle)
+
+
+def _post_drawn(client, payload):
+    with _silent():
+        response = client.post('/', json=payload)
+    assert response.status_code == 200, response.get_data(as_text=True)[:400]
+    out = json.loads(response.get_data(as_text=True))
+    assert not out.get('error'), out.get('message')
+    return out
+
+
+def _by_spec_id(spec, payload, rows):
+    """A study's result rows under their spec ids: cell name -> its label -> the spec element so named."""
+    label = {v['name']: v.get('userFriendlyName') for v in payload.values() if isinstance(v, dict) and 'name' in v}
+    ident = {r.get('name', r['id']): r['id'] for key, lst in spec.items() if isinstance(lst, list)
+             for r in lst if isinstance(r, dict) and 'id' in r}
+    return {ident[label[r['name']]]: r for r in rows if label.get(r['name']) in ident}
+
+
+def test_drawn_diagram_load_flow_matches_spec(client, campus, solved):
+    """The drawn campus's load flow: every AC and DC bus, SST, rectifier, PCS and DC/DC converter as the spec's."""
+    spec, net, _ = campus
+    payload = _drawn('')
+    out = _post_drawn(client, payload)
+    assert not out.get('warnings'), out.get('warnings')
+    res = _results(solved)
+    ids = _ac_ids(net)
+    differ = []
+
+    def check(what, got, want, tol=1e-6):
+        if got is None or abs(float(got) - float(want)) > tol:
+            differ.append(f'{what}: spec {want}, drawn {got}')
+
+    buses = _by_spec_id(spec, payload, out['busbars'])
+    assert set(buses) == set(ids['bus'])
+    for ident, idx in ids['bus'].items():
+        check(f'bus {ident} vm_pu', buses[ident]['vm_pu'], solved.res_bus.at[idx, 'vm_pu'], 1e-8)
+        check(f'bus {ident} va_degree', buses[ident]['va_degree'], solved.res_bus.at[idx, 'va_degree'])
+    dc = _by_spec_id(spec, payload, out['dcbuses'])
+    assert set(dc) == set(res['dc_buses'])
+    for ident, row in dc.items():
+        check(f'DC bus {ident}', row['vm_pu'], res['dc_buses'][ident]['vm_pu'], 1e-8)
+    for key, spec_key, col in (('ssts', 'ssts', 'p_mv_mw'), ('vscs', 'vscs', 'p_mw'), ('pcs', 'pcs', 'p_mw'),
+                               ('pcs', 'pcs', 'q_mvar'), ('dcdcconverters', 'dc_dc_converters', 'p_in_mw')):
+        rows = _by_spec_id(spec, payload, out[key])
+        assert set(rows) == set(res[spec_key]), key
+        for ident, row in rows.items():
+            check(f'{key} {ident} {col}', row[col], res[spec_key][ident][col])
+    grid = out['externalgrids'][0]
+    check('utility p_mw', grid['p_mw'], solved.res_ext_grid.at[ids['ext_grid']['Utility'], 'p_mw'])
+    assert not differ, f'{len(differ)} differ\n  ' + '\n  '.join(differ[:20])
+
+
+@pytest.mark.parametrize('fault, case, name', [
+    ('3ph', 'max', 'sc_'), ('3ph', 'min', 'sc_min_'), ('2ph', 'max', 'sc2ph_'), ('2ph', 'min', 'sc2ph_min_'),
+    ('1ph', 'max', 'sc1ph_'), ('1ph', 'min', 'sc1ph_min_')])
+def test_drawn_diagram_short_circuit_matches_spec(client, campus, fault, case, name):
+    """The drawn campus's IEC fault at every AC bus, as the spec's with its layer."""
+    spec, net, _ = campus
+    payload = _drawn(name)
+    assert (payload['0']['fault_type'], payload['0']['fault_location']) == (fault, case)
+    drawn = _by_spec_id(spec, payload, _post_drawn(client, payload)['busbars'])
+    want = _study_sc(net, fault, case)
+    assert set(drawn) == set(want)
+    differ = [f'{i} {c}: spec {want[i][c]}, drawn {drawn[i][c]}' for i in want for c in ('ikss_ka', 'ip_ka', 'ith_ka')
+              if abs(float(drawn[i][c]) - float(want[i][c])) > 1e-6 * max(1.0, float(want[i][c]))]
+    assert not differ, '\n  '.join(differ)

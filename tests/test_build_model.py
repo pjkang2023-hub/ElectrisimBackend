@@ -291,6 +291,43 @@ def test_three_winding_power_flow_balances_under_its_id():
     assert 0 < t3['loading_percent'] < 100
 
 
+
+# --- two-winding transformers: tap changer and neutral resistor ---------------
+
+def test_a_tap_and_a_neutral_resistor_reach_the_transformer():
+    """
+    An off-load tap at -2.5 % on the HV winding gives the LV what a 2.5 %
+    lower HV rating would; its neutral resistor is kept for earth faults.
+    Without tap fields a transformer has no tap changer.
+    """
+    spec = substation()
+    spec['transformers'][0].update(tap_pos=-1, rn_ohm=20.0)
+    net, _ = sld.build_network(spec)
+    t = net.trafo.loc[0]
+    assert (t.tap_side, t.tap_neutral, t.tap_min, t.tap_max, t.tap_step_percent, t.tap_pos) == ('hv', 0, -2, 2, 2.5, -1)
+    assert t.rn_ohm == 20.0
+    tapped = {b['id']: b['vm_pu'] for b in sld.solve(net)['buses']}
+    spec = substation()
+    spec['transformers'][0]['vn_hv_kv'] = 110 * 0.975
+    rated = {b['id']: b['vm_pu'] for b in sld.solve(sld.build_network(spec)[0])['buses']}
+    assert tapped['MV'] == pytest.approx(rated['MV'], abs=1e-9) and tapped['MV'] > 1.02
+    assert pd_isna_or_none(sld.build_network(substation())[0].trafo.at[0, 'tap_pos'])
+
+
+def pd_isna_or_none(value):
+    return value is None or value != value
+
+
+@pytest.mark.parametrize('fields, problem', [
+    ({'tap_pos': 3}, 'tap_pos=3 is outside tap_min..tap_max (-2..2)'),
+    ({'tap_side': 'mv', 'tap_pos': 0}, "tap_side='mv' must be 'hv' or 'lv'"),
+])
+def test_tap_problems_are_named(fields, problem):
+    spec = substation()
+    spec['transformers'][0].update(fields)
+    assert any(problem in p for p in problems_of(spec)), problems_of(spec)
+
+
 # --- the HTTP endpoint -----------------------------------------------------
 
 #: Tables insertComponentsForData JSON.parse()s unconditionally. A model missing

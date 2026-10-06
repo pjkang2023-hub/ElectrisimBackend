@@ -66,6 +66,9 @@ _TRAFO3W_PAIR_MEANING = {
     'vkr_hv_percent': 'HV-MV', 'vkr_mv_percent': 'MV-LV', 'vkr_lv_percent': 'HV-LV',
 }
 
+#: A two-winding transformer's tap changer, all optional.
+TAP_FIELDS = ('tap_side', 'tap_neutral', 'tap_min', 'tap_max', 'tap_step_percent', 'tap_pos')
+
 #: Accepted values for the spec's optional `layout` hint.
 _LAYOUTS = ('transmission', 'radial', 'auto')
 
@@ -360,6 +363,29 @@ def build_network(spec):
             in_service=bool(row.get('in_service', True)),
         )
         record('trafo', idx, ident)
+        # A tap changer, when any of its fields is given: an off-load tap set for the
+        # network's load, say. Without one the transformer has none.
+        if any(row.get(f) is not None for f in TAP_FIELDS):
+            side = str(row.get('tap_side') or 'hv').strip().lower()
+            if side not in ('hv', 'lv'):
+                problems.append(f"{where}: tap_side={row.get('tap_side')!r} must be 'hv' or 'lv'")
+                side = 'hv'
+            neutral = _num(row.get('tap_neutral'), 'tap_neutral', where, problems, default=0)
+            values = {
+                'tap_side': side, 'tap_neutral': neutral,
+                'tap_min': _num(row.get('tap_min'), 'tap_min', where, problems, default=neutral - 2),
+                'tap_max': _num(row.get('tap_max'), 'tap_max', where, problems, default=neutral + 2),
+                'tap_step_percent': _num(row.get('tap_step_percent'), 'tap_step_percent', where, problems,
+                                         default=2.5, positive=True),
+                'tap_pos': _num(row.get('tap_pos'), 'tap_pos', where, problems, default=neutral),
+                'tap_step_degree': 0.0, 'tap_changer_type': 'Ratio',
+            }
+            if None not in values.values():
+                if not values['tap_min'] <= values['tap_pos'] <= values['tap_max']:
+                    problems.append(f"{where}: tap_pos={values['tap_pos']:g} is outside "
+                                    f"tap_min..tap_max ({values['tap_min']:g}..{values['tap_max']:g})")
+                for field, value in values.items():
+                    net.trafo.at[idx, field] = value
         # The grounded winding's neutral resistor and reactor (ohm), for earth faults.
         for field in ('rn_ohm', 'xn_ohm'):
             if field not in net.trafo.columns:
