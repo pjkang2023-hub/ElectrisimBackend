@@ -5,8 +5,11 @@ The DC network is simulated in time from its load-flow state: DC-link
 capacitors (with ESR and ESL), cables as pi sections (R, L, C), DC sources as
 their voltage behind an internal R and L, DC load input filters, DC breakers'
 current-limiting inductors, and VSCs - which block at the fault, so that
-their diodes rectify the AC grid into it, behind the grid's short-circuit
-impedance at the converter's AC bus and the converter's own reactor.
+their DC-link capacitors discharge into it and their diodes rectify the AC
+grid into it, behind the grid's short-circuit impedance at the converter's AC
+bus and the converter's own reactor. DC/DC converters block too: their output
+capacitors discharge into a fault on their output buses. The converters'
+capacitors are the EMT study's (emt_converters): as given, or its default.
 
 The results are given in IEC 61660-1's terms - peak ip, time to peak tp,
 quasi-steady current Ik, and the rise and decay time constants tau1, tau2 of
@@ -24,7 +27,9 @@ Simplifications, stated with the results:
   through it at its opening time;
 - a discharge faster than the time step is not resolved: a cable's own
   capacitance into a hard fault, which Simscape shows as a spike of some
-  20 ns at t = 0 (tests/emt_reference).
+  20 ns at t = 0 (tests/emt_reference); or a capacitor with no ESR - a
+  converter's, whose element gives none - into a hard fault on its bus,
+  which the study warns of.
 """
 
 import copy
@@ -37,6 +42,7 @@ import pandapower as pp
 from scipy.optimize import minimize_scalar
 
 import pandapower_electrisim as pe
+from emt_converters import dcdc_capacitors, dcdc_rating, vsc_dc_link, vsc_rating
 from emt_solver import Circuit, R_BIAS, R_FLOOR, R_OFF, R_ON  # noqa: F401 - the tests use them
 
 # The solver: emt_solver.Circuit, shared with the EMT study.
@@ -177,11 +183,13 @@ class _Builder:
         self.ckt = Circuit()
         self.f_hz = float(getattr(net, 'f_hz', 50.0) or 50.0)
         self.bus_node, self.v_bus = {}, {}
-        self.contributions = []   # (kind, label, id, ('rl'|'c', index))
+        self.contributions = []   # (kind, label, id, ('rl'|'c', index) or ('diff', port, port))
         self.breakers = []        # (record, rl index)
         self.cable_caps = []
         self.has_converter = False
         self.isolated = set()     # DC buses nothing in the fault circuit reaches
+        self._terminals = {}      # (table, index, bus) -> its node beyond its breaker
+        self.stiff_caps = []      # (bus, R to it, C, label): capacitors with no ESR or ESL, on a bus through R alone
 
     def _v(self, bus):
         return self.v_bus[bus]
@@ -208,6 +216,7 @@ class _Builder:
         self._sources()
         self._loads()
         self._converters()
+        self._dc_dc_capacitors()
         self._ders()
         self._tie_isolated()
         if len(net.b2b_vsc) if 'b2b_vsc' in net else False:
@@ -215,15 +224,33 @@ class _Builder:
         return self
 
     def _terminal(self, table, idx, bus, i0):
-        """The node an element connects at: its bus, or beyond a breaker in front of it."""
+        """The node an element connects at: its bus, or beyond a breaker in front of it (built once)."""
         recs = [r for r in self._breakers.get((table, idx), []) if r['bus_dc'] == bus]
         if not recs:
             return self.bus_node[bus], 0.0
+        if (table, idx, bus) in self._terminals:
+            return self._terminals[(table, idx, bus)], 0.0
         rec = recs[0]
         node = self.ckt.node(f"{rec['label']} terminal")
         k = self.ckt.add_rl(self.bus_node[bus], node, 0.0, rec['limiting_inductance_mh'] * 1e-3, i0=i0)
         self.breakers.append((rec, k))
+        self._terminals[(table, idx, bus)] = node
         return node, 0.0
+
+    def _cap(self, node, c, r, l, v, label, bus=None, r_to_bus=0.0):
+        """
+        A capacitor charged to ``v`` at ``node``, behind its ESR and ESL if it
+        has them: the port of its current. ``bus``: the DC bus ``node`` is on
+        through ``r_to_bus`` alone, when it is.
+        """
+        ckt = self.ckt
+        if r > 0 or l > 0:
+            inner = ckt.node(f'{label} capacitor')
+            ckt.add_c(0, inner, c, w0=-v)
+            return ('rl', ckt.add_rl(inner, node, r, l))
+        if bus is not None:
+            self.stiff_caps.append((bus, r_to_bus, c, label))
+        return ('c', ckt.add_c(0, node, c, w0=-v))
 
     def _cables(self):
         net, ckt = self.net, self.ckt
@@ -254,7 +281,6 @@ class _Builder:
                     self.cable_caps.append(ckt.add_c(0, end, c / 2.0, w0=-self._v(bus)))
 
     def _capacitors(self):
-        ckt = self.ckt
         for cap in getattr(self.net, 'electrisim_dc_capacitors', None) or []:
             if cap.get('electrisim_der'):
                 continue   # a supercapacitor: with the sources and stores
@@ -262,13 +288,8 @@ class _Builder:
             if not cap.get('in_service', True) or bus not in self.bus_node or cap['c_mf'] <= 0:
                 continue
             label = (getattr(self.net, 'user_friendly_names', {}) or {}).get(cap['name'], cap['name'])
-            c, r, l = cap['c_mf'] * 1e-3, cap['esr_mohm'] * 1e-3, cap['esl_uh'] * 1e-6
-            if r > 0 or l > 0:
-                inner = ckt.node(f'{label} capacitor')
-                ckt.add_c(0, inner, c, w0=-self._v(bus))
-                port = ('rl', ckt.add_rl(inner, self.bus_node[bus], r, l))
-            else:
-                port = ('c', ckt.add_c(0, self.bus_node[bus], c, w0=-self._v(bus)))
+            port = self._cap(self.bus_node[bus], cap['c_mf'] * 1e-3, cap['esr_mohm'] * 1e-3, cap['esl_uh'] * 1e-6,
+                             self._v(bus), label, bus)
             self.contributions.append(('DC capacitor', label, cap.get('id', ''), port))
 
     def _sources(self):
@@ -323,9 +344,9 @@ class _Builder:
             if not bool(net.vsc.at[vi, 'in_service']) or bus_dc not in self.bus_node:
                 continue
             if 'electrisim_aux' in net.vsc.columns and net.vsc.at[vi, 'electrisim_aux'] == True:
-                # A DC/DC converter's output stage: it blocks and feeds no fault current.
-                note = ('The DC/DC converters block at a DC fault and feed none of it; their current '
-                        'limits come with the EMT study.')
+                # A DC/DC converter's output stage: it blocks; its capacitors are _dc_dc_capacitors'.
+                note = ('The DC/DC converters block at a DC fault: only their output capacitors discharge '
+                        'into it. Their current limits come with the EMT study.')
                 if note not in self.warnings:
                     self.warnings.append(note)
                 continue
@@ -354,9 +375,74 @@ class _Builder:
                 ckt.add_diode(x, p_node)
                 ckt.add_diode(0, x)
             term, _ = self._terminal('vsc', vi, bus_dc, 0.0)
-            k = ckt.add_rl(p_node, term, _f(net.vsc.at[vi, 'r_dc_ohm']), 0.0)
-            self.contributions.append(('VSC (diodes, blocked)', label, _row_id(net, 'vsc', vi), ('rl', k)))
+            r_dc = _f(net.vsc.at[vi, 'r_dc_ohm'])
+            k = ckt.add_rl(p_node, term, r_dc, 0.0)
+            # Its DC-link capacitor, on its side of its DC resistance, as the EMT study has it.
+            p, q = ((_f(net.res_vsc.at[vi, 'p_mw']), _f(net.res_vsc.at[vi, 'q_mvar']))
+                    if vi in net.res_vsc.index else (0.0, 0.0))
+            col = lambda c: _f(net.vsc.at[vi, c]) if c in net.vsc.columns else 0.0
+            c_link = vsc_dc_link(col('dc_link_mf'), vsc_rating(col('rated_mva'), p, q),
+                                 float(net.bus_dc.at[bus_dc, 'vn_kv']) * 1e3)
+            cap = self._cap(p_node, c_link, 0.0, 0.0, v_dc, f'{label} DC link',
+                            bus_dc if term == self.bus_node[bus_dc] else None, max(r_dc, R_FLOOR))
+            row_id = _row_id(net, 'vsc', vi)
+            self.contributions.append(('VSC (diodes, blocked)', label, row_id, ('diff', ('rl', k), cap)))
+            self.contributions.append(('VSC DC-link capacitor', label, row_id, cap))
             self.has_converter = True
+
+    def _dc_dc_capacitors(self):
+        """
+        Each DC/DC converter's output capacitor on its output bus (an SST's
+        DC/DC stage's among them), and an SST's grid-following inverter's DC
+        link on its LV DC bus, as the EMT study has them: their bridges block
+        at the fault, and they discharge into it. A DC/DC converter's input
+        capacitor, which the EMT study also has, is left out: its input bus -
+        a battery's, a PV array's - stays as it was.
+        """
+        net = self.net
+
+        def vn(bus):
+            return float(net.bus_dc.at[bus, 'vn_kv']) * 1e3
+
+        def add(kind, label, cid, table, idx, bus, c):
+            if bus in self.bus_node and c > 0:
+                term, _ = self._terminal(table, idx, bus, 0.0)
+                name = f"{label} {kind.split(' ', 1)[1]}"     # e.g. 'Shelf output capacitor'
+                port = self._cap(term, c, 0.0, 0.0, self._v(bus), name, bus if term == self.bus_node[bus] else None)
+                self.contributions.append((kind, label, cid, port))
+
+        for rec in getattr(net, 'electrisim_dc_dc_converters', None) or []:
+            if not rec['in_service'] or rec['input'] is None or rec['input'] not in net.load_dc.index \
+                    or not bool(net.load_dc.at[rec['input'], 'in_service']):
+                continue
+            if rec['vsc'] is not None:
+                p_out = -_f(net.res_vsc.at[rec['vsc'], 'p_dc_mw']) if rec['vsc'] in net.res_vsc.index else 0.0
+                out = ('vsc', rec['vsc'])
+            else:
+                p_out, out = rec['p_set_mw'], ('load_dc', rec['output_load'])
+            b_in, b_out = rec['bus_in'], rec['bus_out']
+            _, c_out = dcdc_capacitors((rec.get('emt') or {}).get('c_out_mf', 0.0),
+                                       dcdc_rating(rec['rated_mw'], p_out), vn(b_in), vn(b_out))
+            add('DC/DC output capacitor', rec['label'], rec['id'], out[0], out[1], b_out, c_out)
+        for rec in getattr(net, 'electrisim_ssts', None) or []:
+            stages = {s['stage']: s for s in rec['stages']}
+            rect, dcdc, inv = stages.get('rectifier'), stages.get('dcdc'), stages.get('inverter')
+            lv = rec['bus_lvdc']
+            if not rec['in_service'] or rect is None or dcdc is None or lv not in self.bus_node:
+                continue
+            d_vsc = dcdc['output'][1]
+            p_out = -_f(net.res_vsc.at[d_vsc, 'p_dc_mw']) if d_vsc in net.res_vsc.index else 0.0
+            _, c_out = dcdc_capacitors(0.0, dcdc_rating(dcdc['rated_mw'], p_out), vn(rect['link']), vn(lv))
+            add('DC/DC output capacitor', f"{rec['label']} DC/DC", rec['id'], 'vsc', d_vsc, lv, c_out)
+            lvac = rec['bus_lvac']
+            if inv is None or rec['inverter_mode'] != 'grid_following' or lvac is None \
+                    or lvac not in net.res_bus.index or not np.isfinite(net.res_bus.at[lvac, 'vm_pu']):
+                continue
+            sgen = inv['output'][1]
+            p_s, q_s = ((_f(net.res_sgen.at[sgen, 'p_mw']), _f(net.res_sgen.at[sgen, 'q_mvar']))
+                        if sgen in net.res_sgen.index else (0.0, 0.0))
+            c_link = vsc_dc_link(0.0, vsc_rating(inv['rated_mw'], p_s, q_s), vn(lv))
+            add('VSC DC-link capacitor', f"{rec['label']} inverter", rec['id'], 'load_dc', inv['input'][1], lv, c_link)
 
 
     def _tie_isolated(self):
@@ -416,6 +502,8 @@ class _Builder:
 
 
 def _current(sim, port):
+    if port[0] == 'diff':
+        return _current(sim, port[1]) - _current(sim, port[2])
     kind, k = port
     return sim['i_rl'][:, k] if kind == 'rl' else sim['i_c'][:, k]
 
@@ -439,12 +527,30 @@ def _terms_out(terms, scale=1e-3):
     }
 
 
+def _fault_r(params):
+    return max(_f(params.get('fault_resistance_mohm'), 0.0) * 1e-3, R_FLOOR)
+
+
+def _time_step(params):
+    return max(_f(params.get('time_step_us'), 1.0), 0.01) * 1e-6
+
+
+def _unresolved(builder, bus, params):
+    """
+    The capacitors with no ESR or ESL that a fault on ``bus`` discharges
+    within ten time steps, with their time constants: their peak, V / R at
+    once, the time step does not resolve.
+    """
+    r_f, dt = _fault_r(params), _time_step(params)
+    return [(label, (r + r_f) * c) for b, r, c, label in builder.stiff_caps if b == bus and (r + r_f) * c < 10 * dt]
+
+
 def fault_at(builder, bus, params):
     """Simulate a pole-to-pole fault on DC bus ``bus``; its currents in IEC terms."""
     ckt = copy.deepcopy(builder.ckt)
-    r_f = max(_f(params.get('fault_resistance_mohm'), 0.0) * 1e-3, R_FLOOR)
+    r_f = _fault_r(params)
     k_f = ckt.add_r(builder.bus_node[bus], 0, r_f)
-    dt = max(_f(params.get('time_step_us'), 1.0), 0.01) * 1e-6
+    dt = _time_step(params)
     t_end = max(_f(params.get('duration_ms'), 200.0), 0.1) * 1e-3
     if builder.has_converter:
         # Ik is the mean over the last AC period: three of them at least.
@@ -514,9 +620,11 @@ def fault_at(builder, bus, params):
 
 METHOD = ("A time-domain simulation of the DC network from its load-flow state, reported in IEC 61660-1's "
           "terms (ip, tp, Ik, tau1, tau2) but not computed by its method. Pole-to-pole faults; DC loads leave "
-          "at the fault; VSCs block and their diodes feed the fault from the AC grid; breakers do not open, "
-          "each is checked on the current through it at its opening time. A discharge faster than the time step "
-          "- a cable's own capacitance into a hard fault, over nanoseconds - is not resolved.")
+          "at the fault; VSCs block, their DC-link capacitors discharging and their diodes feeding the fault "
+          "from the AC grid; DC/DC converters block, their output capacitors discharging; breakers "
+          "do not open, each is checked on the current through it at its opening time. A discharge faster than "
+          "the time step - a cable's own capacitance into a hard fault, over nanoseconds, or a capacitor's with "
+          "no ESR on the faulted bus, warned of - is not resolved.")
 
 
 def dc_fault_study(net, params, in_data=None):
@@ -555,6 +663,13 @@ def dc_fault_study(net, params, in_data=None):
         if not result['settled']:
             warnings_out.append(f"A fault on {result['label']}: the current had not settled by the end of the run, "
                                 "so Ik is the last value - lengthen the duration.")
+        fast = _unresolved(builder, b, params)
+        if fast:
+            tau = min(t for _, t in fast)
+            warnings_out.append(f"A fault on {result['label']}: {', '.join(n for n, _ in fast)}, with no ESR, "
+                                f"discharge{'s' if len(fast) == 1 else ''} into it within ten time steps (time constant "
+                                f"{tau * 1e6:.2g} us), so ip is the time step's, not the circuit's: enter a fault "
+                                "resistance, or shorten the time step.")
         faults.append(result)
     # Each breaker's worst case over the faults.
     worst = {}

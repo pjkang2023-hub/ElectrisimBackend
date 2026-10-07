@@ -368,7 +368,10 @@ def test_dc_fault_at_the_54_v_rack(client):
     A bolted fault on rack 10's 54 V bus: its 130 F supercapacitor module
     discharges through its 4 mohm ESR, i(t) = V0 / ESR e^(-t / ESR C) -
     13.5 kA at once - while its DC/DC shelf blocks; over the 60 ms run (three
-    AC periods) it barely decays. The AC short circuit behind the converters
+    AC periods) it barely decays, and sets Ik. The shelf's output capacitor
+    (the EMT study's default, 2 ms of its 160 kW: 219 mF, no ESR) discharges
+    into the bolted fault in 0.2 us, within the 1 us step: the study warns
+    that ip is not resolved. The AC short circuit behind the converters
     solves: a grid-forming PCS's missing machine data made it NaN.
     """
     from test_dc_fault import STUDY
@@ -378,8 +381,14 @@ def test_dc_fault_at_the_54_v_rack(client):
     out = _post(client, p)
     assert not any('did not solve' in w for w in out['warnings']), out['warnings']
     (f,) = out['dcfault']['faults']
-    assert f['ip_ka'] == pytest.approx(54 / 0.004 / 1e3, rel=0.01)
-    assert f['ik_ka'] == pytest.approx(f['ip_ka'] * math.exp(-0.060 / (0.004 * 130)), rel=0.03)
+    sc = next(c for c in f['contributions'] if c['name'] == 'Rack 10 supercapacitor')
+    assert sc['ik_ka'] == pytest.approx(54 / 0.004 / 1e3 * math.exp(-0.060 / (0.004 * 130)), rel=0.03)
+    assert f['ik_ka'] == pytest.approx(sc['ik_ka'], rel=1e-3)
+    shelf = next(c for c in f['contributions'] if c['kind'] == 'DC/DC output capacitor'
+                 and c['name'] == 'Rack 10 power shelf')
+    assert f['ip_ka'] == pytest.approx(shelf['ip_ka'], rel=0.01)
+    assert any('C1 rack 10 54 V: Rack 10 power shelf output capacitor, with no ESR' in w and 'ip is the time step' in w
+               for w in out['warnings'])
 
 
 @pytest.mark.parametrize('fault', ['3ph', '1ph'])

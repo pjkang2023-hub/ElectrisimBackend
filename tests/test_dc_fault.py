@@ -127,9 +127,12 @@ def _cap(name, bus, c_mf=10, esr_mohm=2, esl_uh=0.1):
 
 def test_fault_on_each_dc_bus_fed_by_the_converter(client, quiet):
     """
-    Without capacitors only the VSC feeds the fault: its diodes, once the DC
-    voltage falls below the AC peak. A fault at the far bus draws less than
-    one at the converter's, through the cable.
+    Without DC capacitors only the VSC feeds the fault: its DC-link
+    capacitor at once - the peak - then its diodes, once the DC voltage falls
+    below the AC peak - Ik. A fault at the far bus draws less than one at the
+    converter's, through the cable. At the converter's own bus its DC link,
+    with no ESR, discharges within a step of a bolted fault: the study warns
+    that ip is not resolved there, and not at the far bus.
     """
     result = _study(client, quiet, _drawn_request())
     faults = {f['id']: f for f in result['dcfault']['faults']}
@@ -137,17 +140,22 @@ def test_fault_on_each_dc_bus_fed_by_the_converter(client, quiet):
     a, b = faults['cell-dc_a'], faults['cell-dc_b']
     assert a['ik_ka'] > b['ik_ka'] > 0
     for f in (a, b):
-        (vsc,) = f['contributions']
-        assert vsc['kind'].startswith('VSC') and vsc['name'] == 'Rectifier'
-        assert vsc['ik_ka'] == pytest.approx(f['ik_ka'], rel=1e-3)
-        assert f['settled']
+        diodes, link = f['contributions']
+        assert (diodes['kind'], link['kind']) == ('VSC (diodes, blocked)', 'VSC DC-link capacitor')
+        assert diodes['name'] == link['name'] == 'Rectifier'
+        assert diodes['ik_ka'] == pytest.approx(f['ik_ka'], rel=1e-3)
+        assert link['ip_ka'] == pytest.approx(f['ip_ka'], rel=1e-3) and abs(link['ik_ka']) < 1e-3
+        assert f['tp_ms'] < 0.1 and f['settled']
+    unresolved = [w for w in result['warnings'] if 'ip is the time step' in w]
+    assert len(unresolved) == 1 and 'DC bus A' in unresolved[0] and 'Rectifier DC link' in unresolved[0]
 
 
 def test_dc_link_capacitor_discharges_into_a_fault_at_its_bus(client, quiet):
     """
     A 10 mF capacitor (2 mOhm, 0.1 uH) on DC bus B: at the fault on B it sees
     a near-short, so its current is the series RLC discharge from B's
-    pre-fault voltage - and it sets the peak, within the first millisecond.
+    pre-fault voltage - and it sets the peak, within the first millisecond,
+    the VSC's DC link adding its own over the cable from A.
     """
     result = _study(client, quiet, _with(_drawn_request(), _cap('C link', 'dc_b')), duration_ms=20)
     fault = _fault(result, 'cell-dc_b')
@@ -159,7 +167,9 @@ def test_dc_link_capacitor_discharges_into_a_fault_at_its_bus(client, quiet):
     tp = math.atan(w / a) / w
     ip = v0 / (w * l) * math.exp(-a * tp) * math.sin(w * tp)
     assert cap['ip_ka'] == pytest.approx(ip / 1e3, rel=2e-3)
-    assert fault['ip_ka'] == pytest.approx(cap['ip_ka'], rel=0.02)
+    link = next(c for c in fault['contributions'] if c['kind'] == 'VSC DC-link capacitor')
+    assert fault['ip_ka'] == pytest.approx(cap['at_peak_ka'] + link['at_peak_ka'], rel=0.02)
+    assert cap['at_peak_ka'] > 5 * link['at_peak_ka'] > 0
     assert fault['tp_ms'] < 1 and not fault['monotonic']
     assert fault['tau1_ms'] > 0 and fault['tau2_ms'] > 0
     # Every source's current at the peak adds up to the fault current.

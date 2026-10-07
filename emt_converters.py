@@ -95,6 +95,29 @@ def stage_output(p_in, eta, p_nl):
     return p * eta if p >= 0 else p / eta
 
 
+# --- The converters' ratings and capacitors (the DC fault study's too) -----------------
+
+def vsc_rating(rated_mva, p_mw, q_mvar):
+    """A VSC's rating (VA): as given, or 1.25 times its load-flow power."""
+    return (rated_mva if rated_mva > 0 else max(1.25 * math.hypot(p_mw, q_mvar), 0.05)) * 1e6
+
+
+def vsc_dc_link(c_link_mf, s_rated, v_dc_nom):
+    """A VSC's DC-link capacitance (F): as given, or 4 ms of its rating stored."""
+    return c_link_mf * 1e-3 if c_link_mf > 0 else 8e-3 * s_rated / v_dc_nom ** 2
+
+
+def dcdc_rating(rated_mw, p_out_mw):
+    """A DC/DC converter's rating (W): as given, or 1.25 times its load-flow output."""
+    return rated_mw * 1e6 if rated_mw > 0 else max(1.25 * abs(p_out_mw) * 1e6, 1e4)
+
+
+def dcdc_capacitors(c_out_mf, rated, vn_in, vn_out):
+    """A DC/DC converter's input and output capacitances (F): each 2 ms of its rating stored, its output's unless given."""
+    c_out = c_out_mf * 1e-3 if c_out_mf > 0 else 4e-3 * rated / vn_out ** 2
+    return 4e-3 * rated / vn_in ** 2, c_out
+
+
 class Vsc:
     """One VSC, built into the circuit, with its controller (``control(t, state)``)."""
 
@@ -129,18 +152,13 @@ class Vsc:
         self.w0 = ac.w
         self.ac_nodes = ac.nodes[ac_bus]
         self.eta, self.p_nl, self.input_side = (eta if 0 < eta <= 1 else 1.0), p_nl_mw * 1e6, input_side
-        s_rated = rated_mva
-        if s_rated <= 0:
-            s_rated = max(1.25 * math.hypot(p, q), 0.05)
-        self.s_rated = s_rated * 1e6
+        self.s_rated = vsc_rating(rated_mva, p, q)
         v_ll = float(builder.net.bus.at[ac_bus, 'vn_kv']) * 1e3
         self.v_nom_peak = SQ2 * v_ll / SQ3
         self.i_max = (limit_pu if limit_pu > 0 else 1.2) * SQ2 * self.s_rated / (SQ3 * v_ll)
         self.v_dc_nom = builder.vn[bus_dc]
         v_bus = builder.v_bus[bus_dc]
-        c_link = c_link_mf * 1e-3
-        if c_link <= 0:
-            c_link = 8e-3 * self.s_rated / self.v_dc_nom ** 2     # 4 ms of its rating stored
+        c_link = vsc_dc_link(c_link_mf, self.s_rated, self.v_dc_nom)
         self.r = max(r_ohm, 1e-6)
         self.l = max(x_ohm, 1e-6) / self.w0
         self.mode_dc, self.mode_ac = str(mode_dc), str(mode_ac)
@@ -625,7 +643,7 @@ class DcDc:
         vn_in, vn_out = builder.vn[bus_in], builder.vn[bus_out]
         v_in, v_out = builder.v_bus[bus_in], builder.v_bus[bus_out]
         p_out = p_out_mw * 1e6
-        rated = rated_mw * 1e6 if rated_mw > 0 else max(1.25 * abs(p_out), 1e4)
+        rated = dcdc_rating(rated_mw, p_out_mw)
         self.rated = rated
         self.i_max = (limit_pu if limit_pu > 0 else 1.2) * rated / vn_out
         self.f_sw = (switching_khz if switching_khz > 0 else 20.0) * 1e3
@@ -636,8 +654,7 @@ class DcDc:
         self.p_set = p_set_mw * 1e6
         self.droop, self.p_ref, self.p_in_ref = droop_pu, p_ref, p_in_ref
         self.block_in, self.block_out = block_pu * vn_in, block_pu * vn_out
-        c_out = c_out_mf * 1e-3 if c_out_mf > 0 else 4e-3 * rated / vn_out ** 2     # 2 ms of its rating stored
-        c_in = 4e-3 * rated / vn_in ** 2
+        c_in, c_out = dcdc_capacitors(c_out_mf, rated, vn_in, vn_out)
         self.c_out, self.c_in = c_out, c_in
         w_v = 2 * math.pi * 300.0                            # its output voltage loop
         self.kp_v, self.ki_v = 2 * 0.7 * w_v * c_out, w_v * w_v * c_out
