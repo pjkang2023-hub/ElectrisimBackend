@@ -224,7 +224,7 @@ def _run_pf(net) -> bool:
     # network with a DC side or grid-forming PCS.
     # Each case is a copy of a solved network: started from its results, as the time
     # series starts each step from the last (a campus took 230 s for one size cold).
-    from pandapower_electrisim import _electrisim_runpp
+    from pandapower_electrisim import _electrisim_has_dc_load_models, _electrisim_runpp
     res = getattr(net, "res_bus", None)
     warm = res is not None and len(res) == len(net.bus) and bool(res["vm_pu"].notna().all())
     for init in (("results", "auto") if warm else ("auto",)):
@@ -234,6 +234,12 @@ def _run_pf(net) -> bool:
                 return True
         except Exception:
             continue
+        # Not solved, and no error: with voltage-dependent DC loads, the load flow that
+        # failed was followed by ones started cold, the loads drawing less, then nothing -
+        # one started cold at their full power will not solve (it doubled a failed size's
+        # time when the cases were started warm).
+        if _electrisim_has_dc_load_models(net):
+            return False
     return False
 
 
@@ -495,7 +501,8 @@ def site_screening_analysis(net, params: Dict[str, Any]) -> str:
             base_violations = 0
             base_details: List[Dict[str, Any]] = []
             base_snap = None
-            if _run_pf(net0):
+            base_solved = _run_pf(net0)
+            if base_solved:
                 base_violations, base_details = _count_violations(net0, **limits)
                 base_snap = _dashboard_snapshot(net0, f"{site_name} — intact system, 0 MW", _site_marker(net0, load_idx))
             # What the contingencies do without the site, so only what it adds is
@@ -511,8 +518,11 @@ def site_screening_analysis(net, params: Dict[str, Any]) -> str:
             # default 300-1000 MW sizes at a 20 kV site said it could take
             # nothing, when it could take 21.65 MW.
             _progress(params, f"{site_name} — headroom")
+            # Its sizes and each size's base case are this one with the site's load
+            # set: started from its results, as the contingencies are.
+            solved0 = net0 if base_solved else net
             headroom = _headroom_mw(
-                net, load_idx, load_indices, load_snapshot, power_factor, limits,
+                solved0, load_idx, load_indices, load_snapshot, power_factor, limits,
                 on_step=lambda i, n, site_name=site_name: _progress(params, f"{site_name} — headroom {i}/{n}"),
             )
             _progress(params, f"{site_name} — headroom {headroom:g} MW")
@@ -520,7 +530,7 @@ def site_screening_analysis(net, params: Dict[str, Any]) -> str:
             for mw in mw_sizes:
                 label = f"{site_name} · {mw:g} MW"
                 _progress(params, f"{label} — base case")
-                net_case = deepcopy(net)
+                net_case = deepcopy(solved0)
                 for idx in load_indices:
                     net_case.load.loc[idx, "p_mw"] = 0.0
                     net_case.load.loc[idx, "q_mvar"] = 0.0

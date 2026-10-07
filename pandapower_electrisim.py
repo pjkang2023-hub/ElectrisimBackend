@@ -1973,6 +1973,13 @@ def _electrisim_runpp_dc_loads(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, 
     next power would leave it. A load flow that does not solve counts as too
     much load. Near the voltage-collapse point, where repeating alone swings
     back and forth, the bracket still closes on the answer.
+
+    Until a round has solved, the powers halve towards none with each load flow
+    that does not: one with none is tried first, and when that does not solve
+    either - the load flow fails for another reason, an oversized AC load, a
+    supply out - nor will the rest, which then are not run (they were 60 load
+    flows, each with its own angle start, 8 s). The loads are left at the
+    powers they would have reached.
     """
     if not _electrisim_has_dc_load_models(net):
         return pp.runpp(net, **_electrisim_facts_angle_start(net, kwargs))
@@ -1980,16 +1987,35 @@ def _electrisim_runpp_dc_loads(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, 
     rows = [i for i in ld.index if pd.notna(ld.at[i, 'electrisim_share_p'])]
     lo = {i: 0.0 for i in rows}       # powers known to be too low (g < 0)
     hi = {i: None for i in rows}      # powers known to be too high (g > 0), once one is
-    for _ in range(max_rounds):
+    # The angle start sees the AC network alone, which the rounds do not change: one per start.
+    starts = {}
+
+    def runpp():
+        init = kwargs.get('init', 'auto')
+        if init not in starts:
+            starts[init] = _electrisim_facts_angle_start(net, kwargs)
+        pp.runpp(net, **starts[init])
+
+    def halve():
+        for i in rows:
+            p = float(ld.at[i, 'p_dc_mw'])
+            hi[i] = p if hi[i] is None else min(hi[i], p)
+            ld.at[i, 'p_dc_mw'] = 0.5 * (lo[i] + hi[i])
+
+    probe = True
+    for k in range(max_rounds):
         try:
-            pp.runpp(net, **_electrisim_facts_angle_start(net, kwargs))
+            runpp()
         except pp.LoadflowNotConverged:
-            for i in rows:
-                p = float(ld.at[i, 'p_dc_mw'])
-                hi[i] = p if hi[i] is None else min(hi[i], p)
-                ld.at[i, 'p_dc_mw'] = 0.5 * (lo[i] + hi[i])
+            halve()
             kwargs = {**kwargs, 'init': 'auto'}
+            if probe and k + 1 < max_rounds and not _electrisim_dc_loads_none_solve(net, rows, runpp):
+                for _ in range(max_rounds - k - 1):
+                    halve()
+                break
+            probe = False    # it solves with none: the halving goes on
             continue
+        probe = False
         worst = 0.0
         proposals = {}
         for i in rows:
@@ -2016,6 +2042,24 @@ def _electrisim_runpp_dc_loads(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, 
     _electrisim_warn(net, f"Voltage-dependent DC loads had not settled after {max_rounds} load flows: "
                           "their powers are those of the last one.")
     return None
+
+
+def _electrisim_dc_loads_none_solve(net, rows, runpp):
+    """Whether the load flow solves with the voltage-dependent DC loads drawing nothing; their powers kept."""
+    ld = net.load_dc
+    kept = {i: ld.at[i, 'p_dc_mw'] for i in rows}
+    for i in rows:
+        ld.at[i, 'p_dc_mw'] = 0.0
+    try:
+        runpp()
+        return True
+    except pp.LoadflowNotConverged:
+        return False
+    except Exception:   # noqa: BLE001 - not known: the halving goes on, as without the probe
+        return True
+    finally:
+        for i, p in kept.items():
+            ld.at[i, 'p_dc_mw'] = p
 
 
 def _electrisim_warn(net, message):
