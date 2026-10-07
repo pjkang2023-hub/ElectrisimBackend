@@ -197,3 +197,80 @@ def test_ansi_earth_fault_with_vscs_on_the_network(client):
     rows = _by_label(p, _post(client, p)['busbars'])
     assert 10 < rows['35 kV Bus A']['i_first_sym_ka'] < 15
     assert rows['GT1 13.8 kV']['i_first_sym_ka'] == pytest.approx(0.0, abs=1e-6)   # behind a delta, ungrounded
+
+
+# --- 17a part 2: the time series and site screening -----------------------------------------------
+
+def test_time_series_a_day_with_dispatch(client):
+    """
+    The time-series dialog's request: 24 hourly steps with the microgrid
+    dispatch, the racks on their AI training cycles, PV on its clear-sky day.
+    Each hour's load is the AC loads plus each rack's rating times its
+    profile's mean over that hour (the racks ran at their full 48 MW: a load
+    with a minimum voltage drew its rated power at every load flow). Every
+    step converges and nothing is unserved (an SST's MV draw counted as a
+    load read as load not served, the grid-tied campus as an island running
+    short). A smoothing store over a step far longer than its filter is held
+    at its set point (its proportional term emptied the supercapacitors below
+    0 %); a battery's energy drawn is what it lost.
+    """
+    import load_profiles_electrisim as lp
+    payload = _payload('timeseries_')
+    assert payload['0']['microgrid_dispatch'] in (True, 'true')
+    out = _post(client, payload)
+    mg = out['microgrid']
+    steps = mg['steps']
+    assert len(steps) == 24 and all(s['converged'] for s in steps)
+    assert mg['unserved_mwh'] == pytest.approx(0.0, abs=1e-9) and not any('ran short' in n for n in mg['notes'])
+    library, _ = lp.library_from_params(payload['0'])
+    rows = [v for v in payload.values() if isinstance(v, dict)]
+    ac = sum(float(v['p_mw']) for v in rows if str(v.get('typ', '')).startswith('Load') and not str(v['typ']).startswith('Load DC'))
+    racks = [(float(v['p_mw']), v['load_profile_id']) for v in rows if str(v.get('typ', '')).startswith('Load DC')]
+    for k, s in enumerate(steps):
+        dc = 0.0
+        for p, pid in racks:
+            prof = library[pid]
+            dc += p * lp.average_profile(prof['t'] - prof['t'][0], prof['p'], k * 3600.0, (k + 1) * 3600.0, True)
+        assert s['load_mw'] == pytest.approx(ac + dc, abs=1e-6), k
+    for st in mg['stores']:
+        if st['kind'] == 'Supercapacitor' and 'Rack 10' not in st['label']:
+            assert st['soc_min_percent'] == pytest.approx(50.0, abs=1e-3) and st['soc_max_percent'] == pytest.approx(50.0, abs=1e-3), st
+        if st['kind'] == 'Battery':
+            assert st['drawn_mwh'] == pytest.approx(st['stored_start_mwh'] - st['stored_end_mwh'], abs=1e-9), st['label']
+    pv = [r['p_mw'] for r in mg['pcs'] if r['label'] == 'PV 1 PCS']
+    sky = library['clear_sky']['p']
+    assert all(p == pytest.approx(0.0, abs=1e-9) for p, g in zip(pv, sky) if g == 0)
+    assert max(range(24), key=lambda h: pv[h]) == max(range(24), key=lambda h: sky[h])
+
+
+def test_site_screening_a_campus_board(client):
+    """
+    The AC IT A board as a 2 MW site, screened against the feeders' outages:
+    it fits, base and N-1, with some 2.06 MW of headroom. Every size "did not
+    converge" on the campus - its load flow was pandapower's alone, which
+    cannot settle the converters. The load flow agrees: at 2 MW (the site's
+    total) within 0.95-1.05 pu and nothing above 100 %; at 2.3 MW past a limit.
+    """
+    p = _payload()
+    p['0'] = {'typ': 'DataCenterSiteScreeningPandaPower Parameters', 'site_load_ids': 'AC IT A', 'mw_sizes': '2',
+              'power_factor': '0.95', 'include_n11': 'false', 'element_type': 'line', 'voltage_limits': 'true',
+              'thermal_limits': 'true', 'min_vm_pu': '0.95', 'max_vm_pu': '1.05', 'max_loading_percent': '100',
+              'user_email': 't@t', 'rpc_stream': True}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        response = client.post('/', json=p)
+    result = json.loads(response.get_data(as_text=True).strip().splitlines()[-1])
+    assert result['type'] == 'result', result
+    (site,) = result['data']['screening_results']
+    assert site['headroom_mw'] >= 2.0 and site['base_violations'] == 0 and site['worst_n1_violations'] == 0, site
+    assert not site['upgrade_likely']
+    assert 2.0 <= site['headroom_mw'] < 2.3
+
+    def worst(p_mw):
+        q = p_mw * math.tan(math.acos(0.95))
+        flow = _post(client, _variant(_payload(), {'AC IT A': {'p_mw': str(p_mw), 'q_mvar': str(q)}}))
+        return min(b['vm_pu'] for b in flow['busbars']), max(t['loading_percent'] for t in flow['transformers'])
+    vm, loading = worst(2.0)
+    assert vm >= 0.95 and loading <= 100.0
+    vm, loading = worst(2.3)
+    assert vm < 0.95 or loading > 100.0

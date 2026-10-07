@@ -219,11 +219,22 @@ def _dashboard_snapshot(net, title: str, site_load: Optional[Dict[str, Any]] = N
 
 
 def _run_pf(net) -> bool:
-    try:
-        pp.runpp(net, algorithm="nr", calculate_voltage_angles=True)
-        return True
-    except Exception:
-        return False
+    # Electrisim's load flow: it settles the converters and the sources behind them,
+    # which pandapower's alone does not - every size then "did not converge" on a
+    # network with a DC side or grid-forming PCS.
+    # Each case is a copy of a solved network: started from its results, as the time
+    # series starts each step from the last (a campus took 230 s for one size cold).
+    from pandapower_electrisim import _electrisim_runpp
+    res = getattr(net, "res_bus", None)
+    warm = res is not None and len(res) == len(net.bus) and bool(res["vm_pu"].notna().all())
+    for init in (("results", "auto") if warm else ("auto",)):
+        try:
+            _electrisim_runpp(net, algorithm="nr", calculate_voltage_angles=True, init=init)
+            if net.converged:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _apply_outage(net_cont, case: Dict[str, Any]) -> None:

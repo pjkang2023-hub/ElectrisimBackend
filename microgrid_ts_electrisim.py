@@ -33,6 +33,7 @@ import load_profiles_electrisim as lp
 
 DISPATCH_ITERATIONS = 20
 SOFC_DISPATCH_TAU_S = 900.0     # the SOFC follows the demand averaged over this, under the dispatch
+LONG_STEP_TAUS = 5.0            # a smoothing filter over a step this many time constants long holds its store
 
 
 def _f(value, default=0.0):
@@ -41,6 +42,16 @@ def _f(value, default=0.0):
         return out if math.isfinite(out) else default
     except (TypeError, ValueError):
         return default
+
+
+def _real_rows(df):
+    """A load table's rows that are the diagram's own: no converter-stage role, no stand-in."""
+    keep = np.ones(len(df), dtype=bool)
+    if 'electrisim_dcdc_role' in df.columns:
+        keep &= df['electrisim_dcdc_role'].isna().values
+    if 'electrisim_aux' in df.columns:
+        keep &= (df['electrisim_aux'] != True).values
+    return df.index[keep]
 
 
 # --- Each store's state ---------------------------------------------------------------------
@@ -76,6 +87,18 @@ def battery_energy_j(obj, soc):
     vals = [float(np.interp(x, xs, ys)) for x in pts]
     area = sum(0.5 * (vals[k] + vals[k + 1]) * (pts[k + 1] - pts[k]) for k in range(len(pts) - 1))
     return area * obj.vn * obj.ah * 3600.0
+
+
+def energy_at_soc_j(obj, soc_pct):
+    """What a store holds at a state of charge (%), as soc_percent counts it."""
+    x = min(max(soc_pct / 100.0, 0.0), 1.0)
+    if obj.kind == 'Battery':
+        return battery_energy_j(obj, x)
+    if obj.kind == 'Supercapacitor':
+        return 0.5 * obj.c * (obj.v_min ** 2 + x * (obj.v_rated ** 2 - obj.v_min ** 2))
+    if obj.kind == 'Flywheel':
+        return obj.e_max * (obj.s_min ** 2 + x * (1.0 - obj.s_min ** 2))
+    return 0.0
 
 
 def stored_energy_j(obj):
@@ -196,7 +219,9 @@ class MicrogridTs:
         ld = net.load_dc
         real = ld.index if 'electrisim_dcdc_role' not in ld.columns else ld.index[ld['electrisim_dcdc_role'].isna()]
         self.dc_loads = {int(i): float(ld.at[i, 'p_dc_mw']) for i in real}
-        self.ac_loads = {int(i): (float(net.load.at[i, 'p_mw']), float(net.load.at[i, 'q_mvar'])) for i in net.load.index}
+        # The diagram's own AC loads: not a converter stage's input (an SST's MV draw) or a stand-in.
+        self.real_ac = [int(i) for i in _real_rows(net.load)]
+        self.ac_loads = {i: (float(net.load.at[i, 'p_mw']), float(net.load.at[i, 'q_mvar'])) for i in self.real_ac}
         self.dc_profiles = {}
         for name, a in (params.get('dc_load_profile_assignments') or {}).items():
             idx = [i for i in self.dc_loads if str(ld.at[i, 'name']) == str(name)]
@@ -280,8 +305,8 @@ class MicrogridTs:
         net, pe = self.net, self.pe
         for i, p in self.dc_loads.items():
             scale = self.dc_profiles[i][t] if i in self.dc_profiles else 1.0
-            net.load_dc.at[i, 'p_dc_mw'] = p * scale
-        self.base_ac = {i: (float(net.load.at[i, 'p_mw']), float(net.load.at[i, 'q_mvar'])) for i in net.load.index}
+            self._set_dc_load(i, p * scale)
+        self.base_ac = {i: (float(net.load.at[i, 'p_mw']), float(net.load.at[i, 'q_mvar'])) for i in self.real_ac}
         self.base_dc = {i: float(net.load_dc.at[i, 'p_dc_mw']) for i in self.dc_loads}
         self.shed, self.curtail = 1.0, 1.0
         for it in self.items:
@@ -367,8 +392,18 @@ class MicrogridTs:
             s['y'] = p_rack if s['y'] is None else s['y'] + (p_rack - s['y']) * alpha
             obj = s['store']['obj']
             soc = soc_percent(obj)
-            # Above its set point it discharges a little more, below it a little less.
-            want = s['share'] * (p_rack - s['y']) + s['k'] * (soc - s['soc_ref']) / 100.0 * c['rated_mw']
+            if self.dt > LONG_STEP_TAUS * s['tau']:
+                # A step far longer than its filter: the swings it smooths are gone in the step's mean,
+                # and its state-of-charge loop holds its store at its set point - its converter's
+                # no-load loss taken from the bus. Its proportional term over a whole step would
+                # empty the store: 0.04 MW for an hour is 130 MJ, against a supercapacitor's 2.
+                p_dc = (stored_energy_j(obj) - energy_at_soc_j(obj, s['soc_ref'])) / self.dt / 1e6
+                if obj.kind == 'Supercapacitor' and getattr(obj, 'r_leak', 0) > 0:
+                    p_dc -= obj.v0 ** 2 / obj.r_leak / 1e6        # its own leakage, made up over the step
+                want = pe._electrisim_stage_output(p_dc, c['eta'], c['p_nl_mw'])
+            else:
+                # Above its set point it discharges a little more, below it a little less.
+                want = s['share'] * (p_rack - s['y']) + s['k'] * (soc - s['soc_ref']) / 100.0 * c['rated_mw']
             want = max(min(want, c['rated_mw']), -c['rated_mw']) if c['rated_mw'] > 0 else want
             p_dc = pe._electrisim_dc_dc_input_power(want, c['eta'], c['p_nl_mw'])
             avail = available_w(obj, p_dc * 1e6, self.dt) / 1e6
@@ -452,8 +487,20 @@ class MicrogridTs:
         for i, (p, q) in self.base_ac.items():
             net.load.at[i, 'p_mw'], net.load.at[i, 'q_mvar'] = p * self.shed, q * self.shed
         for i, p in self.base_dc.items():
-            net.load_dc.at[i, 'p_dc_mw'] = p * self.shed
+            self._set_dc_load(i, p * self.shed)
         return True
+
+    def _set_dc_load(self, i, p_mw):
+        """
+        A DC load's power, and its rated power with it: a load with a model (or a
+        minimum voltage) draws its rated power's share at its voltage each load
+        flow, so its profile and any shedding were undone - the racks ran at
+        their full 48 MW whatever their training cycle.
+        """
+        ld = self.net.load_dc
+        ld.at[i, 'p_dc_mw'] = p_mw
+        if 'electrisim_p_rated_mw' in ld.columns and np.isfinite(float(ld.at[i, 'electrisim_p_rated_mw'])):
+            ld.at[i, 'electrisim_p_rated_mw'] = p_mw
 
     def _pv_output_mw(self):
         net = self.net
@@ -472,7 +519,9 @@ class MicrogridTs:
 
     def after_step(self, t, converged):
         net, pe, dt = self.net, self.pe, self.dt
-        loads = sum(float(net.load.at[i, 'p_mw']) for i in net.load.index if bool(net.load.at[i, 'in_service']))
+        # The diagram's loads: an SST's MV draw counted too was its hall's load twice, and, moving as the
+        # load flow settled it, read as load not served on a network on the grid.
+        loads = sum(float(net.load.at[i, 'p_mw']) for i in self.real_ac if bool(net.load.at[i, 'in_service']))
         loads += sum(float(net.load_dc.at[i, 'p_dc_mw']) for i in self.dc_loads if bool(net.load_dc.at[i, 'in_service']))
         base = sum(p for p, _ in self.base_ac.values()) + sum(self.base_dc.values())
         unserved = max(base - loads, 0.0)
@@ -503,6 +552,8 @@ class MicrogridTs:
                 self.pcs_rows.append({'time_step': t, 'name': rec['name'], 'id': rec['id'], 'label': rec['label'],
                                       'p_mw': p_ac, 'q_mvar': float(res.at[rec['index'], 'q_mvar']),
                                       'frequency_hz': float(getattr(net, 'f_hz', 50.0) or 50.0) * (1.0 + rec['df_pu'])})
+            if not (math.isfinite(p) and math.isfinite(v)):
+                continue        # a step whose load flow failed: its state stays as it was
             state = {k: (float(x) if isinstance(x, (int, float)) and x is not None else x)
                      for k, x in obj.state(p / max(v, 1e-9), v).items()}
             obj.notes = []
