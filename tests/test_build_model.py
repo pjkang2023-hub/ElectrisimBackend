@@ -318,6 +318,35 @@ def pd_isna_or_none(value):
     return value is None or value != value
 
 
+def test_a_generators_dynamics_reach_the_drawing(client):
+    """
+    A generator's Dynamics tab, given in the spec by its own field names,
+    is kept on its row and handed to the canvas with its short-circuit
+    data: the drawing kept the defaults, and the transient-stability and
+    EMT studies each took their own.
+    """
+    spec = substation()
+    dyn = {'dyn_machine_model': 'genrou', 'dyn_H': 3.5, 'dyn_governor_model': 'GAST', 'dyn_gov_R': 0.04,
+           'dyn_exciter_model': 'SEXS'}
+    spec['generators'] = [{'id': 'G1', 'bus': 'F2', 'p_mw': 1.0, 'name': 'Engine', **dyn}]
+    net, _ = sld.build_network(spec)
+    assert {k: net.gen.at[0, k] for k in dyn} == {**dyn, 'dyn_machine_model': 'GENROU'}
+    body = client.post('/build-model', json={'spec': spec}).get_json()
+    sidecar = json.loads(json.loads(body['model'])['_object']['electrisim_import_sidecar']['_object'])
+    assert {k: sidecar['gen']['Engine'][k] for k in dyn} == {**dyn, 'dyn_machine_model': 'GENROU'}
+
+
+@pytest.mark.parametrize('fields, problem', [
+    ({'dyn_governor_model': 'GAS'}, "dyn_governor_model='GAS' must be one of NONE, TGOV1"),
+    ({'dyn_H': 'heavy'}, 'dyn_H'),
+    ({'dyn_inertia': 3.5}, "unknown dynamics field 'dyn_inertia'"),
+])
+def test_dynamics_problems_are_named(fields, problem):
+    spec = substation()
+    spec['generators'] = [{'id': 'G1', 'bus': 'F2', 'p_mw': 1.0, **fields}]
+    assert any(problem in p for p in problems_of(spec)), problems_of(spec)
+
+
 @pytest.mark.parametrize('fields, problem', [
     ({'tap_pos': 3}, 'tap_pos=3 is outside tap_min..tap_max (-2..2)'),
     ({'tap_side': 'mv', 'tap_pos': 0}, "tap_side='mv' must be 'hv' or 'lv'"),

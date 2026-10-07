@@ -61,8 +61,8 @@
     {"id": "ACIT_B", "bus": "CB_LV", "p_mw": 1.0, "q_mvar": 0.2, "name": "AC IT B"}
   ],
   "generators": [
-    {"id": "GT1", "bus": "GT1_13", "p_mw": 12, "vm_pu": 1.0, "sn_mva": 31.25, "xdss_pu": 0.15, "rdss_ohm": 0.046, "cos_phi": 0.8, "cost_per_mwh": 60, "name": "Gas turbine 1"},
-    {"id": "GT2", "bus": "GT2_13", "p_mw": 12, "vm_pu": 1.0, "sn_mva": 31.25, "xdss_pu": 0.15, "rdss_ohm": 0.046, "cos_phi": 0.8, "cost_per_mwh": 60, "name": "Gas turbine 2"}
+    {"id": "GT1", "bus": "GT1_13", "p_mw": 12, "vm_pu": 1.0, "sn_mva": 31.25, "xdss_pu": 0.15, "rdss_ohm": 0.046, "cos_phi": 0.8, "cost_per_mwh": 60, "dyn_machine_model": "GENROU", "dyn_H": 3.5, "dyn_xl": 0.1, "dyn_exciter_model": "SEXS", "dyn_governor_model": "GAST", "dyn_gov_R": 0.04, "name": "Gas turbine 1"},
+    {"id": "GT2", "bus": "GT2_13", "p_mw": 12, "vm_pu": 1.0, "sn_mva": 31.25, "xdss_pu": 0.15, "rdss_ohm": 0.046, "cos_phi": 0.8, "cost_per_mwh": 60, "dyn_machine_model": "GENROU", "dyn_H": 3.5, "dyn_xl": 0.1, "dyn_exciter_model": "SEXS", "dyn_governor_model": "GAST", "dyn_gov_R": 0.04, "name": "Gas turbine 2"}
   ],
   "motors": [
     {"id": "CHA1", "bus": "CA_13", "pn_mech_mw": 2.0, "cos_phi": 0.9, "efficiency_percent": 96, "lrc_pu": 6, "rx": 0.1, "name": "Chiller A1"},

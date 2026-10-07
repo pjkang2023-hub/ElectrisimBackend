@@ -101,6 +101,17 @@ to which a minimum-case short circuit raises the line's resistance.
 `xdss_pu` (subtransient reactance, 0.2), `rdss_ohm` (0), `cos_phi` (0.85).
 The defaults are typical values so a short-circuit study runs; give the
 machine's own for a study you will rely on.
+Dynamics, for the transient-stability, eigenvalue and EMT studies, as the
+generator's Dynamics tab names them: `dyn_machine_model` (GENROU or GENCLS),
+`dyn_H` (inertia constant, s) or `dyn_M` (2H), `dyn_D`, `dyn_ra`, `dyn_xl`,
+`dyn_xd`, `dyn_xq`, `dyn_xd1`, `dyn_xq1`, `dyn_xd2`, `dyn_xq2`, `dyn_Td10`,
+`dyn_Td20`, `dyn_Tq10`, `dyn_Tq20` (per unit on `sn_mva`, seconds);
+`dyn_exciter_model` (NONE, EXDC2, SEXS, IEEEX1, ESDC2A, EXST1, ESST1A, AC8B)
+with `dyn_exc_KA`, `dyn_exc_TR`, `dyn_exc_TA`, `dyn_exc_TE`, `dyn_exc_K`;
+`dyn_governor_model` (NONE, TGOV1, IEEEG1, IEESGO, GAST, HYGOV) with
+`dyn_gov_R` (droop, per unit), `dyn_gov_T1`, `dyn_gov_T2`, `dyn_gov_T3`;
+`dyn_pss_model` (NONE, IEEEST) with `dyn_pss_A1`, `dyn_pss_A2`. Left out,
+each study takes its own defaults.
 
 **static_generators** - inverter-connected PV, wind, batteries in PQ mode.
 `id`, **`bus`**, `p_mw` (0), `q_mvar` (0), `name`, `in_service`, and for

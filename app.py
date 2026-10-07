@@ -1731,6 +1731,8 @@ def pandapower_net_to_json(net):
                     'rdss_pu': _scalar(r.get('rdss_pu')),
                     'cos_phi': _scalar(r.get('cos_phi')),
                     **opf_fields('gen', idx, r, opf_pq),
+                    # Its Dynamics tab, as a spec gives it (electrisim_sld): the drawing kept the defaults.
+                    **{c: _scalar(r.get(c)) for c in net.gen.columns if str(c).startswith('dyn_')},
                 }
         if hasattr(net, 'sgen') and not net.sgen.empty:
             for idx, r in net.sgen.iterrows():

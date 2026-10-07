@@ -34,6 +34,7 @@ import math
 import re
 
 import pandapower as pp
+import pandas as pd
 
 import electrisim_spec_layer
 
@@ -154,6 +155,48 @@ def _trafo3w_zero_sequence(row, where, problems, vk_hm, vk_ml, vk_hl):
         out[f'vkr0_{theirs}_percent'] = _num(row.get(f'vkr0_{pair}_percent'), f'vkr0_{pair}_percent',
                                              where, problems, default=vkr)
     return out
+
+
+#: A generator's dynamics as its Dynamics tab names them: the models, and the numbers each reads.
+GEN_DYNAMICS_MODELS = {
+    'dyn_machine_model': ('GENROU', 'GENCLS'),
+    'dyn_exciter_model': ('NONE', 'EXDC2', 'SEXS', 'IEEEX1', 'ESDC2A', 'EXST1', 'ESST1A', 'AC8B'),
+    'dyn_governor_model': ('NONE', 'TGOV1', 'IEEEG1', 'IEESGO', 'GAST', 'HYGOV'),
+    'dyn_pss_model': ('NONE', 'IEEEST'),
+}
+GEN_DYNAMICS_NUMBERS = (
+    'dyn_M', 'dyn_H', 'dyn_D', 'dyn_ra', 'dyn_xl', 'dyn_xd', 'dyn_xq', 'dyn_xd1', 'dyn_xq1', 'dyn_xd2',
+    'dyn_xq2', 'dyn_Td10', 'dyn_Td20', 'dyn_Tq10', 'dyn_Tq20', 'dyn_exc_KA', 'dyn_exc_TR', 'dyn_exc_TA',
+    'dyn_exc_TE', 'dyn_exc_K', 'dyn_gov_R', 'dyn_gov_T1', 'dyn_gov_T2', 'dyn_gov_T3', 'dyn_pss_A1', 'dyn_pss_A2',
+)
+
+
+def _gen_dynamics(net, idx, row, where, problems):
+    """
+    A generator's dynamics (the transient-stability and EMT studies'), given in
+    the spec as the Dynamics tab's own fields - dyn_machine_model, dyn_H,
+    dyn_governor_model, dyn_gov_R... - kept on its row for the drawing. Without
+    them every study took its own defaults, and not the same ones.
+    """
+    for key in sorted(k for k in row if str(k).startswith('dyn_')):
+        value = row[key]
+        if key in GEN_DYNAMICS_MODELS:
+            value = str(value).strip().upper()
+            if value not in GEN_DYNAMICS_MODELS[key]:
+                problems.append(f'{where}: {key}={row[key]!r} must be one of '
+                                + ', '.join(GEN_DYNAMICS_MODELS[key]))
+                continue
+        elif key in GEN_DYNAMICS_NUMBERS:
+            value = _num(value, key, where, problems)
+            if value is None:
+                continue
+        else:
+            problems.append(f'{where}: unknown dynamics field {key!r}; expected one of: '
+                            + ', '.join(sorted(GEN_DYNAMICS_MODELS) + list(GEN_DYNAMICS_NUMBERS)))
+            continue
+        if key not in net.gen.columns:
+            net.gen[key] = pd.Series([None] * len(net.gen), index=net.gen.index, dtype=object)
+        net.gen.at[idx, key] = value
 
 
 def _num(value, field, where, problems, default=None, positive=False):
@@ -564,6 +607,7 @@ def build_network(spec):
             in_service=bool(row.get('in_service', True)),
         )
         record('gen', idx, ident)
+        _gen_dynamics(net, idx, row, where, problems)
         # Optimal power flow: dispatchable between these limits - by default
         # from nothing to its rated active power, and the reactive power its
         # rated power factor allows: the corner of that rectangle is the rated

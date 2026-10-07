@@ -12,6 +12,10 @@ failed on any network with a VSC.
 17b: the fault and protection studies - ANSI and islanded earth faults,
 motor starting, a DC fault at a rack, protection, the POI study's grounding
 table and arc flash.
+
+17c, part 1: transient stability and eigenvalues in ANDES - a 35 kV fault,
+a feeder's breaker, the utility lost and the campus islanding, a turbine
+lost while islanded; the turbines' modes on the grid and islanded.
 """
 import contextlib
 import io
@@ -70,9 +74,9 @@ def _by_label(payload, rows):
 def test_islanded_turbines_and_bess_share_by_droop(client):
     """
     Both feeders open: the four grid-forming BESS PCS (5.5 MVA, 2 %) and the
-    two turbines' governors (31.25 MVA, TGOV1's 5 % - the spec gives them no
-    dynamics) take the island's deficit at one frequency, each on its droop
-    line: f = f0 (1 - R dP / S) for every one. The turbines had stayed at
+    two turbines' governors (31.25 MVA, GAST at 4 %) take the island's
+    deficit at one frequency, each on its droop line: f = f0 (1 - R dP / S)
+    for every one. The turbines had stayed at
     their set point, and the BESS took it all at 108 % of their rating.
     """
     base = _payload()
@@ -88,10 +92,10 @@ def test_islanded_turbines_and_bess_share_by_droop(client):
         assert p['islanded'] and p['frequency_hz'] == pytest.approx(f, abs=1e-9)
         assert f == pytest.approx(50 * (1 - 0.02 * p['p_mw'] / 5.5), abs=1e-6)
     for g in ('Gas turbine 1', 'Gas turbine 2'):
-        assert f == pytest.approx(50 * (1 - 0.05 * (gens[g]['p_mw'] - 12.0) / 31.25), abs=1e-6)
-    # The deficit shared by weight S / R: the turbines 625 MW/pu each, the BESS 275.
+        assert f == pytest.approx(50 * (1 - 0.04 * (gens[g]['p_mw'] - 12.0) / 31.25), abs=1e-6)
+    # The deficit shared by weight S / R: the turbines 781.25 MW/pu each, the BESS 275.
     dp_gt, dp_bess = gens['Gas turbine 1']['p_mw'] - 12.0, bess[0]['p_mw']
-    assert dp_gt / dp_bess == pytest.approx(625 / 275, rel=1e-5)
+    assert dp_gt / dp_bess == pytest.approx(781.25 / 275, rel=1e-5)
     assert 49.4 < f < 49.6
 
 
@@ -448,3 +452,170 @@ def test_arc_flash_by_voltage_class(client):
     assert lee['method'] == 'RalphLee'
     assert lee['incident_energy_cal_cm2'] == pytest.approx(_lee(lee, 910)[0], rel=1e-6)
     assert any('BESS 2 0.69 kV' in w and '65 kA' in w for w in out['warnings'])
+
+
+# --- 17c, part 1: transient stability and eigenvalues (ANDES) ----------------------------------
+
+TDS = {'typ': 'TransientStabilityAndes Parameters', 'frequency': '50', 'sn_mva': '100', 'user_email': 't@t'}
+EIG = {'typ': 'EigenvalueAndes Parameters', 'frequency': '50', 'sn_mva': '100', 'user_email': 't@t'}
+GT = {'s': 31.25, 'r': 0.04, 'h': 3.5}
+BESS = {'s': 5.5, 'droop': 0.02}
+
+
+def _cells(payload):
+    return {v.get('userFriendlyName'): v['name'] for v in payload.values() if isinstance(v, dict) and 'name' in v}
+
+
+def _dynamic():
+    """The transient study's request: its builder sends each generator's whole Dynamics tab."""
+    return _payload('tds_')
+
+
+def _flow(payload):
+    """The same diagram through the load flow."""
+    return {**payload, '0': _payload()['0']}
+
+
+def _islanded():
+    return _variant(_dynamic(), {'Feeder 1 breaker': {'closed': 'false'}, 'Feeder 2 breaker': {'closed': 'false'}})
+
+
+def _tds(client, payload, **params):
+    p = dict(payload)
+    p['0'] = {**TDS, **{k: str(v) for k, v in params.items()}}
+    out = _post(client, p)
+    assert out['converged'] is True and out['time'][-1] == pytest.approx(float(params.get('tf', 10))), out['warnings']
+    assert not any('lost synchronism' in w or 'stopped' in w for w in out['warnings']), out['warnings']
+    return out
+
+
+def _on_droop_lines(out, f_end):
+    """Every turbine and grid-forming PCS still running on its droop line at f_end: f = f0 (1 - R dP / S)."""
+    for g in out['generator_p_mw']:
+        p = g['values']
+        if p[-1] != 0.0:
+            assert f_end == pytest.approx(50 * (1 - GT['r'] * (p[-1] - p[0]) / GT['s']), abs=2e-5), g['name']
+    for r in out['pcs']:
+        if r['control'] == 'grid_forming':
+            assert r['frequency_hz'][-1] == pytest.approx(f_end, abs=1e-5), r['label']
+            assert f_end == pytest.approx(50 * (1 - BESS['droop'] * (r['p_mw'][-1] - r['p_mw'][0]) / BESS['s']),
+                                          abs=2e-5), r['label']
+
+
+def test_transient_35_kv_fault_both_turbines_ride_through(client):
+    """
+    A bolted fault on 35 kV Bus A for 100 ms: both turbines swing - through
+    the bus tie - and ride through, and every bus returns to its voltage.
+    The tie was left out of ANDES: Bus B hung on its own feeder from the
+    External Grid's bus, which ANDES holds, and Gas turbine 2 never moved.
+    The turbines run on their spec's dynamics, GENROU with GAST and SEXS.
+    """
+    base = _dynamic()
+    # 10 s: the exciter (SEXS, its lead-lag's 10 s) brings the turbines' terminals back by then.
+    out = _tds(client, base, tf=10, fault_bus=_cells(base)['35 kV Bus A'], fault_tf=1.0, fault_tc=1.1)
+    for w in out['omega']:
+        assert max(abs(x - 1.0) for x in w['values']) > 2e-3 and w['values'][-1] == pytest.approx(1.0, abs=2e-4)
+    for b in out['bus_voltage']:
+        assert b['values'][-1] == pytest.approx(b['values'][0], abs=2e-3), b['name']
+    applied = ' '.join(out['defaults_applied'])
+    assert 'exciter' not in applied and 'governor' not in applied, applied
+
+
+def test_transient_a_feeder_breaker_opens_and_the_tie_carries_on(client):
+    """
+    Feeder 1's breaker opens at 1 s: the bus tie feeds Bus A from Feeder 2 -
+    nothing is cut off and the turbines barely move. ANDES had no breakers
+    or tie: a feeder's outage cut Bus A and all behind it off, Gas turbine
+    1 tripped as on loss of mains.
+    """
+    base = _dynamic()
+    out = _tds(client, base, tf=5, toggle_line=_cells(base)['Feeder 1 breaker'], toggle_t=1.0)
+    assert not any('cuts' in w or 'island' in w for w in out['warnings']), out['warnings']
+    for w in out['omega']:
+        assert w['values'][-1] == pytest.approx(1.0, abs=1e-5)
+    for b in out['bus_voltage']:
+        assert b['values'][-1] > 0.9, b['name']
+
+
+def test_transient_the_utility_lost_the_campus_islands_on_its_droops(client):
+    """
+    The utility lost at 1 s: the campus islands and its two turbines (GAST,
+    4 % on 31.25 MVA) and four grid-forming BESS (2 % on 5.5 MVA) take the
+    23 MW it imported, each on its droop line at one frequency - 49.61 Hz.
+    The island used to slip: ANDES's REGCV1 answered the angle through slow
+    voltage loops and fell out of step with the turbines, and the PV arrays
+    tripped at 49.6 Hz (1547-2003's 59.5 Hz, scaled).
+    """
+    base = _dynamic()
+    grid = next(v['name'] for v in base.values() if isinstance(v, dict) and str(v.get('typ', '')).startswith('External'))
+    out = _tds(client, base, tf=20, toggle_line=grid, toggle_t=1.0)
+    assert any('leaves 21 buses as an island' in w for w in out['warnings']), out['warnings']
+    f_end = out['frequency_hz'][-1]
+    assert 49.5 < f_end < 49.8
+    _on_droop_lines(out, f_end)
+    for r in out['pcs']:
+        if r['source_kind'] == 'PV Array':
+            assert r['p_mw'][-1] == pytest.approx(r['p_mw'][0], rel=0.02), r['label']
+
+
+def test_transient_a_turbine_lost_while_islanded(client):
+    """
+    Islanded, Gas turbine 1 trips at 1 s: Gas turbine 2 and the BESS take
+    its 18.9 MW on their droops. The island starts where the load flow
+    leaves it - the turbines and BESS each at its droop's share - and not
+    with one machine as slack carrying it all: the islanded load flow had
+    not converged, the halls' 48 MW vanished, Gas turbine 1 absorbed 14 MW
+    and the run stopped at 2.1 s on ANDES's angle check, which takes a
+    tripped machine's frozen angle against an island's turning.
+    """
+    island = _islanded()
+    flow = _post(client, _flow(island))
+    gens = _by_label(island, flow['generators'])
+    out = _tds(client, island, tf=20, toggle_gen=_cells(island)['Gas turbine 1'], toggle_gen_t=1.0)
+    start = {g['name']: g['values'][0] for g in out['generator_p_mw']}
+    # Gas turbine 2 at its share; Gas turbine 1, the island's slack, at the rest - ANDES's losses are its own.
+    assert start['Gas turbine 2'] == pytest.approx(gens['Gas turbine 2']['p_mw'], rel=1e-6)
+    assert start['Gas turbine 1'] == pytest.approx(gens['Gas turbine 1']['p_mw'], rel=0.01)
+    f_end = out['frequency_hz'][-1]
+    assert 49.4 < f_end < 49.8
+    _on_droop_lines(out, f_end)
+
+
+@pytest.mark.parametrize('islanded', [False, True])
+def test_eigenvalues_the_turbines_modes_are_damped(client, islanded):
+    """
+    The campus is small-signal stable on the grid and islanded, and the
+    turbines' electromechanical modes (1.5 Hz on the grid) damped above 5 %.
+    Islanded it had no slack and the study refused it.
+    """
+    p = _islanded() if islanded else _dynamic()
+    p['0'] = dict(EIG)
+    out = _post(client, p)
+    assert out['verdict'] == 'stable' and out['n_positive'] == 0
+    swings = [m for m in out['least_damped_modes'] if 0.2 < m['freq_hz'] < 3.0]
+    assert swings and all(m['damping_ratio'] > 0.05 for m in swings), swings
+
+
+def test_eigenvalues_classical_turbines_against_the_grid_by_hand(client):
+    """
+    The turbines as classical machines (GENCLS, no governor or exciter):
+    each swings against the grid at w = sqrt(w0 K / 2H), K = E' V cos d / X
+    - E' behind x'd 0.3 from the load flow's 12 MW and its Q at 1.0 pu, X
+    through x'd, the 10 % step-up and the two feeders to the External
+    Grid's bus, which ANDES holds; in phase the two share the feeders.
+    """
+    classical = {'dyn_machine_model': 'GENCLS', 'dyn_exciter_model': 'NONE', 'dyn_governor_model': 'NONE'}
+    p = _variant(_dynamic(), {'Gas turbine 1': classical, 'Gas turbine 2': classical})
+    flow = _by_label(p, _post(client, _flow(p))['generators'])['Gas turbine 1']
+    p['0'] = dict(EIG)
+    out = _post(client, p)
+    s, xd1 = GT['s'], 0.3
+    i = complex(flow['p_mw'], -flow['q_mvar']) / s
+    e = 1.0 + 1j * xd1 * i
+    x_gsu = math.sqrt(0.10 ** 2 - 0.003 ** 2) * s / 32
+    x_feeder = 3 * 0.0535 / 2 / (35 ** 2 / s)
+    delta = math.atan2(e.imag, e.real) + math.radians(flow['va_degree'])
+    hand = sorted(math.sqrt(2 * math.pi * 50 * abs(e) * math.cos(delta) / x / (2 * GT['h']))
+                  for x in (xd1 + x_gsu + 2 * x_feeder, xd1 + x_gsu + x_feeder))
+    swings = sorted(m['imag'] for m in out['least_damped_modes'] if 1.0 < m['freq_hz'] < 2.5)
+    assert swings == pytest.approx(hand, rel=0.01), (swings, hand)

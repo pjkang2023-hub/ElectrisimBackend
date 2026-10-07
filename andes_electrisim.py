@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import traceback
+from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -270,38 +271,60 @@ def _iter_elements(in_data: Dict[str, Any]):
         yield key, el, typ
 
 
-def _deenergise_island(ss, out_line, t: float) -> Tuple[List[Any], List[str]]:
+def _islands(ss, out_lines=()) -> List[set]:
+    """The buses as islands: each set joined by in-service lines and transformers, out_lines left out."""
+    adjacency: Dict[Any, set] = {b: set() for b in ss.Bus.idx.v}
+    for idx, a, b, u in zip(ss.Line.idx.v, ss.Line.bus1.v, ss.Line.bus2.v, ss.Line.u.v):
+        if u and idx not in out_lines:
+            adjacency[a].add(b)
+            adjacency[b].add(a)
+    seen, out = set(), []
+    for start in ss.Bus.idx.v:
+        if start in seen:
+            continue
+        island, queue = {start}, [start]
+        for bus in queue:
+            for nxt in adjacency[bus] - island:
+                island.add(nxt)
+                queue.append(nxt)
+        seen |= island
+        out.append(island)
+    return out
+
+
+def _deenergise_island(ss, out_lines, t: float, out_slacks=(), grid_forming=()) -> Tuple[List[Any], List[str], List[set]]:
     """
-    Switch off, at time t, everything a line outage cuts off from the
-    External Grid.
+    Switch off, at time t, everything an outage - lines, or an External
+    Grid's slack - cuts off from the grid, unless it can run as an island.
 
     On a radial network every line outage islands what lies beyond it. ANDES
     cannot simulate a dead island - its loads at 0 V leave the bus angles
-    undetermined - and the run stopped at the outage; nor an island run by a
-    generator alone (its connectivity check then fails). A generator cut off
+    undetermined - and the run stopped at the outage. A generator cut off
     from the grid is tripped by its loss-of-mains protection, so the island's
     generators are tripped with the line, and its loads, shunts, static
     generators and inner lines switched off; its buses keep no devices and
     are reported at 0 V - as pandapower reports an island without an External
-    Grid. Returns the islanded bus idx and the generators tripped.
+    Grid.
+
+    A part cut off with a grid-forming PCS is a microgrid built to island:
+    it runs on, its machines' governors and the PCS's droops sharing its load.
+    Returns the de-energised bus idx, the generators tripped, and the islands
+    that run on.
     """
-    lines = list(zip(ss.Line.idx.v, ss.Line.bus1.v, ss.Line.bus2.v, ss.Line.u.v))
-    sources = set(ss.Slack.bus.v)
-    adjacency: Dict[Any, set] = {}
-    for idx, a, b, u in lines:
-        if idx == out_line or not u:
+    sources = {b for idx, b in zip(ss.Slack.idx.v, ss.Slack.bus.v) if idx not in out_slacks}
+    live = set().union(*(p for p in _islands(ss) if p & set(ss.Slack.bus.v)))
+    running, island = [], []
+    for part in _islands(ss, set(out_lines)):
+        part = part & live
+        if not part or part & sources:
             continue
-        adjacency.setdefault(a, set()).add(b)
-        adjacency.setdefault(b, set()).add(a)
-    reached, queue = set(sources), list(sources)
-    for bus in queue:
-        for nxt in adjacency.get(bus, ()):
-            if nxt not in reached:
-                reached.add(nxt)
-                queue.append(nxt)
-    island = [b for b in ss.Bus.idx.v if b not in reached]
+        if part & set(grid_forming):
+            running.append(part)
+        else:
+            island += [b for b in ss.Bus.idx.v if b in part]
+    lines = list(zip(ss.Line.idx.v, ss.Line.bus1.v, ss.Line.bus2.v, ss.Line.u.v))
     if not island:
-        return [], []
+        return [], [], running
     n = 0
     tripped, machine_buses = [], set()
     for model in ("GENROU", "GENCLS"):
@@ -320,10 +343,10 @@ def _deenergise_island(ss, out_line, t: float) -> Tuple[List[Any], List[str]]:
                 n += 1
                 ss.add("Toggle", idx=f"Toggle_Island_{n}", model=model, dev=mdl.idx.v[k], t=t)
     for idx, a, b, u in lines:
-        if idx != out_line and u and a in island and b in island:
+        if idx not in out_lines and u and a in island and b in island:
             n += 1
             ss.add("Toggle", idx=f"Toggle_Island_{n}", model="Line", dev=idx, t=t)
-    return island, tripped
+    return island, tripped, running
 
 
 # --- PCS: a battery, flywheel, SOFC system or PV array on an AC bus through its inverter -----------
@@ -331,10 +354,11 @@ def _deenergise_island(ss, out_line, t: float) -> Tuple[List[Any], List[str]]:
 # A grid-forming PCS's power filter (s), as the EMT study's GridFormingVsc: its droop through that
 # filter is a virtual machine, M = tau D, D = 1 / droop.
 PCS_TAU_F = 0.02
-# REGCV1's voltage (current per voltage) and current (voltage per current) loop gains, per unit of
-# the PCS's own rating: ANDES takes them on the system base unconverted.
-_REGCV1_GAINS = {"Kpvd": 0.5, "Kivd": 0.02, "Kpvq": 0.5, "Kivq": 0.02,
-                 "KpId": 0.2, "KiId": 0.01, "KpIq": 0.2, "KiIq": 0.01}
+# A closed bus tie's reactance (p.u. on the system base): small against any branch, not so small
+# that the network matrix loses its conditioning.
+BUS_TIE_X_PU = 1e-4
+# A grid-forming PCS's coupling reactance (p.u. on its rating): REGCV1's xs.
+PCS_XS_PU = 0.2
 
 
 def _pcs_plants(in_data: Dict[str, Any], warnings: List[str]) -> List[Dict[str, Any]]:
@@ -404,7 +428,7 @@ def _pcs_plants(in_data: Dict[str, Any], warnings: List[str]) -> List[Dict[str, 
 def _add_pcs_dynamics(ss: Any, rec: Dict[str, Any], n: int, bus: Any, static_idx: str, freq: float,
                       sn_base: float, defaults_applied: List[str]) -> Dict[str, Any]:
     """
-    The PCS's ANDES model. Grid-forming: REGCV1, a virtual machine whose
+    The PCS's ANDES model. Grid-forming: GENCLS, a virtual machine whose
     damping is its P-f droop and whose inertia its power filter's. Grid-
     following: a battery or flywheel ESD1 (its state of charge between its
     window's ends, the energy it can store), a PV array PVD1, an SOFC system
@@ -413,18 +437,22 @@ def _add_pcs_dynamics(ss: Any, rec: Dict[str, Any], n: int, bus: Any, static_idx
     """
     s, label = rec["s_rated"], f"PCS '{rec['label']}'"
     obj, kind = rec["source"]["obj"], rec["source"]["kind"]
-    r = s / sn_base
     if rec["control"] == "grid_forming":
+        # A virtual machine: GENCLS's swing equation is the grid-forming control's, M dw/dt = P0 - P
+        # - D (w - 1), its damping D the P-f droop's 1 / droop and its inertia M = tau D its power
+        # filter's; its voltage behind REGCV1's coupling reactance, held through the run (its Q-V
+        # droop sets where it starts; through a run it is the EMT study's). REGCV1 itself answered
+        # the angle through slow voltage loops: in an island it slipped poles against the turbines.
         d = 1.0 / rec["droop_pf"]
-        gains = {k: v * (r if k[2] == "v" else 1.0 / r) for k, v in _REGCV1_GAINS.items()}
-        # kv is a voltage per Q; ANDES converts it as a power (x S / S_base), so it is given as
-        # droop (S_base / S)^2 to land on droop x S_base / S on the system base.
-        idx = _add_model_safe(ss, "REGCV1", defaults_applied, label, idx=f"REGCV1_PCS_{n}",
-                              name=f"REGCV1_{rec['label']}", bus=bus, gen=static_idx, Sn=s, fn=freq,
-                              D=d, M=PCS_TAU_F * d, kw=0.0, kv=rec["droop_qv"] / (r * r), **gains)
-        return {"model": "REGCV1", "model_idx": idx}
-    # The frequency trip points ESD1 and PVD1 carry are a 60 Hz system's.
-    trips = {k: v * freq / 60.0 for k, v in (("ft0", 59.5), ("ft1", 59.7), ("ft2", 60.3), ("ft3", 60.5))}
+        vn = ss.Bus.Vn.v[list(ss.Bus.idx.v).index(bus)]
+        idx = _add_model_safe(ss, "GENCLS", defaults_applied, label, idx=f"GENCLS_PCS_{n}",
+                              name=rec["label"], bus=bus, gen=static_idx, Sn=s, Vn=vn, fn=freq,
+                              D=d, M=PCS_TAU_F * d, ra=0.0, xd1=PCS_XS_PU)
+        return {"model": "GENCLS", "model_idx": idx}
+    # Frequency trip points, as a 60 Hz system's scaled to this one: IEEE 1547-2018 Category III's
+    # (UF2 56.5, UF1 58.5, OF1 61.8, OF2 62.0 Hz), between which ESD1 and PVD1 ride through. ANDES's
+    # own, 59.5-59.7 Hz, are 1547-2003's: an island at 49.3 Hz cut every PV array and battery out.
+    trips = {k: v * freq / 60.0 for k, v in (("ft0", 56.5), ("ft1", 58.5), ("ft2", 61.8), ("ft3", 62.0))}
     common = dict(bus=bus, gen=static_idx, Sn=s, fn=freq, pqflag=0, ialim=max(rec["k"], 0.1),
                   qmx=1.0, qmn=-1.0, **trips)
     if kind in ("Battery", "Flywheel"):
@@ -518,30 +546,48 @@ def _settle_pcs_set_points(ss, meta: Dict[str, Any], rounds: int = 30) -> bool:
 _DC_CONVERTERS = ("VSC", "B2B VSC", "Solid-State Transformer")
 
 
-def _converter_ac_loads(in_data: Dict[str, Any], freq: float, warnings: List[str]) -> List[Tuple[str, float, float, str]]:
+def _electrisim_flow(in_data: Dict[str, Any], freq: float) -> Tuple[Any, Optional[str]]:
     """
-    Each converter joining the DC network to an AC bus, as the load it is on
-    that bus: (bus name, P MW, Q Mvar, label) - what Electrisim's own load
-    flow, which solves the DC network and settles its sources and stores,
-    gives at its AC side. A VSC or back-to-back VSC draws P and Q; a
-    solid-state transformer draws its MV power and, from its LV AC port,
-    gives its inverter's (a negative load). ANDES has no DC network: without
-    this a data hall's load vanished from the study.
+    Electrisim's own load flow of the diagram - the DC network solved, its
+    sources and stores settled, an island's machines and grid-forming PCS
+    sharing its load by their droops - with the Load Flow study's fallbacks
+    (more iterations, then a flat start): (the solved network or None, why
+    not). Without them the islanded campus did not solve, and its data halls
+    vanished from the study.
     """
-    if not any(typ.startswith(k) for _, _, typ in _iter_elements(in_data) for k in _DC_CONVERTERS):
-        return []
     import pandapower as pp
     import pandapower_electrisim as pe
     rows = {k: v for k, v in in_data.items() if isinstance(v, dict) and "Parameters" not in str(v.get("typ", ""))}
     rows["__andes_lf"] = {"typ": "PowerFlowPandaPower Parameters"}
+    why = "it did not converge"
     try:
         net = pp.create_empty_network(f_hz=freq)
         busbars = pe.create_busbars(rows, net)
         pe.create_other_elements(rows, net, "__andes_lf", busbars)
-        pe._electrisim_runpp(net)
     except Exception as exc:
-        warnings.append(f"The DC network's converters are left out: its load flow failed ({exc}).")
-        return []
+        return None, str(exc)
+    for plan in ({}, {"max_iteration": 50}, {"init": "flat", "max_iteration": 100}):
+        # Each plan from the network as built: a failed one leaves its DC loads where it gave up.
+        attempt = deepcopy(net)
+        try:
+            pe._electrisim_runpp(attempt, algorithm="nr", calculate_voltage_angles="auto", **plan)
+            if attempt.converged:
+                return attempt, None
+        except Exception as exc:
+            why = str(exc)
+    return None, why
+
+
+def _converter_ac_loads(net: Any) -> List[Tuple[str, float, float, str]]:
+    """
+    Each converter joining the DC network to an AC bus, as the load it is on
+    that bus: (bus name, P MW, Q Mvar, label) - what Electrisim's own load
+    flow gives at its AC side. A VSC or back-to-back VSC draws P and Q; a
+    solid-state transformer draws its MV power and, from its LV AC port,
+    gives its inverter's (a negative load). ANDES has no DC network: without
+    this a data hall's load vanished from the study.
+    """
+    import pandapower_electrisim as pe
     out = []
     name = lambda b: str(net.bus.at[int(b), "name"])
     label = lambda table, i: str(getattr(net, "user_friendly_names", {}).get(net[table].at[i, "name"], net[table].at[i, "name"]))
@@ -644,6 +690,22 @@ def build_system(
     if not bus_map:
         raise ValueError("No buses found in the diagram. Place Bus elements before running stability analysis.")
 
+    # --- Switches ---
+    # ANDES has none, and they were ignored: a closed bus tie left its buses apart (the campus's two
+    # 35 kV buses each on their own feeder), an open breaker left its line or transformer in.
+    open_elements, bus_ties, breakers = set(), [], {}
+    for _, el, typ in _iter_elements(in_data):
+        if not typ.startswith("Switch"):
+            continue
+        closed = _sb(el.get("closed"), True)
+        if str(el.get("et") or "").lower() == "b":
+            if closed:
+                bus_ties.append(el)
+        elif el.get("element"):
+            if not closed:
+                open_elements.add(el.get("element"))
+            breakers[el.get("name")] = el
+
     # --- Lines ---
     for _, el, typ in _iter_elements(in_data):
         if not typ.startswith("Line") or typ.startswith("Load"):
@@ -677,7 +739,7 @@ def build_system(
             x_pu = 0.01
             defaults_applied.append(f"Line '{el.get('userFriendlyName', name)}': zero impedance, used x=0.01 pu.")
         line_idx = f"Line_{name}"
-        u = 1 if _sb(el.get("in_service"), True) else 0
+        u = 1 if _sb(el.get("in_service"), True) and name not in open_elements else 0
         ss.add(
             "Line",
             idx=line_idx,
@@ -733,7 +795,7 @@ def build_system(
         if tap_step != 0:
             tap = 1.0 + (tap_pos * tap_step / 100.0)
         line_idx = f"Trafo_{name}"
-        u = 1 if _sb(el.get("in_service"), True) else 0
+        u = 1 if _sb(el.get("in_service"), True) and name not in open_elements else 0
         ss.add(
             "Line",
             idx=line_idx,
@@ -788,7 +850,7 @@ def build_system(
 
         star = bus_counter
         bus_counter += 1
-        u = 1 if _sb(el.get("in_service"), True) else 0
+        u = 1 if _sb(el.get("in_service"), True) and name not in open_elements else 0
         # Kept out of bus_name_by_idx, so results never list it.
         ss.add("Bus", idx=star, name=f"{label} star point", Vn=vn[0], u=u, v0=1.0, a0=0.0)
         bus_vn[star] = vn[0]
@@ -822,6 +884,25 @@ def build_system(
                 u=u,
             )
         line_map[name] = f"Trafo3w_{name}_hv"
+
+    # A closed bus tie: its buses joined through a negligible impedance. A breaker is its line or
+    # transformer: an outage of either opens it.
+    for el in bus_ties:
+        a, b = bus_map.get(el.get("bus")), bus_map.get(el.get("element"))
+        if a is None or b is None or a == b:
+            continue
+        name = el.get("name")
+        ss.add("Line", idx=f"Switch_{name}", name=str(el.get("userFriendlyName") or name), bus1=a, bus2=b,
+               r=0.0, x=BUS_TIE_X_PU, b=0.0, g=0.0, Vn1=bus_vn[a], Vn2=bus_vn[b], Sn=sn_base, fn=freq, u=1)
+        line_map[name] = f"Switch_{name}"
+        if el.get("userFriendlyName"):
+            line_map.setdefault(str(el["userFriendlyName"]), f"Switch_{name}")
+    for name, el in breakers.items():
+        target = line_map.get(el.get("element"))
+        if target is not None:
+            line_map.setdefault(name, target)
+            if el.get("userFriendlyName"):
+                line_map.setdefault(str(el["userFriendlyName"]), target)
 
     # --- Loads (PQ) ---
     # Loads following a profile from the diagram's library start at its first
@@ -874,7 +955,12 @@ def build_system(
         )
 
     # --- The DC network: each converter the load its AC side is in the load flow ---
-    converter_loads = _converter_ac_loads(in_data, freq, warnings)
+    flow, flow_problem = None, None
+    if any(typ.startswith(k) for _, _, typ in _iter_elements(in_data) for k in _DC_CONVERTERS):
+        flow, flow_problem = _electrisim_flow(in_data, freq)
+        if flow is None:
+            warnings.append(f"The DC network's converters are left out: its load flow failed ({flow_problem}).")
+    converter_loads = _converter_ac_loads(flow) if flow is not None else []
     for bus_name, p_mw, q_mvar, label in converter_loads:
         bus = bus_map.get(bus_name)
         if bus is None:
@@ -960,6 +1046,7 @@ def build_system(
     # --- External grids → Slack (no SynGen) ---
     slack_count = 0
     slack_v0: Dict[Any, float] = {}
+    grid_slacks: Dict[str, str] = {}   # an External Grid's name and label -> its slack, for its outage
     for _, el, typ in _iter_elements(in_data):
         if not (typ.startswith("External Grid") or typ.startswith("ExternalGrid")):
             continue
@@ -979,6 +1066,9 @@ def build_system(
                 vm = vm / vn
         va = _sf(el.get("va_degree"), 0.0)
         slack_v0[bus] = vm
+        for key in (el.get("name"), el.get("userFriendlyName")):
+            if key:
+                grid_slacks.setdefault(str(key), idx)
         ss.add(
             "Slack",
             idx=idx,
@@ -990,6 +1080,40 @@ def build_system(
             a0=va * math.pi / 180.0,
             p0=0.0,
         )
+
+    # An island no External Grid holds - its feeders' breakers open - is held, as in the load flow, by
+    # its largest machine; with none it had no slack and the study refused it ("No slack bus found").
+    # Its machines and grid-forming PCS start at the load flow's dispatch, each at its droop's share of
+    # the island's load (their references reset to the rated frequency), not the slack with all of it.
+    held = set(slack_v0)
+    island_slacks, islanded = set(), set()
+    for island in _islands(ss):
+        if island & held:
+            continue
+        islanded |= island
+        machines = [(_sf(el.get("sn_mva"), 0.0), el.get("name")) for _, el, typ in _iter_elements(in_data)
+                    if typ.startswith("Generator") and "Asymmetric" not in typ and "1ph" not in typ
+                    and _sb(el.get("in_service"), True) and bus_map.get(el.get("bus")) in island]
+        if any(_sb(el.get("slack"), False) for _, el, typ in _iter_elements(in_data)
+               if typ.startswith("Generator") and bus_map.get(el.get("bus")) in island):
+            continue
+        if not machines:
+            # Without one, its largest grid-forming PCS by the power its droop takes (S / droop).
+            machines = [(_sf(el.get("s_rated_mva"), 1.0) / max(_sf(el.get("droop_pf_percent"), 2.0), 1e-3),
+                         el.get("name")) for _, el, typ in _iter_elements(in_data)
+                        if typ.startswith("PCS") and str(el.get("control") or "").strip().lower() == "grid_forming"
+                        and _sb(el.get("in_service"), True) and bus_map.get(el.get("bus")) in island]
+        if machines:
+            island_slacks.add(max(machines, key=lambda m: m[0])[1])
+    dispatch: Dict[str, float] = {}
+    if island_slacks:
+        if flow is None and flow_problem is None:
+            flow, flow_problem = _electrisim_flow(in_data, freq)
+        if flow is not None:
+            dispatch = {str(n): float(p) for n, p, b in zip(flow.gen["name"], flow.res_gen["p_mw"], flow.gen["bus"])
+                        if np.isfinite(p) and bus_map.get(str(flow.bus.at[int(b), "name"])) in islanded}
+        else:
+            warnings.append(f"The island's machines start at their set points: its load flow failed ({flow_problem}).")
 
     # --- Generators → PV/Slack + SynGen + Exciter + Governor ---
     gen_count = 0
@@ -1008,7 +1132,7 @@ def build_system(
         gen_count += 1
         name = el.get("name")
         ufname = str(el.get("userFriendlyName") or name or f"Gen_{gen_count}")
-        p_mw = _sf(el.get("p_mw")) * _sf(el.get("scaling"), 1.0)
+        p_mw = dispatch.get(str(name), _sf(el.get("p_mw")) * _sf(el.get("scaling"), 1.0))
         vm = _sf(el.get("vm_pu"), 1.0)
         if vm <= 0:
             vm = 1.0
@@ -1033,7 +1157,7 @@ def build_system(
             )
             vn = bus_v
 
-        is_slack = _sb(el.get("slack"), False)
+        is_slack = _sb(el.get("slack"), False) or name in island_slacks
         static_idx = f"{'Slack' if is_slack else 'PV'}_G_{gen_count}"
         static_model = "Slack" if is_slack else "PV"
         static_kw = dict(
@@ -1348,12 +1472,6 @@ def build_system(
     # --- PCS ---
     pcs_count = 0
     pcs_plants = _pcs_plants(in_data, warnings)
-    if slack_count == 0 and gen_count == 0 and any(r["control"] == "grid_forming" for r in pcs_plants):
-        raise ValueError(
-            "This network is held only by its PCS: ANDES's grid-forming model (REGCV1) cannot hold an island "
-            "on its own - it is unstable there even for a small load step. Simulate the island in the EMT "
-            "study, or add an External Grid or a synchronous Generator."
-        )
     if any(r["control"] == "grid_following" for r in pcs_plants):
         # Its Q as set: its static generator a PV bus held at that Q, which the power flow turns to PQ.
         ss.PV.config.pv2pq = 1
@@ -1363,8 +1481,11 @@ def build_system(
         if bus is None:
             warnings.append(f"PCS '{rec['label']}' needs an AC bus on its AC side, so it is left out.")
             continue
+        rec["p_ac"] = dispatch.get(str(rec["name"]), rec["p_ac"])
         pcs_count += 1
-        static_idx = f"PV_PCS_{pcs_count}"
+        # An island's slack when it holds the island alone (its virtual machine then holds it).
+        holds = str(rec["name"]) in island_slacks
+        static_idx = f"{'Slack' if holds else 'PV'}_PCS_{pcs_count}"
         q0 = rec["q"] / sn_base
         kw = dict(idx=static_idx, name=rec["label"], bus=bus, Vn=bus_vn.get(bus, 110.0), Sn=rec["s_rated"],
                   p0=rec["p_ac"] / sn_base, q0=q0)
@@ -1373,7 +1494,10 @@ def build_system(
             kw["v0"] = slack_v0.get(bus, rec["vm_set_pu"])
         else:
             kw.update(v0=1.0, qmax=q0, qmin=q0)
-        ss.add("PV", **kw)
+        if holds:
+            kw["a0"] = 0.0
+            slack_count += 1
+        ss.add("Slack" if holds else "PV", **kw)
         ids = _add_pcs_dynamics(ss, rec, pcs_count, bus, static_idx, freq, sn_base, defaults_applied)
         if ids.get("model_idx"):
             renewable_count += 1
@@ -1383,7 +1507,7 @@ def build_system(
             "source": rec["source"]["label"], "s_rated_mva": rec["s_rated"], "p_mw": rec["p_ac"],
             "q_mvar": rec["q"], "p_max_mw": rec["p_max_ac"], "p_min_mw": rec["p_min_ac"],
             "vm_set_pu": rec["vm_set_pu"], "droop_qv": rec["droop_qv"], "q_mode": rec["q_mode"],
-            "qv_droop": rec["qv_droop"], "q_max_mvar": rec["q_max"], "on_slack_bus": bus in slack_v0, **ids,
+            "qv_droop": rec["qv_droop"], "q_max_mvar": rec["q_max"], "on_slack_bus": bus in slack_v0 or holds, **ids,
         }
 
     if gen_count + renewable_count == 0:
@@ -1432,6 +1556,7 @@ def build_system(
             warnings.append(f"Fault bus '{fault_bus_name}' not found; no Fault applied.")
 
     islanded_after = None
+    running_islands: List[set] = []
     toggle_line = params.get("toggle_line") or params.get("line_outage") or ""
     toggle_t = _sf(params.get("toggle_t"), 2.0)
     if toggle_line:
@@ -1441,18 +1566,36 @@ def build_system(
                 if str(lname) == str(toggle_line):
                     lidx = lid
                     break
-        if lidx is not None:
-            ss.add("Toggle", idx="Toggle_1", model="Line", dev=lidx, t=toggle_t)
-            island, tripped = _deenergise_island(ss, lidx, toggle_t)
+        # The outage of a line, a transformer or a breaker's element - or of an External Grid:
+        # the utility lost, its slack switched off.
+        grid = grid_slacks.get(toggle_line) if lidx is None else None
+        if lidx is not None and not ss.Line.u.v[list(ss.Line.idx.v).index(lidx)]:
+            warnings.append(f"'{toggle_line}' is already out of service or its breaker open; no outage applied.")
+        elif lidx is not None or grid is not None:
+            if grid is not None:
+                ss.add("Toggle", idx="Toggle_1", model="Slack", dev=grid, t=toggle_t)
+                label = str(ss.Slack.name.v[list(ss.Slack.idx.v).index(grid)])
+            else:
+                ss.add("Toggle", idx="Toggle_1", model="Line", dev=lidx, t=toggle_t)
+                label = str(ss.Line.name.v[list(ss.Line.idx.v).index(lidx)])
+            grid_forming = {g["bus"] for g in gen_map.values() if g.get("pcs") and g.get("control") == "grid_forming"}
+            island, tripped, running = _deenergise_island(
+                ss, {lidx} - {None}, toggle_t, out_slacks={grid} - {None}, grid_forming=grid_forming)
             if island:
-                names = [str(bus_name_by_idx.get(b, b)) for b in island]
-                line_label = str(ss.Line.name.v[list(ss.Line.idx.v).index(lidx)])
+                names = [str(bus_name_by_idx.get(b, b)) for b in island if b in bus_name_by_idx]
                 warnings.append(
-                    f"Taking '{line_label}' out at {toggle_t:g} s cuts {', '.join(names)} off from the "
+                    f"Taking '{label}' out at {toggle_t:g} s cuts {', '.join(names)} off from the "
                     "External Grid: de-energised from then on"
                     + (f", {', '.join(tripped)} tripped (loss of mains)." if tripped else "."))
                 syn_total = sum(getattr(ss, m).n for m in ("GENROU", "GENCLS"))
                 islanded_after = (toggle_t, [str(b) for b in island], len(tripped) == syn_total)
+            running_islands += running
+            for part in running:
+                names = [str(bus_name_by_idx[b]) for b in ss.Bus.idx.v if b in part and b in bus_name_by_idx]
+                warnings.append(
+                    f"Taking '{label}' out at {toggle_t:g} s leaves {len(names)} buses as an island "
+                    f"({', '.join(names[:4])}{', ...' if len(names) > 4 else ''}): its machines' governors "
+                    "and its grid-forming PCS share its load by their droops.")
         else:
             warnings.append(f"Line outage target '{toggle_line}' not found; no Toggle applied.")
 
@@ -1490,6 +1633,7 @@ def build_system(
         "n_pcs": pcs_count,
         "n_buses": len(bus_name_by_idx),
         "islanded_after": islanded_after,
+        "free_islands": bool(island_slacks or running_islands),
         "profiled_loads": profiled_loads,
         "profile_repeat": profile_repeat,
     }
@@ -1531,7 +1675,7 @@ def _pcs_series(ss, meta: Dict[str, Any], idx: np.ndarray) -> List[Dict[str, Any
                 row["speed_percent"] = [_clean_num(100.0 * math.sqrt(max(float(x), 0.0))) for x in soc]
             else:
                 row["soc_percent"] = [_clean_num(100.0 * float(x)) for x in soc]
-        if g["model"] == "REGCV1":
+        if g["model"] == "GENCLS":
             row["frequency_hz"] = [_clean_num(float(x) * meta["frequency"]) for x in col(model.omega)[idx]]
         out.append(row)
     return out
@@ -1561,6 +1705,33 @@ def _extract_syn_series(ss, model_name: str, var_name: str, names: List[str]) ->
             pass
         series.append({"id": str(model.idx.v[i]), "name": label, "values": [_clean_num(x) for x in col.tolist()]})
     return series
+
+
+def _angle_references(ss, idx: np.ndarray) -> Dict[str, np.ndarray]:
+    """
+    Each machine's angle reference through the run, by its idx: none (0) in
+    the part an External Grid holds - its slack bus keeps its angle - else
+    the mean angle of the machines and grid-forming PCS in its island, the
+    islands as they are at the run's end; None for a machine tripped.
+    """
+    attached = {g for m in ("GENROU", "GENCLS") for g in getattr(ss, m).gen.v}
+    fixed = {b for i, b, u in zip(ss.Slack.idx.v, ss.Slack.bus.v, ss.Slack.u.v) if u and i not in attached}
+    machines, tripped = [], set()
+    for m in ("GENROU", "GENCLS"):
+        mdl = getattr(ss, m)
+        if mdl.n:
+            values = tds_values(ss, mdl.delta)
+            values = values if values.ndim == 2 else values[:, None]
+            machines += [(str(mdl.idx.v[k]), mdl.bus.v[k], values[idx, k]) for k in range(mdl.n) if mdl.u.v[k]]
+            tripped |= {str(mdl.idx.v[k]) for k in range(mdl.n) if not mdl.u.v[k]}
+    out = dict.fromkeys(tripped, None)
+    for part in _islands(ss):
+        group = [(i, d) for i, b, d in machines if b in part]
+        if not group or part & fixed:
+            continue
+        mean = np.mean([d for _, d in group], axis=0)
+        out.update({i: mean for i, _ in group})
+    return out
 
 
 def _syn_names(ss) -> Tuple[List[str], List[str]]:
@@ -1712,14 +1883,18 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
             except Exception:
                 pass
 
+        islanded = meta.get("islanded_after")
+        if islanded and islanded[2] or meta.get("free_islands"):
+            # ANDES's rotor-angle stop criterion looks for machines in the
+            # largest island and fails when none is left there; and it takes
+            # angles against the rated frequency's, which an island off it
+            # turns - with a machine tripped, its frozen angle against the
+            # rest stopped the run. Set before the initialisation, which
+            # reads it. Losing synchronism is reported below instead, each
+            # angle against its island's.
+            ss.TDS.config.criteria = 0
         _check_init(ss, meta["warnings"])
         _restore_prefault_state_on_clearing(ss)
-        islanded = meta.get("islanded_after")
-        if islanded and islanded[2]:
-            # ANDES's rotor-angle stop criterion looks for machines in the
-            # largest island and fails when none is left there; losing
-            # synchronism is reported below instead.
-            ss.TDS.config.criteria = 0
         profiled = meta.get("profiled_loads") or []
         if profiled:
             tds_ok = _run_tds_following_profiles(ss, profiled, tf, meta.get("profile_repeat", True),
@@ -1753,6 +1928,8 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
             values = tds_values(ss, getattr(model, var_name))
             out = []
             for i in range(len(addrs)):
+                if str(model.idx.v[i]).startswith("GENCLS_PCS_"):
+                    continue          # a grid-forming PCS's virtual machine: the PCS series carry it
                 col = values[:, i] if values.ndim == 2 else values
                 col = col[idx]
                 try:
@@ -1771,6 +1948,10 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
 
         omega = _series_for("GENROU", "omega") + _series_for("GENCLS", "omega")
         delta = _series_for("GENROU", "delta") + _series_for("GENCLS", "delta")
+        # Each machine's electrical power (MW): its share of a disturbance, its governor's droop.
+        power = _series_for("GENROU", "Pe") + _series_for("GENCLS", "Pe")
+        for series in power:
+            series["values"] = [_clean_num(x * meta["sn_mva"]) if x is not None else None for x in series["values"]]
 
         # Bus voltages
         bus_v = []
@@ -1798,8 +1979,11 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
 
         # Frequency estimate from mean omega (pu → Hz); without a machine, the grid-forming PCS's
         freq_hz = None
-        if omega:
-            mean_w = np.mean([np.asarray(s["values"], dtype=float) for s in omega], axis=0)
+        # The machines still running: a tripped one keeps its last speed, and pulled the mean to it.
+        running = {str(i) for m in ("GENROU", "GENCLS") for i, u in zip(getattr(ss, m).idx.v, getattr(ss, m).u.v) if u}
+        spinning = [s for s in omega if s["id"] in running] or omega
+        if spinning:
+            mean_w = np.mean([np.asarray(s["values"], dtype=float) for s in spinning], axis=0)
             freq_hz = (mean_w * meta["frequency"]).tolist()
         elif any(r.get("frequency_hz") for r in pcs):
             freq_hz = np.mean([np.asarray(r["frequency_hz"], dtype=float) for r in pcs if r.get("frequency_hz")],
@@ -1808,9 +1992,14 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
         # Losing synchronism did not show in the result, only in the plots. A
         # pole slip runs the rotor angle more than 180 degrees from where it
         # started; an undamped but stable swing can span more than that from
-        # its peak to its back-swing.
+        # its peak to its back-swing. Each angle is measured against its
+        # island's: a grid's held by its External Grid, an island's the mean of
+        # its machines' (its frequency off 50 Hz turned every angle).
+        reference = _angle_references(ss, idx)
         for s in delta:
-            swing = np.asarray(s["values"], dtype=float)
+            if s["id"] in reference and reference[s["id"]] is None:
+                continue
+            swing = np.asarray(s["values"], dtype=float) - reference.get(s["id"], 0.0)
             if swing.size and np.nanmax(np.abs(swing - swing[0])) > math.pi:
                 meta["warnings"].append(
                     f"'{s['name']}' lost synchronism: its rotor angle swung by more than 180 degrees.")
@@ -1892,6 +2081,7 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
             "time": [_clean_num(float(x)) for x in t_ds.tolist()],
             "omega": omega,
             "delta": delta,
+            "generator_p_mw": power,
             "bus_voltage": bus_v,
             "pcs": pcs,
             "frequency_hz": [_clean_num(float(x)) for x in freq_hz] if freq_hz is not None else None,
