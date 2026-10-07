@@ -717,3 +717,36 @@ def test_emt_a_row_group_fault_against_the_dc_fault_study(client):
     assert study['ip_ka'] == pytest.approx(fault['ip_ka'], rel=0.04) and study['ip_ka'] < fault['ip_ka']
     assert study['tp_ms'] < 0.1
     assert any(b['label'] == 'Hall 1 rectifier U3' for b in emt['converters_blocked'])
+
+
+def test_emt_the_utility_lost_the_island_holds(client):
+    """
+    The utility lost at 20 ms - its breakers opening at their currents'
+    zeros - and the campus islands on its turbines and grid-forming BESS:
+    over 500 ms nothing blocks or runs into its current limit, Hall 2's
+    rectifier holds its 12 MW, the BESS and turbines pick the import up. At
+    some 480 ms Hall 2's SST rectifier tripped and the hall was lost, two
+    ways: the turbines' exciters set E' itself, through 50 ms, and the
+    voltages swung some 10 % every 100 ms; and the converters' 500 Hz
+    current loops met the weak island's own resonance, 330 Hz in their DC
+    currents (the campus's now 250 Hz, f_sw / 20). Its frequency falls with
+    ANDES's to within 0.15 Hz: ANDES holds the halls as constant impedance,
+    here they are constant power.
+    """
+    emt, warnings = _emt(client, time_step_us=20, duration_ms=500, island_time_ms=20)
+    assert not emt['converters_blocked'], emt['converters_blocked']
+    assert not any('swings ever wider' in w for w in warnings), warnings
+    conv = {c['label']: c for c in emt['converters']}
+    for label in ('Hall 2 rectifier equivalent', 'Hall 2 SST equivalent DC/DC', 'Hall 2 SST equivalent rectifier'):
+        assert not conv[label]['limited_ms'], (label, conv[label]['limited_ms'])
+    u6 = conv['Hall 2 rectifier equivalent']
+    assert u6['p_end_mw'] == pytest.approx(u6['p_start_mw'], rel=0.01)
+    for n in range(1, 5):
+        assert conv[f'BESS {n} PCS']['p_end_mw'] > 2.0
+    machines = emt['machines']
+    assert all(m['p_end_mw'] > m['p_start_mw'] + 3.0 for m in machines)
+    base = _dynamic()
+    grid = next(v['name'] for v in base.values() if isinstance(v, dict) and str(v.get('typ', '')).startswith('External'))
+    andes = _tds(client, base, tf=0.5, toggle_line=grid, toggle_t=0.02, tstep=0.002)
+    f_andes = andes['frequency_hz'][-1]
+    assert machines[0]['f_end_hz'] < 49.6 and machines[0]['f_end_hz'] == pytest.approx(f_andes, abs=0.15)

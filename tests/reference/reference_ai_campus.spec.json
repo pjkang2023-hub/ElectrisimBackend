@@ -136,14 +136,14 @@
     {"id": "LD_H2", "bus": "H2", "p_mw": 24.0, "load_profile_id": "ai_training_late", "name": "Hall 2 racks"}
   ],
   "vscs": [
-    {"id": "U3", "bus": "U3_LV", "bus_dc": "RG3", "r_ohm": 0.00015, "x_ohm": 0.0046, "r_dc_ohm": 0.0005, "control_mode_ac": "q_mvar", "control_value_ac": 0, "control_mode_dc": "vm_pu", "control_value_dc": 1.0, "rated_mva": 7.5, "dc_link_esr_mohm": 0.1, "dc_link_esl_uh": 0.05, "name": "Hall 1 rectifier U3"},
-    {"id": "U4", "bus": "U4_LV", "bus_dc": "RG4", "r_ohm": 0.00015, "x_ohm": 0.0046, "r_dc_ohm": 0.0005, "control_mode_ac": "q_mvar", "control_value_ac": 0, "control_mode_dc": "vm_pu", "control_value_dc": 1.0, "rated_mva": 7.5, "dc_link_esr_mohm": 0.1, "dc_link_esl_uh": 0.05, "name": "Hall 1 rectifier U4"},
-    {"id": "U6", "bus": "U6_LV", "bus_dc": "H2", "r_ohm": 8e-05, "x_ohm": 0.0023, "r_dc_ohm": 0.00025, "control_mode_ac": "q_mvar", "control_value_ac": 0, "control_mode_dc": "p_mw", "control_value_dc": -12.0, "rated_mva": 15, "dc_link_esr_mohm": 0.1, "dc_link_esl_uh": 0.05, "name": "Hall 2 rectifier equivalent"}
+    {"id": "U3", "current_loop_hz": 250, "bus": "U3_LV", "bus_dc": "RG3", "r_ohm": 0.00015, "x_ohm": 0.0046, "r_dc_ohm": 0.0005, "control_mode_ac": "q_mvar", "control_value_ac": 0, "control_mode_dc": "vm_pu", "control_value_dc": 1.0, "rated_mva": 7.5, "dc_link_esr_mohm": 0.1, "dc_link_esl_uh": 0.05, "name": "Hall 1 rectifier U3"},
+    {"id": "U4", "current_loop_hz": 250, "bus": "U4_LV", "bus_dc": "RG4", "r_ohm": 0.00015, "x_ohm": 0.0046, "r_dc_ohm": 0.0005, "control_mode_ac": "q_mvar", "control_value_ac": 0, "control_mode_dc": "vm_pu", "control_value_dc": 1.0, "rated_mva": 7.5, "dc_link_esr_mohm": 0.1, "dc_link_esl_uh": 0.05, "name": "Hall 1 rectifier U4"},
+    {"id": "U6", "current_loop_hz": 250, "bus": "U6_LV", "bus_dc": "H2", "r_ohm": 8e-05, "x_ohm": 0.0023, "r_dc_ohm": 0.00025, "control_mode_ac": "q_mvar", "control_value_ac": 0, "control_mode_dc": "p_mw", "control_value_dc": -12.0, "rated_mva": 15, "dc_link_esr_mohm": 0.1, "dc_link_esl_uh": 0.05, "name": "Hall 2 rectifier equivalent"}
   ],
   "ssts": [
-    {"id": "U1", "bus_mv": "BUS_A", "bus_lv_dc": "RG1", "rect_rated_mw": 7, "dcdc_rated_mw": 7, "vn_mv_kv": 35, "vn_lv_dc_kv": 0.8, "link_kv": 55, "rect_efficiency_percent": 98.5, "rect_no_load_kw": 14, "dcdc_efficiency_percent": 98, "dcdc_no_load_kw": 14, "vm_lv_dc_pu": 1.0, "name": "Hall 1 SST U1"},
-    {"id": "U2", "bus_mv": "BUS_A", "bus_lv_dc": "RG2", "rect_rated_mw": 7, "dcdc_rated_mw": 7, "vn_mv_kv": 35, "vn_lv_dc_kv": 0.8, "link_kv": 55, "rect_efficiency_percent": 98.5, "rect_no_load_kw": 14, "dcdc_efficiency_percent": 98, "dcdc_no_load_kw": 14, "vm_lv_dc_pu": 1.0, "name": "Hall 1 SST U2"},
-    {"id": "U5", "bus_mv": "BUS_B", "bus_lv_dc": "H2", "rect_rated_mw": 13, "dcdc_rated_mw": 13, "vn_mv_kv": 35, "vn_lv_dc_kv": 0.8, "link_kv": 55, "rect_efficiency_percent": 98.5, "rect_no_load_kw": 24, "dcdc_efficiency_percent": 98, "dcdc_no_load_kw": 24, "vm_lv_dc_pu": 1.0, "name": "Hall 2 SST equivalent"}
+    {"id": "U1", "current_loop_hz": 250, "bus_mv": "BUS_A", "bus_lv_dc": "RG1", "rect_rated_mw": 7, "dcdc_rated_mw": 7, "vn_mv_kv": 35, "vn_lv_dc_kv": 0.8, "link_kv": 55, "rect_efficiency_percent": 98.5, "rect_no_load_kw": 14, "dcdc_efficiency_percent": 98, "dcdc_no_load_kw": 14, "vm_lv_dc_pu": 1.0, "name": "Hall 1 SST U1"},
+    {"id": "U2", "current_loop_hz": 250, "bus_mv": "BUS_A", "bus_lv_dc": "RG2", "rect_rated_mw": 7, "dcdc_rated_mw": 7, "vn_mv_kv": 35, "vn_lv_dc_kv": 0.8, "link_kv": 55, "rect_efficiency_percent": 98.5, "rect_no_load_kw": 14, "dcdc_efficiency_percent": 98, "dcdc_no_load_kw": 14, "vm_lv_dc_pu": 1.0, "name": "Hall 1 SST U2"},
+    {"id": "U5", "current_loop_hz": 250, "bus_mv": "BUS_B", "bus_lv_dc": "H2", "rect_rated_mw": 13, "dcdc_rated_mw": 13, "vn_mv_kv": 35, "vn_lv_dc_kv": 0.8, "link_kv": 55, "rect_efficiency_percent": 98.5, "rect_no_load_kw": 24, "dcdc_efficiency_percent": 98, "dcdc_no_load_kw": 24, "vm_lv_dc_pu": 1.0, "name": "Hall 2 SST equivalent"}
   ],
   "dc_dc_converters": [
     {"id": "DD_BESS_RG1", "bus_in": "BESS_RG1_DC", "bus_out": "RG1", "control_mode": "droop", "rated_mw": 1.5, "vn_in_kv": 1.0, "vn_out_kv": 0.8, "bidirectional": true, "droop_percent": 5, "no_load_loss_kw": 2, "c_out_esr_mohm": 0.1, "c_out_esl_uh": 0.05, "c_in_esr_mohm": 0.1, "c_in_esl_uh": 0.05, "name": "Hall 1 RG1 battery converter"},
@@ -201,11 +201,11 @@
     {"id": "PCS_BESS2", "bus": "BESS2_LV", "source": "BESS2", "control": "grid_forming", "s_rated_mva": 5.5, "vn_ac_kv": 0.69, "name": "BESS 2 PCS", "p_set_mw": 0, "droop_pf_percent": 2, "droop_qv_percent": 5},
     {"id": "PCS_BESS3", "bus": "BESS3_LV", "source": "BESS3", "control": "grid_forming", "s_rated_mva": 5.5, "vn_ac_kv": 0.69, "name": "BESS 3 PCS", "p_set_mw": 0, "droop_pf_percent": 2, "droop_qv_percent": 5},
     {"id": "PCS_BESS4", "bus": "BESS4_LV", "source": "BESS4", "control": "grid_forming", "s_rated_mva": 5.5, "vn_ac_kv": 0.69, "name": "BESS 4 PCS", "p_set_mw": 0, "droop_pf_percent": 2, "droop_qv_percent": 5},
-    {"id": "PCS_PV1", "bus": "PV1_LV", "source": "PV1", "control": "grid_following", "s_rated_mva": 5.0, "vn_ac_kv": 0.8, "name": "PV 1 PCS"},
-    {"id": "PCS_PV2", "bus": "PV2_LV", "source": "PV2", "control": "grid_following", "s_rated_mva": 5.0, "vn_ac_kv": 0.8, "name": "PV 2 PCS"},
-    {"id": "PCS_PV3", "bus": "PV3_LV", "source": "PV3", "control": "grid_following", "s_rated_mva": 5.0, "vn_ac_kv": 0.8, "name": "PV 3 PCS"},
-    {"id": "PCS_FC1", "bus": "FC1_LV", "source": "FC1", "control": "grid_following", "s_rated_mva": 5.5, "vn_ac_kv": 0.48, "name": "SOFC 1 PCS"},
-    {"id": "PCS_FC2", "bus": "FC2_LV", "source": "FC2", "control": "grid_following", "s_rated_mva": 5.5, "vn_ac_kv": 0.48, "name": "SOFC 2 PCS"}
+    {"id": "PCS_PV1", "current_loop_hz": 250, "bus": "PV1_LV", "source": "PV1", "control": "grid_following", "s_rated_mva": 5.0, "vn_ac_kv": 0.8, "name": "PV 1 PCS"},
+    {"id": "PCS_PV2", "current_loop_hz": 250, "bus": "PV2_LV", "source": "PV2", "control": "grid_following", "s_rated_mva": 5.0, "vn_ac_kv": 0.8, "name": "PV 2 PCS"},
+    {"id": "PCS_PV3", "current_loop_hz": 250, "bus": "PV3_LV", "source": "PV3", "control": "grid_following", "s_rated_mva": 5.0, "vn_ac_kv": 0.8, "name": "PV 3 PCS"},
+    {"id": "PCS_FC1", "current_loop_hz": 250, "bus": "FC1_LV", "source": "FC1", "control": "grid_following", "s_rated_mva": 5.5, "vn_ac_kv": 0.48, "name": "SOFC 1 PCS"},
+    {"id": "PCS_FC2", "current_loop_hz": 250, "bus": "FC2_LV", "source": "FC2", "control": "grid_following", "s_rated_mva": 5.5, "vn_ac_kv": 0.48, "name": "SOFC 2 PCS"}
   ],
   "grounding_transformers": [
     {"id": "ZA", "bus": "BUS_A", "i_rated_a": 400, "t_rated_s": 10, "r_n_ohm": 50, "name": "Zigzag A"},

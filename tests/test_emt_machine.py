@@ -137,6 +137,47 @@ def test_generator_model_by_setting(client, quiet):
     assert m['pm_end_mw'] == pytest.approx(m['pm_start_mw'], rel=1e-3)
 
 
+def test_exciter_drives_the_field_and_e_follows_it():
+    """
+    Its exciter (SEXS: K 100, its lead-lag 0.1, TB 10 s) sets its field
+    voltage, and E' follows over T'd0 (8 s) less the armature's reaction: a
+    0.1 MW resistive step on the 0.5 MVA machine alone pulls its voltage
+    down at once - E' holds through the step - and E' then rises, bringing
+    the voltage back to within 1 % of its set point. The exciter used to set
+    E' itself through 50 ms: in the AI campus's island the turbines'
+    voltages swung some 10 % every 100 ms.
+    """
+    import emt_solver as es
+    w0, v_ll, s = 2 * np.pi * P['f_hz'], M['v_ll_kv'] * 1e3, M['s_rated_mva'] * 1e6
+    p0, p_step, t_step = P['load']['p_mw'] * 1e6, P['step']['p_mw'] * 1e6, P['step']['t_s']
+    ckt = es.Circuit()
+    nodes = [ckt.node(f'GT {"abc"[k]}') for k in range(3)]
+    for k, node in enumerate(nodes):
+        ckt.add_r(node, 0, v_ll ** 2 / p0)
+        mid = ckt.node(f'step {"abc"[k]}')
+        sw = ckt.add_switch(node, mid, closed=False)
+        ckt.add_r(mid, 0, v_ll ** 2 / p_step)
+        ckt.at(t_step, lambda st, sw=sw: st.set_switch(sw, True))
+    v_pk = np.sqrt(2.0 / 3.0) * v_ll
+    data = emt_machine.machine_data(_gen('a', 0.25, True, dyn_exciter_model='SEXS'), _GOVERNOR_DEFAULTS,
+                                    _EXCITER_DEFAULTS)
+    assert (data['exc']['TATB'], data['exc']['TB'], data['xd_pu'], data['td0_s']) == (0.1, 10.0, 1.8, 8.0)
+    # Its terminal voltage and the current its resistive load draws, peak phasors: P = 1.5 V I.
+    m = emt_machine.SynchronousMachine(ckt, 'GT', nodes, w0, complex(v_pk, 0.0), complex(p0 / (1.5 * v_pk), 0.0),
+                                       s, v_ll, **data)
+    ckt.add_controller(m.control)
+    ckt.start_in_ac_steady_state(w0)
+    sim = ckt.simulate(P['t_end_s'], 2e-4)
+    tr = np.array(m.trace)
+    e = lambda x: float(np.interp(x, tr[:, 0], tr[:, 5]))
+    v = np.sqrt(2.0 / 3.0 * np.sum(sim['v'][:, nodes] ** 2, axis=1)) / v_pk
+    v_at = lambda x: float(np.interp(x, sim['t'], v))
+    assert v_at(t_step - 0.01) == pytest.approx(1.0, abs=1e-3)
+    assert abs(e(t_step + 0.02) - e(t_step - 0.01)) < 2e-3 and v_at(t_step + 0.02) < 0.99
+    assert e(P['t_end_s']) > e(t_step + 0.02) + 0.01
+    assert v_at(P['t_end_s'] - 0.01) == pytest.approx(1.0, abs=0.01)
+
+
 def test_machine_data_from_its_dynamics_fields():
     """H from M = 2H when only M is given; its governor model's defaults; no exciter unless named."""
     d = emt_machine.machine_data({'dyn_M': '9', 'dyn_governor_model': 'TGOV1', 'dyn_gov_R': '0.05'},

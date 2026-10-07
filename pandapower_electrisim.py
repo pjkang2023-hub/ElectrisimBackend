@@ -3114,6 +3114,7 @@ def _electrisim_build_pcs(net, Busbars, study):
             'droop_pf': max(safe_float(el.get('droop_pf_percent'), 2.0), 1e-3) / 100.0,
             'droop_qv': max(safe_float(el.get('droop_qv_percent'), 5.0), 0.0) / 100.0,
             'k': safe_float(el.get('current_limit_pu'), 1.2),
+            'current_loop_hz': safe_float(el.get('current_loop_hz'), 500.0),   # the EMT study's
             'source': {'obj': obj, 'kind': kind, 'name': src.get('name'), 'label': src_label, 'id': src.get('id', ''),
                        'coupling': 'pcs', 'parts': {}, 'bus': None},
             'table': None, 'index': None, 'island': None, 'reference': False, 'df_pu': 0.0, 'qv_hist': None,
@@ -3542,9 +3543,11 @@ def _electrisim_build_ssts(net, Busbars):
         rec = {'name': name, 'id': el.get('id', ''), 'label': label, 'in_service': on, 'bus_mv': int(b_mv),
                'bus_lvdc': int(b_lvdc), 'bus_lvac': int(b_lvac) if b_lvac is not None else None,
                'link_kv': safe_float(el.get('link_kv'), 0.0), 'stages': [], 'aux': [], 'inverter_mode': None,
-               # For the EMT study: its stages' model, switching frequencies and current limit.
+               # For the EMT study: its stages' model, switching frequencies, current limit and its rectifier's
+               # and inverter's current loop bandwidth.
                'emt': {'model': 'switching' if el.get('emt_model') == 'switching' else 'average',
                        'switching_khz': safe_float(el.get('switching_khz'), 5.0),
+                       'current_loop_hz': safe_float(el.get('current_loop_hz'), 500.0),
                        'dcdc_switching_khz': safe_float(el.get('dcdc_switching_khz'), 20.0),
                        'current_limit_pu': safe_float(el.get('current_limit_pu'), 1.2)}}
         if rec['link_kv'] <= 0:
@@ -6768,10 +6771,11 @@ def create_other_elements(in_data,net,x, Busbars):
             if 'id' not in net.vsc.columns:
                 net.vsc['id'] = ''
             net.vsc.at[vsc_idx, 'id'] = in_data[x].get('id', '')
-            # For the EMT study: its rating, DC link and current limit (0: from its load flow), its model;
-            # for it and the DC fault study, its DC link's ESR and ESL (0: none)
+            # For the EMT study: its rating, DC link and current limit (0: from its load flow), its model and
+            # current loop's bandwidth; for it and the DC fault study, its DC link's ESR and ESL (0: none)
             for col, default in (('rated_mva', 0.0), ('dc_link_mf', 0.0), ('dc_link_esr_mohm', 0.0),
-                                 ('dc_link_esl_uh', 0.0), ('current_limit_pu', 1.2), ('switching_khz', 5.0)):
+                                 ('dc_link_esl_uh', 0.0), ('current_limit_pu', 1.2), ('switching_khz', 5.0),
+                                 ('current_loop_hz', 500.0)):
                 if col not in net.vsc.columns:
                     net.vsc[col] = default
                 net.vsc.at[vsc_idx, col] = safe_float(in_data[x].get(col, default), default)

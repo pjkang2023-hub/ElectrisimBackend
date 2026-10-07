@@ -176,7 +176,10 @@ feeds beneath it. `check_network` reports them under their ids: `dc_buses`,
 `r_ohm`, `x_ohm`, `r_dc_ohm`, `control_mode_ac` (`vm_pu` or `q_mvar`) with
 `control_value_ac`, `control_mode_dc` (`vm_pu` or `p_mw`) with
 `control_value_dc`, `rated_mva`, `dc_link_mf`, `dc_link_esr_mohm`,
-`dc_link_esl_uh`, `current_limit_pu`, `emt_model`, `switching_khz`. Its DC-link
+`dc_link_esl_uh`, `current_limit_pu`, `emt_model`, `switching_khz`,
+`current_loop_hz` (its current control's bandwidth in the EMT study, 500 Hz;
+in an island no grid holds, f_sw / 20 - 250 Hz at 5 kHz - keeps it clear of
+the network's resonance). Its DC-link
 capacitor's ESR and ESL (0: none) count in the EMT and DC fault studies. A VSC needs at least sqrt(2) times its AC line voltage on its
 DC side: 0.48 kV AC for an 800 V bus.
 
@@ -187,7 +190,8 @@ stages: `vn_mv_kv`, `vn_lv_dc_kv`, `vn_lv_ac_kv`, `link_kv`, `q_mv_mvar`,
 `dcdc_rated_mw`, `dcdc_efficiency_percent`, `dcdc_no_load_kw`, `vm_lv_dc_pu`,
 `inverter_mode`, `inv_rated_mw`, `inv_efficiency_percent`, `inv_no_load_kw`,
 `p_ac_mw`, `q_ac_mvar`, `vm_lv_ac_pu`, `emt_model`, `switching_khz`,
-`dcdc_switching_khz`, `current_limit_pu`.
+`dcdc_switching_khz`, `current_limit_pu`, `current_loop_hz` (its rectifier's
+and inverter's, as a VSC's).
 
 **dc_dc_converters** - `id`, **`bus_in`**, **`bus_out`** (DC), `control_mode`
 (`voltage`, `power`, `droop`, `dispatch`, `mppt`, `follower` or `smoothing`),
@@ -237,8 +241,8 @@ flywheel, SOFC or PV array id) or `bus_dc` (a DC bus with its source alone on
 it). `control` (`grid_following` or `grid_forming`), `s_rated_mva`,
 `vn_ac_kv`, `efficiency_percent`, `no_load_loss_kw`, `p_set_mw`, `q_mode`
 (`q`, `pf` or `qv`), `q_set_mvar`, `pf`, `qv_droop_percent`, `vm_set_pu`,
-`droop_pf_percent`, `droop_qv_percent`, `current_limit_pu`,
-`opf_marginal_cost_eur_per_mwh`. Draw its transformer to the network as an
+`droop_pf_percent`, `droop_qv_percent`, `current_limit_pu`, `current_loop_hz`
+(grid-following, as a VSC's), `opf_marginal_cost_eur_per_mwh`. Draw its transformer to the network as an
 ordinary transformer between its own LV bus and the network bus.
 
 **grounding_transformers** - a zigzag grounding transformer. `id`, **`bus`**

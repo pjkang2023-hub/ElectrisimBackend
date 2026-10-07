@@ -118,6 +118,12 @@ def dcdc_capacitors(c_out_mf, rated, vn_in, vn_out):
     return 4e-3 * rated / vn_in ** 2, c_out
 
 
+# A VSC's current loop bandwidth (Hz) unless it gives its own. At a few kHz of switching, against a
+# weak network - an island no grid holds - a loop this fast meets the network's own resonance; f_sw / 20
+# (250 Hz at 5 kHz) is usual for converters of some MW.
+CURRENT_LOOP_HZ = 500.0
+
+
 class Vsc:
     """One VSC, built into the circuit, with its controller (``control(t, state)``)."""
 
@@ -136,12 +142,12 @@ class Vsc:
                    mode_dc=str(net.vsc.at[vi, 'control_mode_dc'] if 'control_mode_dc' in net.vsc.columns else 'vm_pu'),
                    mode_ac=str(net.vsc.at[vi, 'control_mode_ac'] if 'control_mode_ac' in net.vsc.columns else 'q_mvar'),
                    model=str(net.vsc.at[vi, 'emt_model']) if 'emt_model' in net.vsc.columns else 'average',
-                   switching_khz=col('switching_khz', 5.0))
+                   switching_khz=col('switching_khz', 5.0), current_loop_hz=col('current_loop_hz', CURRENT_LOOP_HZ))
 
     def __init__(self, builder, label, ac_bus, bus_dc, term, r_dc, block_pu, *, p, q, p_dc, rated_mva=0.0,
                  limit_pu=1.2, c_link_mf=0.0, c_link_esr_mohm=0.0, c_link_esl_uh=0.0, r_ohm=0.0, x_ohm=0.0,
                  mode_dc='vm_pu', mode_ac='q_mvar', model='average', switching_khz=5.0, eta=1.0, p_nl_mw=0.0,
-                 input_side='dc'):
+                 input_side='dc', current_loop_hz=CURRENT_LOOP_HZ):
         """
         ``p``, ``q``: its load-flow power at its AC bus (the load convention);
         ``p_dc``: at its DC bus (the load convention). ``eta``, ``p_nl_mw``: a
@@ -149,7 +155,8 @@ class Vsc:
         ``input_side`` ('ac': a rectifier stage; 'dc': an inverter stage) -
         losses its DC side carries. ``c_link_esr_mohm``, ``c_link_esl_uh``: its
         DC-link capacitor's series resistance and inductance (0: none), in
-        its DC terminals' branch.
+        its DC terminals' branch. ``current_loop_hz``: its current loop's
+        bandwidth.
         """
         ckt, ac = builder.ckt, builder.ac
         self.label = label
@@ -170,6 +177,7 @@ class Vsc:
         self.block_i = 2.5 * self.i_max
         self.model = model if model in ('average', 'switching') else 'average'
         self.f_sw = (switching_khz if switching_khz > 0 else 5.0) * 1e3
+        self.f_i = current_loop_hz if current_loop_hz > 0 else CURRENT_LOOP_HZ
         self.t_sample = 0.5 / self.f_sw
         if self.model == 'switching':
             # Its current ripple, about v_dc / (6 L f_sw) peak to peak, against its rated current.
@@ -291,7 +299,7 @@ class Vsc:
         v_pk = abs(v_ph)
         self.kp_pll, self.ki_pll = 2 * 0.7 * (2 * math.pi * 20) / v_pk, (2 * math.pi * 20) ** 2 / v_pk
         self.int_pll = 0.0
-        a_c = 2 * math.pi * 500
+        a_c = 2 * math.pi * getattr(self, 'f_i', CURRENT_LOOP_HZ)
         # Its PI's zero at a tenth of its bandwidth: alpha * R would leave a near-lossless reactor's integrator idle.
         self.kp_i = a_c * self.l
         self.ki_i = self.kp_i * a_c / 10.0

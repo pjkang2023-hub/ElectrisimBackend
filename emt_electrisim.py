@@ -362,7 +362,7 @@ class _EmtBuilder:
             z = self.ac.vn[rec['bus']] ** 2 / (rec['s_rated'] * 1e6)
             kw = dict(p=-p_ac, q=-q_ac, p_dc=p_dc, rated_mva=rec['s_rated'], limit_pu=rec['k'], r_ohm=0.01 * z,
                       x_ohm=0.15 * z, mode_ac='q_mvar', model='average', eta=rec['eta'], p_nl_mw=rec['p_nl_mw'],
-                      input_side='dc')
+                      input_side='dc', current_loop_hz=rec.get('current_loop_hz', 500.0))
             if rec['table'] == 'gen':
                 conv = GridFormingVsc(self, rec['label'], rec['bus'], key, term, 1e-4, block, mode_dc='p_mw',
                                       droop_pf=rec['droop_pf'], droop_qv=rec['droop_qv'], **kw)
@@ -522,7 +522,7 @@ class _EmtBuilder:
             conv = Vsc(self, label, rec['bus_mv'], link, self.bus_node[link], 1e-6, block, p=p, q=q, p_dc=p_dc,
                        rated_mva=rect['rated_mw'], limit_pu=limit, r_ohm=r_ohm, x_ohm=x_ohm, mode_dc='vm_pu',
                        mode_ac='q_mvar', model=model, switching_khz=e.get('switching_khz', 5.0),
-                       eta=eta, p_nl_mw=p_nl, input_side='ac')
+                       eta=eta, p_nl_mw=p_nl, input_side='ac', current_loop_hz=e.get('current_loop_hz', 500.0))
             self._add_vsc(conv, rec['id'])
 
             # Its DC/DC stage.
@@ -552,7 +552,7 @@ class _EmtBuilder:
             conv = Vsc(self, f"{rec['label']} inverter", rec['bus_lvac'], lv, term, 1e-6, block, p=-p_s, q=-q_s,
                        p_dc=p_dc, rated_mva=inv['rated_mw'], limit_pu=limit, r_ohm=r_ohm, x_ohm=x_ohm, mode_dc='p_mw',
                        mode_ac='q_mvar', model=model, switching_khz=e.get('switching_khz', 5.0),
-                       eta=eta, p_nl_mw=p_nl, input_side='dc')
+                       eta=eta, p_nl_mw=p_nl, input_side='dc', current_loop_hz=e.get('current_loop_hz', 500.0))
             self._add_vsc(conv, rec['id'])
 
     def _add_vsc(self, conv, row_id):
