@@ -363,7 +363,10 @@ def test_fault_fed_by_a_battery_and_a_supercapacitor_on_the_bus(client, quiet):
 def test_battery_fault_current_closed_form(client, quiet):
     """
     A battery alone on its converter's bus: E' behind R0 and L, E' its OCV
-    less its RC branch's voltage, settling at E' / (R0 + Rf).
+    less its RC branch's voltage, settling at E' / (R0 + Rf) with no peak of
+    its own. The converter's input capacitor (no ESR) discharges into the
+    bolted fault within a step: it sets ip, which the study says is not
+    resolved.
     """
     result = _run(client, quiet, _bus('p1', 0.8), _der('Battery', 'b', 'p1', vn_v=800, capacity_kwh=500, l_uh=100),
                   _conv('k1', 'p1', 'dc_a', control_mode='dispatch', p_set_mw=0.1), study={'duration_ms': 20})
@@ -376,7 +379,12 @@ def test_battery_fault_current_closed_form(client, quiet):
     f = _by_id(result['dcfault']['faults'])['cell-p1']
     # Its time constant L / R (1.6 ms) has long run out by 20 ms.
     assert f['ik_ka'] * 1e3 == pytest.approx(e / r, rel=2e-3)
-    assert f['ip_ka'] == pytest.approx(f['ik_ka'], rel=1e-3)
+    batt = next(c for c in f['contributions'] if c['kind'] == 'Battery')
+    assert batt['ik_ka'] == pytest.approx(f['ik_ka'], rel=1e-6)
+    assert batt['ip_ka'] == pytest.approx(batt['ik_ka'], rel=1e-3)
+    cap = next(c for c in f['contributions'] if c['kind'] == 'DC/DC input capacitor')
+    assert cap['name'] == 'K1' and cap['ip_ka'] == pytest.approx(f['ip_ka'], rel=0.01)
+    assert any('P1: K1 input capacitor, with no ESR' in w for w in result['warnings'])
 
 
 # --- The other studies ----------------------------------------------------------------------
@@ -424,14 +432,20 @@ def test_other_studies_run_with_sources_and_stores(client, quiet, fixture, param
 def test_fault_with_a_pv_array_behind_its_converter(client, quiet):
     """
     The PV array is left out of the DC fault and its converter blocks, so its
-    own bus is reached by nothing: it is tied off (its node defined - before,
-    every result was NaN) and not faulted; the network's buses are.
+    own bus is reached by its converter's input capacitor alone (its node
+    defined - with nothing on it, every result was NaN): a fault there is
+    that capacitor's discharge, settling at nothing. The network's buses are
+    faulted as before.
     """
     result = _run(client, quiet, _bus('pv_bus', 0.8), _der('PV Array', 'pv', 'pv_bus'),
                   _conv('kpv', 'pv_bus', 'dc_b', control_mode='mppt'), study={'duration_ms': 20})
     faults = _by_id(result['dcfault']['faults'])
-    assert set(faults) == {'cell-dc_a', 'cell-dc_b'}
-    assert all(math.isfinite(f['ik_ka']) and f['ik_ka'] > 0 for f in faults.values())
+    assert set(faults) == {'cell-dc_a', 'cell-dc_b', 'cell-pv_bus'}
+    assert all(math.isfinite(f['ip_ka']) and math.isfinite(f['ik_ka']) for f in faults.values())
+    assert faults['cell-dc_a']['ik_ka'] > 0 and faults['cell-dc_b']['ik_ka'] > 0
+    pv = faults['cell-pv_bus']
+    cap = next(c for c in pv['contributions'] if c['kind'] == 'DC/DC input capacitor' and c['name'] == 'KPV')
+    assert cap['ip_ka'] == pytest.approx(pv['ip_ka'], rel=0.01) and abs(pv['ik_ka']) < 1e-3
     assert any("PV arrays, SOFC systems and flywheels feed a DC fault" in w for w in result['warnings'])
 
 

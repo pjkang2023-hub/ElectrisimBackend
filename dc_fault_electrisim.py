@@ -7,8 +7,8 @@ their voltage behind an internal R and L, DC load input filters, DC breakers'
 current-limiting inductors, and VSCs - which block at the fault, so that
 their DC-link capacitors discharge into it and their diodes rectify the AC
 grid into it, behind the grid's short-circuit impedance at the converter's AC
-bus and the converter's own reactor. DC/DC converters block too: their output
-capacitors discharge into a fault on their output buses. The converters'
+bus and the converter's own reactor. DC/DC converters block too: their input
+and output capacitors discharge into a fault on their buses. The converters'
 capacitors are the EMT study's (emt_converters): as given, or its default.
 
 The results are given in IEC 61660-1's terms - peak ip, time to peak tp,
@@ -345,8 +345,8 @@ class _Builder:
                 continue
             if 'electrisim_aux' in net.vsc.columns and net.vsc.at[vi, 'electrisim_aux'] == True:
                 # A DC/DC converter's output stage: it blocks; its capacitors are _dc_dc_capacitors'.
-                note = ('The DC/DC converters block at a DC fault: only their output capacitors discharge '
-                        'into it. Their current limits come with the EMT study.')
+                note = ('The DC/DC converters block at a DC fault: only their input and output capacitors '
+                        'discharge into it. Their current limits come with the EMT study.')
                 if note not in self.warnings:
                     self.warnings.append(note)
                 continue
@@ -392,12 +392,12 @@ class _Builder:
 
     def _dc_dc_capacitors(self):
         """
-        Each DC/DC converter's output capacitor on its output bus (an SST's
-        DC/DC stage's among them), and an SST's grid-following inverter's DC
-        link on its LV DC bus, as the EMT study has them: their bridges block
-        at the fault, and they discharge into it. A DC/DC converter's input
-        capacitor, which the EMT study also has, is left out: its input bus -
-        a battery's, a PV array's - stays as it was.
+        Each DC/DC converter's input and output capacitors on its buses (an
+        SST's DC/DC stage's output one: its input is on the SST's internal DC
+        link), and an SST's grid-following inverter's DC link on its LV DC
+        bus, as the EMT study has them: their bridges block at the fault, and
+        they discharge into it. A source's own bus behind its converter - a
+        battery's, a PV array's - is so reached, and faulted.
         """
         net = self.net
 
@@ -421,8 +421,9 @@ class _Builder:
             else:
                 p_out, out = rec['p_set_mw'], ('load_dc', rec['output_load'])
             b_in, b_out = rec['bus_in'], rec['bus_out']
-            _, c_out = dcdc_capacitors((rec.get('emt') or {}).get('c_out_mf', 0.0),
-                                       dcdc_rating(rec['rated_mw'], p_out), vn(b_in), vn(b_out))
+            c_in, c_out = dcdc_capacitors((rec.get('emt') or {}).get('c_out_mf', 0.0),
+                                          dcdc_rating(rec['rated_mw'], p_out), vn(b_in), vn(b_out))
+            add('DC/DC input capacitor', rec['label'], rec['id'], 'load_dc', rec['input'], b_in, c_in)
             add('DC/DC output capacitor', rec['label'], rec['id'], out[0], out[1], b_out, c_out)
         for rec in getattr(net, 'electrisim_ssts', None) or []:
             stages = {s['stage']: s for s in rec['stages']}
@@ -621,7 +622,7 @@ def fault_at(builder, bus, params):
 METHOD = ("A time-domain simulation of the DC network from its load-flow state, reported in IEC 61660-1's "
           "terms (ip, tp, Ik, tau1, tau2) but not computed by its method. Pole-to-pole faults; DC loads leave "
           "at the fault; VSCs block, their DC-link capacitors discharging and their diodes feeding the fault "
-          "from the AC grid; DC/DC converters block, their output capacitors discharging; breakers "
+          "from the AC grid; DC/DC converters block, their input and output capacitors discharging; breakers "
           "do not open, each is checked on the current through it at its opening time. A discharge faster than "
           "the time step - a cable's own capacitance into a hard fault, over nanoseconds, or a capacitor's with "
           "no ESR on the faulted bus, warned of - is not resolved.")
