@@ -343,14 +343,17 @@ class _Builder:
             if c <= 0:
                 continue   # it leaves the network at the fault, with nothing to discharge
             l = _f(ld.at[li, 'filter_l_mh']) * 1e-3 if 'filter_l_mh' in ld.columns else 0.0
+            r = max(_f(ld.at[li, 'filter_r_mohm']), 0.0) * 1e-3 if 'filter_r_mohm' in ld.columns else 0.0
             i_load = p * 1e6 / self._v(bus)
             term, _ = self._terminal('load_dc', li, bus, i_load)
             inner = ckt.node(f'{label} filter')
-            ckt.add_c(0, inner, c, w0=-self._v(bus))
+            # Its capacitor at the drop the load's current leaves across the filter's R, as in EMT
+            # (with no L to carry it on, that current stops at the fault).
+            ckt.add_c(0, inner, c, w0=-(self._v(bus) - (r * i_load if l > 0 else 0.0)))
             # The filter inductor keeps the load's current at the fault, into its capacitor.
-            k = ckt.add_rl(inner, term, 0.0, l, i0=-i_load if l > 0 else 0.0)
+            k = ckt.add_rl(inner, term, r, l, i0=-i_load if l > 0 else 0.0)
             if l <= 0 and term == self.bus_node[bus]:
-                self.stiff_caps.append((bus, R_FLOOR, c, f'{label} input capacitor'))
+                self.stiff_caps.append((bus, max(r, R_FLOOR), c, f'{label} input capacitor'))
             self.contributions.append(('DC load input filter', label, _row_id(net, 'load_dc', li), ('rl', k)))
         if defaulted:
             self.warnings.append(DEFAULT_INPUT_WARNING.format(', '.join(defaulted)))

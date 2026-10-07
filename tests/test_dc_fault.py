@@ -329,6 +329,25 @@ def test_converter_capacitor_behind_its_esr_and_esl(client, quiet):
     assert not any('ip is the time step' in w for w in result['warnings'])
 
 
+def test_load_input_filter_behind_its_resistance_and_inductance(client, quiet):
+    """
+    Server hall B's input filter, 10 mF behind 2 mOhm and 0.1 uH, the hall
+    drawing nothing (so its filter carries no current at the fault): at a
+    bolted fault on its bus it is the series RLC discharge through them -
+    resolved, nothing warned of it, no default given.
+    """
+    request = _resistive_loads(_drawn_request())
+    hall = next(v for v in request.values() if isinstance(v, dict) and v.get('name') == 'ld_b')
+    hall.update(p_mw='0', filter_c_uf='10000', filter_l_mh='0.0001', filter_r_mohm='2')
+    result = _study(client, quiet, request, duration_ms=20, fault_bus='dc_b')
+    fault = _fault(result, 'cell-dc_b')
+    filt = next(c for c in fault['contributions'] if c['kind'] == 'DC load input filter')
+    ip, tp = _rlc_ip(fault['v_prefault_kv'] * 1e3, 2e-3 + dcf.R_FLOOR, 0.1e-6, 10e-3)
+    assert filt['name'] == 'Server hall B' and filt['ip_ka'] == pytest.approx(ip / 1e3, rel=5e-3)
+    assert filt['tp_ms'] == pytest.approx(tp * 1e3, abs=2e-3)
+    assert not any('Server hall B' in w for w in result['warnings'] if 'ip is the time step' in w or 'Given' in w)
+
+
 def test_breaker_in_front_of_a_load_carries_no_fault_current(client, quiet):
     """
     A DC load with no input filter that draws no constant power (it is not

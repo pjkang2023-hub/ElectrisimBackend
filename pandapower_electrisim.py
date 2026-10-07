@@ -6513,12 +6513,13 @@ def create_other_elements(in_data,net,x, Busbars):
             dc_extra['index'] = int(net.load_dc.index.max()) + 1 if len(net.load_dc) else 0
             # Its model: shares of constant power, current and resistance, and
             # the voltage below which the constant-power part draws constant
-            # current; the input filter is for the EMT study.
+            # current; the input filter is for the EMT and DC fault studies.
             share_p, share_i, share_r = _electrisim_dc_load_shares(in_data[x])
             dc_extra.update(electrisim_p_rated_mw=p_dc, electrisim_share_p=share_p, electrisim_share_i=share_i,
                             electrisim_share_r=share_r,
                             electrisim_v_min_pu=safe_float(in_data[x].get('v_min_pu'), 0.0),
                             filter_l_mh=safe_float(in_data[x].get('filter_l_mh'), 0.0),
+                            filter_r_mohm=max(safe_float(in_data[x].get('filter_r_mohm'), 0.0), 0.0),
                             filter_c_uf=safe_float(in_data[x].get('filter_c_uf'), 0.0))
             try:
                 pp.create_load_dc(net, bus_dc=bus_idx, name=in_data[x]['name'],

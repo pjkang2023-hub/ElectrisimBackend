@@ -296,6 +296,7 @@ class _EmtBuilder:
             term = self._terminal('load_dc', li, bus, i_load)
             c = _f(ld.at[li, 'filter_c_uf']) * 1e-6 if 'filter_c_uf' in ld.columns else 0.0
             l = _f(ld.at[li, 'filter_l_mh']) * 1e-3 if 'filter_l_mh' in ld.columns else 0.0
+            r = max(_f(ld.at[li, 'filter_r_mohm']), 0.0) * 1e-3 if 'filter_r_mohm' in ld.columns else 0.0
             if c <= 0:
                 # A converter-fed load has a DC-link capacitor (emt_solver.default_input_capacitance).
                 c = default_input_capacitance(shares[0], p * 1e6, self.v_bus[bus])
@@ -303,10 +304,12 @@ class _EmtBuilder:
                     self.default_filters.append(_label(net, 'load_dc', li))
             node = term
             if c > 0 or l > 0:
-                node = ckt.node(f'{_label(net, "load_dc", li)} input', self.v_bus[bus])
-                ckt.add_rl(term, node, 0.0, l, i0=i_load)
+                # Its filter: R and L to its input, the capacitor there, at the drop its current leaves.
+                v_in = self.v_bus[bus] - r * i_load
+                node = ckt.node(f'{_label(net, "load_dc", li)} input', v_in)
+                ckt.add_rl(term, node, r, l, i0=i_load)
                 if c > 0:
-                    ckt.add_c(0, node, c, w0=-self.v_bus[bus])
+                    ckt.add_c(0, node, c, w0=-v_in)
             k = ckt.add_nonlinear(node, 0, func)
             if plan is not None:
                 plan['measure'] = ('dc', node, k, None)

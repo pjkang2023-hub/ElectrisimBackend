@@ -166,7 +166,9 @@ feeds beneath it. `check_network` reports them under their ids: `dc_buses`,
 
 **dc_loads** - `id`, **`bus`** (DC), `p_mw`, `load_model` and its shares
 (`share_p_percent`, `share_i_percent`, `share_r_percent`), `v_min_pu`,
-`filter_l_mh`, `filter_c_uf`, `load_profile_id` (a power profile).
+`filter_l_mh`, `filter_r_mohm`, `filter_c_uf` (its input filter, in the EMT and
+DC fault studies; with no capacitance a constant-power load is given 4 ms of its
+power), `load_profile_id` (a power profile).
 
 **dc_sources** - an ideal DC source. `id`, **`bus`** (DC), `vm_pu`, `r_sc_mohm`, `l_sc_uh`.
 
