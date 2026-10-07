@@ -252,9 +252,13 @@ def _branch_loadings(net) -> List[Dict[str, Any]]:
 
 
 def _run_pp(net) -> Optional[str]:
+    # Electrisim's load flow: it settles the converters and the sources behind them,
+    # which pandapower's alone does not - a campus with a DC side failed before any
+    # motor started.
+    from pandapower_electrisim import _electrisim_runpp
     try:
-        pp.runpp(net, calculate_voltage_angles=True, init="auto")
-        return None
+        _electrisim_runpp(net, calculate_voltage_angles=True, init="auto")
+        return None if net.converged else "The load flow did not converge."
     except Exception as e:
         return str(e)
 

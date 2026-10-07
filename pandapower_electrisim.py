@@ -132,10 +132,20 @@ def ensure_sgen_k(net):
         net.sgen['k'] = net.sgen['k'].where(net.sgen['k'] > 0, 1.1)
 
 
-def isolated_buses_message(net, advice="Check your network connectivity."):
+def isolated_buses_message(net, advice="Check your network connectivity.", machines=False):
     """The studies' refusal of buses no source supplies, naming them as the
-    diagram does, then the advice; None when every bus is supplied."""
-    isolated_buses = top.unsupplied_buses(net)
+    diagram does, then the advice; None when every bus is supplied.
+
+    machines: a short circuit's sources - every synchronous machine in service
+    feeds a fault, slack or not. Islanded, a campus's turbines carried its
+    buses and every one was refused as isolated, its earth faults unstudied.
+    """
+    slacks = None
+    if machines:
+        slacks = set(int(b) for b in net.ext_grid.loc[net.ext_grid['in_service'].astype(bool), 'bus'])
+        if len(net.gen):
+            slacks |= set(int(b) for b in net.gen.loc[net.gen['in_service'].astype(bool), 'bus'])
+    isolated_buses = top.unsupplied_buses(net, slacks=slacks)
     # A grounding transformer's own delta is cut off with it when its breaker opens: not a fault in the network.
     isolated_buses = {b for b in isolated_buses if not _electrisim_is_grounding(net.bus, b)}
     if len(isolated_buses) == 0:
@@ -10367,7 +10377,7 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
   
     #print(net.line[net.line.isna().any(axis=1)])
     
-    isolated = isolated_buses_message(net)
+    isolated = isolated_buses_message(net, machines=True)
     if isolated:
         raise ValueError(isolated)
 
@@ -16339,7 +16349,7 @@ def _prot_auto_fault_current_ka(net, sw_idx, fault_bus=None, line_fraction=None)
     if line_fraction is not None:
         from pandapower.protection.utility_functions import create_sc_bus
         element = int(net.switch.at[sw_idx, 'element'])
-        net_sc = create_sc_bus(net_sc, sc_line_id=element, sc_fraction=float(line_fraction))
+        net_sc = _prot_split_line(net_sc, element, float(line_fraction))
         # As in the line-fault scenarios: create_sc_bus moves non-line switches too.
         not_line = net.switch.index[net.switch['et'] != 'l']
         net_sc.switch.loc[not_line, 'element'] = net.switch.loc[not_line, 'element']
@@ -17669,12 +17679,50 @@ def _prot_native_and_custom_trips(net_sc, attach_summaries, summary_by_sw_idx, f
     return trip, warning
 
 
+def _prot_split_line(net, line, fraction):
+    """
+    pandapower's create_sc_bus, the fault bus along a line, and the new half
+    given the line's zero sequence and fault temperature: it copies neither,
+    and the NaN that left made every earth fault along a line fail.
+    """
+    from pandapower.protection.utility_functions import create_sc_bus
+    before = set(net.line.index)
+    source = net.line.loc[line].copy()
+    net = create_sc_bus(net, sc_line_id=line, sc_fraction=fraction)
+    for i in set(net.line.index) - before:
+        for col in ('r0_ohm_per_km', 'x0_ohm_per_km', 'c0_nf_per_km', 'g0_us_per_km', 'endtemp_degree'):
+            if col in net.line.columns and col in source.index and pd.isna(net.line.at[i, col]):
+                net.line.at[i, col] = source[col]
+    return net
+
+
+def _prot_earth_fault_net(net_sc, fault_type):
+    """
+    An earth fault's network as the IEC short-circuit study builds it: the DC
+    network set aside (pandapower's zero sequence has no VSC: every
+    single-phase scenario failed with one on the diagram) and each
+    transformer's neutral resistor in its zero sequence (a resistance-grounded
+    winding was solidly grounded).
+    """
+    # A switch with no rating: pandapower divides each switch's fault current by its in_ka,
+    # and 0 / 0 - a breaker no earth-fault current reaches - stopped every scenario.
+    if len(net_sc.switch) and 'in_ka' in net_sc.switch.columns:
+        net_sc.switch['in_ka'] = net_sc.switch['in_ka'].where(net_sc.switch['in_ka'] > 0, np.nan)
+    if fault_type != '1ph':
+        return
+    _electrisim_set_aside_dc_network(
+        net_sc, 'The single-phase protection study',
+        why="pandapower's zero-sequence model has no VSC (a three-wire converter adds no zero-sequence path)")
+    _electrisim_fold_neutral_impedance(net_sc, 10)
+
+
 def _prot_run_bus_scenario(base_net, fault_bus_idx, fault_type, case, attach_summaries):
     """Short-circuit and protection times for a fault placed directly on a bus."""
     summary_by_sw_idx = {int(s['sw_idx']): s for s in attach_summaries if s.get('sw_idx') is not None}
     net_sc = deepcopy(base_net)
     try:
         ensure_ext_grid_zero_sequence_min(net_sc)
+        _prot_earth_fault_net(net_sc, fault_type)
         sc.calc_sc(net_sc, bus=int(fault_bus_idx), branch_results=True, fault=fault_type, case=case)
     except Exception as e:
         return {
@@ -17729,7 +17777,7 @@ def _prot_run_scenario(base_net, sc_line_id, sc_fraction, fault_type, case, atta
     summary_by_sw_idx = {int(s['sw_idx']): s for s in attach_summaries if s.get('sw_idx') is not None}
 
     try:
-        net_sc = create_sc_bus(deepcopy(base_net), sc_line_id=int(sc_line_id), sc_fraction=float(sc_fraction))
+        net_sc = _prot_split_line(deepcopy(base_net), int(sc_line_id), float(sc_fraction))
         # pandapower (3.3) moves every switch whose element number is the
         # line's onto the new line half - transformer and bus switches too, so
         # a transformer switch then named a transformer that does not exist.
@@ -17747,6 +17795,7 @@ def _prot_run_scenario(base_net, sc_line_id, sc_fraction, fault_type, case, atta
     try:
         fault_bus = int(max(net_sc.bus.index))
         ensure_ext_grid_zero_sequence_min(net_sc)
+        _prot_earth_fault_net(net_sc, fault_type)
         sc.calc_sc(net_sc, bus=fault_bus, branch_results=True, fault=fault_type, case=case)
     except Exception as e:
         return {
@@ -18033,7 +18082,8 @@ def protection_coordination(net, prot_params, in_data):
         # sc.calc_sc - naming the buses: the indices read
         # "[np.int64(5), np.int64(6), np.int64(7)]".
         isolated = isolated_buses_message(
-            net, 'Connect every component to a supplied bus before running protection coordination.')
+            net, 'Connect every component to a supplied bus before running protection coordination.',
+            machines=True)
         if isolated:
             return json.dumps({
                 'error': True,

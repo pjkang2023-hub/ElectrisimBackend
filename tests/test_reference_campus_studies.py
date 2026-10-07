@@ -8,6 +8,10 @@ with an element switched - and checked against something independent.
 17a, part 1: the load flow's cases (islanded, a supply unit out), the optimal
 power flow, contingency and state estimation; and the ANSI earth fault, which
 failed on any network with a VSC.
+
+17b: the fault and protection studies - ANSI and islanded earth faults,
+motor starting, a DC fault at a rack, protection, the POI study's grounding
+table and arc flash.
 """
 import contextlib
 import io
@@ -274,3 +278,173 @@ def test_site_screening_a_campus_board(client):
     assert vm >= 0.95 and loading <= 100.0
     vm, loading = worst(2.3)
     assert vm < 0.95 or loading > 100.0
+
+
+# --- 17b: faults and protection ------------------------------------------------------------
+
+R_N_13 = 13.8e3 / math.sqrt(3) / 400
+X0_ZIGZAG = 0.12 * 35e3 / math.sqrt(3) / 400
+
+
+def _golden():
+    with open(os.path.join(HERE, 'golden', f'{GRID}.json'), encoding='utf-8') as handle:
+        return json.load(handle)
+
+
+def _zigzag_neutral_ka(c=1.0):
+    """A zigzag's earth-fault current alone: 3 c V_ph / |Z0 + 3 R_N|, its Z0 12 % on 400 A with X/R 10."""
+    return 3 * c * 35 / math.sqrt(3) / abs(complex(0.1 * X0_ZIGZAG + 3 * 50, X0_ZIGZAG))
+
+
+def test_ansi_earth_faults_through_the_neutral_resistors(client):
+    """
+    ANSI with the short-circuit dialog's request (the load flow's carries no
+    neutral resistors): a 13.8 kV earth fault is held by its 400 A resistor -
+    3 V_ph / |2 Z1 + Z0 + 3 R_N|, a little under 400 A at 1.0 pu; at 35 kV the
+    IEC study's current over its c of 1.1, within the two standards' X/R.
+    """
+    from test_reference_grids import ANSI_PARAMS
+    p = _payload('sc1ph_')
+    p['0'] = {**ANSI_PARAMS, 'fault_type': '1ph', 'user_email': 't@t'}
+    ansi = _by_label(p, _post(client, p)['busbars'])
+    golden = _golden()['bus_sc_1ph_max']
+    assert 0.39 < ansi['Campus A 13.8 kV']['i_first_sym_ka'] < 13.8 / math.sqrt(3) / R_N_13
+    assert ansi['35 kV Bus A']['i_first_sym_ka'] == pytest.approx(golden['BUS_A']['ikss_ka'] / 1.1, rel=0.08)
+
+
+def test_islanded_earth_faults_held_by_the_zigzags(client):
+    """
+    Islanded - both feeders open - a 35 kV earth fault has the zigzags for its
+    only zero-sequence path: each in service adds its c x 400 A or so; the
+    turbines and the PCS feed the rest. It was refused: the study took every
+    bus for isolated with no grid, the turbines not counted as sources.
+    """
+    base = _payload('sc1ph_')
+    island = _variant(base, {'Feeder 1 breaker': {'closed': 'false'}, 'Feeder 2 breaker': {'closed': 'false'}})
+    both = _by_label(island, _post(client, island)['busbars'])
+    one = _variant(island, {'Zigzag B breaker': {'closed': 'false'}})
+    one = _by_label(one, _post(client, one)['busbars'])
+    gain = both['35 kV Bus A']['ikss_ka'] - one['35 kV Bus A']['ikss_ka']
+    assert gain == pytest.approx(_zigzag_neutral_ka(1.1), rel=0.05)
+    assert both['35 kV Bus A']['ikss_ka'] < 0.2 * _golden()['bus_sc_1ph_max']['BUS_A']['ikss_ka']
+    assert both['Campus A 13.8 kV']['ikss_ka'] > 1.0
+
+
+def test_motor_starting_one_chiller(client):
+    """
+    One 2 MW chiller started across the line: its locked-rotor current
+    6 x I_rated, drawn at its dipped voltage; the dip at 13.8 kV about its
+    starting MVA over the bus's short-circuit MVA plus it, within the 15 %
+    limit. It failed before the start: plain pandapower cannot solve the
+    campus.
+    """
+    p = _payload()
+    cid = {v.get('userFriendlyName'): v.get('id') for v in p.values() if isinstance(v, dict)}
+    p['0'] = {'typ': 'MotorStartingPandaPower Parameters', 'mode': 'steady', 'motor_ids': cid['Chiller A1'],
+              'starting_method': 'dol', 'voltage_limit_percent': '15', 'thermal_limit_percent': '100',
+              'frequency': '50', 'user_email': 't@t'}
+    out = _post(client, p)
+    (m,) = out['motors']
+    i_rated = 2.0 / 0.96 / 0.9 / (math.sqrt(3) * 13.8)
+    assert m['i_rated_ka'] == pytest.approx(i_rated, rel=1e-9)
+    assert m['i_start_nominal_ka'] == pytest.approx(6 * i_rated, rel=1e-9)
+    dip = out['summary']['worst_dip_percent']
+    assert m['i_start_ka'] == pytest.approx(m['i_start_nominal_ka'] * (1 - dip / 100), rel=0.02)
+    assert out['summary']['n_fail_voltage'] == 0 and 2 < dip < 15
+    s_start = math.sqrt(3) * 13.8 * 6 * i_rated
+    s_sc = math.sqrt(3) * 13.8 * _golden()['bus_sc_3ph_max']['CA_13']['ikss_ka'] / 1.1
+    assert dip == pytest.approx(100 * s_start / (s_sc + s_start), rel=0.3)
+
+
+def test_dc_fault_at_the_54_v_rack(client):
+    """
+    A bolted fault on rack 10's 54 V bus: its 130 F supercapacitor module
+    discharges through its 4 mohm ESR, i(t) = V0 / ESR e^(-t / ESR C) -
+    13.5 kA at once - while its DC/DC shelf blocks; over the 60 ms run (three
+    AC periods) it barely decays. The AC short circuit behind the converters
+    solves: a grid-forming PCS's missing machine data made it NaN.
+    """
+    from test_dc_fault import STUDY
+    p = _payload()
+    cell = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
+    p['0'] = {**STUDY, 'fault_bus': cell['C1 rack 10 54 V'], 'duration_ms': '20'}
+    out = _post(client, p)
+    assert not any('did not solve' in w for w in out['warnings']), out['warnings']
+    (f,) = out['dcfault']['faults']
+    assert f['ip_ka'] == pytest.approx(54 / 0.004 / 1e3, rel=0.01)
+    assert f['ik_ka'] == pytest.approx(f['ip_ka'] * math.exp(-0.060 / (0.004 * 130)), rel=0.03)
+
+
+@pytest.mark.parametrize('fault', ['3ph', '1ph'])
+def test_protection_feeder_faults(client, fault):
+    """
+    Overcurrent relays on every breaker, set automatically: I> the rated
+    current x the CT factor 1.2 x the overload factor 1.25 - a feeder's
+    1.2 kA, a turbine's or a campus's step-up's at 35 kV. A fault halfway
+    along a feeder trips its breaker first, at I>>'s 0.3 s, and nothing
+    miscoordinates. Earth faults failed: the faulted line's new half had no
+    zero sequence, and pandapower's zero sequence cannot take a VSC.
+    """
+    with open(os.path.join(HERE, 'reference', 'reference_radial.diagram_protection_payload.json'),
+              encoding='utf-8') as handle:
+        params = json.load(handle)['0']
+    p = _payload('sc1ph_')
+    for v in p.values():
+        if isinstance(v, dict) and str(v.get('typ', '')).startswith('Switch'):
+            v.update({'protection_type': 'ocr', 'curve_type': 'standard_inverse', 'tms': '1.0', 't_grade': '0.5',
+                      't_gg': '0.3', 't_g': '0.8', 't_diff': '0.3', 'pickup_mode': 'auto'})
+    p['0'] = {**params, 'fault_type': fault, 'user_email': 't@t'}
+    out = _post(client, p)
+    settings = {d['switch_name']: d['settings'] for d in out['devices']}
+    assert settings['Feeder 1 breaker']['I_g_a'] == pytest.approx(1200 * 1.2 * 1.25)
+    assert settings['GT1 breaker']['I_g_a'] == pytest.approx(32e3 / (math.sqrt(3) * 35) * 1.2 * 1.25)
+    assert settings['Campus A breaker']['I_g_a'] == pytest.approx(16e3 / (math.sqrt(3) * 35) * 1.2 * 1.25)
+    assert out['summary']['n_scenarios'] == 2
+    assert out['summary']['n_miscoordination'] == 0 and out['summary']['n_unwanted_trips'] == 0
+    for sc in out['scenarios']:
+        assert sc['short_circuit']['ikss_ka'] > 1.0, sc['fault_label']
+        trips = sorted((t['t_trip_s'], t['switch_name']) for t in sc['trip'] if t['tripped'])
+        assert trips[0] == (0.3, sc['fault_label'].split(',')[0] + ' breaker'), trips
+
+
+def test_poi_study_grounding_rows_for_the_zigzags(client):
+    """
+    The POI study's grounding table: a zigzag's row is the earth fault at the
+    bus it grounds - its LV is its own unloaded delta, which read 0 kA - and
+    its own neutral current, 3 V_ph / |Z0 + 3 R_N|; the campus step-downs'
+    13.8 kV resistors at 400 A.
+    """
+    from test_reference_grids import POI_PARAMS
+    p = _payload('sc1ph_')
+    p['0'] = {**POI_PARAMS, 'user_email': 't@t'}
+    rows = {r['trafo_name']: r for r in _post(client, p)['grounding']}
+    for z in ('Zigzag A', 'Zigzag B'):
+        assert rows[z]['rn_ohm'] == 50.0
+        assert rows[z]['neutral_i_ka'] == pytest.approx(_zigzag_neutral_ka(), rel=1e-6)
+        assert rows[z]['slg_i_ka_lv'] == pytest.approx(_golden()['bus_sc_1ph_max']['BUS_A']['ikss_ka'], rel=1e-4)
+    assert rows['Campus A transformer']['rn_ohm'] == pytest.approx(R_N_13, rel=1e-4)
+
+
+def test_arc_flash_by_voltage_class(client):
+    """
+    Each bus as the typical equipment of its class: 13.8 and 0.48 kV by IEEE
+    1584-2018 for the same inputs, 35 kV by Ralph Lee; the 0.69 kV PCS buses,
+    at 85 kA bolted, beyond the standard's 65 kA and said so.
+    """
+    from test_reference_grids import _ieee1584, _lee
+    p = _payload()
+    p['0'] = {'typ': 'ArcFlashPandaPower Parameters', 'electrode_config': 'VCB', 'equipment_mode': 'by_voltage',
+              'working_distance_mm': '455', 'conductor_gap_mm': '25', 'enclosure_height_mm': '508',
+              'enclosure_width_mm': '508', 'enclosure_depth_mm': '508', 'clearing_time_s': '0.2',
+              'clearing_time_min_s': '0.2', 'user_email': 't@t'}
+    out = _post(client, p)
+    rows = {r['name']: r for r in out['arc_flash']}
+    for name in ('Campus A 13.8 kV', 'Campus A 0.48 kV'):
+        row = rows[name]
+        gap, distance, enclosure = (32, 610, (508, 508, 508)) if row['vn_kv'] <= 0.6 else (152, 910, (1143, 762, 762))
+        assert row['method'] == 'IEEE1584-2018'
+        assert row['incident_energy_cal_cm2'] == pytest.approx(_ieee1584(row, gap, distance, enclosure), rel=1e-6), name
+    lee = rows['35 kV Bus A']
+    assert lee['method'] == 'RalphLee'
+    assert lee['incident_energy_cal_cm2'] == pytest.approx(_lee(lee, 910)[0], rel=1e-6)
+    assert any('BESS 2 0.69 kV' in w and '65 kA' in w for w in out['warnings'])

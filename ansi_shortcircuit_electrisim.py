@@ -1355,7 +1355,7 @@ def shortcircuit_with_optional_pre_post(net, in_data, in_data_full=None) -> str:
     # ("singular matrix"), or was solved from local machines alone.
     from pandapower_electrisim import isolated_buses_message
 
-    isolated = isolated_buses_message(net)
+    isolated = isolated_buses_message(net, machines=True)
     if isolated:
         return json.dumps({"error": True, "message": isolated})
     compare = str(in_data.get("compare_pre_post", "false")).lower() in ("true", "1", "yes")

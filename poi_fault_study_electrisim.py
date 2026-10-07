@@ -230,7 +230,13 @@ def _iec_bus_sc(
 ) -> dict:
     work = copy.deepcopy(net)
     apply_ngr_to_net(work)
-    from pandapower_electrisim import ensure_ext_grid_zero_sequence_min, ensure_sgen_k
+    from pandapower_electrisim import (_electrisim_set_aside_dc_network, ensure_ext_grid_zero_sequence_min,
+                                       ensure_sgen_k)
+    if fault == "1ph":
+        # pandapower's zero sequence has no VSC: with one on the network every earth
+        # fault failed and its row read 0 kA. A three-wire converter adds no zero-sequence path.
+        _electrisim_set_aside_dc_network(work, "The POI study's earth faults",
+                                         why="pandapower's zero-sequence model has no VSC")
 
     # As the short-circuit study does: 1.1 here for every sgen overrode a
     # ratio set on the element.
@@ -274,10 +280,21 @@ def _grounding_rows(net, slg_target_a: float, freq_hz: float) -> List[dict]:
         hv = int(tr["hv_bus"])
         rn = _f(tr.get("rn_ohm"), 0.0)
         xn = _f(tr.get("xn_ohm"), 0.0)
+        grounding = bool(tr.get("electrisim_grounding") == True)
+        if grounding:
+            # A zigzag: its "LV" is its own unloaded delta, where no fault is anything; the
+            # fault is at the bus it grounds, through its own neutral resistor.
+            lv = hv
+            rn = _f(tr.get("electrisim_gt_r_n"), 0.0)
+            xn = _f(tr.get("electrisim_gt_x_n"), 0.0)
         vn_lv = _f(net.bus.at[lv, "vn_kv"], 0.69)
         slg = _iec_bus_sc(net, lv, "1ph", "max")
         i_slg = _f(slg.get("ikss_ka"), 0.0)
         i_neutral = i_slg
+        if grounding:
+            # Its neutral current alone at its bus: 3 V_ph / |Z0 + 3 Z_N|.
+            z = complex(_f(tr.get("electrisim_gt_r0"), 0.0) + 3 * rn, _f(tr.get("electrisim_gt_x0"), 0.0) + 3 * xn)
+            i_neutral = 3.0 * vn_lv / math.sqrt(3.0) / abs(z) if abs(z) > 0 else None
         v_rn = rn * i_slg * 1000.0 if rn > 0 else None
         v_phase = vn_lv * 1000.0 / math.sqrt(3.0)
         rn_suggest = None
@@ -340,7 +357,7 @@ def run_poi_fault_study(net, in_data: dict, in_data_full=None) -> str:
     # without a message, or came out at 0 kA in the grounding table.
     from pandapower_electrisim import isolated_buses_message
 
-    isolated = isolated_buses_message(net)
+    isolated = isolated_buses_message(net, machines=True)
     if isolated:
         return json.dumps({"error": True, "message": isolated})
 

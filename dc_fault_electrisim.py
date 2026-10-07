@@ -153,6 +153,11 @@ def _ac_thevenin(net, warnings_out):
         for table in ('vsc', 'b2b_vsc', 'line_dc', 'load_dc', 'source_dc', 'bus_dc'):
             if table in ac and len(ac[table]):
                 ac[table].drop(ac[table].index, inplace=True)
+        # A grid-forming PCS is a generator in the load flow, with no machine data: a NaN in
+        # the Ybus, and every converter's AC source taken as stiff. In a fault it is a current
+        # source, which leaves the impedance seen at a bus as it is.
+        if len(ac.gen) and 'electrisim_pcs' in ac.gen.columns:
+            ac.gen.drop(ac.gen.index[ac.gen['electrisim_pcs'] == True], inplace=True)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             sc.calc_sc(ac, case='max', branch_results=False)
