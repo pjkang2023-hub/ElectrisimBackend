@@ -251,6 +251,21 @@ def _branch_loadings(net) -> List[Dict[str, Any]]:
     return results
 
 
+def _before_by_branch(net) -> Dict[Any, Any]:
+    return {(b["element"], b["id"]): b["loading_during_percent"] for b in _branch_loadings(net)}
+
+
+def _add_loading_before(branches: List[Dict[str, Any]], before: Dict[Any, Any]) -> None:
+    """
+    Each branch's loading with the starting motors still off, beside its
+    loading during the start. A thermal fail showed only the start's figure:
+    the campus Chiller A1 start failed its 16 MVA transformer at 119 % with
+    nothing showing it carried 53 % before.
+    """
+    for br in branches:
+        br["loading_before_percent"] = before.get((br["element"], br["id"]))
+
+
 def _run_pp(net) -> Optional[str]:
     # Electrisim's load flow: it settles the converters and the sources behind them,
     # which pandapower's alone does not - a campus with a DC side failed before any
@@ -306,6 +321,7 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
             "exception": err,
         }
     vm_before = _snapshot_bus_vm(net)
+    loading_before = _before_by_branch(net)
 
     # --- During: locked-rotor loads ---
     motor_results: List[Dict[str, Any]] = []
@@ -376,6 +392,7 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
         }
     vm_during = _snapshot_bus_vm(net)
     branches = _branch_loadings(net)
+    _add_loading_before(branches, loading_before)
     # The current and power the motor draws at the dipped voltage; the
     # nominal-voltage figures were reported.
     for result, li in zip(motor_results, lr_load_indices):
@@ -961,23 +978,28 @@ def _dynamic_branch_loadings(net, payload: Dict[str, Any], thermal_limit: float)
     demand[t < t_start] = -1.0
     k = int(np.argmax(demand))
     by_id = {str(_row_id_name(net.motor.loc[i], i)[0]): i for i in net.motor.index}
-    added, switched = [], []
+    added, switched, starting = [], [], []
     for mid, ser in series.items():
         idx = by_id.get(str(mid))
         if idx is None or not ser.get("p_mw"):
             continue
         switched.append((idx, bool(net.motor.at[idx, "in_service"])))
         net.motor.at[idx, "in_service"] = False
-        added.append(pp.create_load(net, bus=int(net.motor.at[idx, "bus"]),
-                                    p_mw=float(ser["p_mw"][k] or 0.0),
-                                    q_mvar=float(ser["q_mvar"][k] or 0.0),
-                                    name=f"__motor_start_dyn_{mid}"))
+        starting.append((idx, mid, ser))
     try:
+        # Before: the starting motors off, as they are until t_start.
+        loading_before = {} if not starting or _run_pp(net) else _before_by_branch(net)
+        for idx, mid, ser in starting:
+            added.append(pp.create_load(net, bus=int(net.motor.at[idx, "bus"]),
+                                        p_mw=float(ser["p_mw"][k] or 0.0),
+                                        q_mvar=float(ser["q_mvar"][k] or 0.0),
+                                        name=f"__motor_start_dyn_{mid}"))
         if not added or _run_pp(net):
             payload.setdefault("warnings", []).append(
                 "The thermal check of the dynamic start could not be run (load flow failed).")
             return
         branches = _branch_loadings(net)
+        _add_loading_before(branches, loading_before)
     finally:
         net.load.drop([li for li in added if li in net.load.index], inplace=True)
         for idx, state in switched:
@@ -994,6 +1016,12 @@ def _dynamic_branch_loadings(net, payload: Dict[str, Any], thermal_limit: float)
     payload["branches"] = branches
     payload["summary"]["n_fail_thermal"] = n_fail
     payload["summary"]["thermal_check_t_s"] = _clean(float(t[k]))
+    # How long the start current flows, so a fail reads against it: the
+    # campus transformer's 129 % lasts the chiller's 1.5 s start. None when a
+    # motor did not finish starting.
+    times = [m.get("start_time_s") for m in payload.get("motors") or []]
+    payload["summary"]["start_duration_s"] = (
+        _clean(max(times)) if times and all(x is not None for x in times) else None)
 
 
 def motor_starting(net, params: Dict[str, Any], in_data: Dict[str, Any]) -> str:

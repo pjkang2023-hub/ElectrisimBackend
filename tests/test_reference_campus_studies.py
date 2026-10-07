@@ -363,6 +363,45 @@ def test_motor_starting_one_chiller(client):
     assert dip == pytest.approx(100 * s_start / (s_sc + s_start), rel=0.3)
 
 
+def test_chiller_start_overloads_its_16_mva_transformer_briefly(client):
+    """
+    The chiller start's one thermal fail is the Campus A transformer, not a
+    feeder: before the start it carries the other two chillers (2 MW / 0.96
+    at 0.9 pf each) and the 0.48 kV loads (3.5 MW, 1.1 Mvar), about 53 % of
+    16 MVA; the start adds its locked-rotor power and the transformer's own
+    reactive loss (vk 8 %), about 119 %. Dynamic mode agrees on before and
+    fails it too, for the chiller's start time.
+    """
+    p = _payload()
+    cid = {v.get('userFriendlyName'): v.get('id') for v in p.values() if isinstance(v, dict)}
+    params = {'typ': 'MotorStartingPandaPower Parameters', 'mode': 'steady', 'motor_ids': cid['Chiller A1'],
+              'starting_method': 'dol', 'voltage_limit_percent': '15', 'thermal_limit_percent': '100',
+              'frequency': '50', 'user_email': 't@t'}
+    p['0'] = params
+    steady = _post(client, p)
+    fails = [b for b in steady['branches'] if not b['pass']]
+    assert [b['name'] for b in fails] == ['Campus A transformer']
+    assert steady['summary']['n_fail_thermal'] == 1
+    (tx,) = fails
+    p_run = 2 * 2.0 / 0.96 + 3.5
+    q_run = 2 * 2.0 / 0.96 * math.tan(math.acos(0.9)) + 1.1
+    assert tx['loading_before_percent'] == pytest.approx(100 * math.hypot(p_run, q_run) / 16, rel=0.05)
+    (m,) = steady['motors']
+    p_on, q_on = p_run + m['p_start_mw'], q_run + m['q_start_mvar']
+    q_on += 0.08 * 16 * (tx['loading_during_percent'] / 100) ** 2
+    assert tx['loading_during_percent'] == pytest.approx(100 * math.hypot(p_on, q_on) / 16, rel=0.05)
+    assert all(b['loading_before_percent'] is not None for b in steady['branches'])
+
+    p['0'] = dict(params, mode='dynamic')
+    dyn = _post(client, p)
+    (dm,) = dyn['motors']
+    assert dyn['summary']['start_duration_s'] == dm['start_time_s'] and 0.5 < dm['start_time_s'] < 4
+    dfails = [b for b in dyn['branches'] if not b['pass']]
+    assert [b['name'] for b in dfails] == ['Campus A transformer']
+    assert dfails[0]['loading_before_percent'] == pytest.approx(tx['loading_before_percent'], rel=1e-3)
+    assert 100 < dfails[0]['loading_during_percent'] < 150
+
+
 def test_dc_fault_at_the_54_v_rack(client):
     """
     A bolted fault on rack 10's 54 V bus: its 130 F supercapacitor module
