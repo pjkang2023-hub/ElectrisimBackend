@@ -68,6 +68,42 @@ def test_dc_load_model_in_time():
     assert f(20.0, 0)[0] == pytest.approx(0.1e6 / 640 * 20 / 40)    # the ramp to zero below 5 %
 
 
+def test_constant_power_loads_by_a_low_rank_update_as_by_refactoring(monkeypatch):
+    """
+    Constant-power loads enter each iteration as a low-rank update of the
+    network's sparse factor (Woodbury), and a node only they reach by
+    refactoring the whole matrix: the run is the one refactoring at every
+    iteration gave, to round-off. That took 7 ms an iteration on the AI
+    campus's 319 nodes - 560 s for 40 ms.
+    """
+    def run(behind=False):
+        p = [0.1]
+        ckt = es.Circuit()
+        a, b, x = ckt.node('A', 800.0), ckt.node('B', 800.0), ckt.node('behind B', 800.0)
+        ckt.add_rl(0, a, 0.01, 1e-4, i0=250.0, e0=800.0)
+        ckt.add_rl(a, b, 0.005, 5e-5, i0=250.0)
+        ckt.add_c(a, 0, 1e-3, w0=800.0)
+        ckt.add_c(b, 0, 1e-3, w0=800.0)
+        ckt.add_nonlinear(b, 0, es.dc_load_current(p, 0.8, 1.0, 0.0, 0.0, 0.8))
+        if behind:
+            ckt.add_nonlinear(b, x, lambda v, t: (v / 0.05, 1 / 0.05))      # its only path: nonlinear branches
+            ckt.add_nonlinear(x, 0, es.dc_load_current([0.1], 0.8, 1.0, 0.0, 0.0, 0.8))
+        else:
+            ckt.add_r(x, 0, 1.0)
+        ckt.at(2e-3, lambda st: p.__setitem__(0, 0.15))
+        return ckt.simulate(6e-3, 5e-6)
+
+    fast, fast_behind = run(), run(behind=True)
+
+    def no_sparse(*_):
+        raise RuntimeError('refactor every iteration')
+    monkeypatch.setattr(es, 'splu', no_sparse)
+    for mine, ref in ((fast, run()), (fast_behind, run(behind=True))):
+        assert np.allclose(mine['v'], ref['v'], rtol=1e-9, atol=1e-6)
+        assert np.allclose(mine['i_nl'], ref['i_nl'], rtol=1e-9, atol=1e-6)
+        assert np.ptp(mine['v'][mine['t'] > 2e-3, 2]) > 1.0          # the step moved bus B
+
+
 # --- Against Simscape -------------------------------------------------------------
 
 def _compare(t_ref, ref, t, mine, peak_rel=0.02, rms_rel=0.01, events=()):

@@ -851,9 +851,13 @@ def emt_study(net, params, in_data=None):
         j = int(np.argmax(i))
         after = t >= fault['t']
         di = np.diff(i[after]) / np.maximum(np.diff(t[after]), 1e-15) if after.sum() > 1 else np.array([0.0])
+        # Ik as the DC fault study takes it: the mean over the run's last AC period (a VSC's diodes ripple at 6 f).
+        last = t >= t[-1] - 1.0 / b.f_hz
+        ik = float(np.trapezoid(i[last], t[last]) / max(t[last][-1] - t[last][0], 1e-12)) if last.sum() > 1 else float(i[-1])
         result['fault'] = {'bus': _label(net, 'bus_dc', fault['bus']), 'id': _row_id(net, 'bus_dc', fault['bus']),
                            't_ms': fault['t'] * 1e3, 'ip_ka': _round(i[j] * 1e-3), 'tp_ms': _round(t[j] * 1e3),
-                           'didt_max_ka_per_ms': _round(float(np.max(di)) * 1e-6), 'i_final_ka': _round(i[-1] * 1e-3)}
+                           'didt_max_ka_per_ms': _round(float(np.max(di)) * 1e-6), 'i_final_ka': _round(i[-1] * 1e-3),
+                           'ik_ka': _round(ik * 1e-3)}
     for brk in b.breakers:
         rec = brk['rec']
         va = sim['v'][:, brk['mid']] - sim['v'][:, brk['b']]

@@ -44,6 +44,8 @@ import math
 
 import numpy as np
 from scipy.linalg import lu_factor, lu_solve
+from scipy.sparse import csc_matrix
+from scipy.sparse.linalg import splu
 
 R_FLOOR = 1e-6           # ohm: a branch with no R or L
 R_ON, R_OFF = 1e-5, 1e6  # ohm: a diode conducting / blocking
@@ -363,8 +365,24 @@ class Circuit:
                     _stamp_block(Y, A_cp, B_cp, coupled_g(method, h))
                 if len(cache) > 512:
                     cache.clear()
-                factor = None if self.nl else lu_factor(Y[1:, 1:], check_finite=False)
-                cache[key] = (Y, factor)
+                # Sparse: a dense LU of the campus's 319 nodes took 7 ms, and far more beside another
+                # process's threads.
+                try:
+                    factor = splu(csc_matrix(Y[1:, 1:]))
+                except RuntimeError:          # singular: a node only the nonlinear branches reach
+                    factor = None
+                Z = C_nl = None
+                if self.nl and factor is not None:
+                    # The nonlinear branches as a low-rank update of this factor (Woodbury): Z = Y^-1 P,
+                    # P their incidence, and P' Z. Refactoring the whole matrix at every iteration for
+                    # them took 7 ms a time on the 319 nodes of the AI campus - 560 s for 40 ms.
+                    P = np.zeros((n, len(self.nl)))
+                    P[na_, np.arange(len(self.nl))] += 1.0
+                    P[nb_, np.arange(len(self.nl))] -= 1.0
+                    Z = np.zeros((n, len(self.nl)))
+                    Z[1:] = factor.solve(P[1:])
+                    C_nl = Z[na_] - Z[nb_]
+                cache[key] = (Y, factor, Z, C_nl)
             return cache[key]
 
         iterations = []                       # solves per step, for diagnosis
@@ -436,19 +454,29 @@ class Circuit:
                     if len(da):
                         Jd = np.where(d_state, d_vf / R_ON, 0.0)      # a conducting diode's forward voltage
                         rhs += np.bincount(da, Jd, n) - np.bincount(db, Jd, n)
-                    Y, factor = base_matrix(method, h_, d_state, state.sw_closed, a_state)
-                    if self.nl:
-                        Yn = Y.copy()
+                    Y, factor, Z, C_nl = base_matrix(method, h_, d_state, state.sw_closed, a_state)
+                    v = np.zeros(n)
+                    if self.nl or factor is None:
                         vn = v_guess[na_] - v_guess[nb_]
                         gn, Jn = np.zeros(len(self.nl)), np.zeros(len(self.nl))
                         for j, (_, _, func) in enumerate(self.nl):
                             i0, g0 = func(vn[j], t0 + h_)
                             gn[j], Jn[j] = g0, i0 - g0 * vn[j]
-                        stamp(na_, nb_, gn, Yn)
                         rhs = rhs + np.bincount(nb_, Jn, n) - np.bincount(na_, Jn, n)
-                        factor = lu_factor(Yn[1:, 1:], check_finite=False)
-                    v = np.zeros(n)
-                    v[1:] = lu_solve(factor, rhs[1:], check_finite=False)
+                        # (Y + P G P')^-1 b = x - Z (I + G P' Z)^-1 G P' x, x = Y^-1 b.
+                        if factor is not None:
+                            x = np.zeros(n)
+                            x[1:] = factor.solve(rhs[1:])
+                            v[1:] = (x - Z @ np.linalg.solve(np.eye(len(gn)) + gn[:, None] * C_nl,
+                                                             gn * (x[na_] - x[nb_])))[1:]
+                        if factor is None or not np.all(np.isfinite(v)):
+                            # A node only the nonlinear branches reach leaves Y singular: the whole matrix.
+                            Yn = Y.copy()
+                            stamp(na_, nb_, gn, Yn)
+                            v[1:] = lu_solve(lu_factor(Yn[1:, 1:], check_finite=False), rhs[1:],
+                                             check_finite=False)
+                    else:
+                        v[1:] = factor.solve(rhs[1:])
                     vd = v[da] - v[db]
                     new_d = np.where(d_state, vd > d_vf, vd > d_vf + 1e-9)
                     va = v[aa] - v[ab]

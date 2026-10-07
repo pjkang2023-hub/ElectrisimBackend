@@ -16,6 +16,9 @@ table and arc flash.
 17c, part 1: transient stability and eigenvalues in ANDES - a 35 kV fault,
 a feeder's breaker, the utility lost and the campus islanding, a turbine
 lost while islanded; the turbines' modes on the grid and islanded.
+
+17c, part 2: EMT - the whole campus from its load flow, a cluster's step
+taken by its supercapacitors, a row-group fault against the DC fault study.
 """
 import contextlib
 import io
@@ -619,3 +622,81 @@ def test_eigenvalues_classical_turbines_against_the_grid_by_hand(client):
                   for x in (xd1 + x_gsu + 2 * x_feeder, xd1 + x_gsu + x_feeder))
     swings = sorted(m['imag'] for m in out['least_damped_modes'] if 1.0 < m['freq_hz'] < 2.5)
     assert swings == pytest.approx(hand, rel=0.01), (swings, hand)
+
+
+# --- 17c, part 2: EMT ------------------------------------------------------------------------------
+
+EMT = {'typ': 'EmtStudy Parameters', 'user_email': 't@t'}
+
+
+def _emt(client, **params):
+    p = _dynamic()
+    p['0'] = {**EMT, **{k: str(v) for k, v in params.items()}}
+    out = _post(client, p)
+    return out['emt'], out['warnings']
+
+
+def test_emt_the_campus_starts_from_its_load_flow_and_holds(client):
+    """
+    300 ms of the whole campus, AC and DC, with nothing happening: it starts
+    where the load flow left it - each SST's rectifier at its DC power - and
+    stays there, nothing blocking, no rack's voltage swinging wider. The
+    SSTs' rectifiers blocked at the first step: their DC links were 1.5 kV
+    (one module's) behind 35 kV, below its peak. The racks then swung ever
+    wider behind their busways, L/R 15 ms against the 4 ms their constant
+    power's input capacitance damps (now busbar trunking's 0.08 mH/km). It
+    took 560 s for 40 ms: the solver refactored the network every iteration.
+    """
+    emt, warnings = _emt(client, time_step_us=20, duration_ms=300)
+    assert not emt['converters_blocked'], emt['converters_blocked']
+    assert not [l['label'] for l in emt['loads'] if l['verdict'] == 'oscillates, growing']
+    assert not any('swings ever wider' in w for w in warnings), warnings
+    flow = _post(client, _flow(_dynamic()))
+    stages = {s['name']: {st['stage']: st for st in s['stages']} for s in flow['ssts']}
+    labels = _labels(_dynamic())
+    rect = {f"{labels[name]} rectifier": st['rectifier']['p_out_mw'] for name, st in stages.items()}
+    conv = {c['label']: c for c in emt['converters']}
+    for label in ('Hall 1 SST U1 rectifier', 'Hall 1 SST U2 rectifier'):
+        assert -conv[label]['p_start_mw'] == pytest.approx(rect[label], rel=0.01), label
+        assert conv[label]['p_end_mw'] == pytest.approx(conv[label]['p_start_mw'], rel=0.01), label
+
+
+def test_emt_a_cluster_steps_down_and_its_supercapacitors_take_it(client):
+    """
+    Cluster 2's racks (1.5 MW) step to 30 % at 10 ms: its supercapacitors
+    take the step and hand it back to the feed over their 2 s filter -
+    P_store = dP e^(-t / tau) - while the feed itself barely moves.
+    """
+    t_step, t_end, tau, dp = 0.010, 0.200, 2.0, -0.7 * 1.5
+    emt, warnings = _emt(client, time_step_us=20, duration_ms=t_end * 1e3, step_load=_cells(_dynamic())['Cluster 2 racks'],
+                         step_percent=-70, step_time_ms=t_step * 1e3)
+    assert not emt['converters_blocked'] and not any('swings ever wider' in w for w in warnings), warnings
+    conv = {c['label']: c for c in emt['converters']}
+    sc = conv['Cluster 2 supercapacitors converter']
+    assert sc['p_end_mw'] - sc['p_start_mw'] == pytest.approx(dp * math.exp(-(t_end - t_step) / tau), rel=0.02)
+    assert sc['smoothing']['feed_ramp_mw_s'] < 0.01 * sc['smoothing']['rack_ramp_mw_s']
+    feed = conv['Hall 1 SST U1 DC/DC']
+    assert abs(feed['p_end_mw'] - feed['p_start_mw']) < 0.15 * abs(dp)
+
+
+def test_emt_a_row_group_fault_against_the_dc_fault_study(client):
+    """
+    A 10 mOhm fault on row group 3 at 5 ms: the rectifier U3 blocks and its
+    diodes feed the fault from the AC network, as in the DC fault study - Ik
+    over the last AC period within 15 % of it (its AC source is the IEC
+    short circuit's, c 1.1 and the turbines subtransient; here they decay).
+    The converters' capacitors - U3's DC link, the DC/DC converters' and the
+    SST's output capacitors on the bus, the same in both studies - discharge
+    at once, V / R: ip within 1 % of each other.
+    """
+    from test_dc_fault import STUDY
+    rg3 = _cells(_dynamic())['Hall 1 row group 3']
+    emt, _ = _emt(client, time_step_us=1, duration_ms=65, fault_bus=rg3, fault_time_ms=5, fault_resistance_mohm=10)
+    p = _dynamic()
+    p['0'] = {**STUDY, 'fault_bus': rg3, 'duration_ms': '20', 'fault_resistance_mohm': '10', 'time_step_us': '1'}
+    (study,) = _post(client, p)['dcfault']['faults']
+    fault = emt['fault']
+    assert fault['ik_ka'] == pytest.approx(study['ik_ka'], rel=0.15)
+    assert fault['ip_ka'] == pytest.approx(0.8 / 0.010, rel=0.01)
+    assert study['ip_ka'] == pytest.approx(fault['ip_ka'], rel=0.01) and study['tp_ms'] < 0.1
+    assert any(b['label'] == 'Hall 1 rectifier U3' for b in emt['converters_blocked'])
