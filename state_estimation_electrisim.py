@@ -328,13 +328,33 @@ def _normalized_residuals(se):
     return out, J, len(r), int(s.H.shape[1])
 
 
+def _no_injection_buses(net):
+    """
+    The buses with nothing drawing or injecting in service and no P or Q
+    measurement - what pandapower's 'no_inj_bus' finds. Its own search pairs
+    each element's in-service flag with its bus's by index, which misaligns
+    once bus numbers are not among the element indices (an IndexError, read
+    as an unobservable network): so the list is given instead.
+    """
+    busy = set()
+    for table in ('load', 'motor', 'sgen', 'storage', 'ward', 'xward', 'gen', 'ext_grid', 'shunt',
+                  'asymmetric_load', 'asymmetric_sgen'):
+        df = net[table] if table in net else None
+        if df is not None and len(df):
+            busy.update(int(b) for b in df.loc[df['in_service'].astype(bool), 'bus'])
+    m = net.measurement
+    if len(m):
+        busy.update(int(b) for b in m.loc[(m['element_type'] == 'bus') & m['measurement_type'].isin(['p', 'q']), 'element'])
+    return [int(b) for b in net.bus.index[net.bus['in_service'].astype(bool)] if int(b) not in busy]
+
+
 def _run_estimate(net, estimator, zero_injection, max_iterations):
     algorithm = 'lp' if estimator == 'lav' else 'wls'
     se = StateEstimation(net, tolerance=1e-6, maximum_iterations=max_iterations, algorithm=algorithm)
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         outcome = se.estimate(v_start='flat', delta_start='flat',
-                              zero_injection='no_inj_bus' if zero_injection else 'aux_bus',
+                              zero_injection=_no_injection_buses(net) if zero_injection else 'aux_bus',
                               algorithm=algorithm)
     ok = outcome['success'] if isinstance(outcome, dict) else bool(outcome)
     iterations = outcome.get('num_iterations') if isinstance(outcome, dict) else None
@@ -369,10 +389,20 @@ def state_estimation(net, params, in_data=None):
     zero_injection = _flag(params.get('zero_injection'), True)
     max_iterations = int(_f(params.get('max_iterations'), 50))
 
+    import pandapower_electrisim as pe
+    # pandapower's estimator has no VSC or DC network (an IndexError, reported as an
+    # unobservable network): the network is the AC one, each converter the load it draws.
+    pe._electrisim_set_aside_dc_network(
+        net, 'State estimation', why="pandapower's state estimation does not model VSCs or DC networks",
+        keep_ac_draw=True)
+    warnings_out.extend(getattr(net, 'warnings', None) or [])
     try:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            pp.runpp(net, calculate_voltage_angles=True, init='auto')
+            # Electrisim's load flow: it settles the PCS and the sources behind them,
+            # which pandapower's alone does not. With the angles, as the estimator
+            # takes the transformers' phase shifts.
+            pe._electrisim_runpp(net, calculate_voltage_angles=True, init='auto')
         lf_ok = bool(net.converged)
     except Exception:
         lf_ok = False

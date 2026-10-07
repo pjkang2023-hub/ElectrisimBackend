@@ -138,8 +138,9 @@ def test_optimal_power_flow_leaves_the_dc_network_out_and_says_so(client, quiet)
     """
     pandapower's OPF has no VSC or DC network model: it failed outright
     (a divide by zero on the DC branches) or, started flat, returned the AC
-    result as if the DC loads were not there. The DC network is left out,
-    the result is the AC grid's, and the warnings say what is missing.
+    result as if the DC loads were not there. The DC network is left out and
+    the warnings say so; each VSC stays as the load its AC side draws in the
+    load flow, which the grid - the cheapest source here - supplies.
     """
     def opf(request):
         with quiet():
@@ -156,7 +157,11 @@ def test_optimal_power_flow_leaves_the_dc_network_out_and_says_so(client, quiet)
     assert not with_dc.get('dcbreakers')
     assert any('Optimal power flow leaves the DC network out (3 DC buses, 2 DC loads of 0.15 MW)' in w
                for w in with_dc['warnings']), with_dc.get('warnings')
-    assert [g['p_mw'] for g in with_dc['externalgrids']] == pytest.approx([g['p_mw'] for g in without['externalgrids']])
+    draws = [r['p_mw'] for r in with_dc['loads'] if 'AC side' in r.get('name', '')]
+    assert len(draws) == 1 and 0.05 < draws[0] < 0.051      # the cable load's 0.05 MW and the VSC's losses
+    assert any('Each VSC is the load its AC side draws' in w for w in with_dc['warnings'])
+    extra = with_dc['externalgrids'][0]['p_mw'] - without['externalgrids'][0]['p_mw']
+    assert extra == pytest.approx(draws[0], abs=2e-3)
 
 
 @pytest.mark.parametrize('fixture, params', [

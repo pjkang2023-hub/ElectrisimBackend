@@ -1872,9 +1872,22 @@ def _electrisim_droop_on_held_buses(net):
     convs = [c for c in getattr(net, 'electrisim_dc_dc_converters', None) or []
              if c.get('control') == 'droop' and c.get('vsc') is not None and c['vsc'] in net.vsc.index]
     droop_vscs = {c['vsc'] for c in convs}
+    # The DC buses joined by cables in service: a bus a closed tie reaches is held as its own is.
+    group = {int(b): int(b) for b in net.bus_dc.index}
+
+    def root(b):
+        while group[b] != b:
+            group[b] = group[group[b]]
+            b = group[b]
+        return b
+    for i in net.line_dc.index:
+        if bool(net.line_dc.at[i, 'in_service']):
+            a, b = root(int(net.line_dc.at[i, 'from_bus_dc'])), root(int(net.line_dc.at[i, 'to_bus_dc']))
+            group[a] = b
     for conv in convs:
         vsc = conv['vsc']
-        holders = net.vsc[(net.vsc['bus_dc'] == conv['bus_out']) & (net.vsc['control_mode_dc'] == 'vm_pu')
+        joined = [b for b in group if root(b) == root(int(conv['bus_out']))]
+        holders = net.vsc[net.vsc['bus_dc'].isin(joined) & (net.vsc['control_mode_dc'] == 'vm_pu')
                           & net.vsc['in_service'].astype(bool) & ~net.vsc.index.isin(list(droop_vscs))]
         if len(holders):
             v = float(holders['control_value_dc'].mean())
@@ -1888,7 +1901,12 @@ def _electrisim_droop_on_held_buses(net):
             conv['held'] = False
 
 
-def _electrisim_runpp(net, max_rounds=60, tolerance_mw=1e-9, **kwargs):
+# The settling loops' tolerance: 0.1 W. pandapower's DC results flicker by some 2e-9 MW between
+# load flows (a float rounding), so a tighter one never settled a converter holding a closed tie.
+_SETTLE_TOL_MW = 1e-7
+
+
+def _electrisim_runpp(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, **kwargs):
     """
     The load flow, with the microgrid sources and stores settled: each one's
     terminal voltage at the current it delivers, each directly connected
@@ -1912,7 +1930,7 @@ def _electrisim_runpp(net, max_rounds=60, tolerance_mw=1e-9, **kwargs):
     return None
 
 
-def _electrisim_runpp_converters(net, max_rounds=60, tolerance_mw=1e-9, **kwargs):
+def _electrisim_runpp_converters(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, **kwargs):
     """
     pp.runpp with the DC/DC converters' inputs matched to their outputs, and
     voltage-dependent DC loads settled: plain runpp when there is neither.
@@ -1943,7 +1961,7 @@ def _electrisim_runpp_converters(net, max_rounds=60, tolerance_mw=1e-9, **kwargs
     return None
 
 
-def _electrisim_runpp_dc_loads(net, max_rounds=60, tolerance_mw=1e-9, **kwargs):
+def _electrisim_runpp_dc_loads(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, **kwargs):
     """
     pp.runpp with voltage-dependent DC loads settled: plain runpp when there
     is none.
@@ -2390,6 +2408,10 @@ def _electrisim_freeze_dc_dc(net):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             _electrisim_runpp(solved, algorithm='nr', calculate_voltage_angles=True, init='auto')
+        # Each VSC's AC power while its DC network is whole, for a study that later sets that network aside.
+        if len(solved.vsc) and len(solved.res_vsc):
+            net.electrisim_vsc_ac_draw = {int(i): (float(solved.res_vsc.at[i, 'p_mw']), float(solved.res_vsc.at[i, 'q_mvar']))
+                                          for i in solved.vsc.index if i in solved.res_vsc.index}
         for table, i in _electrisim_dc_dc_rows(solved):
             col = _STAGE_P_COLUMN[table]
             if i in net[table].index:
@@ -3156,6 +3178,42 @@ def _electrisim_pcs_weight(rec):
     return rec['s_rated'] / rec['droop_pf']
 
 
+def _electrisim_governor_droop(el):
+    """A generator's governor droop R (p.u.): its Dynamics tab's, TGOV1's 0.05 by default; none without a governor."""
+    model = str(el.get('dyn_governor_model') or 'TGOV1').strip().upper()
+    if model in ('NONE', 'OFF'):
+        return np.nan
+    from andes_electrisim import _GOVERNOR_DEFAULTS
+    r = safe_float(el.get('dyn_gov_R'), np.nan)
+    if not (np.isfinite(r) and r > 0):
+        r = _GOVERNOR_DEFAULTS.get(model, _GOVERNOR_DEFAULTS['TGOV1']).get('R', 0.05)
+    return float(r)
+
+
+def _electrisim_island_gens(net, comp):
+    """
+    The synchronous generators in an island with a governor: each shares the
+    island's imbalance with its grid-forming PCS by its droop, its weight its
+    rated MVA / R as a PCS's is S_rated / droop. Each record: index, set point,
+    weight, droop, rating, power limit.
+    """
+    if not len(net.gen) or 'electrisim_gov_r' not in net.gen.columns:
+        return []
+    out = []
+    for i in net.gen.index:
+        if (not bool(net.gen.at[i, 'in_service']) or int(net.gen.at[i, 'bus']) not in comp
+                or _electrisim_is_pcs(net.gen, i) or bool(net.gen.at[i, 'slack'])):
+            continue
+        r = float(net.gen.at[i, 'electrisim_gov_r']) if pd.notna(net.gen.at[i, 'electrisim_gov_r']) else np.nan
+        s = safe_float(net.gen.at[i, 'sn_mva'], np.nan) if 'sn_mva' in net.gen.columns else np.nan
+        if not (np.isfinite(r) and r > 0 and np.isfinite(s) and s > 0):
+            continue
+        cos = safe_float(net.gen.at[i, 'cos_phi'], np.nan) if 'cos_phi' in net.gen.columns else np.nan
+        out.append({'index': int(i), 'p_set': float(net.gen.at[i, 'p_mw']), 'weight': s / r, 'r': r, 's_rated': s,
+                    'p_max': s * cos if np.isfinite(cos) and 0 < cos <= 1 else np.inf})
+    return out
+
+
 def _electrisim_pcs_islands(net):
     """
     Each grid-forming PCS's island: with an external grid it delivers its set
@@ -3182,10 +3240,12 @@ def _electrisim_pcs_islands(net):
         if comp & (grid_buses | slack_gens):
             continue
         islands.setdefault(comp, []).append(rec)
+    net.electrisim_island_gens = {}
     for n, (comp, recs) in enumerate(islands.items()):
         ref = max(recs, key=_electrisim_pcs_weight)
         for rec in recs:
             rec['island'] = n
+        net.electrisim_island_gens[n] = _electrisim_island_gens(net, comp)
         ref['reference'] = True
         net.gen.at[ref['index'], 'slack'] = True
         net.gen.at[ref['index'], 'slack_weight'] = 1.0
@@ -3259,9 +3319,14 @@ def _electrisim_settle_pcs(net):
     for rec in recs:
         if rec['table'] == 'gen' and rec['island'] is not None and rec['index'] in net.res_gen.index:
             islands.setdefault(rec['island'], []).append(rec)
-    for group in islands.values():
+    island_gens = getattr(net, 'electrisim_island_gens', None) or {}
+    for n, group in islands.items():
+        # The island's imbalance: what its members deliver beyond their set points - the
+        # reference PCS takes it all in the load flow - shared by their weights.
+        gens = island_gens.get(n, [])
         dp = sum(float(net.res_gen.at[r['index'], 'p_mw']) - r['p_set_ac'] for r in group)
-        w_sum = sum(_electrisim_pcs_weight(r) for r in group)
+        dp += sum(float(net.res_gen.at[g['index'], 'p_mw']) - g['p_set'] for g in gens if g['index'] in net.res_gen.index)
+        w_sum = sum(_electrisim_pcs_weight(r) for r in group) + sum(g['weight'] for g in gens)
         for rec in group:
             share = _electrisim_pcs_weight(rec) / w_sum * dp
             rec['df_pu'] = -rec['droop_pf'] * share / rec['s_rated']
@@ -3270,6 +3335,12 @@ def _electrisim_settle_pcs(net):
             target = rec['p_set_ac'] + share
             worst = max(worst, abs(target - float(net.gen.at[rec['index'], 'p_mw'])))
             net.gen.at[rec['index'], 'p_mw'] = target
+        for g in gens:
+            # Its governor's share, within its rating; beyond it the PCS take the rest.
+            target = min(max(g['p_set'] + g['weight'] / w_sum * dp, 0.0), g['p_max'])
+            g['df_pu'] = -g['r'] * (target - g['p_set']) / g['s_rated']
+            worst = max(worst, abs(target - float(net.gen.at[g['index'], 'p_mw'])))
+            net.gen.at[g['index'], 'p_mw'] = target
     # Q-V droop of the grid-forming PCS: its voltage set point lowered by its Q.
     for rec in recs:
         if rec['table'] == 'gen' and rec.get('droop_qv_lf', rec['droop_qv']) > 0 and rec['index'] in net.res_gen.index:
@@ -3704,7 +3775,9 @@ def _electrisim_drop_uncoupled_dc(net, quiet=False):
     if not drop:
         return
     names = getattr(net, 'user_friendly_names', {}) or {}
-    labels = sorted(str(names.get(bus_dc.at[b, 'name'], bus_dc.at[b, 'name'])) for b in drop)
+    # A converter's own hidden bus (an SST's DC link) is no bus of the drawing: an SST out of service leaves it.
+    labels = sorted(str(names.get(bus_dc.at[b, 'name'], bus_dc.at[b, 'name'])) for b in drop
+                    if not _electrisim_is_hidden(bus_dc, b) and not _electrisim_is_aux(bus_dc, b))
     for table, cols in (('line_dc', ('from_bus_dc', 'to_bus_dc')), ('load_dc', ('bus_dc',)),
                         ('source_dc', ('bus_dc',)), ('vsc', ('bus_dc',)),
                         ('b2b_vsc', ('bus_dc_plus', 'bus_dc_minus'))):
@@ -3723,7 +3796,7 @@ def _electrisim_drop_uncoupled_dc(net, quiet=False):
         for b in net.electrisim_dc_breakers:
             if b['target'] is not None and b['target'][1] not in net[b['target'][0]].index:
                 b['target'] = None
-    if quiet:
+    if quiet or not labels:
         return
     _electrisim_warn(net, f"DC bus{'es' if len(labels) > 1 else ''} {', '.join(labels)} "
                           f"{'are' if len(labels) > 1 else 'is'} not connected to the AC network through a VSC, "
@@ -3732,19 +3805,54 @@ def _electrisim_drop_uncoupled_dc(net, quiet=False):
                           "through a converter.")
 
 
-def _electrisim_set_aside_dc_network(net, study, why="pandapower's optimal power flow does not model VSCs or DC networks"):
+def _electrisim_set_aside_dc_network(net, study, why="pandapower's optimal power flow does not model VSCs or DC networks",
+                                     keep_ac_draw=False):
     """
     Leave a DC network out of a study that cannot model it, and say so.
 
     pandapower's optimal power flow has no VSC or DC network model: with one it
     failed (with init='pf', a divide by zero on the DC branches) or, started
     flat, returned the AC result as if the DC loads were not there.
+
+    keep_ac_draw: each VSC stays as the load it is on its AC bus - its P and Q
+    in Electrisim's own load flow, which solves the DC network - so a data
+    hall behind a rectifier does not vanish from the study with its network.
     """
     bus_dc = getattr(net, 'bus_dc', None)
     if bus_dc is None or not len(bus_dc):
         return
     n_bus, n_load = len(bus_dc), len(net.load_dc)
     p_load = float(net.load_dc['p_dc_mw'].sum()) if n_load else 0.0
+    kept = []
+    if keep_ac_draw and len(net.vsc):
+        real = [i for i in net.vsc.index if not _electrisim_is_aux(net.vsc, i) and bool(net.vsc.at[i, 'in_service'])]
+        if real:
+            try:
+                # The DC/DC converters' and SSTs' stand-ins recorded each VSC's power while the DC
+                # network was whole; without them, a load flow of this one.
+                draw = getattr(net, 'electrisim_vsc_ac_draw', None)
+                if not draw:
+                    solved = deepcopy(net)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore')
+                        _electrisim_runpp(solved, algorithm='nr', calculate_voltage_angles='auto', init='auto')
+                    draw = {int(i): (float(solved.res_vsc.at[i, 'p_mw']), float(solved.res_vsc.at[i, 'q_mvar']))
+                            for i in solved.vsc.index if i in solved.res_vsc.index}
+                names = getattr(net, 'user_friendly_names', {}) or {}
+                for i in real:
+                    p, q = draw.get(int(i), (np.nan, np.nan))
+                    if not (np.isfinite(p) and np.isfinite(q)):
+                        continue
+                    name = str(net.vsc.at[i, 'name'])
+                    label = str(names.get(name, name))
+                    ld = pp.create_load(net, int(net.vsc.at[i, 'bus']), p_mw=p, q_mvar=q, name=f'{name} AC side')
+                    net.load.at[ld, 'electrisim_aux'] = True
+                    names[f'{name} AC side'] = f'{label} (AC side)'
+                    kept.append(f'{label} {p:.4g} MW')
+                net.user_friendly_names = names
+            except Exception:   # noqa: BLE001 - said below
+                _electrisim_warn(net, f"{study}: the load flow that gives the VSCs' AC power did not solve, "
+                                      "so they are left out with the DC network.")
     for table in ('line_dc', 'load_dc', 'source_dc', 'vsc', 'b2b_vsc', 'bus_dc'):
         df = net[table]
         if len(df):
@@ -3774,7 +3882,8 @@ def _electrisim_set_aside_dc_network(net, study, why="pandapower's optimal power
             setattr(net, records, [])
     _electrisim_warn(net, f"{study} leaves the DC network out ({n_bus} DC bus{'es' if n_bus != 1 else ''}"
                           + (f", {n_load} DC load{'s' if n_load != 1 else ''} of {p_load:.3g} MW" if n_load else '')
-                          + f"): {why}, so this result does not include them.")
+                          + (f"): {why}. Each VSC is the load its AC side draws in the load flow: "
+                             + ', '.join(kept) + '.' if kept else f"): {why}, so this result does not include them."))
 
 
 def _electrisim_row_id(df, index):
@@ -5610,6 +5719,9 @@ def create_other_elements(in_data,net,x, Busbars):
                 gen_kw['max_q_mvar'] = _q['max_q_mvar']
             pp.create_gen(net, **gen_kw)
             gen_idx = net.gen.index[-1]
+            # Its governor's droop R (p.u. on its rated MVA), from its Dynamics tab as ANDES reads it:
+            # islanded with grid-forming PCS, it takes its share of the imbalance by it.
+            net.gen.at[gen_idx, 'electrisim_gov_r'] = _electrisim_governor_droop(in_data[x])
             ansi_mt = in_data[x].get('ansi_machine_type')
             if ansi_mt and str(ansi_mt).strip().lower() not in ('', 'none', 'null'):
                 if 'ansi_machine_type' not in net.gen.columns:
@@ -7837,6 +7949,21 @@ def _electrisim_attach_park_controllers(net, in_data, algorithm='nr', calculate_
 
 
 
+def _as_auto_voltage_angles(net, value):
+    """
+    'auto' resolved as pandapower's load flow resolves it: the angles only with
+    a line between buses above 70 kV. Its optimal power flow never resolves
+    'auto' and reads the text as true, so the OPF dialog's Auto always meant
+    the angles - and with 30-degree transformer shifts the OPF did not
+    converge where the load flow, on Auto, ran without them.
+    """
+    if value != 'auto':
+        return value
+    hv = net.bus.index[net.bus['vn_kv'].values > 70]
+    line_buses = set(net.line['from_bus'].values) & set(net.line['to_bus'].values)
+    return bool(len(hv)) and any(b in line_buses for b in hv)
+
+
 def _as_calculate_voltage_angles(value):
     """
     calculate_voltage_angles from a request as True, False or 'auto'.
@@ -9794,7 +9921,13 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                             continue   # a DC/DC converter's output stage
                         vsc_name = net.vsc.at[index, 'name'] if 'name' in net.vsc.columns else f'VSC_{index}'
                         vsc_id = net.vsc.at[index, 'id'] if 'id' in net.vsc.columns else str(index)
-                        vsc = VSCOut(name=vsc_name, id=vsc_id, p_mw=row['p_mw'], vm_pu=row.get('vm_pu', 0.0), q_mvar=row.get('q_mvar'), p_dc_mw=row.get('p_dc_mw'), vm_dc_pu=row.get('vm_dc_pu'))        
+                        # Beyond its rating, said as an SST's or a PCS's is.
+                        rated = float(net.vsc.at[index, 'rated_mva']) if 'rated_mva' in net.vsc.columns else 0.0
+                        s_vsc = math.hypot(float(row['p_mw']), float(row.get('q_mvar') or 0.0))
+                        if rated > 0 and np.isfinite(s_vsc) and s_vsc > rated * (1 + 1e-6):
+                            label = getattr(net, 'user_friendly_names', {}).get(vsc_name, vsc_name)
+                            _electrisim_warn(net, f"VSC '{label}' is loaded to {100 * s_vsc / rated:.1f} % of its rating.")
+                        vsc = VSCOut(name=vsc_name, id=vsc_id, p_mw=row['p_mw'], vm_pu=row.get('vm_pu', 0.0), q_mvar=row.get('q_mvar'), p_dc_mw=row.get('p_dc_mw'), vm_dc_pu=row.get('vm_dc_pu'))
                         vscsList.append(vsc) 
                         vscs = VSCsOut(vscs = vscsList) 
                     result = {**result, **VSCsOut(vscs = vscsList).__dict__}
@@ -11302,9 +11435,10 @@ def optimalPowerFlow(net, opf_params):
         # Extract OPF parameters
         opf_type = opf_params.get('opf_type', 'ac')
         algorithm = opf_params.get('ac_algorithm', 'pypower') if opf_type == 'ac' else opf_params.get('dc_algorithm', 'pypower')
-        calculate_voltage_angles = _as_calculate_voltage_angles(opf_params.get('calculate_voltage_angles', 'auto'))
+        calculate_voltage_angles = _as_auto_voltage_angles(
+            net, _as_calculate_voltage_angles(opf_params.get('calculate_voltage_angles', 'auto')))
         init = opf_params.get('init', 'pf')
-        _electrisim_set_aside_dc_network(net, 'Optimal power flow')
+        _electrisim_set_aside_dc_network(net, 'Optimal power flow', keep_ac_draw=True)
         delta = float(opf_params.get('delta', 1e-8))
         trafo_model = opf_params.get('trafo_model', 't')
         trafo_loading = opf_params.get('trafo_loading', 'current')

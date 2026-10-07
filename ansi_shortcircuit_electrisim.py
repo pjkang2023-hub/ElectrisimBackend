@@ -209,6 +209,12 @@ def _init_ansi_ppc(net, prefault_v: float = 1.0):
         use_pre_fault_voltage=False,
     )
     _add_auxiliary_elements(net)
+    # A second build on the same net (the zero sequence after the positive) found the
+    # last one's auxiliary-bus lookups and read its VSC table, built empty in sc mode:
+    # with a VSC on the network every ground fault failed. Start as the first build does.
+    lookups = net.get('_pd2ppc_lookups')
+    if isinstance(lookups, dict):
+        lookups.pop('aux', None)
     ppc, _ = _pd2ppc(net)
     ppci = _ppc2ppci(ppc, net)
     # In sc mode _pd2ppc pre-builds the ext_grid and motor short-circuit impedances
