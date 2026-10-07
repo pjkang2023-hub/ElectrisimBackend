@@ -59,6 +59,26 @@ def test_breaker_opening_into_its_arrester_matches_the_exponentials():
     assert np.trapezoid(v_arr * sim['i_arr'][:, ka], t) == pytest.approx(energy, rel=1e-3)
 
 
+def test_no_sliver_of_a_last_step_after_an_event_at_the_end():
+    """
+    An event a rounding error before the end - a controller's sample time,
+    summed from its period - is landed on with the end: a sliver of a last
+    step (femtoseconds) after it would put a node only inductances reach at
+    any voltage. Here a current source steps there, as a controller sets it.
+    """
+    ckt = es.Circuit()
+    a = ckt.node('a', 50.0)
+    ckt.add_rl(0, a, 0.05, 10e-6, i0=1000.0, e0=100.0)      # 100 V behind 50 mOhm: 1 kA, 50 V at a
+    ckt.add_rl(a, 0, 0.05, 10e-6, i0=1000.0)
+    k = ckt.add_isrc(0, a, i0=0.0)
+    t_end = 1e-3
+    ckt.at(t_end - 2.2e-15, lambda state: state.set_source_value(k, 500.0))
+    sim = ckt.simulate(t_end, 10e-6)
+    assert sim['t'][-1] == pytest.approx(t_end, abs=1e-15)
+    assert np.min(np.diff(sim['t'])) > 1e-7
+    assert sim['v'][-1, a] == pytest.approx(50.0, abs=1e-6)
+
+
 def test_dc_load_model_in_time():
     """Constant power above its minimum voltage, constant current below, nothing at reverse voltage."""
     f = es.dc_load_current([0.1], 0.8, 1.0, 0.0, 0.0, 0.8)

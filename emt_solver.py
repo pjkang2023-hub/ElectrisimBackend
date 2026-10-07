@@ -409,7 +409,10 @@ class Circuit:
                 h = t_end - t          # no sliver of a last step: rounding would make a tiny one ring
             if queue and t + h > queue[0][0] - tol:
                 t_ev = queue[0][0]
-                if t + h > t_ev or t_ev - (t + h) < tol:
+                # An event within a sliver of the end changes nothing after it: landing on it would
+                # leave a sliver of a last step - femtoseconds, from a sample time's rounding -
+                # across which a node only inductances reach takes any voltage.
+                if (t + h > t_ev or t_ev - (t + h) < tol) and t_end - t_ev >= tol:
                     h = t_ev - t
             t1 = t + h
             iterations.append(0)

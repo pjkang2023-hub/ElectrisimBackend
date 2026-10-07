@@ -118,17 +118,6 @@ def dcdc_capacitors(c_out_mf, rated, vn_in, vn_out):
     return 4e-3 * rated / vn_in ** 2, c_out
 
 
-def add_capacitor(ckt, node, c, v, esr_mohm=0.0, esl_uh=0.0, label=''):
-    """A converter's capacitor charged to ``v`` at ``node``, behind its ESR and ESL when it has them."""
-    r, l = max(esr_mohm, 0.0) * 1e-3, max(esl_uh, 0.0) * 1e-6
-    if r <= 0 and l <= 0:
-        ckt.add_c(0, node, c, w0=-v)
-        return
-    inner = ckt.node(f'{label} capacitor', v)
-    ckt.add_c(0, inner, c, w0=-v)
-    ckt.add_rl(inner, node, r, l)
-
-
 class Vsc:
     """One VSC, built into the circuit, with its controller (``control(t, state)``)."""
 
@@ -649,7 +638,7 @@ class DcDc:
         """
         ``c_out_esr_mohm``, ``c_out_esl_uh``, ``c_in_esr_mohm``,
         ``c_in_esl_uh``: its output and input capacitors' series resistance
-        and inductance (0: none).
+        and inductance (0: none), in its terminals' branches.
         ``r_in``, ``r_out``: its terminals' resistance (0: the solver's floor).
         ``every_step``: its controller acting every step, not twice per period
         (average-value only: the benchmarks).
@@ -688,13 +677,20 @@ class DcDc:
         i_in0 = p_in_mw * 1e6 / max(v_in, 1.0)
         self.phi0 = self._phi(i_out0, v_in)[0]
 
-        # Its terminals: input and output capacitors, the currents to its buses.
-        self.in_node = ckt.node(f'{label} input', v_in)
-        self.out_node = ckt.node(f'{label} output', v_out)
-        self.k_in = ckt.add_rl(term_in, self.in_node, r_in, 0.0, i0=i_in0)
-        add_capacitor(ckt, self.in_node, c_in, v_in, c_in_esr_mohm, c_in_esl_uh, f'{label} input')
-        self.k_out = ckt.add_rl(self.out_node, term_out, r_out, 0.0, i0=i_out0)
-        add_capacitor(ckt, self.out_node, c_out, v_out, c_out_esr_mohm, c_out_esl_uh, f'{label} output')
+        # Its terminals: input and output capacitors, the currents to its buses. Each capacitor's ESR
+        # and ESL are in its terminal's branch, as a VSC's: a fault on its bus meets them there as
+        # behind the capacitor, and the capacitor holds the node its bridge's current is drawn from.
+        esr_in, esr_out = max(c_in_esr_mohm, 0.0) * 1e-3, max(c_out_esr_mohm, 0.0) * 1e-3
+        r_ci, l_ci = r_in + esr_in, max(c_in_esl_uh, 0.0) * 1e-6
+        r_co, l_co = r_out + esr_out, max(c_out_esl_uh, 0.0) * 1e-6
+        # Its capacitors start behind their ESR's drop (its terminals' own as before: at its buses).
+        v_in_node, v_out_node = v_in - esr_in * i_in0, v_out + esr_out * i_out0
+        self.in_node = ckt.node(f'{label} input', v_in_node)
+        self.out_node = ckt.node(f'{label} output', v_out_node)
+        self.k_in = ckt.add_rl(term_in, self.in_node, r_ci, l_ci, i0=i_in0)
+        ckt.add_c(0, self.in_node, c_in, w0=-v_in_node)
+        self.k_out = ckt.add_rl(self.out_node, term_out, r_co, l_co, i0=i_out0)
+        ckt.add_c(0, self.out_node, c_out, w0=-v_out_node)
         switching = self.model == 'switching'
         # Averaged: what its input draws; switching: the current its losses draw.
         self.k_src_in = ckt.add_isrc(self.in_node, 0, i0=i_in0 - (p_out / max(v_in, 1.0) if switching else 0.0))

@@ -369,12 +369,12 @@ def test_dc_fault_at_the_54_v_rack(client):
     discharges through its 4 mohm ESR, i(t) = V0 / ESR e^(-t / ESR C) -
     13.5 kA at once - while its DC/DC shelf blocks; over the 60 ms run (three
     AC periods) it barely decays, and sets Ik. The shelf's output capacitor
-    (the EMT study's default, 2 ms of its 160 kW: 219 mF, no ESR) discharges
-    into the bolted fault in 0.2 us, within the 1 us step: the study warns
-    that ip is not resolved. The AC short circuit behind the converters
-    solves: a grid-forming PCS's missing machine data made it NaN.
+    (the EMT study's default, 2 ms of its 160 kW: 219.5 mF) behind its
+    0.5 mOhm and 0.02 uH is the series RLC discharge, 74 kA at 70 us: it sets
+    ip with the supercapacitor's, resolved. The AC short circuit behind the
+    converters solves: a grid-forming PCS's missing machine data made it NaN.
     """
-    from test_dc_fault import STUDY
+    from test_dc_fault import STUDY, _rlc_ip
     p = _payload()
     cell = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
     p['0'] = {**STUDY, 'fault_bus': cell['C1 rack 10 54 V'], 'duration_ms': '20'}
@@ -382,13 +382,16 @@ def test_dc_fault_at_the_54_v_rack(client):
     assert not any('did not solve' in w for w in out['warnings']), out['warnings']
     (f,) = out['dcfault']['faults']
     sc = next(c for c in f['contributions'] if c['name'] == 'Rack 10 supercapacitor')
-    assert sc['ik_ka'] == pytest.approx(54 / 0.004 / 1e3 * math.exp(-0.060 / (0.004 * 130)), rel=0.03)
+    assert sc['ip_ka'] == pytest.approx(54 / 0.004 / 1e3, rel=0.01)
+    assert sc['ik_ka'] == pytest.approx(sc['ip_ka'] * math.exp(-0.060 / (0.004 * 130)), rel=0.03)
     assert f['ik_ka'] == pytest.approx(sc['ik_ka'], rel=1e-3)
     shelf = next(c for c in f['contributions'] if c['kind'] == 'DC/DC output capacitor'
                  and c['name'] == 'Rack 10 power shelf')
-    assert f['ip_ka'] == pytest.approx(shelf['ip_ka'], rel=0.01)
-    assert any('C1 rack 10 54 V: Rack 10 power shelf output capacitor, with no ESR' in w and 'ip is the time step' in w
-               for w in out['warnings'])
+    ip, tp = _rlc_ip(f['v_prefault_kv'] * 1e3, 0.5e-3 + 1e-6, 0.02e-6, 4e-3 * 0.16e6 / 54 ** 2)
+    assert shelf['ip_ka'] == pytest.approx(ip / 1e3, rel=5e-3)
+    assert shelf['tp_ms'] == pytest.approx(tp * 1e3, abs=2e-3) and f['tp_ms'] == shelf['tp_ms']
+    assert f['ip_ka'] == pytest.approx(shelf['at_peak_ka'] + sc['at_peak_ka'], rel=0.03)
+    assert not any('ip is the time step' in w for w in out['warnings'])
 
 
 @pytest.mark.parametrize('fault', ['3ph', '1ph'])
@@ -695,8 +698,12 @@ def test_emt_a_row_group_fault_against_the_dc_fault_study(client):
     over the last AC period within 15 % of it (its AC source is the IEC
     short circuit's, c 1.1 and the turbines subtransient; here they decay).
     The converters' capacitors - U3's DC link, the DC/DC converters' and the
-    SST's output capacitors on the bus, the same in both studies - discharge
-    at once, V / R: ip within 1 % of each other.
+    SST's output capacitors on the bus, the same in both studies, behind the
+    spec's ESR and ESL - rise in some 10 us. EMT gives the row group's racks
+    (6 MW, no input filter) a default input capacitor, 4 ms of their power,
+    on the bus with nothing in series: its ip is V / R at once. The DC fault
+    study leaves the racks at the fault, so its ip is some 3 % lower; given
+    the same capacitor it is 79.8 kA against EMT's 80.5.
     """
     from test_dc_fault import STUDY
     rg3 = _cells(_dynamic())['Hall 1 row group 3']
@@ -707,5 +714,6 @@ def test_emt_a_row_group_fault_against_the_dc_fault_study(client):
     fault = emt['fault']
     assert fault['ik_ka'] == pytest.approx(study['ik_ka'], rel=0.15)
     assert fault['ip_ka'] == pytest.approx(0.8 / 0.010, rel=0.01)
-    assert study['ip_ka'] == pytest.approx(fault['ip_ka'], rel=0.01) and study['tp_ms'] < 0.1
+    assert study['ip_ka'] == pytest.approx(fault['ip_ka'], rel=0.04) and study['ip_ka'] < fault['ip_ka']
+    assert study['tp_ms'] < 0.1
     assert any(b['label'] == 'Hall 1 rectifier U3' for b in emt['converters_blocked'])
