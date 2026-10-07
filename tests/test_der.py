@@ -392,11 +392,12 @@ def test_dc_dc_capacitors_behind_their_esr_and_esl(client, quiet):
     The converter's input and output capacitors (each 2 ms of its 0.5 MW at
     800 V: 3.125 mF) given 5 mOhm and 1 uH: at a bolted fault on either of
     its buses each is the series RLC discharge through them, resolved. The
-    rectifier's DC link on DC bus A is given its own, so nothing on either
-    bus discharges unresolved.
+    rectifier's DC link on DC bus A is given its own and the halls are
+    resistive (no input capacitance), so nothing on either bus discharges
+    unresolved.
     """
-    from test_dc_fault import _rlc_ip, _vsc_link
-    request = _vsc_link(_drawn_request(), dc_link_mf=10, dc_link_esr_mohm=2, dc_link_esl_uh=0.1)
+    from test_dc_fault import _resistive_loads, _rlc_ip, _vsc_link
+    request = _vsc_link(_resistive_loads(_drawn_request()), dc_link_mf=10, dc_link_esr_mohm=2, dc_link_esl_uh=0.1)
     request = _with(request, _bus('p1', 0.8), _der('Battery', 'b', 'p1', vn_v=800, capacity_kwh=500, l_uh=100),
                     _conv('k1', 'p1', 'dc_a', control_mode='dispatch', p_set_mw=0.1, c_in_esr_mohm=5, c_in_esl_uh=1,
                           c_out_esr_mohm=5, c_out_esl_uh=1))

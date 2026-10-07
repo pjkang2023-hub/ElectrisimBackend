@@ -610,6 +610,21 @@ class _State:
         self.sw_closed[k] = bool(closed)
 
 
+# A constant-power DC load with no input capacitance is given 4 ms x P / V^2 (its stored energy,
+# 2 ms of its power): it is converter-fed, so it has a DC link, and with none a constant-power load
+# fed through any inductance is unstable within microseconds. The EMT and DC fault studies both.
+DEFAULT_LINK_S = 4e-3
+
+
+def default_input_capacitance(share_p, p_w, v):
+    """A DC load's input capacitance (F) when it gives none: 0 unless it draws constant power."""
+    return DEFAULT_LINK_S * p_w / v ** 2 if share_p > 0 and p_w > 0 and v > 0 else 0.0
+
+
+DEFAULT_INPUT_WARNING = ('Given an input capacitance of 4 ms x P / V^2, as they have none: {}. '
+                         'Enter their input filters for their own values.')
+
+
 def dc_load_current(p_mw, vn_kv, share_p, share_i, share_r, v_min_pu, power=None):
     """
     A DC load's current (A) as a function of its voltage (V), with its

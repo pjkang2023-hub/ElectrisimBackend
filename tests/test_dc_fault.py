@@ -127,12 +127,14 @@ def _cap(name, bus, c_mf=10, esr_mohm=2, esl_uh=0.1):
 
 def test_fault_on_each_dc_bus_fed_by_the_converter(client, quiet):
     """
-    Without DC capacitors only the VSC feeds the fault: its DC-link
-    capacitor at once - the peak - then its diodes, once the DC voltage falls
-    below the AC peak - Ik. A fault at the far bus draws less than one at the
-    converter's, through the cable. At the converter's own bus its DC link,
-    with no ESR, discharges within a step of a bolted fault: the study warns
-    that ip is not resolved there, and not at the far bus.
+    Without DC capacitors the VSC and the halls' input capacitors feed the
+    fault: the capacitors at once - the peak - then its diodes, once the DC
+    voltage falls below the AC peak - Ik. The halls have no input filter:
+    being constant-power, converter-fed, they are given the EMT study's
+    default, 4 ms of their power, which the study names. A fault at the far
+    bus draws less than one at the converter's, through the cable. At each
+    bus a capacitor with no ESR or ESL - the DC link, a hall's - discharges
+    within a step of a bolted fault: the study warns that ip is not resolved.
     """
     result = _study(client, quiet, _drawn_request())
     faults = {f['id']: f for f in result['dcfault']['faults']}
@@ -140,14 +142,17 @@ def test_fault_on_each_dc_bus_fed_by_the_converter(client, quiet):
     a, b = faults['cell-dc_a'], faults['cell-dc_b']
     assert a['ik_ka'] > b['ik_ka'] > 0
     for f in (a, b):
-        diodes, link = f['contributions']
-        assert (diodes['kind'], link['kind']) == ('VSC (diodes, blocked)', 'VSC DC-link capacitor')
-        assert diodes['name'] == link['name'] == 'Rectifier'
-        assert diodes['ik_ka'] == pytest.approx(f['ik_ka'], rel=1e-3)
-        assert link['ip_ka'] == pytest.approx(f['ip_ka'], rel=1e-3) and abs(link['ik_ka']) < 1e-3
+        kinds = {(c['kind'], c['name']): c for c in f['contributions']}
+        assert set(kinds) == {('VSC (diodes, blocked)', 'Rectifier'), ('VSC DC-link capacitor', 'Rectifier'),
+                              ('DC load input filter', 'Server hall A'), ('DC load input filter', 'Server hall B')}
+        assert kinds[('VSC (diodes, blocked)', 'Rectifier')]['ik_ka'] == pytest.approx(f['ik_ka'], rel=1e-3)
+        assert all(abs(c['ik_ka']) < 1e-3 for k, c in kinds.items() if k[0] != 'VSC (diodes, blocked)')
+        assert sum(c['at_peak_ka'] for c in f['contributions']) == pytest.approx(f['ip_ka'], rel=1e-3)
         assert f['tp_ms'] < 0.1 and f['settled']
+    assert any('Given an input capacitance of 4 ms x P / V^2' in w and 'Server hall A' in w and 'Server hall B' in w
+               for w in result['warnings'])
     unresolved = [w for w in result['warnings'] if 'ip is the time step' in w]
-    assert len(unresolved) == 1 and 'DC bus A' in unresolved[0] and 'Rectifier DC link' in unresolved[0]
+    assert len(unresolved) == 2 and 'Rectifier DC link' in next(w for w in unresolved if 'DC bus A' in w)
 
 
 def test_dc_link_capacitor_discharges_into_a_fault_at_its_bus(client, quiet):
@@ -298,14 +303,22 @@ def _vsc_link(request, **fields):
     return request
 
 
+def _resistive_loads(request):
+    """The drawn halls as constant resistances: no constant power, no default input capacitance."""
+    for v in request.values():
+        if isinstance(v, dict) and v.get('name') in ('ld_a', 'ld_b'):
+            v['load_model'] = 'constant_resistance'
+    return request
+
+
 def test_converter_capacitor_behind_its_esr_and_esl(client, quiet):
     """
     The rectifier's 10 mF DC link given 2 mOhm and 0.1 uH: at a bolted fault
     on its bus it is the series RLC discharge through those and its DC
     resistance (0.1 mOhm) - resolved, so the study says nothing of it - and
-    sets the peak.
+    sets the peak. The halls are resistive: no input capacitance of theirs.
     """
-    request = _vsc_link(_drawn_request(), dc_link_mf=10, dc_link_esr_mohm=2, dc_link_esl_uh=0.1)
+    request = _vsc_link(_resistive_loads(_drawn_request()), dc_link_mf=10, dc_link_esr_mohm=2, dc_link_esl_uh=0.1)
     result = _study(client, quiet, request, duration_ms=20, fault_bus='dc_a')
     fault = _fault(result, 'cell-dc_a')
     link = next(c for c in fault['contributions'] if c['kind'] == 'VSC DC-link capacitor')
@@ -317,8 +330,12 @@ def test_converter_capacitor_behind_its_esr_and_esl(client, quiet):
 
 
 def test_breaker_in_front_of_a_load_carries_no_fault_current(client, quiet):
-    """A DC load without an input filter leaves at the fault: its breaker is listed, at 0 kA."""
-    request = _with(_drawn_request(), _breaker('ql', 'dc_b', 'ld_b', 'load_dc'))
+    """
+    A DC load with no input filter that draws no constant power (it is not
+    converter-fed: no default input capacitance) leaves at the fault: its
+    breaker is listed, at 0 kA.
+    """
+    request = _with(_resistive_loads(_drawn_request()), _breaker('ql', 'dc_b', 'ld_b', 'load_dc'))
     result = _study(client, quiet, request, duration_ms=5, fault_bus='dc_b')
     (brk,) = _fault(result, 'cell-dc_b')['breakers']
     assert brk['label'] == 'QL' and brk['i_open_ka'] == 0 and not brk['exceeds']

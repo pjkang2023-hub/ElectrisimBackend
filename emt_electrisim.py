@@ -42,13 +42,11 @@ from dc_fault_electrisim import _ac_thevenin, _f, _label, _row_id, _waveform
 from emt_ac import AcBuilder
 import emt_der
 from emt_converters import DcDc, GridFormingVsc, Vsc
-from emt_solver import R_BIAS, Circuit, dc_load_current
+from emt_solver import DEFAULT_INPUT_WARNING, R_BIAS, Circuit, dc_load_current, default_input_capacitance
 
 
 # A constant-power load with no minimum voltage set draws constant current below this.
 _DEFAULT_V_MIN = 0.8
-# A constant-power load with no input capacitance is given 4 ms x P / V^2 (its stored energy, 2 ms of its power).
-_DEFAULT_LINK_S = 4e-3
 
 
 def _round(x, nd=6):
@@ -298,11 +296,11 @@ class _EmtBuilder:
             term = self._terminal('load_dc', li, bus, i_load)
             c = _f(ld.at[li, 'filter_c_uf']) * 1e-6 if 'filter_c_uf' in ld.columns else 0.0
             l = _f(ld.at[li, 'filter_l_mh']) * 1e-3 if 'filter_l_mh' in ld.columns else 0.0
-            if shares[0] > 0 and c <= 0 and p > 0:
-                # A converter-fed load has a DC-link capacitor; with none, a constant-power load fed
-                # through any inductance is unstable within microseconds.
-                c = _DEFAULT_LINK_S * p * 1e6 / self.v_bus[bus] ** 2
-                self.default_filters.append(_label(net, 'load_dc', li))
+            if c <= 0:
+                # A converter-fed load has a DC-link capacitor (emt_solver.default_input_capacitance).
+                c = default_input_capacitance(shares[0], p * 1e6, self.v_bus[bus])
+                if c > 0:
+                    self.default_filters.append(_label(net, 'load_dc', li))
             node = term
             if c > 0 or l > 0:
                 node = ckt.node(f'{_label(net, "load_dc", li)} input', self.v_bus[bus])
@@ -932,8 +930,7 @@ def emt_study(net, params, in_data=None):
         warnings_out.append(f'Constant-power loads: run at least {VSC_VERDICT_SPAN * 1e3:.0f} ms after the last event to tell '
                             "whether they settle - the VSCs' DC voltage loops swing at some 30 Hz.")
     if b.default_filters:
-        warnings_out.append('Given an input capacitance of 4 ms x P / V^2, as they have none: '
-                            + ', '.join(b.default_filters) + '. Enter their input filters for their own values.')
+        warnings_out.append(DEFAULT_INPUT_WARNING.format(', '.join(b.default_filters)))
     if b.blockers and any(blk['t'] is not None for blk in b.blockers):
         names = ', '.join(blk['label'] for blk in b.blockers if blk['t'] is not None)
         warnings_out.append(f'Blocked on undervoltage: {names}.')

@@ -21,7 +21,9 @@ Simplifications, stated with the results:
 - pole-to-pole faults only; a DC bus's voltage is pole to pole and a cable's
   R, L and C per km are its loop values, as in the load flow;
 - DC loads leave the network at the fault (a fault current neglects them, as
-  IEC 61660-1 does), their input filters stay;
+  IEC 61660-1 does), their input filters stay; a constant-power load with
+  none has the EMT study's default, 4 ms of its power at its voltage
+  (emt_solver.default_input_capacitance): it is converter-fed;
 - a VSC's pre-fault current stops as it blocks, and its AC source is the
   pre-fault voltage of its AC bus;
 - the breakers do not open: each is checked on the prospective current
@@ -45,6 +47,7 @@ from scipy.optimize import minimize_scalar
 import pandapower_electrisim as pe
 from emt_converters import dcdc_capacitors, dcdc_rating, vsc_dc_link, vsc_rating
 from emt_solver import Circuit, R_BIAS, R_FLOOR, R_OFF, R_ON  # noqa: F401 - the tests use them
+from emt_solver import DEFAULT_INPUT_WARNING, default_input_capacitance
 
 # The solver: emt_solver.Circuit, shared with the EMT study.
 
@@ -316,23 +319,41 @@ class _Builder:
 
     def _loads(self):
         net, ckt = self.net, self.ckt
-        for li in net.load_dc.index:
-            bus = int(net.load_dc.at[li, 'bus_dc'])
-            if not bool(net.load_dc.at[li, 'in_service']) or bus not in self.bus_node:
+        ld = net.load_dc
+        # A converter stage's input is its converter's (its capacitors are _dc_dc_capacitors'), but
+        # for an SST's grid-forming inverter, which the EMT study too keeps as a load.
+        kept_stages = {sst_stage['input'][1] for rec in getattr(net, 'electrisim_ssts', None) or []
+                       if rec.get('inverter_mode') == 'grid_forming'
+                       for sst_stage in rec['stages'] if sst_stage['stage'] == 'inverter'}
+        defaulted = []
+        for li in ld.index:
+            bus = int(ld.at[li, 'bus_dc'])
+            if not bool(ld.at[li, 'in_service']) or bus not in self.bus_node:
                 continue
-            c = _f(net.load_dc.at[li, 'filter_c_uf']) * 1e-6 if 'filter_c_uf' in net.load_dc.columns else 0.0
+            label = _label(net, 'load_dc', li)
+            p = _f(net.res_load_dc.at[li, 'p_dc_mw']) if li in net.res_load_dc.index else 0.0
+            c = _f(ld.at[li, 'filter_c_uf']) * 1e-6 if 'filter_c_uf' in ld.columns else 0.0
+            aux = 'electrisim_aux' in ld.columns and ld.at[li, 'electrisim_aux'] == True
+            if c <= 0 and (not aux or li in kept_stages):
+                # A constant-power load is converter-fed: its DC link, as the EMT study gives it.
+                share_p = _f(ld.at[li, 'electrisim_share_p'], 1.0) if 'electrisim_share_p' in ld.columns and not aux else 1.0
+                c = default_input_capacitance(share_p, p * 1e6, self._v(bus))
+                if c > 0:
+                    defaulted.append(label)
             if c <= 0:
                 continue   # it leaves the network at the fault, with nothing to discharge
-            label = _label(net, 'load_dc', li)
-            l = _f(net.load_dc.at[li, 'filter_l_mh']) * 1e-3 if 'filter_l_mh' in net.load_dc.columns else 0.0
-            p = _f(net.res_load_dc.at[li, 'p_dc_mw']) if li in net.res_load_dc.index else 0.0
+            l = _f(ld.at[li, 'filter_l_mh']) * 1e-3 if 'filter_l_mh' in ld.columns else 0.0
             i_load = p * 1e6 / self._v(bus)
             term, _ = self._terminal('load_dc', li, bus, i_load)
             inner = ckt.node(f'{label} filter')
             ckt.add_c(0, inner, c, w0=-self._v(bus))
             # The filter inductor keeps the load's current at the fault, into its capacitor.
             k = ckt.add_rl(inner, term, 0.0, l, i0=-i_load if l > 0 else 0.0)
+            if l <= 0 and term == self.bus_node[bus]:
+                self.stiff_caps.append((bus, R_FLOOR, c, f'{label} input capacitor'))
             self.contributions.append(('DC load input filter', label, _row_id(net, 'load_dc', li), ('rl', k)))
+        if defaulted:
+            self.warnings.append(DEFAULT_INPUT_WARNING.format(', '.join(defaulted)))
 
     def _converters(self):
         net, ckt = self.net, self.ckt
@@ -628,7 +649,8 @@ def fault_at(builder, bus, params):
 
 METHOD = ("A time-domain simulation of the DC network from its load-flow state, reported in IEC 61660-1's "
           "terms (ip, tp, Ik, tau1, tau2) but not computed by its method. Pole-to-pole faults; DC loads leave "
-          "at the fault; VSCs block, their DC-link capacitors discharging and their diodes feeding the fault "
+          "at the fault, their input capacitors discharging (a constant-power load's, given none, 4 ms of its "
+          "power, as in the EMT study); VSCs block, their DC-link capacitors discharging and their diodes feeding the fault "
           "from the AC grid; DC/DC converters block, their input and output capacitors discharging; breakers "
           "do not open, each is checked on the current through it at its opening time. A discharge faster than "
           "the time step - a cable's own capacitance into a hard fault, over nanoseconds, or a capacitor's with "
