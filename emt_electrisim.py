@@ -523,7 +523,8 @@ class _EmtBuilder:
             conv = Vsc(self, label, rec['bus_mv'], link, self.bus_node[link], 1e-6, block, p=p, q=q, p_dc=p_dc,
                        rated_mva=rect['rated_mw'], limit_pu=limit, r_ohm=r_ohm, x_ohm=x_ohm, mode_dc='vm_pu',
                        mode_ac='q_mvar', model=model, switching_khz=e.get('switching_khz', 5.0),
-                       eta=eta, p_nl_mw=p_nl, input_side='ac', current_loop_hz=e.get('current_loop_hz', 500.0))
+                       eta=eta, p_nl_mw=p_nl, input_side='ac', current_loop_hz=e.get('current_loop_hz', 500.0),
+                       c_link_esr_mohm=e.get('rect_dc_link_esr_mohm', 0.0), c_link_esl_uh=e.get('rect_dc_link_esl_uh', 0.0))
             self._add_vsc(conv, rec['id'])
 
             # Its DC/DC stage.
@@ -537,7 +538,9 @@ class _EmtBuilder:
             conv = DcDc(self, f"{rec['label']} DC/DC", link, lv, self.bus_node[link], term_out, p_in_mw=p_in,
                         p_out_mw=p_out, mode='voltage', vm_out_pu=vm_out, rated_mw=dcdc['rated_mw'], eta=eta,
                         p_nl_mw=p_nl, bidirectional=True, limit_pu=limit, model=model,
-                        switching_khz=e.get('dcdc_switching_khz', 20.0), block_pu=block)
+                        switching_khz=e.get('dcdc_switching_khz', 20.0), block_pu=block,
+                        c_in_esr_mohm=e.get('dcdc_c_in_esr_mohm', 0.0), c_in_esl_uh=e.get('dcdc_c_in_esl_uh', 0.0),
+                        c_out_esr_mohm=e.get('dcdc_c_out_esr_mohm', 0.0), c_out_esl_uh=e.get('dcdc_c_out_esl_uh', 0.0))
             self._add_dcdc(conv, rec['id'])
 
             # Its grid-following inverter.
@@ -553,7 +556,8 @@ class _EmtBuilder:
             conv = Vsc(self, f"{rec['label']} inverter", rec['bus_lvac'], lv, term, 1e-6, block, p=-p_s, q=-q_s,
                        p_dc=p_dc, rated_mva=inv['rated_mw'], limit_pu=limit, r_ohm=r_ohm, x_ohm=x_ohm, mode_dc='p_mw',
                        mode_ac='q_mvar', model=model, switching_khz=e.get('switching_khz', 5.0),
-                       eta=eta, p_nl_mw=p_nl, input_side='dc', current_loop_hz=e.get('current_loop_hz', 500.0))
+                       eta=eta, p_nl_mw=p_nl, input_side='dc', current_loop_hz=e.get('current_loop_hz', 500.0),
+                       c_link_esr_mohm=e.get('inv_dc_link_esr_mohm', 0.0), c_link_esl_uh=e.get('inv_dc_link_esl_uh', 0.0))
             self._add_vsc(conv, rec['id'])
 
     def _add_vsc(self, conv, row_id):

@@ -193,7 +193,11 @@ stages: `vn_mv_kv`, `vn_lv_dc_kv`, `vn_lv_ac_kv`, `link_kv`, `q_mv_mvar`,
 `inverter_mode`, `inv_rated_mw`, `inv_efficiency_percent`, `inv_no_load_kw`,
 `p_ac_mw`, `q_ac_mvar`, `vm_lv_ac_pu`, `emt_model`, `switching_khz`,
 `dcdc_switching_khz`, `current_limit_pu`, `current_loop_hz` (its rectifier's
-and inverter's, as a VSC's).
+and inverter's, as a VSC's), and its stages' capacitors' ESR and ESL (0: none):
+`rect_dc_link_esr_mohm`, `rect_dc_link_esl_uh`, `dcdc_c_in_esr_mohm`,
+`dcdc_c_in_esl_uh` (on its internal DC link, the EMT study's),
+`dcdc_c_out_esr_mohm`, `dcdc_c_out_esl_uh`, `inv_dc_link_esr_mohm`,
+`inv_dc_link_esl_uh` (on its LV DC port, the EMT and DC fault studies').
 
 **dc_dc_converters** - `id`, **`bus_in`**, **`bus_out`** (DC), `control_mode`
 (`voltage`, `power`, `droop`, `dispatch`, `mppt`, `follower` or `smoothing`),

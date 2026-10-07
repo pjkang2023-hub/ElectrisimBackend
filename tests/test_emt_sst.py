@@ -276,6 +276,48 @@ def test_sst_lv_dc_fault(client, quiet):
     assert {c['label'] for c in result['emt']['converters_blocked']} == {'SST 1 DC/DC', 'SST 1 inverter'}
 
 
+SST_ESR = dict(rect_dc_link_esr_mohm=0.1, rect_dc_link_esl_uh=0.05, dcdc_c_in_esr_mohm=0.1, dcdc_c_in_esl_uh=0.05,
+               dcdc_c_out_esr_mohm=0.5, dcdc_c_out_esl_uh=0.05, inv_dc_link_esr_mohm=0.5, inv_dc_link_esl_uh=0.05)
+
+
+def test_sst_capacitors_behind_their_esr_and_esl(client, quiet):
+    """
+    The SST's capacitors given their ESR and ESL - on its internal link 0.1
+    mOhm and 0.05 uH, on its LV DC port 0.5 mOhm and 0.05 uH. A bolted fault
+    on the port in the DC fault study: its DC/DC stage's output capacitor
+    (2 ms of its 2 MW) and its inverter's DC link (4 ms of its 1 MW), each
+    12.5 mF, are the series RLC discharge, resolved. A 1 mOhm fault in both
+    studies: the same peak, at the same time (without the fields, 761 kA
+    against 769 at the first step, unresolved).
+    """
+    from test_dc_fault import STUDY, _rlc_ip
+    import dc_fault_electrisim as dcf
+
+    def request(params):
+        r = _with_sst(_drawn_request(), LV_DC, dict(LV_DC_LOAD, filter_c_uf='20000', filter_l_mh='0.001',
+                                                    filter_r_mohm='1'),
+                      lv_ac=LV_NETWORK_A, p_ac_mw=0.2, q_ac_mvar=0.0, **{k: str(v) for k, v in SST_ESR.items()})
+        key = next(k for k, v in r.items() if isinstance(v, dict) and 'Parameters' in str(v.get('typ', '')))
+        r[key] = params
+        return r
+
+    bolted = _post(client, quiet, request({**STUDY, 'fault_bus': 'sst_dc', 'duration_ms': '20'}))
+    (f,) = bolted['dcfault']['faults']
+    ip, tp = _rlc_ip(f['v_prefault_kv'] * 1e3, 0.5e-3 + dcf.R_FLOOR, 0.05e-6, 12.5e-3)
+    for kind, name in (('DC/DC output capacitor', 'SST 1 DC/DC'), ('VSC DC-link capacitor', 'SST 1 inverter')):
+        cap = next(c for c in f['contributions'] if c['kind'] == kind and c['name'] == name)
+        assert cap['ip_ka'] == pytest.approx(ip / 1e3, rel=5e-3), name
+        assert cap['tp_ms'] == pytest.approx(tp * 1e3, abs=2e-3), name
+    assert not any('SST 1' in w for w in bolted['warnings'] if 'ip is the time step' in w)
+    emt = _post(client, quiet, request({'typ': 'EmtStudy Parameters', 'user_email': 't@t', 'time_step_us': '1',
+                                        'duration_ms': '10', 'fault_bus': 'sst_dc', 'fault_time_ms': '5',
+                                        'fault_resistance_mohm': '1'}))['emt']['fault']
+    (study,) = _post(client, quiet, request({**STUDY, 'fault_bus': 'sst_dc', 'fault_resistance_mohm': '1',
+                                             'duration_ms': '20'}))['dcfault']['faults']
+    assert emt['ip_ka'] == pytest.approx(study['ip_ka'], rel=0.01)
+    assert emt['tp_ms'] - 5.0 == pytest.approx(study['tp_ms'], abs=2e-3) and study['tp_ms'] > 0.01
+
+
 def test_sst_as_switching_models(client, quiet):
     """
     The SST's three stages as switching models - its rectifier and inverter

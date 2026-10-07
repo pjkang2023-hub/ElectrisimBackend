@@ -465,7 +465,9 @@ class _Builder:
             d_vsc = dcdc['output'][1]
             p_out = -_f(net.res_vsc.at[d_vsc, 'p_dc_mw']) if d_vsc in net.res_vsc.index else 0.0
             _, c_out = dcdc_capacitors(0.0, dcdc_rating(dcdc['rated_mw'], p_out), vn(rect['link']), vn(lv))
-            add('DC/DC output capacitor', f"{rec['label']} DC/DC", rec['id'], 'vsc', d_vsc, lv, c_out)
+            e = rec.get('emt') or {}
+            add('DC/DC output capacitor', f"{rec['label']} DC/DC", rec['id'], 'vsc', d_vsc, lv, c_out,
+                e.get('dcdc_c_out_esr_mohm', 0.0), e.get('dcdc_c_out_esl_uh', 0.0))
             lvac = rec['bus_lvac']
             if inv is None or rec['inverter_mode'] != 'grid_following' or lvac is None \
                     or lvac not in net.res_bus.index or not np.isfinite(net.res_bus.at[lvac, 'vm_pu']):
@@ -474,7 +476,8 @@ class _Builder:
             p_s, q_s = ((_f(net.res_sgen.at[sgen, 'p_mw']), _f(net.res_sgen.at[sgen, 'q_mvar']))
                         if sgen in net.res_sgen.index else (0.0, 0.0))
             c_link = vsc_dc_link(0.0, vsc_rating(inv['rated_mw'], p_s, q_s), vn(lv))
-            add('VSC DC-link capacitor', f"{rec['label']} inverter", rec['id'], 'load_dc', inv['input'][1], lv, c_link)
+            add('VSC DC-link capacitor', f"{rec['label']} inverter", rec['id'], 'load_dc', inv['input'][1], lv, c_link,
+                e.get('inv_dc_link_esr_mohm', 0.0), e.get('inv_dc_link_esl_uh', 0.0))
 
 
     def _tie_isolated(self):

@@ -3549,7 +3549,11 @@ def _electrisim_build_ssts(net, Busbars):
                        'switching_khz': safe_float(el.get('switching_khz'), 5.0),
                        'current_loop_hz': safe_float(el.get('current_loop_hz'), 500.0),
                        'dcdc_switching_khz': safe_float(el.get('dcdc_switching_khz'), 20.0),
-                       'current_limit_pu': safe_float(el.get('current_limit_pu'), 1.2)}}
+                       'current_limit_pu': safe_float(el.get('current_limit_pu'), 1.2),
+                       # its stages' capacitors' ESR and ESL (0: none), for it and the DC fault study
+                       **{k: max(safe_float(el.get(k), 0.0), 0.0) for k in (
+                           'rect_dc_link_esr_mohm', 'rect_dc_link_esl_uh', 'dcdc_c_in_esr_mohm', 'dcdc_c_in_esl_uh',
+                           'dcdc_c_out_esr_mohm', 'dcdc_c_out_esl_uh', 'inv_dc_link_esr_mohm', 'inv_dc_link_esl_uh')}}}
         if rec['link_kv'] <= 0:
             rec['link_kv'] = float(net.bus.at[b_mv, 'vn_kv']) * math.sqrt(2) * 1.1
         for key, bus, vn in (('vn_mv_kv', b_mv, float(net.bus.at[b_mv, 'vn_kv'])),
