@@ -299,6 +299,36 @@ def test_fault_cleared_by_a_breaker(client, quiet):
     assert any('run at least 60 ms after the last event' in w for w in result['warnings'])
 
 
+def test_dc_link_behind_its_esr_and_esl_against_the_dc_fault_study(client, quiet):
+    """
+    The rectifier's 10 mF DC link given 2 mOhm and 0.1 uH, a 1 mOhm fault on
+    DC bus A: its discharge, with the halls' input filters, sets the peak -
+    the same in the EMT and DC fault studies, which read the same fields, at
+    the same time. Its ESR and ESL are in its DC terminals' branch: behind
+    them the averaged bridge drove its diodes into the collapsing rail for a
+    step (482 kA with the halls at 1 kW).
+    """
+    from test_dc_fault import STUDY, _vsc_link
+
+    def build(params):
+        request = _vsc_link(_drawn_request(), dc_link_mf=10, dc_link_esr_mohm=2, dc_link_esl_uh=0.1)
+        for el in request.values():
+            if isinstance(el, dict) and el.get('name') in ('ld_a', 'ld_b'):
+                el.update(filter_c_uf='5000', filter_l_mh='0.001', v_min_pu='0.8')
+        key = next(k for k, v in request.items() if 'Parameters' in str(v.get('typ', '')))
+        request[key] = params
+        return request
+
+    emt = _run(client, quiet, build({'typ': 'EmtStudy Parameters', 'time_step_us': '1', 'duration_ms': '5',
+                                     'fault_bus': 'dc_a', 'fault_time_ms': '2', 'fault_resistance_mohm': '1',
+                                     'user_email': 't@t'}))['emt']['fault']
+    study = _run(client, quiet, build({**STUDY, 'fault_bus': 'dc_a', 'fault_resistance_mohm': '1',
+                                       'duration_ms': '20'}))
+    (fault,) = study['dcfault']['faults']
+    assert emt['ip_ka'] == pytest.approx(fault['ip_ka'], rel=0.01)
+    assert emt['tp_ms'] - 2.0 == pytest.approx(fault['tp_ms'], abs=2e-3) and fault['tp_ms'] > 0.02
+
+
 def test_load_step_settles(client, quiet):
     """Server hall B steps up 20 %: run long enough for the rectifier's DC voltage loop, both halls settle."""
     result = _run(client, quiet, _request(step_load='ld_b', step_percent=20, step_time_ms=2, duration_ms=100,

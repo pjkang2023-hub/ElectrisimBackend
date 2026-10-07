@@ -118,6 +118,17 @@ def dcdc_capacitors(c_out_mf, rated, vn_in, vn_out):
     return 4e-3 * rated / vn_in ** 2, c_out
 
 
+def add_capacitor(ckt, node, c, v, esr_mohm=0.0, esl_uh=0.0, label=''):
+    """A converter's capacitor charged to ``v`` at ``node``, behind its ESR and ESL when it has them."""
+    r, l = max(esr_mohm, 0.0) * 1e-3, max(esl_uh, 0.0) * 1e-6
+    if r <= 0 and l <= 0:
+        ckt.add_c(0, node, c, w0=-v)
+        return
+    inner = ckt.node(f'{label} capacitor', v)
+    ckt.add_c(0, inner, c, w0=-v)
+    ckt.add_rl(inner, node, r, l)
+
+
 class Vsc:
     """One VSC, built into the circuit, with its controller (``control(t, state)``)."""
 
@@ -131,21 +142,25 @@ class Vsc:
         p_dc = _f(net.res_vsc.at[vi, 'p_dc_mw']) if res else p
         return cls(builder, label, int(net.vsc.at[vi, 'bus']), bus_dc, term, r_dc, block_pu, p=p, q=q, p_dc=p_dc,
                    rated_mva=col('rated_mva', 0.0), limit_pu=col('current_limit_pu', 1.2),
-                   c_link_mf=col('dc_link_mf', 0.0), r_ohm=col('r_ohm', 0.0), x_ohm=col('x_ohm', 0.0),
+                   c_link_mf=col('dc_link_mf', 0.0), c_link_esr_mohm=col('dc_link_esr_mohm', 0.0),
+                   c_link_esl_uh=col('dc_link_esl_uh', 0.0), r_ohm=col('r_ohm', 0.0), x_ohm=col('x_ohm', 0.0),
                    mode_dc=str(net.vsc.at[vi, 'control_mode_dc'] if 'control_mode_dc' in net.vsc.columns else 'vm_pu'),
                    mode_ac=str(net.vsc.at[vi, 'control_mode_ac'] if 'control_mode_ac' in net.vsc.columns else 'q_mvar'),
                    model=str(net.vsc.at[vi, 'emt_model']) if 'emt_model' in net.vsc.columns else 'average',
                    switching_khz=col('switching_khz', 5.0))
 
     def __init__(self, builder, label, ac_bus, bus_dc, term, r_dc, block_pu, *, p, q, p_dc, rated_mva=0.0,
-                 limit_pu=1.2, c_link_mf=0.0, r_ohm=0.0, x_ohm=0.0, mode_dc='vm_pu', mode_ac='q_mvar',
-                 model='average', switching_khz=5.0, eta=1.0, p_nl_mw=0.0, input_side='dc'):
+                 limit_pu=1.2, c_link_mf=0.0, c_link_esr_mohm=0.0, c_link_esl_uh=0.0, r_ohm=0.0, x_ohm=0.0,
+                 mode_dc='vm_pu', mode_ac='q_mvar', model='average', switching_khz=5.0, eta=1.0, p_nl_mw=0.0,
+                 input_side='dc'):
         """
         ``p``, ``q``: its load-flow power at its AC bus (the load convention);
         ``p_dc``: at its DC bus (the load convention). ``eta``, ``p_nl_mw``: a
         converter stage's efficiency and no-load loss, its input on its
         ``input_side`` ('ac': a rectifier stage; 'dc': an inverter stage) -
-        losses its DC side carries.
+        losses its DC side carries. ``c_link_esr_mohm``, ``c_link_esl_uh``: its
+        DC-link capacitor's series resistance and inductance (0: none), in
+        its DC terminals' branch.
         """
         ckt, ac = builder.ckt, builder.ac
         self.label = label
@@ -184,13 +199,18 @@ class Vsc:
         # Its DC current, as its load flow has it at its DC bus: what its AC side
         # takes, less its reactor's losses.
         i_dc = -p_dc * 1e6 / max(v_bus, 1.0)
-        v_link = v_bus + r_dc * i_dc
+        # Its DC link's ESR and ESL are in its DC terminals' branch, with its DC resistance: a DC
+        # fault's discharge meets them there as behind the capacitor, and the link holds the
+        # bridge's DC rail - behind them, the averaged bridge's stiff phase voltages would drive
+        # its diodes into the rail as a fault collapses it, until it blocks.
+        r_out, l_out = r_dc + max(c_link_esr_mohm, 0.0) * 1e-3, max(c_link_esl_uh, 0.0) * 1e-6
+        v_link = v_bus + r_out * i_dc
 
         # The circuit: DC link, its DC current (averaged only), the isolating transformer, the bridge.
         switching = self.model == 'switching'
         self.p_node = ckt.node(f'{label} DC+', v_link)
         ckt.add_c(0, self.p_node, c_link, w0=-v_link)
-        self.k_dc_out = ckt.add_rl(self.p_node, term, r_dc, 0.0, i0=i_dc)
+        self.k_dc_out = ckt.add_rl(self.p_node, term, r_out, l_out, i0=i_dc)
         # Averaged, its DC current; switching, the current its losses draw (the bridge's is its switches').
         p_e0 = 1.5 * (e_ph * i_ph.conjugate()).real
         self.k_src = ckt.add_isrc(0, self.p_node, i0=-(self._dc_drawn(p_e0) - p_e0) / v_link if switching else i_dc)
@@ -623,9 +643,13 @@ class DcDc:
 
     def __init__(self, builder, label, bus_in, bus_out, term_in, term_out, *, p_in_mw, p_out_mw, mode='voltage',
                  vm_out_pu=1.0, p_set_mw=0.0, rated_mw=0.0, eta=1.0, p_nl_mw=0.0, bidirectional=False,
-                 limit_pu=1.2, model='average', switching_khz=20.0, c_out_mf=0.0, block_pu=0.8, r_in=0.0, r_out=0.0,
+                 limit_pu=1.2, model='average', switching_khz=20.0, c_out_mf=0.0, c_out_esr_mohm=0.0,
+                 c_out_esl_uh=0.0, c_in_esr_mohm=0.0, c_in_esl_uh=0.0, block_pu=0.8, r_in=0.0, r_out=0.0,
                  every_step=False, droop_pu=0.0, p_ref=None, p_in_ref=None):
         """
+        ``c_out_esr_mohm``, ``c_out_esl_uh``, ``c_in_esr_mohm``,
+        ``c_in_esl_uh``: its output and input capacitors' series resistance
+        and inductance (0: none).
         ``r_in``, ``r_out``: its terminals' resistance (0: the solver's floor).
         ``every_step``: its controller acting every step, not twice per period
         (average-value only: the benchmarks).
@@ -668,9 +692,9 @@ class DcDc:
         self.in_node = ckt.node(f'{label} input', v_in)
         self.out_node = ckt.node(f'{label} output', v_out)
         self.k_in = ckt.add_rl(term_in, self.in_node, r_in, 0.0, i0=i_in0)
-        ckt.add_c(0, self.in_node, c_in, w0=-v_in)
+        add_capacitor(ckt, self.in_node, c_in, v_in, c_in_esr_mohm, c_in_esl_uh, f'{label} input')
         self.k_out = ckt.add_rl(self.out_node, term_out, r_out, 0.0, i0=i_out0)
-        ckt.add_c(0, self.out_node, c_out, w0=-v_out)
+        add_capacitor(ckt, self.out_node, c_out, v_out, c_out_esr_mohm, c_out_esl_uh, f'{label} output')
         switching = self.model == 'switching'
         # Averaged: what its input draws; switching: the current its losses draw.
         self.k_src_in = ckt.add_isrc(self.in_node, 0, i0=i_in0 - (p_out / max(v_in, 1.0) if switching else 0.0))

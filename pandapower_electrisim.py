@@ -2364,11 +2364,14 @@ def _electrisim_build_dc_dc_converters(net):
                           'soc_ref_percent': safe_float(el.get('soc_ref_percent'), 50.0),
                           'soc_gain': safe_float(el.get('soc_gain'), 0.1)},
             'input': None, 'vsc': None, 'output_load': None, 'aux_bus': None, 'aux_ext_grid': None,
-            # For the EMT study: its model (a dual active bridge), switching frequency, current limit, output capacitor.
+            # For the EMT study: its model (a dual active bridge), switching frequency, current limit, output
+            # capacitor; for it and the DC fault study, its capacitors' ESR and ESL (0: none).
             'emt': {'model': 'switching' if el.get('emt_model') == 'switching' else 'average',
                     'switching_khz': safe_float(el.get('switching_khz'), 20.0),
                     'current_limit_pu': safe_float(el.get('current_limit_pu'), 1.2),
-                    'c_out_mf': safe_float(el.get('c_out_mf'), 0.0)},
+                    'c_out_mf': safe_float(el.get('c_out_mf'), 0.0),
+                    **{k: max(safe_float(el.get(k), 0.0), 0.0)
+                       for k in ('c_out_esr_mohm', 'c_out_esl_uh', 'c_in_esr_mohm', 'c_in_esl_uh')}},
         }
         for side, bus, key in (('input', b_in, 'vn_in_kv'), ('output', b_out, 'vn_out_kv')):
             rated_kv, vn = safe_float(el.get(key), 0.0), float(net.bus_dc.at[bus, 'vn_kv'])
@@ -6765,9 +6768,10 @@ def create_other_elements(in_data,net,x, Busbars):
             if 'id' not in net.vsc.columns:
                 net.vsc['id'] = ''
             net.vsc.at[vsc_idx, 'id'] = in_data[x].get('id', '')
-            # For the EMT study: its rating, DC link and current limit (0: from its load flow), its model
-            for col, default in (('rated_mva', 0.0), ('dc_link_mf', 0.0), ('current_limit_pu', 1.2),
-                                 ('switching_khz', 5.0)):
+            # For the EMT study: its rating, DC link and current limit (0: from its load flow), its model;
+            # for it and the DC fault study, its DC link's ESR and ESL (0: none)
+            for col, default in (('rated_mva', 0.0), ('dc_link_mf', 0.0), ('dc_link_esr_mohm', 0.0),
+                                 ('dc_link_esl_uh', 0.0), ('current_limit_pu', 1.2), ('switching_khz', 5.0)):
                 if col not in net.vsc.columns:
                     net.vsc[col] = default
                 net.vsc.at[vsc_idx, col] = safe_float(in_data[x].get(col, default), default)

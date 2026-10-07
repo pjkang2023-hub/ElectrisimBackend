@@ -9,7 +9,8 @@ their DC-link capacitors discharge into it and their diodes rectify the AC
 grid into it, behind the grid's short-circuit impedance at the converter's AC
 bus and the converter's own reactor. DC/DC converters block too: their input
 and output capacitors discharge into a fault on their buses. The converters'
-capacitors are the EMT study's (emt_converters): as given, or its default.
+capacitors are the EMT study's (emt_converters): as given, or its default,
+behind the ESR and ESL their elements give.
 
 The results are given in IEC 61660-1's terms - peak ip, time to peak tp,
 quasi-steady current Ik, and the rise and decay time constants tau1, tau2 of
@@ -27,8 +28,8 @@ Simplifications, stated with the results:
   through it at its opening time;
 - a discharge faster than the time step is not resolved: a cable's own
   capacitance into a hard fault, which Simscape shows as a spike of some
-  20 ns at t = 0 (tests/emt_reference); or a capacitor with no ESR - a
-  converter's, whose element gives none - into a hard fault on its bus,
+  20 ns at t = 0 (tests/emt_reference); or a capacitor with no ESR or
+  ESL given - a converter's by default - into a hard fault on its bus,
   which the study warns of.
 """
 
@@ -375,16 +376,19 @@ class _Builder:
                 ckt.add_diode(x, p_node)
                 ckt.add_diode(0, x)
             term, _ = self._terminal('vsc', vi, bus_dc, 0.0)
-            r_dc = _f(net.vsc.at[vi, 'r_dc_ohm'])
-            k = ckt.add_rl(p_node, term, r_dc, 0.0)
-            # Its DC-link capacitor, on its side of its DC resistance, as the EMT study has it.
+            col = lambda c: _f(net.vsc.at[vi, c]) if c in net.vsc.columns else 0.0
+            # Its DC-link capacitor on its bridge's DC rail, its ESR and ESL with its DC resistance in
+            # its DC terminals' branch, as the EMT study has them.
+            r_out = _f(net.vsc.at[vi, 'r_dc_ohm']) + max(col('dc_link_esr_mohm'), 0.0) * 1e-3
+            l_out = max(col('dc_link_esl_uh'), 0.0) * 1e-6
+            k = ckt.add_rl(p_node, term, r_out, l_out)
             p, q = ((_f(net.res_vsc.at[vi, 'p_mw']), _f(net.res_vsc.at[vi, 'q_mvar']))
                     if vi in net.res_vsc.index else (0.0, 0.0))
-            col = lambda c: _f(net.vsc.at[vi, c]) if c in net.vsc.columns else 0.0
             c_link = vsc_dc_link(col('dc_link_mf'), vsc_rating(col('rated_mva'), p, q),
                                  float(net.bus_dc.at[bus_dc, 'vn_kv']) * 1e3)
-            cap = self._cap(p_node, c_link, 0.0, 0.0, v_dc, f'{label} DC link',
-                            bus_dc if term == self.bus_node[bus_dc] else None, max(r_dc, R_FLOOR))
+            stiff = term == self.bus_node[bus_dc] and l_out <= 0
+            cap = self._cap(p_node, c_link, 0.0, 0.0, v_dc, f'{label} DC link', bus_dc if stiff else None,
+                            max(r_out, R_FLOOR))
             row_id = _row_id(net, 'vsc', vi)
             self.contributions.append(('VSC (diodes, blocked)', label, row_id, ('diff', ('rl', k), cap)))
             self.contributions.append(('VSC DC-link capacitor', label, row_id, cap))
@@ -404,11 +408,12 @@ class _Builder:
         def vn(bus):
             return float(net.bus_dc.at[bus, 'vn_kv']) * 1e3
 
-        def add(kind, label, cid, table, idx, bus, c):
+        def add(kind, label, cid, table, idx, bus, c, esr_mohm=0.0, esl_uh=0.0):
             if bus in self.bus_node and c > 0:
                 term, _ = self._terminal(table, idx, bus, 0.0)
                 name = f"{label} {kind.split(' ', 1)[1]}"     # e.g. 'Shelf output capacitor'
-                port = self._cap(term, c, 0.0, 0.0, self._v(bus), name, bus if term == self.bus_node[bus] else None)
+                port = self._cap(term, c, max(esr_mohm, 0.0) * 1e-3, max(esl_uh, 0.0) * 1e-6, self._v(bus), name,
+                                 bus if term == self.bus_node[bus] else None)
                 self.contributions.append((kind, label, cid, port))
 
         for rec in getattr(net, 'electrisim_dc_dc_converters', None) or []:
@@ -421,10 +426,12 @@ class _Builder:
             else:
                 p_out, out = rec['p_set_mw'], ('load_dc', rec['output_load'])
             b_in, b_out = rec['bus_in'], rec['bus_out']
-            c_in, c_out = dcdc_capacitors((rec.get('emt') or {}).get('c_out_mf', 0.0),
-                                          dcdc_rating(rec['rated_mw'], p_out), vn(b_in), vn(b_out))
-            add('DC/DC input capacitor', rec['label'], rec['id'], 'load_dc', rec['input'], b_in, c_in)
-            add('DC/DC output capacitor', rec['label'], rec['id'], out[0], out[1], b_out, c_out)
+            e = rec.get('emt') or {}
+            c_in, c_out = dcdc_capacitors(e.get('c_out_mf', 0.0), dcdc_rating(rec['rated_mw'], p_out), vn(b_in), vn(b_out))
+            add('DC/DC input capacitor', rec['label'], rec['id'], 'load_dc', rec['input'], b_in, c_in,
+                e.get('c_in_esr_mohm', 0.0), e.get('c_in_esl_uh', 0.0))
+            add('DC/DC output capacitor', rec['label'], rec['id'], out[0], out[1], b_out, c_out,
+                e.get('c_out_esr_mohm', 0.0), e.get('c_out_esl_uh', 0.0))
         for rec in getattr(net, 'electrisim_ssts', None) or []:
             stages = {s['stage']: s for s in rec['stages']}
             rect, dcdc, inv = stages.get('rectifier'), stages.get('dcdc'), stages.get('inverter')
@@ -669,8 +676,8 @@ def dc_fault_study(net, params, in_data=None):
             tau = min(t for _, t in fast)
             warnings_out.append(f"A fault on {result['label']}: {', '.join(n for n, _ in fast)}, with no ESR, "
                                 f"discharge{'s' if len(fast) == 1 else ''} into it within ten time steps (time constant "
-                                f"{tau * 1e6:.2g} us), so ip is the time step's, not the circuit's: enter a fault "
-                                "resistance, or shorten the time step.")
+                                f"{tau * 1e6:.2g} us), so ip is the time step's, not the circuit's: enter its ESR "
+                                "and ESL, a fault resistance, or a shorter time step.")
         faults.append(result)
     # Each breaker's worst case over the faults.
     worst = {}

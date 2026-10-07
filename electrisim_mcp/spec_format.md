@@ -175,8 +175,9 @@ feeds beneath it. `check_network` reports them under their ids: `dc_buses`,
 **vscs** - an AC/DC converter. `id`, **`bus`** (AC), **`bus_dc`** (DC),
 `r_ohm`, `x_ohm`, `r_dc_ohm`, `control_mode_ac` (`vm_pu` or `q_mvar`) with
 `control_value_ac`, `control_mode_dc` (`vm_pu` or `p_mw`) with
-`control_value_dc`, `rated_mva`, `dc_link_mf`, `current_limit_pu`, `emt_model`,
-`switching_khz`. A VSC needs at least sqrt(2) times its AC line voltage on its
+`control_value_dc`, `rated_mva`, `dc_link_mf`, `dc_link_esr_mohm`,
+`dc_link_esl_uh`, `current_limit_pu`, `emt_model`, `switching_khz`. Its DC-link
+capacitor's ESR and ESL (0: none) count in the EMT and DC fault studies. A VSC needs at least sqrt(2) times its AC line voltage on its
 DC side: 0.48 kV AC for an 800 V bus.
 
 **ssts** - a solid-state transformer, MV AC to LV DC (and optionally LV AC).
@@ -193,7 +194,9 @@ stages: `vn_mv_kv`, `vn_lv_dc_kv`, `vn_lv_ac_kv`, `link_kv`, `q_mv_mvar`,
 `vm_out_pu`, `p_set_mw`, `rated_mw`, `vn_in_kv`, `vn_out_kv`,
 `efficiency_percent`, `no_load_loss_kw`, `bidirectional`, `droop_percent`,
 `smoothing_tau_s`, `soc_ref_percent`, `soc_gain`, `emt_model`,
-`switching_khz`, `current_limit_pu`, `c_out_mf`.
+`switching_khz`, `current_limit_pu`, `c_out_mf`, `c_out_esr_mohm`,
+`c_out_esl_uh`, `c_in_esr_mohm`, `c_in_esl_uh` (its output and input
+capacitors' ESR and ESL, 0: none, in the EMT and DC fault studies).
 
 **dc_breakers** - `id`, **`bus`** (DC), **`element`** (the DC bus, line, load,
 source, VSC or DC/DC converter it switches), `closed`, `breaker_type`,

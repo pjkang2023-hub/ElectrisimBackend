@@ -284,6 +284,38 @@ def test_benchmark_matches_simscape():
     assert mine['ip'] == pytest.approx(theirs['ip'], rel=2e-3)
 
 
+def _rlc_ip(v0, r, l, c):
+    """The peak of an underdamped series RLC discharge from v0 into a short, and when."""
+    a = r / (2 * l)
+    w = math.sqrt(1 / (l * c) - a * a)
+    tp = math.atan(w / a) / w
+    return v0 / (w * l) * math.exp(-a * tp) * math.sin(w * tp), tp
+
+
+def _vsc_link(request, **fields):
+    vsc = next(v for v in request.values() if isinstance(v, dict) and str(v.get('typ', '')).startswith('VSC'))
+    vsc.update({k: str(v) for k, v in fields.items()})
+    return request
+
+
+def test_converter_capacitor_behind_its_esr_and_esl(client, quiet):
+    """
+    The rectifier's 10 mF DC link given 2 mOhm and 0.1 uH: at a bolted fault
+    on its bus it is the series RLC discharge through those and its DC
+    resistance (0.1 mOhm) - resolved, so the study says nothing of it - and
+    sets the peak.
+    """
+    request = _vsc_link(_drawn_request(), dc_link_mf=10, dc_link_esr_mohm=2, dc_link_esl_uh=0.1)
+    result = _study(client, quiet, request, duration_ms=20, fault_bus='dc_a')
+    fault = _fault(result, 'cell-dc_a')
+    link = next(c for c in fault['contributions'] if c['kind'] == 'VSC DC-link capacitor')
+    ip, tp = _rlc_ip(fault['v_prefault_kv'] * 1e3, 2e-3 + 1e-4 + dcf.R_FLOOR, 0.1e-6, 10e-3)
+    assert link['ip_ka'] == pytest.approx(ip / 1e3, rel=5e-3)
+    assert link['tp_ms'] == pytest.approx(tp * 1e3, abs=2e-3)
+    assert fault['ip_ka'] == pytest.approx(link['ip_ka'], rel=5e-3)      # the cable and the diodes, a little
+    assert not any('ip is the time step' in w for w in result['warnings'])
+
+
 def test_breaker_in_front_of_a_load_carries_no_fault_current(client, quiet):
     """A DC load without an input filter leaves at the fault: its breaker is listed, at 0 kA."""
     request = _with(_drawn_request(), _breaker('ql', 'dc_b', 'ld_b', 'load_dc'))

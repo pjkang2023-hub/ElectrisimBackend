@@ -456,7 +456,9 @@ class _EmtBuilder:
                         mode=rec['mode'], vm_out_pu=rec['vm_out_pu'], p_set_mw=rec['p_set_mw'], rated_mw=rec['rated_mw'],
                         eta=rec['eta'], p_nl_mw=rec['p_nl_mw'], bidirectional=rec['bidirectional'] or control == 'smoothing',
                         limit_pu=e.get('current_limit_pu', 1.2), model=e.get('model', 'average'),
-                        switching_khz=e.get('switching_khz', 20.0), c_out_mf=e.get('c_out_mf', 0.0), block_pu=block,
+                        switching_khz=e.get('switching_khz', 20.0), c_out_mf=e.get('c_out_mf', 0.0),
+                        c_out_esr_mohm=e.get('c_out_esr_mohm', 0.0), c_out_esl_uh=e.get('c_out_esl_uh', 0.0),
+                        c_in_esr_mohm=e.get('c_in_esr_mohm', 0.0), c_in_esl_uh=e.get('c_in_esl_uh', 0.0), block_pu=block,
                         droop_pu=rec.get('droop_percent', 0.0) / 100.0 if control == 'droop' else 0.0)
             conv.control_mode = control
             conv.bus_out = b_out

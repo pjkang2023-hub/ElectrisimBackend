@@ -387,6 +387,33 @@ def test_battery_fault_current_closed_form(client, quiet):
     assert any('P1: K1 input capacitor, with no ESR' in w for w in result['warnings'])
 
 
+def test_dc_dc_capacitors_behind_their_esr_and_esl(client, quiet):
+    """
+    The converter's input and output capacitors (each 2 ms of its 0.5 MW at
+    800 V: 3.125 mF) given 5 mOhm and 1 uH: at a bolted fault on either of
+    its buses each is the series RLC discharge through them, resolved. The
+    rectifier's DC link on DC bus A is given its own, so nothing on either
+    bus discharges unresolved.
+    """
+    from test_dc_fault import _rlc_ip, _vsc_link
+    request = _vsc_link(_drawn_request(), dc_link_mf=10, dc_link_esr_mohm=2, dc_link_esl_uh=0.1)
+    request = _with(request, _bus('p1', 0.8), _der('Battery', 'b', 'p1', vn_v=800, capacity_kwh=500, l_uh=100),
+                    _conv('k1', 'p1', 'dc_a', control_mode='dispatch', p_set_mw=0.1, c_in_esr_mohm=5, c_in_esl_uh=1,
+                          c_out_esr_mohm=5, c_out_esl_uh=1))
+    key = next(k for k, v in request.items() if 'Parameters' in str(v.get('typ', '')))
+    request[key] = {**STUDY, 'duration_ms': '20'}
+    with quiet():
+        result = json.loads(client.post('/', json=request).get_data(as_text=True))
+    faults = _by_id(result['dcfault']['faults'])
+    for bus, kind in (('cell-p1', 'DC/DC input capacitor'), ('cell-dc_a', 'DC/DC output capacitor')):
+        f = faults[bus]
+        cap = next(c for c in f['contributions'] if c['kind'] == kind and c['name'] == 'K1')
+        ip, tp = _rlc_ip(f['v_prefault_kv'] * 1e3, 5e-3 + dcf.R_FLOOR, 1e-6, 4e-3 * 0.5e6 / 800 ** 2)
+        assert cap['ip_ka'] == pytest.approx(ip / 1e3, rel=5e-3), bus
+        assert cap['tp_ms'] == pytest.approx(tp * 1e3, abs=2e-3), bus
+    assert not any('ip is the time step' in w for w in result['warnings']), result['warnings']
+
+
 # --- The other studies ----------------------------------------------------------------------
 
 MIXED = [
