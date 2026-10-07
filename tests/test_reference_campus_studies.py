@@ -742,6 +742,8 @@ def test_emt_the_utility_lost_the_island_holds(client):
     emt, warnings = _emt(client, time_step_us=20, duration_ms=500, island_time_ms=20)
     assert not emt['converters_blocked'], emt['converters_blocked']
     assert not any('swings ever wider' in w for w in warnings), warnings
+    # The racks behind the rectifiers ripple at six times the island's frequency, some 0.03 %: held, and ripple.
+    assert not [l['label'] for l in emt['loads'] if l['verdict'] in ('oscillates', 'oscillates, growing')]
     conv = {c['label']: c for c in emt['converters']}
     for label in ('Hall 2 rectifier equivalent', 'Hall 2 SST equivalent DC/DC', 'Hall 2 SST equivalent rectifier'):
         assert not conv[label]['limited_ms'], (label, conv[label]['limited_ms'])

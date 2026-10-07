@@ -79,6 +79,22 @@ def test_no_sliver_of_a_last_step_after_an_event_at_the_end():
     assert sim['v'][-1, a] == pytest.approx(50.0, abs=1e-6)
 
 
+def test_a_held_small_swing_is_ripple_not_an_oscillation():
+    """
+    After the last event: 0.25 V of 295 Hz on an 800 V load, held, is the
+    AC network's ripple through a rectifier (the campus's islanded racks
+    read 'oscillates'); the same growing is still an instability starting;
+    10 V held is an oscillation.
+    """
+    from emt_electrisim import _oscillation_verdict
+    t = np.arange(0.0, 0.5, 1e-5)
+    wave = np.sin(2 * np.pi * 295 * t)
+    assert _oscillation_verdict(t, 800 + 0.125 * wave, 0.02, 800, 0.06) == 'steady ripple'
+    assert _oscillation_verdict(t, 800 + 0.125 * np.exp(3 * t) * wave, 0.02, 800, 0.06) == 'oscillates, growing'
+    assert _oscillation_verdict(t, 800 + 5 * wave, 0.02, 800, 0.06) == 'oscillates'
+    assert _oscillation_verdict(t, 800 + 0.125 * np.exp(-20 * t) * wave, 0.02, 800, 0.06) == 'settles'
+
+
 def test_dc_load_model_in_time():
     """Constant power above its minimum voltage, constant current below, nothing at reverse voltage."""
     f = es.dc_load_current([0.1], 0.8, 1.0, 0.0, 0.0, 0.8)

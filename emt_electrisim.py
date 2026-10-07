@@ -657,6 +657,10 @@ def _oscillation_verdict(t, v, t_from, vn, min_span=1e-3):
         return 'settles'
     if a_late > 1.1 * a_early:
         return 'oscillates, growing'
+    if a_late < RIPPLE_PU * vn:
+        # Held, and small: the AC network's ripple through its converters (six times its frequency from a
+        # rectifier), not a swing of its own. The campus's islanded racks read 'oscillates' at 0.25 V on 800 V.
+        return 'steady ripple'
     return 'oscillates'
 
 
@@ -1152,6 +1156,7 @@ def _dcdc_result(conv, t_event):
 
 SQ2 = math.sqrt(2.0)
 VSC_VERDICT_SPAN = 0.06    # s: two periods of a VSC's DC voltage loop
+RIPPLE_PU = 1e-3           # a held swing below this, peak to peak per unit of the load's voltage, is ripple
 
 
 def _volts(w):
