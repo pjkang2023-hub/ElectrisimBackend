@@ -392,14 +392,64 @@ def test_chiller_start_overloads_its_16_mva_transformer_briefly(client):
     assert tx['loading_during_percent'] == pytest.approx(100 * math.hypot(p_on, q_on) / 16, rel=0.05)
     assert all(b['loading_before_percent'] is not None for b in steady['branches'])
 
-    p['0'] = dict(params, mode='dynamic')
+    p['0'] = dict(params, mode='dynamic', thermal_check='continuous')
     dyn = _post(client, p)
     (dm,) = dyn['motors']
     assert dyn['summary']['start_duration_s'] == dm['start_time_s'] and 0.5 < dm['start_time_s'] < 4
+    assert dyn['summary']['thermal_check'] == 'continuous'
     dfails = [b for b in dyn['branches'] if not b['pass']]
     assert [b['name'] for b in dfails] == ['Campus A transformer']
     assert dfails[0]['loading_before_percent'] == pytest.approx(tx['loading_before_percent'], rel=1e-3)
     assert 100 < dfails[0]['loading_during_percent'] < 150
+    assert dfails[0]['short_time_limit_percent'] is None
+
+
+def test_chiller_start_within_its_transformers_short_time_limit(client):
+    """
+    Dynamic mode judges the start against a short-time limit by default: the
+    Campus A transformer's 129 % lasts the chiller's 1.6 s start. Heated as a
+    first-order body from its 53 % before, with IEC 60076-7's 7 min winding
+    time constant, it could carry some fourteen times its rating for that
+    long; IEC 60076-7 holds a medium power transformer (to 100 MVA) to 1.8 pu
+    in short-time emergency loading, so its limit is 180 % and it passes. Its
+    continuous verdict is still reported. With a time constant of 0.6 s the
+    heating binds instead, by the closed form, and it fails.
+    """
+    import motor_starting_electrisim as M
+    # The closed form: no time, no limit but the cap; a long start, the
+    # continuous limit; loaded to its limit before, no margin at all.
+    assert M._short_time_limit(0.5, 1.0, 1e-9, 420.0, 1.8) == 1.8
+    assert M._short_time_limit(0.5, 1.0, 1e6, 420.0) == pytest.approx(1.0)
+    assert M._short_time_limit(1.0, 1.0, 1.5, 420.0) == pytest.approx(1.0)
+    assert M._short_time_limit(0.5, 1.0, 420.0, 420.0) == pytest.approx(
+        math.sqrt(0.25 + 0.75 / (1 - math.exp(-1))))
+    assert [M._by_rating(M.TRAFO_SHORT_TIME_PU, sn) for sn in (2.5, 16, 100, 500)] == [2.0, 1.8, 1.8, 1.5]
+
+    p = _payload()
+    cid = {v.get('userFriendlyName'): v.get('id') for v in p.values() if isinstance(v, dict)}
+    params = {'typ': 'MotorStartingPandaPower Parameters', 'mode': 'dynamic', 'motor_ids': cid['Chiller A1'],
+              'starting_method': 'dol', 'voltage_limit_percent': '15', 'thermal_limit_percent': '100',
+              'frequency': '50', 'user_email': 't@t'}
+    p['0'] = params
+    dyn = _post(client, p)
+    summary = dyn['summary']
+    assert summary['thermal_check'] == 'short_time'
+    assert summary['n_fail_thermal'] == 0 and summary['n_over_continuous'] == 1
+    tx = next(b for b in dyn['branches'] if b['name'] == 'Campus A transformer')
+    assert tx['sn_mva'] == 16 and not tx['pass_continuous'] and tx['pass']
+    assert tx['short_time_limit_percent'] == pytest.approx(180.0)
+    for b in dyn['branches']:
+        assert b['short_time_limit_percent'] >= 100.0 and b['pass'], b['name']
+
+    p['0'] = dict(params, trafo_tau_min='0.01')
+    tight = _post(client, p)
+    tx2 = next(b for b in tight['branches'] if b['name'] == 'Campus A transformer')
+    k_pre = tx2['loading_before_percent'] / 100
+    t = tight['summary']['start_duration_s']
+    want = 100 * math.sqrt(k_pre ** 2 + (1 - k_pre ** 2) / (1 - math.exp(-t / 0.6)))
+    assert tx2['short_time_limit_percent'] == pytest.approx(want, rel=1e-9)
+    assert 100 < want < tx2['loading_during_percent'] and not tx2['pass']
+    assert tight['summary']['n_fail_thermal'] == 1
 
 
 def test_dc_fault_at_the_54_v_rack(client):

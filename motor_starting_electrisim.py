@@ -31,6 +31,22 @@ except ImportError:
 
 VALID_METHODS = ("dol", "soft_start", "star_delta", "autotransformer", "reactor")
 
+# A dynamic start's thermal check against a short-time limit. A branch heats as
+# a first-order body, its losses as its current squared: from its loading
+# before the start, k_pre, held at k for the start's t, its temperature rise is
+#     dT_r (k_pre^2 + (k^2 - k_pre^2) (1 - e^(-t / tau))),
+# within the rise its continuous limit k_lim allows, dT_r k_lim^2, while
+#     k^2 <= k_pre^2 + (k_lim^2 - k_pre^2) / (1 - e^(-t / tau)).
+# tau is a transformer's winding time constant (IEC 60076-7: 4 min for a
+# distribution transformer, 7 to 10 min above - 7 taken) and a conductor's for
+# a line. A transformer is also held to its short-time emergency current
+# (IEC 60076-7: 2.0 pu to 2.5 MVA, 1.8 pu to 100 MVA, 1.5 pu above). A start's
+# seconds against a continuous rating failed the campus's 16 MVA transformer
+# at 129 % for the chiller's 1.6 s start.
+TRAFO_TAU_MIN = ((2.5, 4.0), (math.inf, 7.0))
+TRAFO_SHORT_TIME_PU = ((2.5, 2.0), (100.0, 1.8), (math.inf, 1.5))
+LINE_TAU_MIN = 10.0
+
 
 def _sf(value: Any, default: float = 0.0) -> float:
     if value is None or value == "" or str(value).lower() in ("none", "null", "nan"):
@@ -228,6 +244,7 @@ def _branch_loadings(net) -> List[Dict[str, Any]]:
                 "id": mid,
                 "name": name,
                 "element": "trafo",
+                "sn_mva": _clean(_sf(row.get("sn_mva"), float("nan"))),
                 "loading_during_percent": _clean(loading),
                 "max_i_ka": None,
                 "i_ka": _clean(_sf(net.res_trafo.at[idx, "i_lv_ka"] if "i_lv_ka" in net.res_trafo.columns else None, float("nan"))),
@@ -244,11 +261,24 @@ def _branch_loadings(net) -> List[Dict[str, Any]]:
                 "id": mid,
                 "name": name,
                 "element": "trafo3w",
+                "sn_mva": _clean(_sf(row.get("sn_hv_mva"), float("nan"))),
                 "loading_during_percent": _clean(loading),
                 "max_i_ka": None,
                 "i_ka": _clean(_sf(net.res_trafo3w.at[idx, "i_hv_ka"] if "i_hv_ka" in net.res_trafo3w.columns else None, float("nan"))),
             })
     return results
+
+
+def _by_rating(table, sn_mva: float) -> float:
+    return next(v for top, v in table if sn_mva <= top)
+
+
+def _short_time_limit(k_pre: float, k_lim: float, t_s: float, tau_s: float,
+                      cap: Optional[float] = None) -> float:
+    """The loading (pu) a branch may carry for t_s from k_pre: see TRAFO_TAU_MIN."""
+    frac = -math.expm1(-t_s / tau_s) if t_s > 0 and tau_s > 0 else 1.0
+    k = math.sqrt(max(k_pre ** 2 + (k_lim ** 2 - k_pre ** 2) / frac, 0.0))
+    return min(k, max(cap, k_lim)) if cap is not None else k
 
 
 def _before_by_branch(net) -> Dict[Any, Any]:
@@ -957,13 +987,19 @@ def _build_system_with_motors(
     return ss, meta, motor_map
 
 
-def _dynamic_branch_loadings(net, payload: Dict[str, Any], thermal_limit: float) -> None:
+def _dynamic_branch_loadings(net, payload: Dict[str, Any], params: Dict[str, Any]) -> None:
     """
     Thermal check for a dynamic start: a load flow with each starting motor
     replaced by the power it drew at the moment of the largest total demand.
     Dynamic mode returned no branches at all, so its thermal check could
     never fail - with the radial grid's TA at 118 % during the start.
+
+    That loading, held for the whole start, is judged against each branch's
+    short-time limit for the start's duration (see TRAFO_TAU_MIN), or with
+    thermal_check "continuous" against its continuous rating; both verdicts
+    are reported.
     """
+    thermal_limit = _sf(params.get("thermal_limit_percent"), 100.0)
     ts = payload.get("timeseries") or {}
     t = np.asarray(ts.get("t") or [], dtype=float)
     series = ts.get("motors") or {}
@@ -1004,24 +1040,49 @@ def _dynamic_branch_loadings(net, payload: Dict[str, Any], thermal_limit: float)
         net.load.drop([li for li in added if li in net.load.index], inplace=True)
         for idx, state in switched:
             net.motor.at[idx, "in_service"] = state
+    # How long the start current flows. None when a motor did not finish
+    # starting: its locked-rotor current then flows until its protection trips.
+    times = [m.get("start_time_s") for m in payload.get("motors") or []]
+    duration = max(times) if times and all(x is not None for x in times) else None
+    check = str(params.get("thermal_check") or "short_time").strip().lower()
+    short = check != "continuous" and duration is not None and duration > 0
+    if check != "continuous" and not short:
+        payload.setdefault("warnings", []).append(
+            "A motor did not finish starting, so the branches are judged on their continuous rating.")
+    trafo_tau = _sf(params.get("trafo_tau_min"), 0.0)
+    line_tau = _sf(params.get("line_tau_min"), LINE_TAU_MIN)
+    k_lim = thermal_limit / 100.0
     labels = getattr(net, "user_friendly_names", None) or {}
-    n_fail = 0
+    n_fail = n_over = 0
     for br in branches:
         loading = br.get("loading_during_percent")
-        br["pass"] = loading is None or float(loading) <= thermal_limit
+        continuous = loading is None or float(loading) <= thermal_limit
+        limit = None
+        if short and loading is not None:
+            before = br.get("loading_before_percent")
+            # Its loading before unknown: as loaded as its limit allows, the safe side.
+            k_pre = k_lim if before is None else float(before) / 100.0
+            if br.get("element") == "line":
+                tau, cap = line_tau, None
+            else:
+                sn = _sf(br.get("sn_mva"), 0.0)
+                tau = trafo_tau or _by_rating(TRAFO_TAU_MIN, sn)
+                cap = _by_rating(TRAFO_SHORT_TIME_PU, sn)
+            limit = 100.0 * _short_time_limit(k_pre, k_lim, float(duration), tau * 60.0, cap)
         br["thermal_limit_percent"] = thermal_limit
+        br["short_time_limit_percent"] = _clean(limit)
+        br["pass_continuous"] = continuous
+        br["pass"] = continuous if limit is None else float(loading) <= limit
         n_fail += 0 if br["pass"] else 1
+        n_over += 0 if continuous else 1
         if br.get("name") in labels:
             br["name"] = labels[br["name"]]
     payload["branches"] = branches
     payload["summary"]["n_fail_thermal"] = n_fail
+    payload["summary"]["n_over_continuous"] = n_over
+    payload["summary"]["thermal_check"] = "short_time" if short else "continuous"
     payload["summary"]["thermal_check_t_s"] = _clean(float(t[k]))
-    # How long the start current flows, so a fail reads against it: the
-    # campus transformer's 129 % lasts the chiller's 1.5 s start. None when a
-    # motor did not finish starting.
-    times = [m.get("start_time_s") for m in payload.get("motors") or []]
-    payload["summary"]["start_duration_s"] = (
-        _clean(max(times)) if times and all(x is not None for x in times) else None)
+    payload["summary"]["start_duration_s"] = _clean(duration)
 
 
 def motor_starting(net, params: Dict[str, Any], in_data: Dict[str, Any]) -> str:
@@ -1031,7 +1092,7 @@ def motor_starting(net, params: Dict[str, Any], in_data: Dict[str, Any]) -> str:
         if mode in ("dynamic", "transient", "tds", "andes"):
             payload = _dynamic_start(params, in_data)
             if not payload.get("error") and net is not None:
-                _dynamic_branch_loadings(net, payload, _sf(params.get("thermal_limit_percent"), 100.0))
+                _dynamic_branch_loadings(net, payload, params)
         else:
             payload = _steady_state_start(net, params, in_data)
         return json.dumps(payload, allow_nan=False)

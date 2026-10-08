@@ -1717,7 +1717,10 @@ def test_drawn_diagram_dynamic_motor_starting(client, quiet, grid):
     for branch in dynamic['branches']:
         assert branch['loading_during_percent'] == pytest.approx(
             steady_loading[branch['name']], rel=0.1, abs=1.0), branch['name']
-    assert dynamic['summary']['n_fail_thermal'] == steady['summary']['n_fail_thermal']
+    # Against the continuous rating the two modes agree; dynamic mode judges
+    # the start by default against a short-time limit, which it passes.
+    assert dynamic['summary']['n_over_continuous'] == steady['summary']['n_fail_thermal']
+    assert dynamic['summary']['n_fail_thermal'] <= steady['summary']['n_fail_thermal']
 
 
 ANDES_PARAMS = {'frequency': '50', 'sn_mva': '100'}
