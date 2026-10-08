@@ -3100,18 +3100,17 @@ def _electrisim_build_pcs(net, Busbars, study):
                 continue
             src = on_bus[0]
         if src is None:
-            _electrisim_warn(net, f"PCS '{label}' has no battery, flywheel, SOFC system or PV array on its DC side, "
-                                  "so it is left out.")
+            _electrisim_warn(net, f"PCS '{label}' has no battery, supercapacitor, flywheel, SOFC system or PV array "
+                                  "on its DC side, so it is left out.")
             continue
         ders.remove(src)
         kind = der_electrisim.kind_of(src.get('typ'))
         src_label = src.get('userFriendlyName') or src.get('name')
         if bus_dc is not None and bus_dc in net.bus_dc.index:
             net.bus_dc.drop(bus_dc, inplace=True)       # the PCS's own DC link: its source's terminals
-        if kind == 'Supercapacitor':
-            _electrisim_warn(net, f"PCS '{label}' is left out: a supercapacitor connects to a DC bus, "
-                                  f"directly or through a DC/DC converter ('{src_label}').")
-            continue
+        # A supercapacitor behind a PCS, grid-forming, is an eSTATCOM: a STATCOM with an energy store
+        # (GE Vernova's FACTSFLEX). It was refused - a supercapacitor joined a DC bus only - so the
+        # 800 V AI factory reference had no way to draw one.
         try:
             obj = der_electrisim.build(src)
         except ValueError as e:

@@ -387,13 +387,10 @@ def _pcs_plants(in_data: Dict[str, Any], warnings: List[str]) -> List[Dict[str, 
             on_bus = [d for d in ders if d.get("bus") == el.get("bus_dc")]
             src = on_bus[0] if len(on_bus) == 1 else None
         if src is None:
-            warnings.append(f"PCS '{label}' has no battery, flywheel, SOFC system or PV array on its DC side, "
-                            "so it is left out.")
+            warnings.append(f"PCS '{label}' has no battery, supercapacitor, flywheel, SOFC system or PV array "
+                            "on its DC side, so it is left out.")
             continue
         kind = der_electrisim.kind_of(src.get("typ"))
-        if kind == "Supercapacitor":
-            warnings.append(f"PCS '{label}' is left out: a supercapacitor connects to a DC bus.")
-            continue
         try:
             obj = der_electrisim.build(src)
         except ValueError as e:
@@ -458,10 +455,15 @@ def _add_pcs_dynamics(ss: Any, rec: Dict[str, Any], n: int, bus: Any, static_idx
     trips = {k: v * freq / 60.0 for k, v in (("ft0", 56.5), ("ft1", 58.5), ("ft2", 61.8), ("ft3", 62.0))}
     common = dict(bus=bus, gen=static_idx, Sn=s, fn=freq, pqflag=0, ialim=max(rec["k"], 0.1),
                   qmx=1.0, qmn=-1.0, **trips)
-    if kind in ("Battery", "Flywheel"):
+    if kind in ("Battery", "Flywheel", "Supercapacitor"):
         if kind == "Battery":
             en, soc0, soc_min, soc_max = obj.energy_kwh / 1e3, obj.soc0, obj.soc_min, obj.soc_max
             eta_c, eta_d = obj.eta_charge, 1.0
+        elif kind == "Supercapacitor":
+            # Its usable energy, 1/2 C (V^2 - V_min^2), as a share of its energy at its rated voltage.
+            usable = obj.energy(obj.v_rated)[1]
+            en, soc0, soc_min, soc_max = usable / 3.6e9, obj.energy()[1] / max(usable, 1e-12), 0.0, 1.0
+            eta_c = eta_d = 1.0
         else:
             # Its energy, 1/2 J w^2, as a share of its energy at full speed: speed squared.
             en, soc0, soc_min, soc_max = obj.e_max / 3.6e9, obj.s0 ** 2, obj.s_min ** 2, 1.0

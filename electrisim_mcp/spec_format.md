@@ -247,7 +247,8 @@ irradiance profile), `temperature_profile_id` (a temperature profile).
 A source or store goes on a DC bus (behind a DC/DC converter on a bus of its
 own, or directly on a network bus), or behind a PCS - then give it no `bus`.
 
-**pcs** - a power conversion system joining one source or store to an AC bus.
+**pcs** - a power conversion system joining one source or store to an AC bus
+(grid-forming, with a supercapacitor and no `p_set_mw`, an eSTATCOM).
 `id`, **`bus`** (AC), and its DC side: `source` (a battery, supercapacitor,
 flywheel, SOFC or PV array id) or `bus_dc` (a DC bus with its source alone on
 it). `control` (`grid_following` or `grid_forming`), `s_rated_mva`,

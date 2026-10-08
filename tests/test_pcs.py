@@ -213,13 +213,13 @@ def test_power_window_from_its_source(client, quiet):
 
 
 def test_left_out_with_a_reason(client, quiet):
+    """A PCS with nothing on its DC side is left out, named. (A supercapacitor behind one was too: an eSTATCOM now.)"""
     request = _drawn_request()
     lv = _lv(request)
     result = _post(client, quiet, _with(request, _der('Supercapacitor', 'sc'), _pcs('p1', lv, 'sc'), _pcs('p2', lv)))
-    assert not result.get('pcs')
+    assert [p['id'] for p in result['pcs']] == ['cell-p1']
     w = ' '.join(result['warnings'])
-    assert "PCS 'P1' is left out: a supercapacitor connects to a DC bus" in w
-    assert "PCS 'P2' has no battery, flywheel, SOFC system or PV array on its DC side" in w
+    assert "PCS 'P2' has no battery, supercapacitor, flywheel, SOFC system or PV array on its DC side" in w
 
 
 # --- Short circuit -----------------------------------------------------------------------------
