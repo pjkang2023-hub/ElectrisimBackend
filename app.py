@@ -803,7 +803,8 @@ def simulation():
                 # Extract user email for logging
                 user_email = in_data[x].get('user_email', 'unknown@user.com')
 
-                net = pp.create_empty_network()
+                # At the network's frequency: an earth fault's thermal current depends on it.
+                net = pp.create_empty_network(f_hz=_as_frequency(in_data[x].get('frequency', 50)))
                 Busbars = pandapower_electrisim.create_busbars(in_data, net)
                 pandapower_electrisim.create_other_elements(in_data, net, x, Busbars)
                 export_python = _coerce_export_flag(in_data[x].get('exportPython', False))

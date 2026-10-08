@@ -28,6 +28,11 @@ Its oracle, in three parts:
    neutral resistors folded in.
 
 Goldens pin the rest. Regenerate with:  pytest --regen-golden
+
+And the drawn diagram (Phase 19b): each
+tests/reference/reference_ai_factory_800vdc.diagram_*payload.json is the request
+the browser sent after drawing the spec and running the study from its dialog
+at 60 Hz - the same answers as the spec's.
 """
 import contextlib
 import io
@@ -499,3 +504,116 @@ def test_build_model_route(client, factory):
     wanted = {r['id'] for key in layer.LISTS for r in spec.get(key, [])}
     assert wanted <= elements, sorted(wanted - elements)
     assert set(drawn['load_profiles']) == {p['id'] for p in spec['load_profiles']}
+
+
+# --- the drawn diagram ----------------------------------------------------------------------
+# Each tests/reference/reference_ai_factory_800vdc.diagram_*payload.json is the request the
+# browser sent after drawing the spec - /build-model's model through the canvas import - and
+# running the study from its dialog at 60 Hz. Recapture after changing the import or a
+# payload builder (19b in the design note): the tests say whether the drawing still computes
+# the spec's answers.
+
+def _drawn(name):
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_{name}payload.json'), encoding='utf-8') as handle:
+        return json.load(handle)
+
+
+def _post_drawn(client, payload):
+    with _silent():
+        response = client.post('/', json=payload)
+    assert response.status_code == 200, response.get_data(as_text=True)[:400]
+    out = json.loads(response.get_data(as_text=True))
+    assert not out.get('error'), out.get('message')
+    return out
+
+
+def _by_spec_id(spec, payload, rows):
+    """A study's result rows under their spec ids: cell name -> its label -> the spec element so named."""
+    label = {v['name']: v.get('userFriendlyName') for v in payload.values() if isinstance(v, dict) and 'name' in v}
+    ident = {r.get('name', r['id']): r['id'] for key, lst in spec.items() if isinstance(lst, list)
+             for r in lst if isinstance(r, dict) and 'id' in r}
+    return {ident[label[r['name']]]: r for r in rows if label.get(r['name']) in ident}
+
+
+def test_drawn_diagram_is_the_spec(factory):
+    """
+    The drawing's request: every element, 60 Hz, the gensets out of service
+    - the import dropped a generator's in_service, so all three ran - and
+    each diode's anode and cathode the spec's.
+    """
+    spec = factory[0]
+    payload = _drawn('')
+    assert payload['0']['frequency'] == '60'
+    rows = [v for v in payload.values() if isinstance(v, dict) and 'userFriendlyName' in v]
+    named = {v['userFriendlyName']: v for v in rows}
+    by_name = {r.get('name', r['id']): r for key, lst in spec.items() if isinstance(lst, list)
+               for r in lst if isinstance(r, dict) and 'id' in r and key != 'load_profiles'}
+    assert set(by_name) <= set(named), sorted(set(by_name) - set(named))
+    for g in spec['generators']:
+        assert named[g['name']]['in_service'] == ('false' if g.get('in_service') is False else 'true'), g['id']
+    cell = {v['name']: v['userFriendlyName'] for v in rows if 'name' in v}
+    buses = {r['id']: r['name'] for r in spec['dc_buses']}
+    for d in spec['dc_diodes']:
+        drawn = named[d['name']]
+        assert (cell[drawn['busFrom']], cell[drawn['busTo']]) == (buses[d['from_bus']], buses[d['to_bus']]), d['id']
+
+
+def test_drawn_diagram_load_flow_matches_spec(client, factory, solved):
+    """The drawn factory's load flow: every AC and DC bus, diode, rectifier, SST, PCS and DC/DC converter as the spec's."""
+    spec, net, _ = factory
+    payload = _drawn('')
+    out = _post_drawn(client, payload)
+    assert not out.get('warnings'), out.get('warnings')
+    res = _results(solved)
+    ids = _ac_ids(net)
+    differ = []
+
+    def check(what, got, want, tol=1e-6):
+        if got is None or abs(float(got) - float(want)) > tol:
+            differ.append(f'{what}: spec {want}, drawn {got}')
+
+    buses = _by_spec_id(spec, payload, out['busbars'])
+    assert set(buses) == set(ids['bus'])
+    for ident, idx in ids['bus'].items():
+        check(f'bus {ident} vm_pu', buses[ident]['vm_pu'], solved.res_bus.at[idx, 'vm_pu'], 1e-8)
+        check(f'bus {ident} va_degree', buses[ident]['va_degree'], solved.res_bus.at[idx, 'va_degree'])
+    dc = _by_spec_id(spec, payload, out['dcbuses'])
+    assert set(dc) == set(res['dc_buses'])
+    for ident, row in dc.items():
+        check(f'DC bus {ident}', row['vm_pu'], res['dc_buses'][ident]['vm_pu'], 1e-8)
+    diodes = _by_spec_id(spec, payload, out['dcdiodes'])
+    assert set(diodes) == set(res['dc_diodes'])
+    for ident, row in diodes.items():
+        assert row['conducting'] == res['dc_diodes'][ident]['conducting'], ident
+        check(f'diode {ident} i_ka', row['i_ka'], res['dc_diodes'][ident]['i_ka'])
+        check(f'diode {ident} v_ak_v', row['v_ak_v'], res['dc_diodes'][ident]['v_ak_v'], 1e-4)
+    for key, spec_key, col in (('ssts', 'ssts', 'p_mv_mw'), ('vscs', 'vscs', 'p_mw'), ('pcs', 'pcs', 'p_mw'),
+                               ('pcs', 'pcs', 'q_mvar'), ('dcdcconverters', 'dc_dc_converters', 'p_in_mw')):
+        rows = _by_spec_id(spec, payload, out[key])
+        assert set(rows) == set(res[spec_key]), key
+        for ident, row in rows.items():
+            check(f'{key} {ident} {col}', row[col], res[spec_key][ident][col])
+    grid = out['externalgrids'][0]
+    check('grid p_mw', grid['p_mw'], solved.res_ext_grid.at[ids['ext_grid']['Grid'], 'p_mw'])
+    assert not differ, f'{len(differ)} differ\n  ' + '\n  '.join(differ[:20])
+
+
+@pytest.mark.parametrize('fault, case, name', [
+    ('3ph', 'max', 'sc_'), ('3ph', 'min', 'sc_min_'), ('2ph', 'max', 'sc2ph_'), ('2ph', 'min', 'sc2ph_min_'),
+    ('1ph', 'max', 'sc1ph_'), ('1ph', 'min', 'sc1ph_min_')])
+def test_drawn_diagram_short_circuit_matches_spec(client, factory, fault, case, name):
+    """
+    The drawn factory's IEC fault at every AC bus, as the spec's with its
+    layer, at 60 Hz: the IEC study took no frequency, so an earth fault's
+    thermal current - Electrisim's, from m at the network's frequency - was a
+    50 Hz network's, 0.3-0.8 % high.
+    """
+    spec, net, _ = factory
+    payload = _drawn(name)
+    assert (payload['0']['fault_type'], payload['0']['fault_location'], payload['0']['frequency']) == (fault, case, '60')
+    drawn = _by_spec_id(spec, payload, _post_drawn(client, payload)['busbars'])
+    want = _study_sc(net, fault, case)
+    assert set(drawn) == set(want)
+    differ = [f'{i} {c}: spec {want[i][c]}, drawn {drawn[i][c]}' for i in want for c in ('ikss_ka', 'ip_ka', 'ith_ka')
+              if abs(float(drawn[i][c]) - float(want[i][c])) > 1e-6 * max(1.0, float(want[i][c]))]
+    assert not differ, '\n  '.join(differ)
