@@ -1616,6 +1616,9 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
                 lines.append(f"# {row['name']!s}: a battery's internal resistance, from its cells to its bus")
             elif 'electrisim_dc_breaker' in row.index and row['electrisim_dc_breaker'] == True:
                 lines.append(f"# DC breaker {row['name']!s}: a low-resistance coupler, in service when closed")
+            elif 'electrisim_dc_diode' in row.index and row['electrisim_dc_diode'] == True:
+                lines.append(f"# DC diode {row['name']!s}: r_on + v_f / I at its settled current; "
+                             "out of service while it blocks")
             lines.append(f"pp.create_line_dc_from_parameters(net, from_bus_dc=bus_dc_{int(row['from_bus_dc'])}, "
                          f"to_bus_dc=bus_dc_{int(row['to_bus_dc'])}, length_km={_export_py_literal(row['length_km'])}, "
                          f"r_ohm_per_km={_export_py_literal(row['r_ohm_per_km'])}, "
@@ -1917,6 +1920,26 @@ _SETTLE_TOL_MW = 1e-7
 
 
 def _electrisim_runpp(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, **kwargs):
+    """
+    The load flow with the DC diodes settled around it: each conducting or
+    blocking as the voltages of the last load flow set it, its forward drop
+    at the current it carries - repeating until none changes.
+    """
+    if not _electrisim_live_dc_diodes(net):
+        return _electrisim_runpp_settled(net, max_rounds, tolerance_mw, **kwargs)
+    _electrisim_start_dc_diodes(net)
+    for _ in range(30):
+        _electrisim_runpp_settled(net, max_rounds, tolerance_mw, **kwargs)
+        if not _electrisim_settle_dc_diodes(net):
+            _electrisim_warn_unsupplied_dc(net)
+            return None
+        kwargs = {**kwargs, 'init': 'results'}
+    _electrisim_warn(net, 'The DC diodes had not settled after 30 load flows: '
+                          'each is as the last one left it.')
+    return None
+
+
+def _electrisim_runpp_settled(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, **kwargs):
     """
     The load flow, with the microgrid sources and stores settled: each one's
     terminal voltage at the current it delivers, each directly connected
@@ -3752,6 +3775,11 @@ def _electrisim_apply_dc_breakers(net):
             idx = int(hit[0])
             if not closed:
                 table.at[idx, 'in_service'] = False
+                if et == 'line_dc' and _electrisim_is_dc_diode(net, idx):
+                    # A diode behind an open breaker: out, whatever its voltages.
+                    for d in getattr(net, 'electrisim_dc_diodes', None) or []:
+                        if d.get('line') == idx:
+                            d['in_service'] = False
             rec['target'] = (et, idx)
         else:
             _electrisim_warn(net, f"DC Breaker '{label}' is left out: it goes between a DC bus and a DC cable, "
@@ -3805,6 +3833,172 @@ def _electrisim_in_service(el):
     return str(value).strip().lower() not in ('false', '0', 'no', 'off')
 
 
+# A DC diode - a server shelf's OR-ing diode in the GE Vernova / NVIDIA 800 V
+# designs, fed from its own lineup and a catcher - conducts from its anode
+# (busFrom, its left pin) to its cathode (busTo) only. Conducting, it is a
+# line_dc of resistance r_on + v_f / I: once the load flow has settled it at
+# the current I it carries, it drops exactly v_f + r_on I. Blocking - its
+# current would reverse, or its anode is not v_f above its cathode - the line
+# is out of service.
+_DC_DIODE_MIN_I_FRACTION = 1e-3     # of its rating: the current its resistance is held at, near none
+_DC_DIODE_TOL_V = 1e-4              # its forward drop settled to 0.1 mV
+
+
+def _electrisim_create_dc_diode(net, row):
+    label = row.get('userFriendlyName', row.get('name'))
+    anode, cathode = _electrisim_dc_bus(net, row.get('busFrom')), _electrisim_dc_bus(net, row.get('busTo'))
+    if anode is None or cathode is None or anode == cathode:
+        _electrisim_warn(net, f"DC Diode '{label}' is left out: it joins two DC buses, "
+                              "its anode on its left pin and its cathode on its right.")
+        return
+    rec = {
+        'name': row.get('name'), 'id': row.get('id', ''), 'label': label,
+        'bus_from': int(anode), 'bus_to': int(cathode),
+        'v_f_v': max(safe_float(row.get('v_f_v'), 1.6), 0.0),
+        'r_on_ohm': max(safe_float(row.get('r_on_mohm'), 0.1), 0.0) / 1e3,
+        'rated_current_ka': safe_float(row.get('rated_current_ka'), 1.5),
+        'in_service': _electrisim_in_service(row),
+    }
+    rated = rec['rated_current_ka'] if rec['rated_current_ka'] > 0 else 1.0
+    idx = pp.create_line_dc_from_parameters(
+        net, from_bus_dc=anode, to_bus_dc=cathode, length_km=1.0,
+        r_ohm_per_km=_electrisim_dc_diode_r(rec, rated * 1e3), max_i_ka=rated,
+        name=row.get('name'), in_service=rec['in_service'])
+    for col, default in (('id', ''), ('electrisim_dc_diode', False)):
+        if col not in net.line_dc.columns:
+            net.line_dc[col] = default
+    net.line_dc.at[idx, 'id'] = rec['id']
+    net.line_dc.at[idx, 'electrisim_dc_diode'] = True
+    rec['line'] = int(idx)
+    if not hasattr(net, 'electrisim_dc_diodes'):
+        net.electrisim_dc_diodes = []
+    net.electrisim_dc_diodes.append(rec)
+    if not hasattr(net, 'user_friendly_names'):
+        net.user_friendly_names = {}
+    net.user_friendly_names[row.get('name')] = label
+
+
+def _electrisim_is_dc_diode(net, idx):
+    return 'electrisim_dc_diode' in net.line_dc.columns and net.line_dc.at[idx, 'electrisim_dc_diode'] == True
+
+
+def _electrisim_dc_diode_r(rec, amps):
+    """Its resistance at a forward current (A): r_on + v_f / I."""
+    rated = rec['rated_current_ka'] * 1e3 if rec['rated_current_ka'] > 0 else 1e3
+    return max(rec['r_on_ohm'] + rec['v_f_v'] / max(amps, _DC_DIODE_MIN_I_FRACTION * rated), 1e-9)
+
+
+def _electrisim_dc_bus_volts(net, bus):
+    res = getattr(net, 'res_bus_dc', None)
+    if res is None or bus not in res.index or bus not in net.bus_dc.index:
+        return float('nan')
+    return float(res.at[bus, 'vm_pu']) * float(net.bus_dc.at[bus, 'vn_kv']) * 1e3
+
+
+def _electrisim_live_dc_diodes(net):
+    return [d for d in getattr(net, 'electrisim_dc_diodes', None) or []
+            if d['in_service'] and d.get('line') in net.line_dc.index]
+
+
+def _electrisim_dc_diode_amps(net, d):
+    """Its forward current (A) in the load flow just run; NaN when it has none."""
+    i = d['line']
+    if not bool(net.line_dc.at[i, 'in_service']) or i not in net.res_line_dc.index:
+        return float('nan')
+    p = float(net.res_line_dc.at[i, 'p_from_mw'])
+    va = _electrisim_dc_bus_volts(net, d['bus_from'])
+    return p * 1e6 / va if np.isfinite(p) and np.isfinite(va) and va > 0 else float('nan')
+
+
+def _electrisim_start_dc_diodes(net):
+    """
+    Each diode blocking before the first load flow, so it gives every source
+    bus its own voltage; the settling then turns them on as an ideal OR does.
+    All conducting from the start, two from buses 16 V apart drove kiloamps
+    round between them and no load flow solved; all near no current, none
+    could carry its shelf.
+    """
+    for d in _electrisim_live_dc_diodes(net):
+        if not d.get('started'):
+            net.line_dc.at[d['line'], 'in_service'] = False
+            d['started'] = True
+
+
+def _electrisim_settle_dc_diodes(net):
+    """Each diode set by the load flow just run. Returns whether any changed."""
+    changed = False
+    ld = net.line_dc
+    # Into a bus with no supply, only the diode from the highest anode turns on this round.
+    feeding = {}
+    for d in _electrisim_live_dc_diodes(net):
+        va, vk = _electrisim_dc_bus_volts(net, d['bus_from']), _electrisim_dc_bus_volts(net, d['bus_to'])
+        if not bool(ld.at[d['line'], 'in_service']) and np.isfinite(va) and not np.isfinite(vk):
+            best = feeding.get(d['bus_to'])
+            if best is None or va > _electrisim_dc_bus_volts(net, best['bus_from']):
+                feeding[d['bus_to']] = d
+    for d in _electrisim_live_dc_diodes(net):
+        i = d['line']
+        va, vk = _electrisim_dc_bus_volts(net, d['bus_from']), _electrisim_dc_bus_volts(net, d['bus_to'])
+        if bool(ld.at[i, 'in_service']):
+            amps = _electrisim_dc_diode_amps(net, d)
+            if not np.isfinite(amps):
+                continue
+            if amps < 0:
+                ld.at[i, 'in_service'] = False      # its current would reverse: it blocks
+                changed = True
+                continue
+            r = _electrisim_dc_diode_r(d, amps)
+            if abs(r - float(ld.at[i, 'r_ohm_per_km'])) * amps > _DC_DIODE_TOL_V:
+                ld.at[i, 'r_ohm_per_km'] = r
+                changed = True
+        elif np.isfinite(va) and (va - vk > d['v_f_v'] if np.isfinite(vk) else feeding.get(d['bus_to']) is d):
+            # Its anode v_f above its cathode, or the highest into a bus with no supply: it conducts.
+            ld.at[i, 'in_service'] = True
+            ld.at[i, 'r_ohm_per_km'] = _electrisim_dc_diode_r(d, d['rated_current_ka'] * 1e3)
+            changed = True
+    return changed
+
+
+def _electrisim_warn_unsupplied_dc(net):
+    """The DC buses left with no voltage - every diode into them blocking - named, once."""
+    res = getattr(net, 'res_bus_dc', None)
+    if res is None:
+        return
+    names = getattr(net, 'user_friendly_names', {}) or {}
+    dead = sorted(str(names.get(net.bus_dc.at[b, 'name'], net.bus_dc.at[b, 'name'])) for b in net.bus_dc.index
+                  if bool(net.bus_dc.at[b, 'in_service']) and b in res.index and not np.isfinite(res.at[b, 'vm_pu'])
+                  and not _electrisim_is_hidden(net.bus_dc, b) and not _electrisim_is_aux(net.bus_dc, b))
+    if not dead:
+        return
+    message = (f"DC bus{'es' if len(dead) > 1 else ''} {', '.join(dead)} "
+               f"{'have' if len(dead) > 1 else 'has'} no supply: the diodes into "
+               f"{'them' if len(dead) > 1 else 'it'} block, and what is on "
+               f"{'them' if len(dead) > 1 else 'it'} is not served.")
+    if message not in (getattr(net, 'warnings', None) or []):
+        _electrisim_warn(net, message)
+
+
+def _electrisim_dc_diode_result(net, d):
+    i = d.get('line')
+    alive = i in net.line_dc.index
+    conducting = bool(alive and d['in_service'] and net.line_dc.at[i, 'in_service'])
+    amps = _electrisim_dc_diode_amps(net, d) if conducting else 0.0
+    va, vk = _electrisim_dc_bus_volts(net, d['bus_from']), _electrisim_dc_bus_volts(net, d['bus_to'])
+    pl = float(net.res_line_dc.at[i, 'pl_mw']) if conducting and i in net.res_line_dc.index else 0.0
+    fin = lambda v: float(v) if v is not None and np.isfinite(v) else None   # noqa: E731
+    rated = d['rated_current_ka']
+    return {
+        'name': d['name'], 'id': d['id'], 'in_service': d['in_service'], 'conducting': conducting,
+        'i_ka': fin(amps / 1e3 if np.isfinite(amps) else amps),
+        'p_mw': fin(amps * va / 1e6 if conducting and np.isfinite(amps) else 0.0),
+        # Anode less cathode: its forward drop conducting, minus its reverse voltage blocking.
+        'v_ak_v': fin(va - vk),
+        'loss_kw': fin(pl * 1e3),
+        'loading_percent': fin(100.0 * amps / (rated * 1e3)) if rated > 0 and np.isfinite(amps) else None,
+        'v_f_v': d['v_f_v'], 'rated_current_ka': rated,
+    }
+
+
 def _electrisim_drop_uncoupled_dc(net, quiet=False):
     """
     Set aside the DC buses no converter ties to the AC network, with what is on them.
@@ -3854,6 +4048,8 @@ def _electrisim_drop_uncoupled_dc(net, quiet=False):
         net.electrisim_dc_capacitors = [c for c in net.electrisim_dc_capacitors if c['bus_dc'] not in drop]
     if getattr(net, 'electrisim_ders', None):
         net.electrisim_ders = [r for r in net.electrisim_ders if r['bus'] not in drop]
+    if getattr(net, 'electrisim_dc_diodes', None):
+        net.electrisim_dc_diodes = [d for d in net.electrisim_dc_diodes if d.get('line') in net.line_dc.index]
     if getattr(net, 'electrisim_dc_breakers', None):
         # A breaker stays while its own bus does; what it switched may be gone.
         net.electrisim_dc_breakers = [b for b in net.electrisim_dc_breakers if b['bus_dc'] not in drop]
@@ -6580,6 +6776,10 @@ def create_other_elements(in_data,net,x, Busbars):
             if not hasattr(net, '_electrisim_pending_dc_breakers'):
                 net._electrisim_pending_dc_breakers = []
             net._electrisim_pending_dc_breakers.append(in_data[x])
+            continue
+
+        if (in_data[x]['typ'].startswith("DC Diode")):
+            _electrisim_create_dc_diode(net, in_data[x])
             continue
 
         if (in_data[x]['typ'].startswith("DC Capacitor")):
@@ -9940,6 +10140,11 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                         })
                     result = {**result, 'dcbreakers': breakers}
 
+                # DC diodes: conducting or blocking, the current through each, its drop and loss.
+                if getattr(net, 'electrisim_dc_diodes', None):
+                    result = {**result, 'dcdiodes': [_electrisim_dc_diode_result(net, d)
+                                                     for d in net.electrisim_dc_diodes]}
+
                 # Solid-state transformers: each stage's power, losses and loading; MV P and Q; port voltages.
                 if getattr(net, 'electrisim_ssts', None):
                     result = {**result, 'ssts': [_electrisim_sst_result(net, r) for r in net.electrisim_ssts]}
@@ -10046,6 +10251,8 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                     for index, row in net.res_line_dc.iterrows():
                         if 'electrisim_dc_breaker' in net.line_dc.columns and net.line_dc.at[index, 'electrisim_dc_breaker'] == True:
                             continue   # a DC breaker's coupler, reported with the breakers
+                        if _electrisim_is_dc_diode(net, index):
+                            continue   # a DC diode, reported with the diodes
                         if _electrisim_is_hidden(net.line_dc, index):
                             continue   # a battery's resistance, reported with it
                         line_dc_name = net.line_dc.at[index, 'name'] if 'name' in net.line_dc.columns else f'LineDC_{index}'

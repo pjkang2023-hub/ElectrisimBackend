@@ -49,6 +49,7 @@ DC_FIELDS = {
     'Source DC': ('vm_pu', 'r_sc_mohm', 'l_sc_uh'),
     'DC Capacitor': ('c_mf', 'esr_mohm', 'esl_uh'),
     'DC Line': ('length_km', 'r_ohm_per_km', 'max_i_ka', 'l_mh_per_km', 'c_uf_per_km'),
+    'DC Diode': ('v_f_v', 'r_on_mohm', 'rated_current_ka'),
     'DC Breaker': ('closed', 'breaker_type', 'rated_voltage_kv', 'rated_current_ka', 'breaking_capacity_ka',
                    'trip_current_ka', 'opening_time_ms', 'limiting_inductance_mh', 'arrester_clamp_kv',
                    'arrester_energy_kj'),
@@ -252,7 +253,8 @@ DEFAULTS = {'Battery': {'vn_v': '800',
          'emt_model': 'average',
          'switching_khz': '5',
          'current_loop_hz': '500'},
- 'DC Line': {'length_km': '0.1', 'r_ohm_per_km': '0.1', 'max_i_ka': '1', 'l_mh_per_km': '0.3', 'c_uf_per_km': '0.2'}}
+ 'DC Line': {'length_km': '0.1', 'r_ohm_per_km': '0.1', 'max_i_ka': '1', 'l_mh_per_km': '0.3', 'c_uf_per_km': '0.2'},
+ 'DC Diode': {'v_f_v': '1.6', 'r_on_mohm': '0.1', 'rated_current_ka': '1.5'}}
 
 # spec list -> (kind, {connection field: what it must name}); a '?' makes it optional.
 LISTS = {
@@ -265,6 +267,7 @@ LISTS = {
     'ssts': ('Solid-State Transformer', {'bus_mv': 'ac_bus', 'bus_lv_dc': 'dc_bus', 'bus_lv_ac': 'ac_bus?'}),
     'dc_dc_converters': ('DC/DC Converter', {'bus_in': 'dc_bus', 'bus_out': 'dc_bus'}),
     'dc_breakers': ('DC Breaker', {'bus': 'dc_bus', 'element': 'dc_element'}),
+    'dc_diodes': ('DC Diode', {'from_bus': 'dc_bus', 'to_bus': 'dc_bus'}),
     'batteries': ('Battery', {'bus': 'dc_bus?'}),
     'supercapacitors': ('Supercapacitor', {'bus': 'dc_bus?'}),
     'flywheels': ('Flywheel', {'bus': 'dc_bus?'}),
@@ -277,9 +280,10 @@ TOP_LEVEL = tuple(LISTS) + ('load_profiles',)
 SOURCES = ('Battery', 'Supercapacitor', 'Flywheel', 'SOFC', 'PV Array')
 # What a DC breaker switches, by the kind of element beyond it (dcPayload.js DC_BREAKER_TARGETS).
 DC_BREAKER_TARGETS = {'DC Bus': 'bus_dc', 'DC Line': 'line_dc', 'VSC': 'vsc', 'Load DC': 'load_dc',
-                      'Source DC': 'source_dc', 'DC/DC Converter': 'dc_dc_converter'}
+                      'Source DC': 'source_dc', 'DC/DC Converter': 'dc_dc_converter', 'DC Diode': 'line_dc'}
 # Row keys where the payload names a connection differently from the spec.
-ROW_KEY = {('DC Line', 'from_bus'): 'busFrom', ('DC Line', 'to_bus'): 'busTo', ('PCS', 'source'): 'der'}
+ROW_KEY = {('DC Line', 'from_bus'): 'busFrom', ('DC Line', 'to_bus'): 'busTo', ('PCS', 'source'): 'der',
+           ('DC Diode', 'from_bus'): 'busFrom', ('DC Diode', 'to_bus'): 'busTo'}
 PROFILE_KINDS = ('power', 'irradiance', 'temperature')
 PROFILE_FIELDS = {'load_profile_id': 'power', 'irradiance_profile_id': 'irradiance',
                   'temperature_profile_id': 'temperature'}
@@ -519,7 +523,11 @@ def results(net, r):
         out['dc_lines'] = [{
             'id': str(net.line_dc.at[i, 'name']), 'p_from_mw': r(net.res_line_dc.at[i, 'p_from_mw'], 5),
             'i_ka': r(net.res_line_dc.at[i, 'i_ka'], 5), 'loading_percent': r(net.res_line_dc.at[i, 'loading_percent'], 2),
-        } for i in net.line_dc.index if i in net.res_line_dc.index and not pe._electrisim_is_hidden(net.line_dc, i)]
+        } for i in net.line_dc.index if i in net.res_line_dc.index and not pe._electrisim_is_hidden(net.line_dc, i)
+            and not pe._electrisim_is_dc_diode(net, i)]
+    if getattr(net, 'electrisim_dc_diodes', None):
+        out['dc_diodes'] = [clean({**pe._electrisim_dc_diode_result(net, d), 'id': str(d['name'])})
+                            for d in net.electrisim_dc_diodes]
     if len(getattr(net, 'vsc', [])):
         out['vscs'] = [{
             'id': str(net.vsc.at[i, 'name']), 'p_mw': r(net.res_vsc.at[i, 'p_mw'], 5),

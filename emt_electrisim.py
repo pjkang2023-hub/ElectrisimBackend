@@ -187,10 +187,34 @@ class _EmtBuilder:
         self.series.append(('DC breaker', rec['label'], rec['id'], rec['label'], ('i_rl', k_l), 1.0))
         return b
 
+    def _diode(self, li):
+        """
+        A DC diode: its forward voltage behind its on-resistance. One blocking
+        in the load flow is built too, to conduct when its anode rises v_f
+        above its cathode - a catcher's diode, when its shelf's own bus fails.
+        """
+        net, ckt = self.net, self.ckt
+        rec = next((d for d in getattr(net, 'electrisim_dc_diodes', None) or [] if d.get('line') == li), None)
+        fb, tb = int(net.line_dc.at[li, 'from_bus_dc']), int(net.line_dc.at[li, 'to_bus_dc'])
+        if rec is None or not rec['in_service'] or fb not in self.bus_node or tb not in self.bus_node:
+            return
+        i0 = pe._electrisim_dc_diode_amps(net, rec)
+        i0 = i0 if np.isfinite(i0) and i0 > 0 else 0.0
+        # Through the breakers in front of it, as a cable is: a shelf feeder's breaker trips, then its diode.
+        anode = self._terminal('line_dc', li, fb, i0)
+        cathode = self._terminal('line_dc', li, tb, -i0)
+        junction = ckt.node(f"{rec['label']} junction", self.v_bus[tb] + i0 * rec['r_on_ohm'])
+        ckt.add_diode(anode, junction, rec['v_f_v'])
+        k = ckt.add_rl(junction, cathode, rec['r_on_ohm'], 0.0, i0=i0)
+        self.series.append(('DC diode', rec['label'], rec['id'], rec['label'], ('i_rl', k), 1.0))
+
     def _cables(self):
         net, ckt = self.net, self.ckt
         max_km = max(_f(self.params.get('max_section_km'), 1.0), 1e-3)
         for li in net.line_dc.index:
+            if pe._electrisim_is_dc_diode(net, li):
+                self._diode(li)
+                continue
             if not bool(net.line_dc.at[li, 'in_service']) or ('line_dc', li) in self.skip:
                 continue
             fb, tb = int(net.line_dc.at[li, 'from_bus_dc']), int(net.line_dc.at[li, 'to_bus_dc'])

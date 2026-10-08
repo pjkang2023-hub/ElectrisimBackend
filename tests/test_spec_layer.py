@@ -69,7 +69,7 @@ def test_fields_follow_the_dialogs():
         block = src[src.index(start):src.index('\n];', src.index(start))]
         assert tuple(re.findall(r"(?:num|sel)\('(\w+)'", block)) == layer.DER_FIELDS[kind], kind
     dc = open(os.path.join(JS, 'utils', 'dcPayload.js'), encoding='utf-8').read()
-    for kind in ('DC Breaker', 'Solid-State Transformer', 'DC/DC Converter', 'DC Line'):
+    for kind in ('DC Breaker', 'DC Diode', 'Solid-State Transformer', 'DC/DC Converter', 'DC Line'):
         case = dc[dc.index(f"case '{kind}'"):]
         listed = re.findall(r"'(\w+)'", case[case.index('withOptional'):case.index(']', case.index('withOptional'))])
         listed = [f for f in listed if f not in ('in_service', 'cost_per_unit_by_currency')]
@@ -102,7 +102,8 @@ def test_defaults_follow_the_dialogs():
     fns = {'Load DC': 'configureLoadDcAttributes', 'Source DC': 'configureSourceDcAttributes',
            'DC Capacitor': 'configureDcCapacitorAttributes', 'DC Breaker': 'configureDcBreakerAttributes',
            'DC/DC Converter': 'configureDcDcConverterAttributes', 'VSC': 'configureVscAttributes',
-           'DC Line': 'configureDCLineAttributes', 'Solid-State Transformer': 'configureSstAttributes'}
+           'DC Line': 'configureDCLineAttributes', 'Solid-State Transformer': 'configureSstAttributes',
+           'DC Diode': 'configureDcDiodeAttributes'}
     for kind, fn in fns.items():
         i = cfg.index(f'export function {fn}')
         body = cfg[i:cfg.index('\nexport function', i + 10)]

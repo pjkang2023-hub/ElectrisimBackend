@@ -14,7 +14,7 @@ Units: kV, MW, MVAr, MVA, km, per-unit (`_pu`), percent (`_percent`), degrees.
 | `frequency_hz` | 50 (default) or 60 |
 | `layout` | `transmission`, `radial` or `auto` - see Layout below |
 | `buses`, `external_grids`, `transformers`, `three_winding_transformers`, `lines`, `loads`, `generators`, `static_generators`, `shunts`, `storage`, `motors`, `switches` | lists of AC elements |
-| `dc_buses`, `dc_lines`, `dc_loads`, `dc_sources`, `dc_capacitors`, `vscs`, `ssts`, `dc_dc_converters`, `dc_breakers`, `batteries`, `supercapacitors`, `flywheels`, `sofcs`, `pv_arrays`, `pcs`, `grounding_transformers` | lists of DC and microgrid elements - see below |
+| `dc_buses`, `dc_lines`, `dc_loads`, `dc_sources`, `dc_capacitors`, `vscs`, `ssts`, `dc_dc_converters`, `dc_breakers`, `dc_diodes`, `batteries`, `supercapacitors`, `flywheels`, `sofcs`, `pv_arrays`, `pcs`, `grounding_transformers` | lists of DC and microgrid elements - see below |
 | `load_profiles` | the diagram's load-profile library - see below |
 
 Any other top-level key is rejected.
@@ -156,7 +156,7 @@ takes the dialog's default. Connections name other elements by id: an AC bus
 from `buses`, a DC bus from `dc_buses`. They are drawn below the AC network,
 each converter, PCS and grounding transformer under its AC bus with what it
 feeds beneath it. `check_network` reports them under their ids: `dc_buses`,
-`dc_lines`, `vscs`, `ssts`, `dc_dc_converters`, `sources_and_stores`, `pcs`,
+`dc_lines`, `dc_diodes`, `vscs`, `ssts`, `dc_dc_converters`, `sources_and_stores`, `pcs`,
 `grounding_transformers`.
 
 **dc_buses** - `id`, **`vn_kv`** (DC, e.g. 0.8 for an 800 V bus), `name`, `in_service`.
@@ -208,11 +208,17 @@ and inverter's, as a VSC's), and its stages' capacitors' ESR and ESL (0: none):
 `c_out_esl_uh`, `c_in_esr_mohm`, `c_in_esl_uh` (its output and input
 capacitors' ESR and ESL, 0: none, in the EMT and DC fault studies).
 
-**dc_breakers** - `id`, **`bus`** (DC), **`element`** (the DC bus, line, load,
-source, VSC or DC/DC converter it switches), `closed`, `breaker_type`,
+**dc_breakers** - `id`, **`bus`** (DC), **`element`** (the DC bus, line, diode,
+load, source, VSC or DC/DC converter it switches), `closed`, `breaker_type`,
 `rated_voltage_kv`, `rated_current_ka`, `breaking_capacity_ka`,
 `trip_current_ka`, `opening_time_ms`, `limiting_inductance_mh`,
 `arrester_clamp_kv`, `arrester_energy_kj`.
+
+**dc_diodes** - a diode between two DC buses, conducting from **`from_bus`** (its
+anode) to **`to_bus`** (its cathode) only: a server shelf fed from two buses
+through a diode from each takes its power from the higher. `id`, `v_f_v` (its
+forward voltage, V), `r_on_mohm` (its on-resistance), `rated_current_ka`. A
+breaker in front of it names it as its `element`.
 
 **batteries** - `id`, `bus` (a DC bus, or none when behind a PCS), `sizing`
 (`ratings` or `cells`), `vn_v`, `capacity_kwh`, `r0_mohm`, `cells_series`,

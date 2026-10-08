@@ -228,7 +228,7 @@ def _sanitize_opendss_name(name):
 # The DC network and the converters on it: OpenDSS models neither, and a DC
 # bus taken for an AC one sat in the results at 0 pu, its cables (X1=None)
 # failing to build.
-_OPENDSS_DC_TYP_PREFIXES = ('DC Bus', 'DC Line', 'DC Breaker', 'DC/DC Converter', 'Load DC')
+_OPENDSS_DC_TYP_PREFIXES = ('DC Bus', 'DC Line', 'DC Breaker', 'DC Diode', 'DC/DC Converter', 'Load DC')
 _OPENDSS_CONVERTER_TYP_PREFIXES = ('PCS', 'Solid-State Transformer', 'VSC', 'B2B VSC')
 
 

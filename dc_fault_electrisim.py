@@ -194,6 +194,7 @@ class _Builder:
         self.isolated = set()     # DC buses nothing in the fault circuit reaches
         self._terminals = {}      # (table, index, bus) -> its node beyond its breaker
         self.stiff_caps = []      # (bus, R to it, C, label): capacitors with no ESR or ESL, on a bus through R alone
+        self.diodes = []          # (record, its RL branch): the DC diodes
 
     def _v(self, bus):
         return self.v_bus[bus]
@@ -256,9 +257,33 @@ class _Builder:
             self.stiff_caps.append((bus, r_to_bus, c, label))
         return ('c', ckt.add_c(0, node, c, w0=-v))
 
+    def _diode(self, li):
+        """
+        A DC diode: its forward voltage behind its on-resistance, conducting
+        or blocking as the fault drives it. One blocking in the load flow is
+        built too: a catcher's diode starts to conduct when the fault takes
+        its shelf's own bus.
+        """
+        net, ckt = self.net, self.ckt
+        rec = next((d for d in getattr(net, 'electrisim_dc_diodes', None) or [] if d.get('line') == li), None)
+        fb, tb = int(net.line_dc.at[li, 'from_bus_dc']), int(net.line_dc.at[li, 'to_bus_dc'])
+        if rec is None or not rec['in_service'] or fb not in self.bus_node or tb not in self.bus_node:
+            return
+        i0 = pe._electrisim_dc_diode_amps(net, rec)
+        i0 = i0 if np.isfinite(i0) and i0 > 0 else 0.0
+        # Through the breakers in front of it, as a cable is: a shelf feeder's breaker, then its diode.
+        anode, _ = self._terminal('line_dc', li, fb, i0)
+        cathode, _ = self._terminal('line_dc', li, tb, -i0)
+        junction = ckt.node(f"{rec['label']} junction", self._v(tb) + i0 * rec['r_on_ohm'])
+        ckt.add_diode(anode, junction, rec['v_f_v'])
+        self.diodes.append((rec, ckt.add_rl(junction, cathode, rec['r_on_ohm'], 0.0, i0=i0)))
+
     def _cables(self):
         net, ckt = self.net, self.ckt
         for li in net.line_dc.index:
+            if pe._electrisim_is_dc_diode(net, li):
+                self._diode(li)
+                continue
             if not bool(net.line_dc.at[li, 'in_service']):
                 continue
             fb, tb = int(net.line_dc.at[li, 'from_bus_dc']), int(net.line_dc.at[li, 'to_bus_dc'])
@@ -605,6 +630,7 @@ def fault_at(builder, bus, params):
         'waveform': _waveform(t, i_f, k_peak, t_fine),
         'contributions': [],
         'breakers': [],
+        'diodes': [],
     }
     for kind, label, cid, port in builder.contributions:
         i = _current(sim, port)
@@ -638,6 +664,16 @@ def fault_at(builder, bus, params):
             'breaking_capacity_ka': rec['breaking_capacity_ka'],
             'exceeds': bool(cap > 0 and np.isfinite(i_open) and i_open > cap),
             't_reaches_capacity_ms': _round(float(t[over[0]]) * 1e3) if len(over) else None,
+        })
+    # Each diode's forward current: conducting before the fault, blocking backfeed into it,
+    # or starting to conduct as its shelf's other supply fails.
+    for rec, k in builder.diodes:
+        i = sim['i_rl'][:, k]
+        out['diodes'].append({
+            'name': rec['name'], 'id': rec['id'], 'label': rec['label'],
+            'i_prefault_ka': _round(float(i[0]) * 1e-3), 'ip_ka': _round(float(np.max(i)) * 1e-3),
+            'tp_ms': _round(float(t[int(np.argmax(i))]) * 1e3), 'i_end_ka': _round(float(i[-1]) * 1e-3),
+            'conducting_end': bool(i[-1] > 1e-3),
         })
     # A closed breaker in front of what feeds no fault current - a DC load without an
     # input filter, which leaves the network at the fault - carries none.
