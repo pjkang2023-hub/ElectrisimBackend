@@ -439,6 +439,40 @@ def test_ground_faults_by_design(factory):
     assert grid_ka < three['GRID']['ikss_ka'] < 1.05 * grid_ka
 
 
+# --- the back-up gensets on ------------------------------------------------------------------
+
+def test_gensets_on_beside_the_rectifiers(factory, solved):
+    """
+    The three back-up gensets on, each holding its lineup's 0.48 kV bus
+    beside the rectifiers that hold its 800 V: pandapower's Newton-Raphson
+    failed from every start, though the network solves with 0.1-1.1 Mvar
+    from each. Solved, each bus at its genset's 1.0 pu, each 2 MW within its
+    rating, the halls as before (their 800 V buses held), the grid 6 MW less.
+    """
+    spec = load_spec()
+    for g in spec['generators']:
+        g.pop('in_service', None)
+    with _silent():
+        net, _ = sld.build_network(spec)
+    full = _layered(net)
+    with _silent():
+        pe._electrisim_runpp(full, calculate_voltage_angles='auto', init='auto')
+    assert full.converged and not getattr(full, 'warnings', None), getattr(full, 'warnings', None)
+    ids = _ac_ids(net)
+    for x in ('LA', 'LB', 'LC'):
+        g = ids['gen'][f'GEN_{x}']
+        assert float(full.res_bus.at[ids['bus'][f'{x}_LV'], 'vm_pu']) == pytest.approx(1.0, abs=1e-9), x
+        assert float(full.res_gen.at[g, 'p_mw']) == pytest.approx(2.0, abs=1e-9), x
+        assert math.hypot(2.0, float(full.res_gen.at[g, 'q_mvar'])) < 3.125, x
+    res, base = _results(full), _results(solved)
+    for ident, bus in res['dc_buses'].items():
+        if ident.startswith(('DC', 'S', 'HB', 'RK')):
+            assert bus['vm_pu'] == pytest.approx(base['dc_buses'][ident]['vm_pu'], abs=1e-4), ident
+    grid = float(full.res_ext_grid.at[ids['ext_grid']['Grid'], 'p_mw'])
+    before = float(solved.res_ext_grid.at[ids['ext_grid']['Grid'], 'p_mw'])
+    assert grid == pytest.approx(before - 6.0, abs=0.05)
+
+
 # --- goldens and the canvas ---------------------------------------------------------------
 
 def _summary(net, solved):

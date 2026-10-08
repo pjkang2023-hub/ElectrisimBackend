@@ -1994,6 +1994,51 @@ def _electrisim_runpp_converters(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW
     return None
 
 
+def _electrisim_gens_beside_vscs(net):
+    """In-service generators, not slack, holding the voltage of an AC bus an in-service VSC is on."""
+    gen = _electrisim_in_service_rows(net.gen)
+    vsc = _electrisim_in_service_rows(getattr(net, 'vsc', None))
+    if gen is None or not len(gen) or vsc is None or not len(vsc):
+        return []
+    beside = gen['bus'].isin(set(vsc['bus']))
+    if 'slack' in gen.columns:
+        beside &= ~gen['slack'].fillna(False).astype(bool)
+    return [int(i) for i in gen.index[beside]]
+
+
+def _electrisim_pp_runpp(net, kwargs):
+    """
+    pp.runpp; and when it does not converge with a generator holding the
+    voltage of a bus a VSC is on, again from a start beside the solution.
+    pandapower's Newton-Raphson can fail from its own start there: the 800 V
+    AI factory's back-up genset on its lineup's 0.48 kV bus, beside the
+    rectifiers holding the 800 V, failed every start and setting, though the
+    network solves with 0.15 Mvar from it. Each such generator is first a PQ
+    source at its power, then, from that solution, as it is.
+    """
+    try:
+        return pp.runpp(net, **kwargs)
+    except pp.LoadflowNotConverged:
+        gens = _electrisim_gens_beside_vscs(net)
+        if not gens:
+            raise
+    added = []
+    try:
+        for i in gens:
+            scaling = net.gen.at[i, 'scaling'] if 'scaling' in net.gen.columns else 1.0
+            added.append(pp.create_sgen(net, int(net.gen.at[i, 'bus']), p_mw=float(net.gen.at[i, 'p_mw']), q_mvar=0.0,
+                                        scaling=1.0 if pd.isna(scaling) else float(scaling),
+                                        name='_electrisim_pq_start'))
+            net.gen.at[i, 'in_service'] = False
+        pp.runpp(net, **kwargs)
+    finally:
+        net.sgen.drop(added, inplace=True)
+        for i in gens:
+            net.gen.at[i, 'in_service'] = True
+    start = {k: v for k, v in kwargs.items() if k not in ('init_va_degree', 'init_vm_pu')}
+    return pp.runpp(net, **{**start, 'init': 'results'})
+
+
 def _electrisim_runpp_dc_loads(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, **kwargs):
     """
     pp.runpp with voltage-dependent DC loads settled: plain runpp when there
@@ -2015,7 +2060,7 @@ def _electrisim_runpp_dc_loads(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, 
     powers they would have reached.
     """
     if not _electrisim_has_dc_load_models(net):
-        return pp.runpp(net, **_electrisim_facts_angle_start(net, kwargs))
+        return _electrisim_pp_runpp(net, _electrisim_facts_angle_start(net, kwargs))
     ld = net.load_dc
     rows = [i for i in ld.index if pd.notna(ld.at[i, 'electrisim_share_p'])]
     lo = {i: 0.0 for i in rows}       # powers known to be too low (g < 0)
@@ -2027,7 +2072,7 @@ def _electrisim_runpp_dc_loads(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, 
         init = kwargs.get('init', 'auto')
         if init not in starts:
             starts[init] = _electrisim_facts_angle_start(net, kwargs)
-        pp.runpp(net, **starts[init])
+        _electrisim_pp_runpp(net, starts[init])
 
     def halve():
         for i in rows:
