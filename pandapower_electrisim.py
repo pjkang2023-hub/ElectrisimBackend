@@ -10486,6 +10486,36 @@ def _iec_thermal_m(kappa, tk_s, f_hz):
     return m.where(kappa <= 1.99, 0.0)
 
 
+def _iec_ith_at_frequency(ikss, ith, f_hz):
+    """
+    pandapower's thermal current Ik'' sqrt(m + 1), its m taken at 50 Hz, at
+    f_hz instead. m depends on the frequency only through x = f tk ln(kappa - 1),
+    m = (exp(4 x) - 1) / (2 x), which rises from 0 to 2 as x goes from -inf to
+    0: m read back from the current, x solved for it, and m again at x f_hz / 50.
+    m = 0 (pandapower's for kappa > 1.99) stays 0; a bus without a current is kept.
+    """
+    ikss_v = np.asarray(ikss, dtype=float)
+    ith_v = np.asarray(ith, dtype=float)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        m50 = (ith_v / ikss_v) ** 2 - 1.0
+        ok = np.isfinite(m50) & (m50 > 1e-12) & (m50 < 2.0)
+        target = np.where(ok, m50, 1.0)
+
+        def m_of(x):
+            return np.expm1(4.0 * x) / (2.0 * x)
+
+        lo = np.full(target.shape, -1e9)
+        hi = np.full(target.shape, -1e-12)
+        for _ in range(200):
+            mid = 0.5 * (lo + hi)
+            above = m_of(mid) > target
+            hi = np.where(above, mid, hi)
+            lo = np.where(above, lo, mid)
+        m_f = m_of(0.5 * (lo + hi) * f_hz / 50.0)
+        out = np.where(ok, ikss_v * np.sqrt(m_f + 1.0), ith_v)
+    return pd.Series(out, index=ith.index) if isinstance(ith, pd.Series) else out
+
+
 def _sc_missing_machine_data(net):
     """
     In-service machines that lack what pandapower's short-circuit calculation
@@ -10754,6 +10784,11 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
             net.res_bus_sc['ip_ka'] = kappa * np.sqrt(2) * ikss
             net.res_bus_sc['ith_ka'] = ikss * np.sqrt(
                 _iec_thermal_m(kappa, tk_s, float(getattr(net, 'f_hz', 50.0) or 50.0)) + 1.0)
+        elif abs(float(getattr(net, 'f_hz', 50.0) or 50.0) - 50.0) > 1e-9:
+            # pandapower takes m at 50 Hz whatever the network's frequency
+            # (shortcircuit.currents._calc_ith: f = 50): its thermal current at the network's.
+            net.res_bus_sc['ith_ka'] = _iec_ith_at_frequency(net.res_bus_sc['ikss_ka'], net.res_bus_sc['ith_ka'],
+                                                             float(net.f_hz))
 
     except Exception as e:
         
