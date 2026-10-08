@@ -114,6 +114,7 @@ class AcBuilder:
         self.vn = {}             # AC bus -> nominal line voltage (V)
         self.offset = {}         # AC bus -> radians the EMT angle leads the load flow's
         self.series = []         # (kind, name, id, label, [(array, group or index, column or None, sign)] per phase)
+        self.grid_groups = []    # (ext_grid index, its source's coupled group, label): a voltage profile scales them
         self.trafos = []
         self.left_out = set()
         self.skip = set()        # (table, index): elements a converter's EMT model stands for
@@ -274,6 +275,7 @@ class AcBuilder:
                     self.island['last'].append(None)
             g = ckt.add_coupled([0, 0, 0], ends, _matrix(rs, rm), _matrix(ls, lm), ac=(amp, w, ph))
             label = _label(net, 'ext_grid', gi)
+            self.grid_groups.append((gi, g, label))
             self.series.append(('External grid', label, _row_id(net, 'ext_grid', gi), label,
                                 [('i_cp', g, k, 1.0) for k in range(3)]))
 

@@ -15,6 +15,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+import grid_voltage_profile as gvp
+
+GRID_PROFILE_V_FLOOR = 0.05     # pu: the lowest grid voltage ANDES applies
+
 try:
     import andes
 
@@ -1047,6 +1051,7 @@ def build_system(
     slack_count = 0
     slack_v0: Dict[Any, float] = {}
     grid_slacks: Dict[str, str] = {}   # an External Grid's name and label -> its slack, for its outage
+    grid_v0: Dict[str, float] = {}      # each External Grid's slack -> its set voltage
     for _, el, typ in _iter_elements(in_data):
         if not (typ.startswith("External Grid") or typ.startswith("ExternalGrid")):
             continue
@@ -1066,6 +1071,7 @@ def build_system(
                 vm = vm / vn
         va = _sf(el.get("va_degree"), 0.0)
         slack_v0[bus] = vm
+        grid_v0[idx] = vm
         for key in (el.get("name"), el.get("userFriendlyName")):
             if key:
                 grid_slacks.setdefault(str(key), idx)
@@ -1615,6 +1621,32 @@ def build_system(
             ss.add("Toggle", idx="Toggle_Gen_1", model="SynGen", dev=syn_dev, t=toggle_gen_t)
         else:
             warnings.append(f"Generator trip target '{toggle_gen}' not found; no Toggle applied.")
+
+    # The grid's voltage following a profile (IEEE 2800's ride-through envelope, or a table):
+    # each step an Alter of its slack's set voltage, which its reactive power holds the bus at.
+    points, problems = gvp.profile_points(params)
+    warnings.extend(problems)
+    if points:
+        target = str(params.get("grid_voltage_target") or "").strip()
+        slacks = [grid_slacks[target]] if target in grid_slacks else list(grid_v0)
+        if target and target not in grid_slacks:
+            warnings.append(f"Grid voltage profile: no External Grid '{target}'; every one follows it.")
+        start = _sf(params.get("grid_voltage_start_s"), 1.0)
+        if any(v < GRID_PROFILE_V_FLOOR for _, v in points):
+            # A phasor model has no solution at no voltage: its converters draw P / V.
+            warnings.append(f"Grid voltage profile: ANDES takes its voltages below {GRID_PROFILE_V_FLOOR:g} pu "
+                            f"as {GRID_PROFILE_V_FLOOR:g} pu (the EMT study applies them as given).")
+            points = [(t, max(v, GRID_PROFILE_V_FLOOR)) for t, v in points]
+        n_alter = 0
+        for slack in slacks:
+            for t_rel, v in points:
+                n_alter += 1
+                ss.add("Alter", idx=f"Alter_GV_{n_alter}", t=start + t_rel, model="Slack", dev=slack,
+                       src="v0", attr="v", method="=", amount=v * grid_v0[slack])
+        if slacks:
+            warnings.append(gvp.describe(points, start))
+        else:
+            warnings.append("Grid voltage profile: the network has no External Grid to apply it to.")
 
     if setup:
         ss.setup()

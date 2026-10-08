@@ -294,7 +294,8 @@ class Circuit:
             return g_cache[key]
 
         def coupled_emf(tt):
-            return e0_cp + amp_cp * np.cos(om_cp * tt + ph_cp)
+            # Scaled by events (state.scale_coupled): a grid's voltage following a profile.
+            return e0_cp + amp_cp * state.cp_scale * np.cos(om_cp * tt + ph_cp)
 
         t_fine = t_end if t_fine is None else t_fine
         out = {'t': [0.0], 'v': [], 'i_rl': [], 'i_c': [], 'i_r': [], 'i_d': [], 'i_sw': [], 'i_arr': [],
@@ -307,6 +308,8 @@ class Circuit:
             return np.where(ctrl, state.e_ctrl, base) if ctrl.any() else base
 
         state = _State(self, n)
+        state.cp_scale = np.ones(M)
+        state.cp_bounds = bounds
         state.sw_closed = np.array([s[2] for s in self.sw], dtype=bool)
         state.src_on = np.array([x[6] for x in self.isrc], dtype=bool)
         state.i_src0 = i_dc.copy()
@@ -608,6 +611,11 @@ class _State:
     def set_switch(self, k, closed):
         self.sw_closed = self.sw_closed.copy()
         self.sw_closed[k] = bool(closed)
+
+    def scale_coupled(self, g, factor):
+        """A coupled group's AC electromotive forces, as a share of their own, from the next step."""
+        self.cp_scale = self.cp_scale.copy()
+        self.cp_scale[self.cp_bounds[g]:self.cp_bounds[g + 1]] = float(factor)
 
 
 # A constant-power DC load with no input capacitance is given 4 ms x P / V^2 (its stored energy,

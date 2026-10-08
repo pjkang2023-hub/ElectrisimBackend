@@ -39,6 +39,7 @@ import numpy as np
 import load_profiles_electrisim as lp
 import pandapower_electrisim as pe
 from dc_fault_electrisim import _ac_thevenin, _f, _label, _row_id, _waveform
+import grid_voltage_profile as gvp
 from emt_ac import AcBuilder
 import emt_der
 from emt_converters import DcDc, GridFormingVsc, Vsc
@@ -845,6 +846,27 @@ def emt_study(net, params, in_data=None):
             ac_fault = b.ac.fault(hit[0], kind, r_f, r_f, t_on, t_on + dur if dur > 0 else None)
             ac_fault.update(bus=hit[0], kind=kind, t=t_on, t_off=t_on + dur if dur > 0 else None)
             event_times.append(t_on + (dur if dur > 0 else 0.0))
+
+    # The grid's voltage following a profile (IEEE 2800's ride-through envelope, or a table): its
+    # source's electromotive force stepped, a share of its own, behind its short-circuit impedance.
+    points, problems = gvp.profile_points(params)
+    warnings_out.extend(problems)
+    if points:
+        target = str(params.get('grid_voltage_target') or '').strip()
+        grids = [(gi, g, label) for gi, g, label in b.ac.grid_groups
+                 if not target or target in (label, str(net.ext_grid.at[gi, 'name']))]
+        if target and not grids:
+            warnings_out.append(f"Grid voltage profile: no External Grid '{target}'; every one follows it.")
+            grids = list(b.ac.grid_groups)
+        t0 = _f(params.get('grid_voltage_start_ms'), 20.0) * 1e-3
+        for _, g, _ in grids:
+            for t_rel, v in points:
+                ckt.at(t0 + t_rel, lambda st, g=g, v=v: st.scale_coupled(g, v))
+        if grids:
+            event_times.extend(t0 + t_rel for t_rel, _ in points if t0 + t_rel < t_end)
+            warnings_out.append(gvp.describe(points, t0))
+        else:
+            warnings_out.append('Grid voltage profile: the network has no External Grid to apply it to.')
 
     ckt.add_controller(b.controller)
     t_fine = min(t_end, (max(event_times) if event_times else 0.0) + 0.01)
