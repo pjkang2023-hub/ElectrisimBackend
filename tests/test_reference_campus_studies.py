@@ -26,6 +26,7 @@ import json
 import math
 import os
 
+import numpy as np
 import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -630,6 +631,22 @@ def test_transient_35_kv_fault_both_turbines_ride_through(client):
         assert b['values'][-1] == pytest.approx(b['values'][0], abs=2e-3), b['name']
     applied = ' '.join(out['defaults_applied'])
     assert 'exciter' not in applied and 'governor' not in applied, applied
+
+
+def test_transient_rides_through_ieee_2800(client):
+    """
+    The utility's 35 kV through IEEE 2800's low-voltage ride-through envelope
+    from 1 s (GE Vernova's Figure 7; ANDES floors its first stage at 0.05 pu):
+    the campus rides it through to 9 s, its 35 kV buses a little above each
+    stage, the turbines in step. It stalled just after 4 s with its SOFC
+    inverters as REGCA1, settled on its 0.8 pu low-voltage gain breakpoint.
+    """
+    out = _tds(client, _dynamic(), tf=9, grid_voltage_profile='ieee2800', grid_voltage_start_s=1)
+    t = np.asarray(out['time'])
+    v = np.asarray(next(b['values'] for b in out['bus_voltage'] if b['name'] == '35 kV Bus A'))
+    for at, share in ((1.2, 0.05), (1.8, 0.25), (3.0, 0.5), (5.5, 0.7), (8.5, 0.9)):
+        assert share < np.interp(at, t, v) < share + 0.03, at
+    assert {r['model'] for r in out['pcs'] if r['source_kind'] == 'SOFC'} == {'PVD1'}
 
 
 def test_transient_a_feeder_breaker_opens_and_the_tie_carries_on(client):

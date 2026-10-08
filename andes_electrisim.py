@@ -435,9 +435,8 @@ def _add_pcs_dynamics(ss: Any, rec: Dict[str, Any], n: int, bus: Any, static_idx
     The PCS's ANDES model. Grid-forming: GENCLS, a virtual machine whose
     damping is its P-f droop and whose inertia its power filter's. Grid-
     following: a battery or flywheel ESD1 (its state of charge between its
-    window's ends, the energy it can store), a PV array PVD1, an SOFC system
-    REGCA1 + REECA1 with its power order ramp-limited and held between its
-    minimum load and its rating.
+    window's ends, the energy it can store), a PV array or an SOFC system
+    PVD1 up to its rating.
     """
     s, label = rec["s_rated"], f"PCS '{rec['label']}'"
     obj, kind = rec["source"]["obj"], rec["source"]["kind"]
@@ -472,21 +471,13 @@ def _add_pcs_dynamics(ss: Any, rec: Dict[str, Any], n: int, bus: Any, static_idx
                               En=max(en, 1e-9), SOCinit=soc0, SOCmin=soc_min, SOCmax=soc_max,
                               EtaC=eta_c, EtaD=eta_d, **common)
         return {"model": "ESD1", "model_idx": idx}
-    if kind == "PV Array":
-        idx = _add_model_safe(ss, "PVD1", defaults_applied, label, idx=f"PVD1_PCS_{n}",
-                              name=f"PVD1_{rec['label']}", pmx=max(rec["p_max_ac"], 1e-6) / s, **common)
-        return {"model": "PVD1", "model_idx": idx}
-    # SOFC: its power order changes no faster than its ramp rate.
-    reg = _add_model_safe(ss, "REGCA1", defaults_applied, label, idx=f"REGCA1_PCS_{n}",
-                          name=f"REGCA1_{rec['label']}", bus=bus, gen=static_idx, Sn=s,
-                          **_RENEWABLE_DEFAULTS["REGCA1"])
-    ramp = obj.ramp * obj.p_rated / 1e6 / s
-    # Its Q held as set (no power-factor or voltage control), no speed-dependent power, Q priority.
-    ree = reg and _add_model_safe(ss, "REECA1", defaults_applied, label, idx=f"REECA1_PCS_{n}",
-                                  name=f"REECA1_{rec['label']}", reg=reg, dPmax=ramp, dPmin=-ramp,
-                                  PMAX=max(rec["p_max_ac"], 0.0) / s, PMIN=max(rec["p_min_ac"], 0.0) / s,
-                                  PFFLAG=0, VFLAG=0, QFLAG=0, PFLAG=0, PQFLAG=0, **_RENEWABLE_DEFAULTS["REECA1"])
-    return {"model": "REGCA1", "model_idx": reg, "ree_idx": ree or None}
+    # A PV array, and an SOFC system: its power order is constant through a run, so the ramp limit
+    # and minimum load REGCA1 + REECA1 gave it never acted, while REGCA1's low-voltage gain stalled
+    # the solver - at its 0.8 pu breakpoint the campus's SOFC inverters switched state almost every
+    # step through IEEE 2800's ride-through envelope. Its ramp is the time series' to apply.
+    idx = _add_model_safe(ss, "PVD1", defaults_applied, label, idx=f"PVD1_PCS_{n}",
+                          name=f"PVD1_{rec['label']}", pmx=max(rec["p_max_ac"], 1e-6) / s, **common)
+    return {"model": "PVD1", "model_idx": idx}
 
 
 def _settle_pcs_set_points(ss, meta: Dict[str, Any], rounds: int = 30) -> bool:

@@ -1,7 +1,7 @@
 """
 The PCS in the ANDES transient stability study: each source behind its PCS
-as an ANDES model - a battery or flywheel ESD1, a PV array PVD1, an SOFC
-system REGCA1 + REECA1, a grid-forming PCS a virtual machine (GENCLS) -
+as an ANDES model - a battery or flywheel ESD1, a PV array or an SOFC
+system PVD1, a grid-forming PCS a virtual machine (GENCLS) -
 starting where the load flow left it and riding through a fault.
 """
 import json
@@ -53,7 +53,7 @@ def test_battery_and_pv_ride_through_a_fault(client, quiet):
     t = np.asarray(result['time'])
     at = lambda series, x: float(np.asarray(series, dtype=float)[np.searchsorted(t, x)])
     pcs = {r['id']: r for r in result['pcs']}
-    assert {r['model'] for r in pcs.values()} == {'ESD1', 'PVD1', 'REGCA1', 'GENCLS'}
+    assert {r['model'] for r in pcs.values()} == {'ESD1', 'PVD1', 'GENCLS'}
     for cell, row in pcs.items():
         p0 = row['p_mw'][0]
         assert p0 == pytest.approx(flow[cell]['p_mw'], abs=1e-5), cell
@@ -78,8 +78,10 @@ def test_battery_and_pv_ride_through_a_fault(client, quiet):
 def test_each_pcs_model_carries_its_source(quiet):
     """
     ESD1 a battery's window and energy, a flywheel's as its speed squared;
-    PVD1 a PV array's MPP; REECA1 an SOFC system's ramp, minimum load and
-    rating; a grid-forming PCS's virtual machine (GENCLS) its droop as its
+    PVD1 a PV array's MPP and an SOFC system's rating (its ramp and minimum
+    load never act on a run's constant power order: REGCA1 + REECA1 gave
+    them, and stalled at REGCA1's low-voltage breakpoint); a grid-forming
+    PCS's virtual machine (GENCLS) its droop as its
     damping, its power filter as its inertia. ESD1's and PVD1's frequency
     trip points IEEE 1547-2018 Category III's, scaled to 50 Hz.
     """
@@ -106,10 +108,8 @@ def test_each_pcs_model_carries_its_source(quiet):
     pv = g['p3']
     assert vin('PVD1', 'pmx', pv['model_idx']) == pytest.approx(pv['p_mw'] / 0.5)
     fc = g['p4']
-    ree = list(ss.REECA1.idx.v).index(fc['ree_idx'])
-    assert float(ss.REECA1.dPmax.vin[ree]) == pytest.approx(0.02 * 0.1 / 0.2)
-    assert float(ss.REECA1.PMIN.vin[ree]) == pytest.approx(0.98 * 0.03 / 0.2)
-    assert float(ss.REECA1.PMAX.vin[ree]) == pytest.approx(0.98 * 0.095 / 0.2)
+    assert fc['model'] == 'PVD1' and not ss.REGCA1.n
+    assert vin('PVD1', 'pmx', fc['model_idx']) == pytest.approx(0.98 * 0.095 / 0.2)
     gf = g['p5']['model_idx']
     assert vin('GENCLS', 'D', gf) == pytest.approx(25.0) and vin('GENCLS', 'M', gf) == pytest.approx(0.5)
 
