@@ -10,6 +10,10 @@ independent.
 the catcher picking up through the diodes, an SST out (2+1), a transformer out
 with the tie closed - the conversion losses of Hall A against Hall B, and
 contingency.
+
+20a, part 2: the optimal power flow in merit order, a day's time series with
+the microgrid dispatch, and the back-up case - the grid lost and the turbine
+off, ten minutes on storage.
 """
 import contextlib
 import io
@@ -52,6 +56,24 @@ def _variant(payload, changes):
     for label, fields in changes.items():
         p[by_label[label]].update(fields)
     return p
+
+
+def _step_loads(payload, dt, n):
+    """Each step's load by hand: the AC loads, and each rack's rating times its cycle's mean over the step."""
+    import load_profiles_electrisim as lp
+    library, _ = lp.library_from_params(payload['0'])
+    rows = [v for v in payload.values() if isinstance(v, dict) and str(v.get('in_service', 'true')) != 'false']
+    ac = sum(float(v['p_mw']) for v in rows
+             if str(v.get('typ', '')).startswith('Load') and not str(v['typ']).startswith('Load DC'))
+    out = []
+    for k in range(n):
+        dc = 0.0
+        for v in rows:
+            if str(v.get('typ', '')).startswith('Load DC'):
+                prof = library[v['load_profile_id']]
+                dc += float(v['p_mw']) * lp.average_profile(prof['t'] - prof['t'][0], prof['p'], k * dt, (k + 1) * dt, True)
+        out.append(ac + dc)
+    return out
 
 
 def _by_label(payload, rows):
@@ -264,3 +286,110 @@ def test_contingency_each_transformer_and_source(client, base):
     assert not cases['Gas turbine']['violations']
     t1 = sorted(v['element'] for v in cases['T1 245/34.5 kV']['violations'] if v['type'] == 'supply')
     assert t1 == ['Bus_34.5 kV Bus 1', 'Bus_Catcher B 0.48 kV', 'Bus_Lineup A 0.48 kV', 'Bus_Substation BESS 0.69 kV']
+
+
+# --- 20a, part 2: the optimal power flow, the time series, the back-up case ---------------------------
+
+def test_optimal_power_flow_in_merit_order(client):
+    """
+    The OPF dialog's request: the turbine at 60 under the grid's 70 runs to its
+    35 MW (43.75 MVA at 0.8); the back-up gensets, out of service, give nothing
+    (the OPF's request left that out, and dispatched them); the BESS PCS at
+    their window's top, alike; the eSTATCOM, on 7.5 MW-s of supercapacitors,
+    no active power (free to the OPF, it exported 14.7 MW) - its rating for
+    reactive power. The total cost each source's marginal cost times its power.
+    """
+    payload = _payload('opf_')
+    out = _post(client, payload)
+    assert out['opf_converged'] is True
+    gens = _by_label(payload, out['generators'])
+
+    def g(label):
+        return next(r for k, r in gens.items() if k.startswith(label))
+    assert g('Gas turbine')['p_mw'] == pytest.approx(35.0, abs=1e-4)
+    for x in ('Lineup A', 'Lineup B', 'Catcher B'):
+        assert g(f'{x} back-up genset')['p_mw'] == pytest.approx(0.0, abs=1e-9)
+    bess = [g(f'Substation BESS PCS {k}')['p_mw'] for k in range(1, 5)]
+    assert max(bess) - min(bess) < 1e-6 and 2.4 < bess[0] < 2.75
+    est = g('eSTATCOM')
+    assert est['p_mw'] == pytest.approx(0.0, abs=1e-6) and abs(est['q_mvar']) <= 15.0
+    grid = out['externalgrids'][0]
+    assert grid['p_mw'] < 0                                     # the turbine cheaper than the tariff: it exports
+    rows = [grid] + [r for r in out['generators'] if r.get('marginal_cost') is not None]
+    assert out['total_cost'] == pytest.approx(sum(r['marginal_cost'] * r['p_mw'] for r in rows), rel=1e-6)
+
+
+def test_time_series_a_day_with_dispatch(client):
+    """
+    The time-series dialog's request at 60 Hz: 24 hourly steps with the
+    microgrid dispatch, every rack on Figure 5's cycle. Each hour's load is the
+    AC loads and each rack's rating times the cycle's mean over it (1.1 s does
+    not divide an hour: each hour's differs a little); every step
+    converges and nothing goes unserved. The eSTATCOM's supercapacitors hold
+    their charge - its PCS draws their 182 W of leakage from the grid (at
+    none they ended the day below their minimum); each lineup's store gives
+    nothing and loses its converter's 2 kW no-load loss.
+    """
+    payload = _payload('timeseries_')
+    assert payload['0']['microgrid_dispatch'] in (True, 'true') and payload['0']['frequency'] == '60'
+    out = _post(client, payload)
+    mg = out['microgrid']
+    steps = mg['steps']
+    assert len(steps) == 24 and all(st['converged'] for st in steps)
+    assert mg['unserved_mwh'] == pytest.approx(0.0, abs=1e-9)
+    for st, load in zip(steps, _step_loads(payload, 3600.0, 24)):
+        assert st['load_mw'] == pytest.approx(load, abs=1e-6), st['time_step']
+    stores = {st['label']: st for st in mg['stores']}
+    est = stores['eSTATCOM supercapacitors']
+    assert est['soc_min_percent'] == pytest.approx(est['soc_max_percent'], abs=1e-4)
+    assert est['soc_min_percent'] == pytest.approx(100 * (0.9 ** 2 - 0.5 ** 2) / (1 - 0.5 ** 2), abs=1e-4)
+    assert est['delivered_mwh'] == pytest.approx(-1350.0 ** 2 / 1e4 * 24 / 1e6, rel=1e-3)
+    for x in ('Lineup A', 'Lineup B', 'Catcher B'):
+        st = stores[f'{x} DC Store']
+        assert st['drawn_mwh'] == pytest.approx(st['stored_start_mwh'] - st['stored_end_mwh'], abs=1e-9)
+        assert st['drawn_mwh'] == pytest.approx(0.002 * 24, rel=1e-3)
+
+
+def test_backup_ten_minutes_on_storage(client):
+    """
+    The paper's back-up case: the grid lost, the turbine off, the bus tie
+    closed - ten one-minute steps. The island's grid-forming PCS share it by
+    droop within what each can give for the step: the four substation BESS at
+    their window's top, 2.53 MW each; the eSTATCOM, its 7.5 MW-s gone in the
+    first minute, nothing after; the island at the frequency the BESS reached
+    their limits, f0 (1 - P_max droop / S). The rest is shed: some 6.7 of
+    20.5 MW served. Shared by weight alone, the eSTATCOM took 58 % of the
+    island, every load was shed and no step after the first solved. The
+    800 V stores give nothing: the island holds the AC, the rectifiers the
+    800 V (they have no power limit here).
+    """
+    payload = _variant(_payload('timeseries_'), {'Grid': {'in_service': 'false'},
+                                                 'Gas turbine': {'in_service': 'false'},
+                                                 'Bus tie': {'closed': 'true'}})
+    payload['0'].update(time_steps='10', time_step_s='60')
+    out = _post(client, payload)
+    mg = out['microgrid']
+    steps = mg['steps']
+    assert len(steps) == 10 and all(st['converged'] for st in steps)
+    for st, load in zip(steps, _step_loads(payload, 60.0, 10)):
+        assert st['load_mw'] + st['unserved_mw'] == pytest.approx(load, abs=1e-6), st['time_step']
+        assert 6.5 < st['load_mw'] < 7.0
+    assert any('ran short' in n for n in mg['notes'])
+    rows = _spec_rows()
+    by_step = {}
+    for r in mg['pcs']:
+        by_step.setdefault(r['time_step'], {})[r['label']] = r
+    row = rows['Substation BESS PCS 1']
+    for t, pcs in by_step.items():
+        bess = [pcs[f'Substation BESS PCS {k}']['p_mw'] for k in range(1, 5)]
+        assert max(bess) - min(bess) < 1e-6 and 2.52 < bess[0] < 2.54, t        # their window, falling with their voltage
+        f = 60.0 * (1 - bess[0] * row['droop_pf_percent'] / 100 / row['s_rated_mva'])
+        for r in pcs.values():
+            assert r['frequency_hz'] == pytest.approx(f, abs=1e-6), (t, r['label'])
+        if t > 0:
+            assert pcs['eSTATCOM']['p_mw'] == pytest.approx(0.0, abs=1e-3), t
+    stores = {st['label']: st for st in mg['stores']}
+    assert stores['eSTATCOM supercapacitors']['soc_max_percent'] < 1.0
+    assert stores['Lineup A DC Store']['drawn_mwh'] < 1e-3 and stores['Hall B DC Store 1']['drawn_mwh'] < 1e-3
+    st = stores['Substation DC Store 1']
+    assert st['drawn_mwh'] == pytest.approx(st['stored_start_mwh'] - st['stored_end_mwh'], abs=1e-9)
