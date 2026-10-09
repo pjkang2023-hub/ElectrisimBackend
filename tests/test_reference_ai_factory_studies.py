@@ -266,36 +266,46 @@ def test_conversion_losses_hall_a_against_hall_b(base):
     assert eta_a > eta_b
 
 
-def test_contingency_each_transformer_and_source(client, base):
+def test_contingency_each_transformer_source_and_converter(client, base):
     """
-    The contingency dialog's request, every transformer and source: all
-    converge. T1 or T2 out with the tie open cuts off its bus's side - the
-    AC loads and SSTs there by hand (the tie's transfer is not in a static
-    study); a lineup transformer its 0.6 MW AC load (its shelves carried by
+    The contingency dialog's request, every transformer, source and converter:
+    all converge. T1 or T2 out: the bus tie closes, as the site's transfer
+    would, and nothing is lost - the other carries both buses within its
+    rating. A lineup transformer: its 0.6 MW AC load (its shelves carried by
     the catcher); the cooling plant's its 4 MW; the turbine, the BESS PCS or
-    the eSTATCOM nothing - the grid takes them up. Each SST its MV draw.
+    the eSTATCOM nothing - the grid takes them up. Each rectifier, SST and DC/DC
+    converter: N+1 everywhere but the rack's own 50/12 V stage, whose 1 MW of
+    GPUs is lost - DC load counted now, as AC load was.
     """
     payload, flow = base
     out = _post(client, _payload('contingency_'))
     cases = {c['outage']: c for c in out['contingency_results']}
     assert all(c['converged'] for c in cases.values())
-    ssts = _by_label(payload, flow['ssts'])
+    for name in ('T1 245/34.5 kV', 'T2 245/34.5 kV'):
+        assert cases[name]['ties_closed'] == ['Bus tie'] and cases[name]['lost_load_mw'] == pytest.approx(0.0, abs=1e-9)
+        assert cases[name]['max_loading_percent'] < 100.0
     lost = {
-        'T1 245/34.5 kV': 0.6 + 0.6 + ssts['Hall B SST 1']['p_mv_mw'],
-        'T2 245/34.5 kV': 0.6 + 4.0 + ssts['Hall B SST 2']['p_mv_mw'] + ssts['Hall B SST 3']['p_mv_mw'],
         'Lineup A transformer': 0.6, 'Lineup B transformer': 0.6, 'Catcher B transformer': 0.6,
         'Cooling plant transformer': 4.0, 'Gas turbine GSU': 0.0, 'Substation BESS transformer': 0.0,
         'eSTATCOM transformer': 0.0, 'Gas turbine': 0.0,
     }
     for name, mw in lost.items():
         assert cases[name]['lost_load_mw'] == pytest.approx(mw, abs=2e-3), name
+        assert cases[name]['ties_closed'] == [], name
+    converters = [l for l in (f'Lineup {x} rectifier {k}' for x in 'AB' for k in range(1, 5))] + [
+        f'Catcher B rectifier {k}' for k in range(1, 5)] + [f'Hall B SST {k}' for k in range(1, 4)] + [
+        'Lineup A DC Store converter', 'Lineup B DC Store converter', 'Catcher B DC Store converter',
+        'DC bus coupler A-B', 'Rack A1 power supply 800/50 V', 'Hall B DC Store 1 converter',
+        'Hall B DC Store 2 converter', 'Hall B supercapacitors converter']
+    for name in converters:
+        assert cases[name]['lost_load_mw'] == pytest.approx(0.0, abs=1e-6), name
+    vrm = cases['Rack A1 50/12 V converters']
+    assert vrm['lost_dc_load_mw'] == pytest.approx(1.0, abs=1e-6) and vrm['lost_load_mw'] == pytest.approx(1.0, abs=1e-6)
+    assert [v['element'] for v in vrm['violations'] if v['type'] == 'supply'] == ['DC_Bus_Rack A1 12 V']
     for name, c in cases.items():
-        if name not in lost:                              # the PCS
+        if name not in lost and name not in converters and not name.startswith(('T1', 'T2', 'Rack A1 50/12')):
             assert 'PCS' in name or 'eSTATCOM' in name, name
             assert not c['violations'] and c['lost_load_mw'] == 0
-    assert not cases['Gas turbine']['violations']
-    t1 = sorted(v['element'] for v in cases['T1 245/34.5 kV']['violations'] if v['type'] == 'supply')
-    assert t1 == ['Bus_34.5 kV Bus 1', 'Bus_Catcher B 0.48 kV', 'Bus_Lineup A 0.48 kV', 'Bus_Substation BESS 0.69 kV']
 
 
 # --- 20a, part 2: the optimal power flow, the time series, the back-up case ---------------------------
@@ -556,20 +566,17 @@ def test_arc_flash_by_voltage_class(client):
         assert any(w.startswith(f'Bus {bus}: Ibf=') and '65 kA' in w for w in out['warnings'])
 
 
-def test_harmonics_run_but_the_converters_inject_none(client, tmp_path):
-    """
-    The harmonic study (OpenDSS) runs at 60 Hz and reports every AC bus, the
-    DC network left out and said so. Its converters are the constant loads
-    their AC sides draw, with no spectrum: the rectifiers and SSTs inject
-    nothing, so every bus reads 0 % THD - IEEE 519 at 245 kV cannot be judged
-    until a converter carries its own harmonic spectrum.
-    """
+def _harmonics(client, tmp_path, spectrum=None):
     import opendssdirect as dss
     with open(os.path.join(HERE, 'reference', 'reference_radial.diagram_harmonic_payload.json'),
               encoding='utf-8') as handle:
         params = json.load(handle)['0']
     p = _payload()
     p['0'] = {**params, 'frequency': '60'}
+    if spectrum:
+        for v in p.values():
+            if isinstance(v, dict) and str(v.get('typ', '')).startswith('VSC'):
+                v['spectrum'] = spectrum
     before = dss.Basic.DataPath()
     dss.Basic.DataPath(str(tmp_path))
     try:
@@ -577,10 +584,36 @@ def test_harmonics_run_but_the_converters_inject_none(client, tmp_path):
     finally:
         dss.Basic.DataPath(before)
     assert out['harmonic_analysis']['executed']
-    assert any('DC network is left out' in w for w in out.get('warnings', []))
-    buses = _by_label(p, out['busbars'])
+    return p, _by_label(p, out['busbars'])
+
+
+def test_harmonics_the_converters_inject_and_ieee_519_is_judged(client, tmp_path):
+    """
+    The harmonic study (OpenDSS) at 60 Hz: each rectifier and SST injects an
+    active front end's spectrum by default (generic: 2 % fifth, 1.5 % seventh,
+    falling after), and every bus is judged against IEEE 519-2022's voltage
+    limits for its class - 245 kV 1.5 % THD and 1 % a harmonic, 1-69 kV 5 %
+    and 3 %, under 1 kV 8 % and 5 %. Before, every bus read 0 % THD: not for
+    want of a spectrum alone - a converter carrying nothing (the catcher's
+    rectifiers at rest) was a load of no power, its 0/0 harmonic current made
+    every solve NaN. With active front ends all pass; with six-pulse diode
+    bridges the lineups' 0.48 kV buses fail on a single harmonic.
+    """
+    p, buses = _harmonics(client, tmp_path)
     assert len(buses) == 10
-    assert all(b['vthd_percent'] == pytest.approx(0.0, abs=1e-9) for b in buses.values())
+    for name, b in buses.items():
+        assert 0.0 < b['vthd_percent'] < 3.0, name
+        assert b['ieee519']['ok'], name
+    grid = buses['Grid 245 kV']['ieee519']
+    assert (grid['thd_limit_percent'], grid['individual_limit_percent']) == (1.5, 1.0)
+    assert (buses['34.5 kV Bus 1']['ieee519']['thd_limit_percent'],
+            buses['Lineup A 0.48 kV']['ieee519']['thd_limit_percent']) == (5.0, 8.0)
+
+    _, six = _harmonics(client, tmp_path, spectrum='six_pulse')
+    for name in ('Lineup A 0.48 kV', 'Lineup B 0.48 kV'):
+        assert not six[name]['ieee519']['ok'] and six[name]['ieee519']['max_individual_percent'] > 5.0, name
+    assert six['Grid 245 kV']['ieee519']['ok']
+    assert six['Grid 245 kV']['vthd_percent'] > 2 * buses['Grid 245 kV']['vthd_percent']
 
 
 def _tds(client, off=(), **params):
@@ -818,7 +851,7 @@ def test_emt_ride_through_ieee2800_the_800_v_where_it_holds(client):
     - its racks lose their 800 V within 15 ms. Lineup A and the catcher, on
     Bus 1 with the grid at 0 pu, have only their stores, 2.5 MW each at its
     current limit against some 6 MW: their buses fall through 0.8 pu, all on
-    them blocks, and the shelves lose it too. Lineup B, on Bus 2, rides
+    them blocks, and the shelves lose it too, before 100 ms. Lineup B, on Bus 2, rides
     through on its rectifiers at their current limit. Where the 800 V is
     lost, it is for want of power, not energy: no store gives a thousandth
     of what it holds.
@@ -831,7 +864,7 @@ def test_emt_ride_through_ieee2800_the_800_v_where_it_holds(client):
     for i in range(1, 11):
         assert loads[f'Hall B rack {i}']['verdict'] == 'lost supply' and 30 < loads[f'Hall B rack {i}']['t_lost_ms'] < 40
     for i in range(2, 7):
-        assert loads[f'Shelf A{i} racks']['verdict'] == 'lost supply' and 55 < loads[f'Shelf A{i} racks']['t_lost_ms'] < 95
+        assert loads[f'Shelf A{i} racks']['verdict'] == 'lost supply' and 55 < loads[f'Shelf A{i} racks']['t_lost_ms'] < 100
     for i in range(1, 7):
         assert loads[f'Shelf B{i} racks']['t_lost_ms'] is None and loads[f'Shelf B{i} racks']['v_min_pu'] > 0.85
     blocked = {b['label']: b['t_ms'] for b in emt['converters_blocked']}
@@ -841,3 +874,173 @@ def test_emt_ride_through_ieee2800_the_800_v_where_it_holds(client):
     for d in emt['ders']:
         if d['kind'] == 'Battery':
             assert d['energy_given_mj'] < 1e-3 * 5000 * 3.6, d['label']        # 5 MWh each
+
+
+def test_emt_the_rack_supply_damps_its_input_filter(client):
+    """
+    Shelf A1's breaker limits through 10 uH; the rack's power supply behind
+    it has 6.9 mF at its input and draws a constant 1 MW, a negative
+    resistance of -V^2 / P = -0.64 ohm. The LC rings at 1 / 2 pi sqrt(L C),
+    some 606 Hz, and is damped only when its series resistance passes
+    L / (C |R|) = 2.3 mOhm (Middlebrook): at 0.1 mOhm its input capacitor's
+    ESR left a 5.4 % ring on the shelf's 800 V. At 5 mOhm it settles, and the
+    shelves beside it with it.
+    """
+    import numpy as np
+    l_h, c_f, r = 10e-6, 6.9e-3, 0.8 ** 2 / 1.0
+    assert 1 / (2 * math.pi * math.sqrt(l_h * c_f)) == pytest.approx(606, abs=1)
+    assert l_h / (c_f * r) * 1e3 == pytest.approx(2.26, abs=0.01)
+    p = _payload()
+    psu = next(v for v in p.values() if isinstance(v, dict) and v.get('userFriendlyName') == 'Rack A1 power supply 800/50 V')
+    assert float(psu['c_in_esr_mohm']) == 5.0
+    p['0'] = {'typ': 'EmtStudy Parameters', 'user_email': 't@t', 'duration_ms': '60', 'frequency': '60'}
+    emt = _post(client, p)['emt']
+    for b in emt['buses']:
+        if b['label'] in ('Shelf A1 800 V', 'Shelf A2 800 V'):
+            t, v = np.asarray(b['waveform']['t_ms']), np.asarray(b['waveform']['v_kv']) / b['vn_kv']
+            assert np.ptp(v[t >= t[-1] - 20]) < 0.002, b['label']
+    loads = {l['label']: l['verdict'] for l in emt['loads']}
+    assert all(loads[f'Shelf A{i} racks'] == 'settles' for i in range(2, 7))
+
+
+def test_two_rectifiers_out_the_other_two_at_their_rating_the_store_picks_up(client):
+    """
+    Lineup A with two of its four rectifiers out: the two left would carry
+    some 6 MW, past their 2.2 MVA. Each delivers its rating instead, its
+    800 V bus sags, and the lineup's store in droop picks up what its droop
+    gives at that voltage, P = P_r (V0 - V) V / (d V0^2); the catcher's
+    diodes, 2 % lower, take a little of Shelf A1. Before, a rectifier held
+    its 800 V whatever it carried and its store never helped.
+    """
+    p = _variant(_payload(), {'Lineup A rectifier 3': {'in_service': 'false'},
+                              'Lineup A rectifier 4': {'in_service': 'false'}})
+    out = _post(client, p)
+    vscs = _by_label(p, out['vscs'])
+    for k in (1, 2):
+        assert vscs[f'Lineup A rectifier {k}']['p_mw'] == pytest.approx(2.2, rel=1e-6)
+        assert any(w.startswith(f"VSC 'Lineup A rectifier {k}' is at its rating, 2.2 MVA") for w in out['warnings'])
+    v = _by_label(p, out['dcbuses'])['Lineup A 800 V']['vm_pu']
+    assert 0.95 < v < 0.98
+    row = _spec_rows()['Lineup A DC Store converter']
+    droop = row['rated_mw'] * (1.0 - v) * v / (row['droop_percent'] / 100.0)
+    store = _by_label(p, out['dcdcconverters'])['Lineup A DC Store converter']
+    assert store['p_out_mw'] == pytest.approx(droop, rel=0.01)
+    assert _by_label(p, out['dcdiodes'])['Shelf A1 diode from the catcher']['p_mw'] > 0.05
+
+
+# --- The design findings, closed as variants: each the fix, against the finding ------------------
+
+def test_variant_ssts_of_5_2_mw_are_a_true_two_plus_one(client):
+    """
+    Found in 20a: with one SST out the other two carry Hall B past their 5 MW.
+    Rated 5.2 MW, the two carry it within their rating.
+    """
+    p = _variant(_payload(), {**{f'Hall B SST {k}': {'rect_rated_mw': '5.2', 'dcdc_rated_mw': '5.2'} for k in (1, 2, 3)},
+                              'Hall B SST 1': {'rect_rated_mw': '5.2', 'dcdc_rated_mw': '5.2', 'in_service': 'false'}})
+    ssts = _by_label(p, _post(client, p)['ssts'])
+    for k in (2, 3):
+        assert 5.0 < ssts[f'Hall B SST {k}']['p_mv_mw'] < 5.2
+
+
+def test_variant_a_breaker_per_shelf_on_the_catcher_side_is_selective(client):
+    """
+    Found in 20b: the catcher's group breaker sat in every shelf fault's path.
+    With a breaker per shelf on the catcher's side instead (its 3 kA trip, as
+    the shelves' own), a fault on shelf A2 trips its two breakers only; the
+    catcher stays on the other eleven shelves.
+    """
+    import copy
+    from test_dc_fault import STUDY
+    p = _payload()
+    cell = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
+    key = {v.get('userFriendlyName'): k for k, v in p.items() if isinstance(v, dict)}
+    proto = p[key['Shelf A2 breaker']]
+    for g in 'AB':
+        del p[key[f'Catcher group {g} breaker']]
+        for k in range(1, 7):
+            b = copy.deepcopy(proto)
+            b.update(name=f'catcher_brk_{g}{k}', id=f'catcher-brk-{g}{k}', userFriendlyName=f'Shelf {g}{k} catcher breaker',
+                     element=cell[f'Shelf {g}{k} diode from the catcher'], bus=cell[f'Catcher group {g} 800 V'])
+            p[b['name']] = b
+    p['0'] = {**STUDY, 'fault_bus': cell['Shelf A2 800 V'], 'duration_ms': '60', 'frequency': '60'}
+    out = _post(client, p)
+    trip = float(proto['trip_current_ka'])
+    trips = {b['label'] for b in out['dcfault']['breakers'] if b['ip_ka'] > trip}
+    assert trips == {'Shelf A2 breaker', 'Shelf A2 catcher breaker'}
+    assert all(not b['exceeds'] for b in out['dcfault']['breakers'])
+
+
+def test_variant_lineup_transformers_at_10_percent_bring_the_lv_into_ieee_1584(client):
+    """
+    Found in 20b: the 0.48 kV lineups at 127-143 kA, past IEEE 1584's 106 kA.
+    Their 8 MVA transformers at 10 % rather than 6 % bring them inside it.
+    """
+    p = _variant(_payload('sc_'), {t: {'vk_percent': '10', 'vkr_percent': '1'}
+                                   for t in ('Lineup A transformer', 'Lineup B transformer', 'Catcher B transformer')})
+    buses = _by_label(p, _post(client, p)['busbars'])
+    for b in ('Lineup A 0.48 kV', 'Lineup B 0.48 kV', 'Catcher B 0.48 kV'):
+        assert 60 < buses[b]['ikss_ka'] < 106, b
+
+
+def test_variant_some_24_mw_of_grid_forming_storage_carries_the_backup(client):
+    """
+    Found in 20a: grid lost and turbine off, the substation storage carried
+    some 6.7 of 20.5 MW. Four PCS of 7.5 MVA on 6 MWh stores at 1.5 C carry
+    the whole site, each some 6.1 MW at the island's droop frequency.
+    """
+    payload = _variant(_payload('timeseries_'), {
+        'Grid': {'in_service': 'false'}, 'Gas turbine': {'in_service': 'false'}, 'Bus tie': {'closed': 'true'},
+        'Substation BESS transformer': {'sn_mva': '32'},
+        **{f'Substation BESS PCS {k}': {'s_rated_mva': '7.5'} for k in range(1, 5)},
+        **{f'Substation DC Store {k}': {'capacity_kwh': '6000', 'c_rate_discharge': '1.5', 'c_rate_charge': '1.5'}
+           for k in range(1, 5)}})
+    payload['0'].update(time_steps='2', time_step_s='60')
+    mg = _post(client, payload)['microgrid']
+    for st, load in zip(mg['steps'], _step_loads(payload, 60.0, 2)):
+        assert st['converged'] and st['unserved_mw'] == pytest.approx(0.0, abs=1e-6)
+        assert st['load_mw'] == pytest.approx(load, abs=1e-6)
+    assert not any('ran short' in n for n in mg['notes'])
+
+
+def test_variant_a_40_mva_estatcom_keeps_the_turbine_in_step(client):
+    """
+    Found in 20c: held to their 1.2 pu, the substation's PCS could not keep
+    the turbine in step through IEEE 2800's dip at 245 kV. A 40 MVA eSTATCOM
+    (its supercapacitors scaled with it, from 75 %) at the same limit does:
+    the run reaches 10 s and the turbine's angle swings some 60 degrees.
+    """
+    k = 40.0 / 15.0
+    p = _variant(_payload('tds_'), {'eSTATCOM': {'s_rated_mva': '40'}, 'eSTATCOM transformer': {'sn_mva': '44'},
+                                    'eSTATCOM supercapacitors': {'c_f': str(8.8889 * k), 'p_rated_kw': str(15000 * k),
+                                                                 'v0_percent': '75'}})
+    p['0'].update(fault_enabled='false', tf='10', grid_voltage_profile='ieee2800', grid_voltage_start_s='1')
+    out = _post(client, p)
+    assert out['converged'] is True and out['time'][-1] == pytest.approx(10.0)
+    delta, = (s for s in out['delta'] if s['name'] == 'Gas turbine')
+    assert math.degrees(max(delta['values']) - delta['values'][0]) < 90
+    est, = (r for r in out['pcs'] if r['label'] == 'eSTATCOM')
+    assert est['stopped_s'] is None and est['current_limited_from_s'] is not None
+
+
+def test_emt_variant_bus_stores_sized_for_their_bus_ride_through(client):
+    """
+    Found in 20c: through IEEE 2800's 0 pu, Lineup A's, the catcher's and
+    Hall B's racks lost their 800 V - their stores' converters, 2.5 MW
+    against some 6 MW, blocked at 0.8 pu, their batteries behind 62.5 mOhm
+    sagging under the current. Converters of 7 MW (6 MW in Hall B) on banks
+    of 5 mOhm hold every 800 V bus above 0.94 pu; only the SSTs block, their
+    MV gone, and Hall B's stores carry it.
+    """
+    stores = ('Lineup A DC Store', 'Lineup B DC Store', 'Catcher B DC Store', 'Hall B DC Store 1', 'Hall B DC Store 2')
+    p = _variant(_payload(), {
+        **{f'{s} converter': {'rated_mw': '6' if s.startswith('Hall B') else '7'} for s in stores},
+        **{s: {'r0_mohm': '5'} for s in stores}})
+    p['0'] = {'typ': 'EmtStudy Parameters', 'user_email': 't@t', 'duration_ms': '100', 'frequency': '60',
+              'grid_voltage_profile': 'ieee2800', 'grid_voltage_start_ms': '20'}
+    emt = _post(client, p)['emt']
+    assert all(l['t_lost_ms'] is None for l in emt['loads']), [l['label'] for l in emt['loads'] if l['t_lost_ms']]
+    assert {b['label'] for b in emt['converters_blocked']} == {
+        f'Hall B SST {k} {stage}' for k in (1, 2, 3) for stage in ('rectifier', 'DC/DC')}
+    for b in emt['buses']:
+        if b['label'].endswith('800 V'):
+            assert b['v_min_pu'] > 0.94, b['label']

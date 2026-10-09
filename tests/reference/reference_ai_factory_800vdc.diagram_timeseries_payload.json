@@ -3057,7 +3057,7 @@
   "c_out_mf": "0",
   "c_out_esr_mohm": "0.1",
   "c_out_esl_uh": "0.05",
-  "c_in_esr_mohm": "0.1",
+  "c_in_esr_mohm": "5",
   "c_in_esl_uh": "0.05",
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
