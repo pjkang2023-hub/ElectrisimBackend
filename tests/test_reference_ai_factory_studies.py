@@ -19,6 +19,11 @@ off, ten minutes on storage.
 resistors, DC faults at a lineup's bus, a shelf, the catcher's bus and the
 rack's 50 V bus, a shelf fault's selectivity, arc flash by voltage class, and
 the harmonic study.
+
+20c: the power swing in the transient stability study (ANDES) - the racks'
+training cycle reaching the machines through the converters' AC draw, its
+swing at the grid and the turbine, its filtering by the storage tiers, the
+torsional screen - and ride-through and islanding.
 """
 import contextlib
 import io
@@ -576,3 +581,236 @@ def test_harmonics_run_but_the_converters_inject_none(client, tmp_path):
     buses = _by_label(p, out['busbars'])
     assert len(buses) == 10
     assert all(b['vthd_percent'] == pytest.approx(0.0, abs=1e-9) for b in buses.values())
+
+
+def _tds(client, off=(), **params):
+    """The transient stability study (ANDES) on the factory, 10 s, no fault; the elements named in off out of service."""
+    p = _payload('tds_')
+    if off:
+        p = _variant(p, {label: {'in_service': 'false'} for label in off})
+    p['0'].update({'fault_enabled': 'false', 'tf': '10'}, **params)
+    return p, _post(client, p)
+
+
+PCS = ('Substation BESS PCS 1', 'Substation BESS PCS 2', 'Substation BESS PCS 3', 'Substation BESS PCS 4', 'eSTATCOM')
+SMOOTHING = ('Hall B supercapacitors converter',)
+
+
+def _cycle_s(payload):
+    import load_profiles_electrisim as lp
+    library, _ = lp.library_from_params(payload['0'])
+    prof = library['ai_training']
+    t = prof['t'] - prof['t'][0]
+    return float(t[-1] + (t[-1] - t[-2]))           # a repeating profile's period: one step past its last sample
+
+
+def _racks_mw(payload, prefix=''):
+    return sum(float(v['p_mw']) for v in payload.values() if isinstance(v, dict)
+               and str(v.get('typ', '')).startswith('Load DC') and str(v.get('userFriendlyName')).startswith(prefix))
+
+
+def _fundamental(row, f_hz):
+    """A swing's amplitude at the cycle's own frequency: its strongest line within a bin of it."""
+    return max(d['amplitude_mw'] for d in row['dominant'] if abs(d['f_hz'] - f_hz) < 0.12)
+
+
+def _window_mean(t, x, a, b):
+    import numpy as np
+    t = np.asarray(t, dtype=float)
+    k = (t >= a) & (t <= b)
+    return float(np.trapezoid(np.asarray(x, dtype=float)[k], t[k]) / (t[k][-1] - t[k][0]))
+
+
+def test_tds_the_training_cycle_reaches_the_machines(client):
+    """
+    Each converter's AC draw follows the DC loads it reaches - the racks on
+    their 1.1 s training cycle, 40 % to 100 % - so the swing reaches the grid
+    and the turbine: before, the converters were held at the load flow's.
+    Hall B's racks are smoothed by its supercapacitors (2 s), so its SSTs
+    draw a swing far smaller than the lineups' rectifiers. The power drawn
+    matches the power given (losses under 2 %), and the swing's strongest
+    frequencies are the cycle's own and its harmonics.
+    """
+    p, out = _tds(client)
+    assert any('each following the profiles of the DC loads it reaches' in w
+               and 'less the fast part their smoothing stores take (Hall B supercapacitors converter)' in w
+               for w in out['warnings'])
+    following = {r['load']: r for r in out['load_profiles'] if r['profile'] == "its DC loads' profiles"}
+    rectifiers = {f'Lineup {x} rectifier {i} (DC network)' for x in 'AB' for i in range(1, 5)}
+    ssts = {f'Hall B SST {i} (MV) (DC network)' for i in range(1, 4)}
+    assert set(following) == rectifiers | ssts
+    for label in rectifiers:
+        r = following[label]['p_mw']
+        assert min(r) / max(r) == pytest.approx(0.4, abs=0.01), label
+    for label in ssts:
+        r = following[label]['p_mw']
+        assert min(r) / max(r) > 0.85, label
+
+    ac = sum(float(v['p_mw']) for v in p.values() if isinstance(v, dict) and str(v.get('typ', '')).startswith('Load')
+             and not str(v['typ']).startswith('Load DC') and str(v.get('in_service', 'true')) != 'false')
+    motors = sum(float(v.get('pn_mech_mw') or 0.0) for v in p.values()
+                 if isinstance(v, dict) and str(v.get('typ', '')).startswith('Motor'))
+    drawn = ac + motors + sum(sum(r['p_mw']) / len(r['p_mw']) for r in following.values())
+    swing = out['swing']
+    given = sum(r['mean_mw'] for r in swing['grid'] + swing['machines']) + sum(
+        sum(r['p_mw']) / len(r['p_mw']) for r in out['pcs'])
+    assert drawn < given < drawn * 1.02
+
+    f_cycle = 1.0 / _cycle_s(p)
+    grid, = swing['grid']
+    turbine, = swing['machines']
+    assert turbine['name'] == 'Gas turbine'
+    assert grid['peak_to_peak_mw'] > 5.0 and turbine['peak_to_peak_mw'] > 1.5
+    resolution = 1.0 / (out['tf'] - swing['from_s'])
+    for row in (grid, turbine):
+        for d in row['dominant'][:3]:
+            k = d['f_hz'] / f_cycle
+            assert abs(k - round(k)) * f_cycle <= resolution, (row['name'], d)
+
+
+def test_tds_power_swing_filtering_by_tier(client):
+    """
+    The swing at the grid with no storage, each tier, and all. Tier 2, Hall
+    B's supercapacitors smoothing its racks: at the cycle's frequency a first-
+    order filter of 2 s leaves 1 / sqrt(1 + (w tau)^2) of Hall B's swing, the
+    rest of the racks' as it was - the fundamental at the grid falls by that
+    share. Tier 3, the substation's grid-forming PCS on a stiff grid: the
+    1.1 s swing passes - the grid holds the frequency their droops answer -
+    within 5 %. All: about tier 2's.
+    """
+    p = _payload('tds_')
+    f_cycle = 1.0 / _cycle_s(p)
+    cases = {}
+    for name, off in (('none', PCS + SMOOTHING), ('tier 2', PCS), ('tier 3', SMOOTHING), ('all', ())):
+        _, out = _tds(client, off=off)
+        cases[name] = out['swing']['grid'][0]
+    none = _fundamental(cases['none'], f_cycle)
+    hall_b, total = _racks_mw(p, 'Hall B rack'), _racks_mw(p)
+    left = 1.0 / math.sqrt(1.0 + (2 * math.pi * f_cycle * 2.0) ** 2)
+    assert _fundamental(cases['tier 2'], f_cycle) == pytest.approx(none * (total - hall_b + hall_b * left) / total,
+                                                                   rel=0.1)
+    assert _fundamental(cases['tier 3'], f_cycle) == pytest.approx(none, rel=0.05)
+    assert _fundamental(cases['all'], f_cycle) == pytest.approx(_fundamental(cases['tier 2'], f_cycle), rel=0.05)
+    pp = {k: v['peak_to_peak_mw'] for k, v in cases.items()}
+    assert pp['all'] < pp['tier 2'] < pp['tier 3'] < pp['none'] and pp['all'] < 0.6 * pp['none']
+
+
+def test_tds_turbine_torsional_screen(client):
+    """
+    The swing's spectrum at the turbine against an assumed first torsional
+    mode, 20 Hz (the 15-25 Hz band): at a 5 ms step the band is resolved. The
+    1.1 s cycle's steps put a little of it there; the storage tiers take most
+    of it away - the substation's grid-forming PCS the steps' sharp edges,
+    Hall B's supercapacitors its swing.
+    """
+    runs = {}
+    for name, off in (('none', PCS + SMOOTHING), ('all', ())):
+        _, out = _tds(client, off=off, tstep='0.005')
+        assert not any('torsional band' in w for w in out['warnings'])
+        turbine, = out['swing']['machines']
+        assert turbine['band_resolved'] and turbine['band_hz'] == [15.0, 25.0] and turbine['nyquist_hz'] >= 99
+        runs[name] = turbine
+    assert 0 < runs['none']['band_rms_mw'] < 0.2 * runs['none']['total_rms_mw']
+    assert runs['all']['band_rms_mw'] < 0.15 * runs['none']['band_rms_mw']
+    # Its ramp depends on the pieces the profiles are applied in (each a step): only roughly.
+    assert runs['all']['max_ramp_mw_per_s'] < 0.5 * runs['none']['max_ramp_mw_per_s']
+
+
+def test_tds_islanding_the_droops_share(client):
+    """
+    The grid lost at 2 s: the turbine's governor (4 %, 43.75 MVA) and the
+    grid-forming PCS (2 %, 4 x 2.75 and 15 MVA) take what the grid gave, each
+    by its droop, P = S / R x df / f0 at the island's mean frequency over
+    whole cycles. The eSTATCOM's supercapacitors empty some 4.5 s on and it
+    stops; the rest take its share, so the frequency settles lower by their
+    gains' ratio.
+    """
+    payload = _payload('tds_')
+    grid = next(k for k, v in payload.items() if isinstance(v, dict) and v.get('userFriendlyName') == 'Grid')
+    p, out = _tds(client, tf='20', toggle_line=payload[grid]['name'], toggle_t='2.0', max_points='4000')
+    t, f = out['time'], out['frequency_hz']
+    gt = out['generator_p_mw'][0]['values']
+    pcs = {r['label']: r for r in out['pcs']}
+    cycle = _cycle_s(p)
+    stop = pcs['eSTATCOM']['stopped_s']
+    assert pcs['eSTATCOM']['stopped_because'] == 'emptied' and 5.5 < stop < 7.5
+    assert all(pcs[k]['stopped_s'] is None for k in PCS[:4])
+    assert any("PCS 'eSTATCOM': its supercapacitors emptied" in w for w in out['warnings'])
+
+    gains = {'Gas turbine': 43.75 / 0.04, **{k: 2.75 / 0.02 for k in PCS[:4]}, 'eSTATCOM': 15.0 / 0.02}
+    before = (2.0 - cycle, 2.0)
+    dfs = []
+    for window, running in (((3.2, 3.2 + 2 * cycle), gains),
+                            ((20.0 - 4 * cycle, 20.0), {k: g for k, g in gains.items() if k != 'eSTATCOM'})):
+        df = (60.0 - _window_mean(t, f, *window)) / 60.0
+        dfs.append((df, sum(running.values())))
+        assert _window_mean(t, gt, *window) - _window_mean(t, gt, *before) == pytest.approx(
+            gains['Gas turbine'] * df, rel=0.03)
+        for k in PCS:
+            share = running[k] * df if k in running else 0.0
+            got = _window_mean(t, pcs[k]['p_mw'], *window) - _window_mean(t, pcs[k]['p_mw'], *before)
+            assert got == pytest.approx(share, rel=0.03, abs=0.01), k
+    (df1, g1), (df2, g2) = dfs
+    assert df2 / df1 == pytest.approx(g1 / g2, rel=0.05)
+
+
+def test_tds_ride_through_ieee2800_the_turbine_slips_at_the_pcs_limits(client):
+    """
+    IEEE 2800's envelope at 245 kV from 1 s (0.05 pu in ANDES for 0.32 s,
+    then 0.25 pu): the grid-forming PCS reach their current limit, 1.2 pu, at
+    once, and their virtual impedance holds them there. So held, they no
+    longer prop up 34.5 kV Bus 2: the turbine's rotor angle runs on past
+    150 degrees and the run stops - it slips a pole. Without the limits the
+    eSTATCOM went far past its rating and the turbine rode through: the ride-
+    through rested on current the PCS cannot give.
+    """
+    import numpy as np
+    _, out = _tds(client, grid_voltage_profile='ieee2800', grid_voltage_start_s='1')
+    assert out['converged'] is False and 1.5 < out['time'][-1] < 2.2
+    assert any(w.startswith('The simulation stopped at t = ') for w in out['warnings'])
+    t = np.asarray(out['time'])
+    for r in out['pcs']:
+        assert 1.0 <= r['current_limited_from_s'] < 1.05, r['label']
+        held = np.asarray(r['current_pu'])[(t > 1.1) & (t < 1.3)]
+        assert held.max() <= 1.2 * 1.05, r['label']
+    delta, = (s for s in out['delta'] if s['name'] == 'Gas turbine')
+    assert math.degrees(max(delta['values']) - delta['values'][0]) > 130
+
+    _, free = _tds(client, grid_voltage_profile='ieee2800', grid_voltage_start_s='1', pcs_limits='false')
+    assert free['converged'] is True and free['time'][-1] == pytest.approx(10.0)
+    est, = (r for r in free['pcs'] if r['label'] == 'eSTATCOM')
+    assert max(est['current_pu']) > 2.0 and max(est['q_mvar']) > 15.0
+
+
+def test_emt_ride_through_ieee2800_the_800_v_where_it_holds(client):
+    """
+    IEEE 2800's envelope at 245 kV in the EMT study, 0 pu from 20 ms: 100 ms
+    sees every loss. Hall B's SSTs, on 34.5 kV Bus 2 at some 0.4 pu, cannot
+    carry its racks within their current limit and block within 5 ms; its
+    stores' converters, short of the load step, block at 0.8 pu after them
+    - its racks lose their 800 V within 15 ms. Lineup A and the catcher, on
+    Bus 1 with the grid at 0 pu, have only their stores, 2.5 MW each at its
+    current limit against some 6 MW: their buses fall through 0.8 pu, all on
+    them blocks, and the shelves lose it too. Lineup B, on Bus 2, rides
+    through on its rectifiers at their current limit. Where the 800 V is
+    lost, it is for want of power, not energy: no store gives a thousandth
+    of what it holds.
+    """
+    p = _payload()
+    p['0'] = {'typ': 'EmtStudy Parameters', 'user_email': 't@t', 'duration_ms': '100', 'frequency': '60',
+              'grid_voltage_profile': 'ieee2800', 'grid_voltage_start_ms': '20'}
+    emt = _post(client, p)['emt']
+    loads = {l['label']: l for l in emt['loads']}
+    for i in range(1, 11):
+        assert loads[f'Hall B rack {i}']['verdict'] == 'lost supply' and 30 < loads[f'Hall B rack {i}']['t_lost_ms'] < 40
+    for i in range(2, 7):
+        assert loads[f'Shelf A{i} racks']['verdict'] == 'lost supply' and 55 < loads[f'Shelf A{i} racks']['t_lost_ms'] < 95
+    for i in range(1, 7):
+        assert loads[f'Shelf B{i} racks']['t_lost_ms'] is None and loads[f'Shelf B{i} racks']['v_min_pu'] > 0.85
+    blocked = {b['label']: b['t_ms'] for b in emt['converters_blocked']}
+    assert all(20 < blocked[f'Hall B SST {i} rectifier'] < 26 for i in range(1, 4))
+    assert {f'Lineup A rectifier {i}' for i in range(1, 5)} <= set(blocked)
+    assert not any(label.startswith('Lineup B') for label in blocked)
+    for d in emt['ders']:
+        if d['kind'] == 'Battery':
+            assert d['energy_given_mj'] < 1e-3 * 5000 * 3.6, d['label']        # 5 MWh each
