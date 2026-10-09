@@ -112,7 +112,8 @@ def test_a_supply_unit_out_with_its_tie_closed(client, unit, tie, partner, rated
     A supply unit out and its row group's tie closed: the other unit feeds
     both row groups (12 MW and the tie's I^2 R) and says it is overloaded.
     The far row group sags by the tie's I R, and its battery, in droop on a
-    bus another converter holds, gives what its droop gives at that voltage.
+    bus another converter holds, gives what its droop gives at that voltage:
+    its set voltage behind its virtual resistance, P = P_r (1 - v) v / droop.
     This never converged: two voltage sources joined by a 0.5 mohm tie, and
     a settling tolerance under pandapower's own rounding.
     """
@@ -129,7 +130,8 @@ def test_a_supply_unit_out_with_its_tie_closed(client, unit, tie, partner, rated
     conv = {c['name']: c for c in out['dcdcconverters']}
     battery = next(c for c in out['dcdcconverters'] if _labels(base).get(c['name'], '').startswith(
         f"Hall 1 RG{'1' if 'U1' in unit else '3'} battery"))
-    assert battery['p_out_mw'] == pytest.approx(1.5 * (1.0 - battery['vm_out_pu']) / 0.05, rel=1e-3)
+    v = battery['vm_out_pu']
+    assert battery['p_out_mw'] == pytest.approx(1.5 * (1.0 - v) * v / 0.05, rel=1e-3)
 
 
 # --- optimal power flow --------------------------------------------------------------------------

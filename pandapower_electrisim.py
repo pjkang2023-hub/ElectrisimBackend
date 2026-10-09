@@ -140,6 +140,14 @@ def isolated_buses_message(net, advice="Check your network connectivity.", machi
     feeds a fault, slack or not. Islanded, a campus's turbines carried its
     buses and every one was refused as isolated, its earth faults unstudied.
     """
+    isolated_names = isolated_bus_names(net, machines)
+    if not isolated_names:
+        return None
+    return f"Isolated buses found: {', '.join(isolated_names)}. {advice}"
+
+
+def isolated_bus_names(net, machines=False):
+    """The buses no source supplies, named as the diagram does (see isolated_buses_message)."""
     slacks = None
     if machines:
         slacks = set(int(b) for b in net.ext_grid.loc[net.ext_grid['in_service'].astype(bool), 'bus'])
@@ -149,10 +157,9 @@ def isolated_buses_message(net, advice="Check your network connectivity.", machi
     # A grounding transformer's own delta is cut off with it when its breaker opens: not a fault in the network.
     isolated_buses = {b for b in isolated_buses if not _electrisim_is_grounding(net.bus, b)}
     if len(isolated_buses) == 0:
-        return None
+        return []
     isolated_refs = resolve_element_refs(net, 'bus', isolated_buses)
-    isolated_names = [r.get('name') or r.get('id') or str(r.get('index')) for r in isolated_refs]
-    return f"Isolated buses found: {', '.join(isolated_names)}. {advice}"
+    return [r.get('name') or r.get('id') or str(r.get('index')) for r in isolated_refs]
 
 
 def ensure_ext_grid_zero_sequence_min(net):
@@ -1865,72 +1872,77 @@ def _electrisim_has_dc_load_models(net):
                      | (ld['electrisim_v_min_pu'].fillna(0.0) > 0).any()))
 
 
-def _electrisim_droop_power_mw(conv, vm_pu):
-    """The power (MW) a DC/DC converter in droop delivers at its output voltage, within its rating."""
-    rated = conv['rated_mw'] if conv['rated_mw'] > 0 else 1.0
-    ref = conv['vm_out_pu'] if conv['vm_out_pu'] > 0 else 1.0
-    p = rated * (ref - vm_pu) / (conv['droop_percent'] / 100.0 * ref) if conv['droop_percent'] > 0 else 0.0
-    return float(min(max(p, -rated if conv['bidirectional'] else 0.0), rated))
-
-
-def _electrisim_droop_on_held_buses(net):
-    """
-    A DC/DC converter in droop is a voltage source on its output bus, its
-    voltage lowered with its power. On a bus another converter holds - a
-    supply unit, a rectifier - two voltage sources in parallel have no load
-    flow: there it delivers the power its droop gives at that bus's voltage,
-    settled with the sources and stores. With the bus's holder out of
-    service it holds the bus again.
-    """
-    convs = [c for c in getattr(net, 'electrisim_dc_dc_converters', None) or []
-             if c.get('control') == 'droop' and c.get('vsc') is not None and c['vsc'] in net.vsc.index]
-    droop_vscs = {c['vsc'] for c in convs}
-    # The DC buses joined by cables in service: a bus a closed tie reaches is held as its own is.
-    group = {int(b): int(b) for b in net.bus_dc.index}
-
-    def root(b):
-        while group[b] != b:
-            group[b] = group[group[b]]
-            b = group[b]
-        return b
-    for i in net.line_dc.index:
-        if bool(net.line_dc.at[i, 'in_service']):
-            a, b = root(int(net.line_dc.at[i, 'from_bus_dc'])), root(int(net.line_dc.at[i, 'to_bus_dc']))
-            group[a] = b
-    for conv in convs:
-        vsc = conv['vsc']
-        joined = [b for b in group if root(b) == root(int(conv['bus_out']))]
-        holders = net.vsc[net.vsc['bus_dc'].isin(joined) & (net.vsc['control_mode_dc'] == 'vm_pu')
-                          & net.vsc['in_service'].astype(bool) & ~net.vsc.index.isin(list(droop_vscs))]
-        if len(holders):
-            v = float(holders['control_value_dc'].mean())
-            if not conv.get('held'):
-                net.vsc.at[vsc, 'control_mode_dc'] = 'p_mw'
-                net.vsc.at[vsc, 'control_value_dc'] = -_electrisim_droop_power_mw(conv, v)
-            conv['held'] = True
-        elif conv.get('held'):
-            net.vsc.at[vsc, 'control_mode_dc'] = 'vm_pu'
-            net.vsc.at[vsc, 'control_value_dc'] = conv['vm_out_pu']
-            conv['held'] = False
-
-
 # The settling loops' tolerance: 0.1 W. pandapower's DC results flicker by some 2e-9 MW between
 # load flows (a float rounding), so a tighter one never settled a converter holding a closed tie.
 _SETTLE_TOL_MW = 1e-7
+
+
+def _electrisim_drop_unsupplied_converters(net):
+    """
+    Take out of the load flow the converters on an AC bus no source reaches -
+    a grid, a slack generator (an island's, a grid-forming PCS's when it holds
+    one) or a VSC forming its AC network, as pandapower supplies a bus - naming
+    them once: a rectifier or SST cannot draw from a dead bus. A lineup's breaker open left its four rectifiers on their dead 0.48 kV
+    bus beside a live 800 V one, and no load flow solved; an SST, fed from its
+    own auxiliary grid, went on delivering from a dead one.
+    """
+    vsc = _electrisim_in_service_rows(getattr(net, 'vsc', None))
+    ssts = [r for r in getattr(net, 'electrisim_ssts', None) or [] if r.get('in_service')]
+    if (vsc is None or not len(vsc)) and not ssts:
+        return
+    forming = vsc['control_mode_ac'].astype(str).eq('slack') if vsc is not None and len(vsc) else None
+    sources = set(int(b) for b in net.ext_grid.loc[net.ext_grid['in_service'].fillna(False).astype(bool), 'bus'])
+    if len(net.gen) and 'slack' in net.gen.columns:
+        on = net.gen['in_service'].fillna(False).astype(bool) & net.gen['slack'].fillna(False).astype(bool)
+        sources |= set(int(b) for b in net.gen.loc[on, 'bus'])
+    if forming is not None:
+        sources |= set(int(b) for b in vsc.loc[forming, 'bus'])
+    try:
+        dead = set(int(b) for b in top.unsupplied_buses(net, slacks=sources))
+    except Exception as err:   # noqa: BLE001 - the load flow says what it finds without this
+        print(f"Unsupplied converters not looked for: {type(err).__name__}: {err}")
+        return
+    if not dead:
+        return
+    names = getattr(net, 'user_friendly_names', {}) or {}
+    out = []
+    if vsc is not None and len(vsc):
+        for i in vsc.index:
+            if int(vsc.at[i, 'bus']) in dead and not forming[i] and not _electrisim_is_aux(net.vsc, i):
+                net.vsc.at[i, 'in_service'] = False
+                out.append(str(names.get(net.vsc.at[i, 'name'], net.vsc.at[i, 'name'])))
+    for rec in ssts:
+        if int(rec['bus_mv']) in dead:
+            rec['in_service'] = False
+            for table, i in rec['aux'] + [st['input'] for st in rec['stages']] + [st['output'] for st in rec['stages']]:
+                if i in net[table].index:
+                    net[table].at[i, 'in_service'] = False
+            out.append(str(rec['label']))
+    if out:
+        _electrisim_warn(net, f"{', '.join(sorted(out))} {'have' if len(out) > 1 else 'has'} no AC supply - no "
+                              "source reaches the AC bus - and " + ('are' if len(out) > 1 else 'is')
+                         + " out of this load flow.")
 
 
 def _electrisim_runpp(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, **kwargs):
     """
     The load flow with the DC diodes settled around it: each conducting or
     blocking as the voltages of the last load flow set it, its forward drop
-    at the current it carries - repeating until none changes.
+    at the current it carries - repeating until none changes. Converters with
+    no AC supply out of it first.
     """
+    _electrisim_drop_unsupplied_converters(net)
     if not _electrisim_live_dc_diodes(net):
         return _electrisim_runpp_settled(net, max_rounds, tolerance_mw, **kwargs)
     _electrisim_start_dc_diodes(net)
+    calm = 0                                    # rounds since a diode last switched
     for _ in range(30):
         _electrisim_runpp_settled(net, max_rounds, tolerance_mw, **kwargs)
-        if not _electrisim_settle_dc_diodes(net):
+        states = [bool(net.line_dc.at[d['line'], 'in_service']) for d in _electrisim_live_dc_diodes(net)]
+        changed = _electrisim_settle_dc_diodes(net, noise_ok=calm >= _DC_DIODE_NOISE_ROUNDS)
+        calm = calm + 1 if states == [bool(net.line_dc.at[d['line'], 'in_service'])
+                                      for d in _electrisim_live_dc_diodes(net)] else 0
+        if not changed:
             _electrisim_warn_unsupplied_dc(net)
             return None
         kwargs = {**kwargs, 'init': 'results'}
@@ -1944,12 +1956,12 @@ def _electrisim_runpp_settled(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, *
     The load flow, with the microgrid sources and stores settled: each one's
     terminal voltage at the current it delivers, each directly connected
     PV array or SOFC at the power its curve gives at its bus's voltage, each
-    DC/DC converter in droop at the voltage its power gives - repeating until
-    they agree. Without them, _electrisim_runpp_converters alone.
+    DC/DC converter in droop within its rating - repeating until they agree.
+    Without them, _electrisim_runpp_converters alone.
     """
     droop = any(c.get('control') == 'droop' for c in getattr(net, 'electrisim_dc_dc_converters', None) or [])
-    if droop:
-        _electrisim_droop_on_held_buses(net)
+    for conv in getattr(net, 'electrisim_dc_dc_converters', None) or []:
+        conv.pop('limit_hold', None)            # its limit may hold again, the network having changed
     pcs = _electrisim_pcs_to_settle(net)
     if not getattr(net, 'electrisim_ders', None) and not droop and not pcs:
         return _electrisim_runpp_converters(net, max_rounds, tolerance_mw, **kwargs)
@@ -2432,6 +2444,7 @@ def _electrisim_build_dc_dc_converters(net):
                           'soc_ref_percent': safe_float(el.get('soc_ref_percent'), 50.0),
                           'soc_gain': safe_float(el.get('soc_gain'), 0.1)},
             'input': None, 'vsc': None, 'output_load': None, 'aux_bus': None, 'aux_ext_grid': None,
+            'droop_bus': None, 'droop_line': None,
             # For the EMT study: its model (a dual active bridge), switching frequency, current limit, output
             # capacitor; for it and the DC fault study, its capacitors' ESR and ESL (0: none).
             'emt': {'model': 'switching' if el.get('emt_model') == 'switching' else 'average',
@@ -2449,7 +2462,26 @@ def _electrisim_build_dc_dc_converters(net):
         on = rec['in_service']
         if control == 'smoothing':
             rec['p_set_mw'] = 0.0      # its store's power follows its loads' swings: none in a load flow
-        if mode == 'voltage':
+        if control == 'droop':
+            # In droop: its set voltage behind a virtual resistance, R = droop V0^2 / P_rated - its
+            # voltage the droop's share lower at its rated current - solved inside the load flow, so
+            # beside another source on its bus, or a diode, it delivers what its droop gives there.
+            # Settled outside it, a lineup's store and its catcher's diodes chased each other.
+            vn = float(net.bus_dc.at[b_out, 'vn_kv'])
+            v0 = rec['vm_out_pu'] * vn
+            rated = rec['rated_mw'] if rec['rated_mw'] > 0 else 1.0
+            r = max(rec['droop_percent'] / 100.0, 1e-6) * v0 * v0 / rated
+            src = pp.create_bus_dc(net, vn_kv=vn, name=f'{name} droop source', in_service=on)
+            net.bus_dc.at[src, 'electrisim_hidden'] = True
+            vsc, aux_bus, aux_grid = _electrisim_aux_dc_source(net, src, rec['vm_out_pu'], rec['rated_mw'], name, on)
+            line = pp.create_line_dc_from_parameters(net, from_bus_dc=src, to_bus_dc=b_out, length_km=1.0,
+                                                     r_ohm_per_km=r, max_i_ka=1e3, name=f'{name} droop',
+                                                     in_service=on)
+            net.line_dc.at[line, 'electrisim_hidden'] = True
+            rec.update(vsc=vsc, aux_bus=aux_bus, aux_ext_grid=aux_grid, droop_bus=int(src), droop_line=int(line),
+                       droop_r_ohm=r, droop_v0_kv=v0)
+            p_in0 = rec['p_nl_mw']
+        elif mode == 'voltage':
             vsc, aux_bus, aux_grid = _electrisim_aux_dc_source(net, b_out, rec['vm_out_pu'], rec['rated_mw'], name, on)
             rec.update(vsc=vsc, aux_bus=aux_bus, aux_ext_grid=aux_grid)
             p_in0 = rec['p_nl_mw']
@@ -2458,7 +2490,8 @@ def _electrisim_build_dc_dc_converters(net):
                                           electrisim_aux=True, electrisim_dcdc_role='output', electrisim_dcdc_name=name)
             rec['output_load'] = int(out)
             p_in0 = _electrisim_dc_dc_input_power(rec['p_set_mw'], eta, rec['p_nl_mw'])
-        output = ('vsc', rec['vsc']) if rec['vsc'] is not None else ('load_dc', rec['output_load'])
+        output = (('line_dc', rec['droop_line']) if rec['droop_line'] is not None
+                  else ('vsc', rec['vsc']) if rec['vsc'] is not None else ('load_dc', rec['output_load']))
         rec['input'] = int(_electrisim_new_load_dc(
             net, b_in, p_in0, f'{name} input', on, **_electrisim_stage_columns(name, eta, rec['p_nl_mw'], output)))
         net.electrisim_dc_dc_converters.append(rec)
@@ -2469,7 +2502,8 @@ def _electrisim_build_dc_dc_converters(net):
 
 def _electrisim_dc_dc_parts(rec):
     return [('load_dc', rec['input']), ('load_dc', rec['output_load']), ('vsc', rec['vsc']),
-            ('ext_grid', rec['aux_ext_grid']), ('bus', rec['aux_bus'])]
+            ('ext_grid', rec['aux_ext_grid']), ('bus', rec['aux_bus']), ('bus_dc', rec.get('droop_bus')),
+            ('line_dc', rec.get('droop_line'))]
 
 
 def _electrisim_set_dc_dc_in_service(net, rec, on):
@@ -2631,6 +2665,10 @@ def _electrisim_stage_output_mw(net, table, idx):
         return float(res.at[idx, 'p_mw']) if res is not None and idx in res.index else np.nan
     if table == 'sgen':
         return float(net.sgen.at[idx, 'p_mw']) if idx in net.sgen.index else np.nan
+    if table == 'line_dc':
+        # A droop converter's: what its virtual resistance delivers into its output bus.
+        res = getattr(net, 'res_line_dc', None)
+        return -float(res.at[idx, 'p_to_mw']) if res is not None and idx in res.index else np.nan
     return np.nan
 
 
@@ -2862,31 +2900,73 @@ def _electrisim_settle_ders(net):
                 at_mpp = mppt or i >= i_mp * (1.0 - 1e-9)
                 vm_new = (v_mp if at_mpp else max(obj.v_terminal(i), v_mp)) / rec['vn']
             else:
-                vm_new = obj.v_terminal(i) / rec['vn']
+                # At half its nominal voltage at least: asked far past what it can give - a lineup's
+                # store, briefly alone on its shelves while the diodes settled - its terminal went
+                # negative and the next load flow ran away.
+                vm_new = max(obj.v_terminal(i), 0.5 * obj.v_nominal()) / rec['vn']
             worst = max(worst, abs(vm_new - float(net.vsc.at[vsc, 'control_value_dc'])))
             net.vsc.at[vsc, 'control_value_dc'] = vm_new
         elif 'load' in parts and obj.kind in ('PV Array', 'SOFC'):
             p_new = -_f_der_direct_power(obj, v) / 1e6
             worst = max(worst, abs(p_new - float(net.load_dc.at[parts['load'], 'p_dc_mw'])))
             net.load_dc.at[parts['load'], 'p_dc_mw'] = p_new
-    # Converters in droop: their voltage set point lowered with the power they deliver.
+    # Converters in droop: within their rating.
     for conv in getattr(net, 'electrisim_dc_dc_converters', None) or []:
-        if conv.get('control') != 'droop' or conv['vsc'] is None or conv['vsc'] not in net.res_vsc.index:
-            continue
-        if conv.get('held'):
-            bus = conv['bus_out']
-            if bus not in net.res_bus_dc.index or not np.isfinite(net.res_bus_dc.at[bus, 'vm_pu']):
-                continue
-            p_new = -_electrisim_droop_power_mw(conv, float(net.res_bus_dc.at[bus, 'vm_pu']))
-            worst = max(worst, abs(p_new - float(net.vsc.at[conv['vsc'], 'control_value_dc'])))
-            net.vsc.at[conv['vsc'], 'control_value_dc'] = p_new
-            continue
-        p_out = -float(net.res_vsc.at[conv['vsc'], 'p_dc_mw'])
-        rated = conv['rated_mw'] if conv['rated_mw'] > 0 else 1.0
-        vm_new = conv['vm_out_pu'] * (1.0 - conv['droop_percent'] / 100.0 * p_out / rated)
-        worst = max(worst, abs(vm_new - float(net.vsc.at[conv['vsc'], 'control_value_dc'])))
-        net.vsc.at[conv['vsc'], 'control_value_dc'] = vm_new
+        worst = max(worst, _electrisim_droop_within_rating(net, conv))
     return worst
+
+
+def _electrisim_droop_within_rating(net, conv):
+    """
+    A converter in droop beyond its rating - or reversed, one way only -
+    delivers its limit, a power source; back in droop once its droop would
+    give less. When its limit leaves its bus with no voltage - nothing else
+    holds it - it stays in droop beyond its rating until the next settling:
+    a lineup's store, briefly alone on its shelves before the catcher's
+    diodes turned on, swapped between the two for 60 load flows. Returns
+    how far its power moved (MW).
+    """
+    line, vsc = conv.get('droop_line'), conv.get('vsc')
+    if (line is None or not conv['in_service'] or line not in net.res_line_dc.index
+            or vsc not in net.vsc.index or not bool(net.vsc.at[vsc, 'in_service'])):
+        return 0.0
+    delivered = -float(net.res_line_dc.at[line, 'p_to_mw'])
+    if not np.isfinite(delivered):
+        return 0.0
+    rated = conv['rated_mw'] if conv['rated_mw'] > 0 else 1.0
+    low = -rated if conv['bidirectional'] else 0.0
+    r, v0 = conv['droop_r_ohm'], conv['droop_v0_kv']
+    if conv.get('limit') is None:
+        if low - 1e-9 * rated <= delivered <= rated * (1.0 + 1e-9) or conv.get('limit_hold'):
+            return 0.0
+        conv['limit'] = rated if delivered > rated else low
+        net.vsc.at[vsc, 'control_mode_dc'] = 'p_mw'
+    else:
+        v = float(net.res_bus_dc.at[conv['bus_out'], 'vm_pu']) * float(net.bus_dc.at[conv['bus_out'], 'vn_kv'])
+        if not np.isfinite(v):
+            conv['limit'], conv['limit_hold'] = None, True
+            net.vsc.at[vsc, 'control_mode_dc'] = 'vm_pu'
+            net.vsc.at[vsc, 'control_value_dc'] = conv['vm_out_pu']
+            return 1.0
+        if low <= (v0 - v) * v / r <= rated:
+            conv['limit'] = None
+            net.vsc.at[vsc, 'control_mode_dc'] = 'vm_pu'
+            net.vsc.at[vsc, 'control_value_dc'] = conv['vm_out_pu']
+            return abs(delivered - (v0 - v) * v / r) + 1.0
+    # Its source delivers the limit and the virtual resistance's I^2 R.
+    v_out = float(net.res_bus_dc.at[conv['bus_out'], 'vm_pu']) * float(net.bus_dc.at[conv['bus_out'], 'vn_kv'])
+    i_ka = conv['limit'] / v_out if np.isfinite(v_out) and v_out > 0 else 0.0
+    net.vsc.at[vsc, 'control_value_dc'] = -(conv['limit'] + i_ka * i_ka * r)
+    return abs(delivered - conv['limit'])
+
+
+def _electrisim_dc_dc_delivered_mw(net, rec):
+    """What a DC/DC converter delivers into its output bus (MW), from the last load flow."""
+    if rec.get('droop_line') is not None:
+        return _electrisim_stage_output_mw(net, 'line_dc', rec['droop_line'])
+    if rec.get('vsc') is not None:
+        return _electrisim_stage_output_mw(net, 'vsc', rec['vsc'])
+    return rec['p_set_mw']
 
 
 def _electrisim_der_power(net, rec):
@@ -3886,6 +3966,10 @@ def _electrisim_in_service(el):
 # is out of service.
 _DC_DIODE_MIN_I_FRACTION = 1e-3     # of its rating: the current its resistance is held at, near none
 _DC_DIODE_TOL_V = 1e-4              # its forward drop settled to 0.1 mV
+# ... or to 1 mV after 10 rounds with none switching: a shelf fed through both its diodes, one from a store in
+# droop, jittered 0.1-0.8 mV round to round - the load flows' own noise - and never settled to 0.1 mV.
+_DC_DIODE_NOISE_V = 1e-3
+_DC_DIODE_NOISE_ROUNDS = 10
 
 
 def _electrisim_create_dc_diode(net, row):
@@ -3968,8 +4052,11 @@ def _electrisim_start_dc_diodes(net):
             d['started'] = True
 
 
-def _electrisim_settle_dc_diodes(net):
-    """Each diode set by the load flow just run. Returns whether any changed."""
+def _electrisim_settle_dc_diodes(net, noise_ok=False):
+    """
+    Each diode set by the load flow just run. Returns whether any changed.
+    noise_ok: a conducting diode whose drop is within _DC_DIODE_NOISE_V counts as settled.
+    """
     changed = False
     ld = net.line_dc
     # Into a bus with no supply, only the diode from the highest anode turns on this round.
@@ -3989,18 +4076,42 @@ def _electrisim_settle_dc_diodes(net):
                 continue
             if amps < 0:
                 ld.at[i, 'in_service'] = False      # its current would reverse: it blocks
+                d.pop('last_iv', None)
                 changed = True
                 continue
             r = _electrisim_dc_diode_r(d, amps)
-            if abs(r - float(ld.at[i, 'r_ohm_per_km'])) * amps > _DC_DIODE_TOL_V:
-                ld.at[i, 'r_ohm_per_km'] = r
+            r_now = float(ld.at[i, 'r_ohm_per_km'])
+            if abs(r - r_now) * amps > (_DC_DIODE_NOISE_V if noise_ok else _DC_DIODE_TOL_V):
+                ld.at[i, 'r_ohm_per_km'] = _electrisim_dc_diode_secant(d, amps, r_now * amps, r)
                 changed = True
+            d['last_iv'] = (amps, r_now * amps)
         elif np.isfinite(va) and (va - vk > d['v_f_v'] if np.isfinite(vk) else feeding.get(d['bus_to']) is d):
             # Its anode v_f above its cathode, or the highest into a bus with no supply: it conducts.
             ld.at[i, 'in_service'] = True
             ld.at[i, 'r_ohm_per_km'] = _electrisim_dc_diode_r(d, d['rated_current_ka'] * 1e3)
+            d.pop('last_iv', None)
             changed = True
     return changed
+
+
+def _electrisim_dc_diode_secant(d, amps, v_ak, r_proxy):
+    """
+    Its next resistance. As r_on + v_f / I, from the current it carried, it
+    settles slowly or not at all when a bus has two supplies: a shelf fed
+    through both its diodes, one from a store in droop, had its share of
+    current change the resistance that set it, nearly one for one, and drifted
+    for 30 rounds. Two load flows give the line the network draws across it,
+    V = E - R I; its current is where that meets v_f + r_on I (a secant step).
+    """
+    last = d.get('last_iv')
+    if last is None or abs(amps - last[0]) < 1e-6 * max(amps, 1.0) or not np.isfinite(last[1]):
+        return r_proxy
+    r_th = -(v_ak - last[1]) / (amps - last[0])
+    e_th = v_ak + r_th * amps
+    if not (r_th > 0 and e_th > d['v_f_v']):
+        return r_proxy
+    i_star = (e_th - d['v_f_v']) / (r_th + d['r_on_ohm'])
+    return _electrisim_dc_diode_r(d, i_star) if i_star > 0 else r_proxy
 
 
 def _electrisim_warn_unsupplied_dc(net):
@@ -8317,10 +8428,15 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
             sys.stderr = _safe_buf
             
             try:
-                # Check for isolated buses before running power flow
-                isolated = isolated_buses_message(net)
-                if isolated:
-                    raise ValueError(isolated)
+                # Buses no source reaches - a lineup's when its breaker opens - are named and left
+                # unsolved; the rest of the network is solved. They were refused, and with them the
+                # study of a supply lost.
+                cut_off = isolated_bus_names(net)
+                if cut_off:
+                    _electrisim_warn(net, f"Bus{'es' if len(cut_off) > 1 else ''} {', '.join(cut_off)} "
+                                          f"{'have' if len(cut_off) > 1 else 'has'} no supply - no source reaches "
+                                          f"{'them' if len(cut_off) > 1 else 'it'} - and what is on "
+                                          f"{'them' if len(cut_off) > 1 else 'it'} is not served.")
                 
                 # DiscreteTapControl + DiscreteShuntController (per-family flags from UI)
                 rc2 = bool(run_control_trafo2w)
@@ -11452,6 +11568,8 @@ def contingency_analysis(net, contingency_params):
                 # one dropping 1.3 MW of load.
                 lost_load = lost_gen = 0.0
                 for bus_idx in dead.index[dead.vm_pu.isna()]:
+                    if _electrisim_is_aux(net_cont.bus, bus_idx):
+                        continue        # a converter's own auxiliary bus, out with it
                     bus_name = _contingency_friendly_name(net, net_cont.bus.loc[bus_idx, 'name'])
                     load_mw, gen_mw = bus_load_mw.get(bus_idx, 0.0), bus_gen_mw.get(bus_idx, 0.0)
                     lost_load += load_mw

@@ -219,15 +219,19 @@ def test_battery_charging_behind_its_converter(client, quiet):
 
 
 def test_converter_in_droop(client, quiet):
-    """In droop it holds its output at its set voltage less droop x its loading: 5 % at full power."""
+    """
+    In droop its set voltage is behind a virtual resistance, droop V^2 / P_rated:
+    its output 5 % lower at its rated current, P = P_r (1 - v) v / droop.
+    """
     result = _run(client, quiet, *[dict(e) for e in RACK_48[:3]])
     flat = _vm(result, 'r48')
     result = _run(client, quiet, *[dict(e) for e in RACK_48[:2]],
                   _conv('k48', 'dc_b', 'r48', control_mode='droop', droop_percent=5, rated_mw=0.02))
     (k48,) = result['dcdcconverters']
     assert k48['control'] == 'droop' and flat == pytest.approx(1.0)
-    assert _vm(result, 'r48') == pytest.approx(1.0 - 0.05 * k48['p_out_mw'] / 0.02, rel=1e-6)
-    assert _vm(result, 'r48') == pytest.approx(0.975, abs=1e-3)
+    v = _vm(result, 'r48')
+    assert k48['p_out_mw'] == pytest.approx(0.02 * (1.0 - v) * v / 0.05, rel=1e-6)
+    assert v == pytest.approx(0.9743, abs=1e-3)
 
 
 @pytest.mark.parametrize('kind, ratings, blocks', [
@@ -502,8 +506,9 @@ def test_droop_on_a_bus_another_converter_holds(quiet, vm_out_pu):
     """
     A converter in droop on a bus a supply unit holds: two voltage sources in
     parallel had no load flow (it never converged). It delivers the power its
-    droop gives at the bus's voltage - rated x (V_set - V) / (droop V_set) -
-    and the supply unit the rest.
+    droop gives at the bus's voltage - its set voltage behind a virtual
+    resistance, rated x (V_set - V) V / (droop V_set^2) - and the supply unit
+    the rest.
     """
     with quiet():
         res = _droop_spec(vm_out_pu)
@@ -511,17 +516,20 @@ def test_droop_on_a_bus_another_converter_holds(quiet, vm_out_pu):
     (dd,) = res['dc_dc_converters']
     (rg,) = [b for b in res['dc_buses'] if b['id'] == 'RG']
     assert rg['vm_pu'] == pytest.approx(1.0, abs=1e-9)
-    assert dd['p_out_mw'] == pytest.approx(1.5 * (vm_out_pu - 1.0) / (0.05 * vm_out_pu), abs=1e-6)
+    assert dd['p_out_mw'] == pytest.approx(1.5 * (vm_out_pu - 1.0) * 1.0 / (0.05 * vm_out_pu ** 2), abs=1e-6)
     (sst,) = res['ssts']
     assert sst['stages'][1]['p_out_mw'] == pytest.approx(6.0 - dd['p_out_mw'], abs=1e-5)
 
 
 def test_droop_holds_its_bus_when_nothing_else_does(quiet):
-    """With no supply unit the converter holds the bus again, lowered by its droop: 1 - 0.05 x P / 1.5 MW."""
+    """
+    With no supply unit the converter holds the bus, lowered by its droop:
+    1.5 (1 - v) v / 0.05 = P = 1 MW, v = (1 + sqrt(1 - 4 x 0.05 / 1.5)) / 2.
+    """
     with quiet():
         res = _droop_spec(sst=False, load_mw=1.0)
     assert res['converged'], res.get('hint')
     (dd,) = res['dc_dc_converters']
     (rg,) = [b for b in res['dc_buses'] if b['id'] == 'RG']
     assert dd['p_out_mw'] == pytest.approx(1.0, abs=1e-6)
-    assert rg['vm_pu'] == pytest.approx(1.0 - 0.05 * 1.0 / 1.5, abs=1e-5)
+    assert rg['vm_pu'] == pytest.approx((1.0 + math.sqrt(1.0 - 4 * 0.05 / 1.5)) / 2, abs=1e-5)

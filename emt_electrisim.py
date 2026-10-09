@@ -468,7 +468,7 @@ class _EmtBuilder:
             res_in = net.res_load_dc
             p_in = _f(res_in.at[rec['input'], 'p_dc_mw']) if rec['input'] in res_in.index else 0.0
             if rec['vsc'] is not None:
-                p_out = -_f(net.res_vsc.at[rec['vsc'], 'p_dc_mw']) if rec['vsc'] in net.res_vsc.index else 0.0
+                p_out = _f(pe._electrisim_dc_dc_delivered_mw(net, rec))      # in droop, past its virtual resistance
                 out = ('vsc', rec['vsc'])
             else:
                 p_out = rec['p_set_mw']

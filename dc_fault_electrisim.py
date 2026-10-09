@@ -470,7 +470,7 @@ class _Builder:
                     or not bool(net.load_dc.at[rec['input'], 'in_service']):
                 continue
             if rec['vsc'] is not None:
-                p_out = -_f(net.res_vsc.at[rec['vsc'], 'p_dc_mw']) if rec['vsc'] in net.res_vsc.index else 0.0
+                p_out = _f(pe._electrisim_dc_dc_delivered_mw(net, rec))      # in droop, past its virtual resistance
                 out = ('vsc', rec['vsc'])
             else:
                 p_out, out = rec['p_set_mw'], ('load_dc', rec['output_load'])

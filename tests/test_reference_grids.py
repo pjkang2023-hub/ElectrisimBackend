@@ -818,11 +818,12 @@ def test_short_circuit_studies_refuse_isolated_buses(client, quiet, params, line
 
 @pytest.mark.parametrize('line, cut_off', (('LA1', ('A1', 'A2', 'LV network A')),
                                            ('LA2', ('A2', 'LV network A'))))
-def test_load_flow_names_isolated_buses(client, quiet, monkeypatch, line, cut_off):
+def test_load_flow_names_isolated_buses(client, quiet, line, cut_off):
     """
-    The load flow refuses a grid with buses cut off, naming them as the
-    diagram does in its exception and its diagnostic - the message every
-    other study's refusal now shares.
+    A grid with buses cut off: the load flow names them as the diagram does,
+    leaves them unsolved and solves the rest. It refused the whole grid,
+    and with it the study of a supply lost - a lineup's breaker open in the
+    800 VDC AI factory (Phase 20a). The short-circuit studies still refuse.
     """
     with open(os.path.join(REFERENCE_DIR, 'reference_radial.diagram_payload.json'),
               encoding='utf-8') as handle:
@@ -830,17 +831,16 @@ def test_load_flow_names_isolated_buses(client, quiet, monkeypatch, line, cut_of
     for element in payload.values():
         if isinstance(element, dict) and element.get('userFriendlyName') == line:
             element['in_service'] = False
-    # The exception text is otherwise suppressed in the response.
-    monkeypatch.setenv('ELECTRISIM_DEBUG_ERRORS', '1')
     with quiet():
         response = client.post('/', json=payload)
     result = json.loads(response.get_data(as_text=True))
-    assert result.get('error') is True
-    assert result['exception'] == ('Isolated buses found: ' + ', '.join(cut_off)
-                                   + '. Check your network connectivity.')
-    isolated = result['diagnostic']['isolated_buses']
-    assert [b['name'] for b in isolated] == list(cut_off)
-    assert all(str(b['id']).startswith('mxCell_') for b in isolated), isolated
+    assert not result.get('error'), result.get('message')
+    assert (f"Buses {', '.join(cut_off)} have no supply - no source reaches them - and what is on them is not served."
+            in result['warnings']), result['warnings']
+    names = {v['name']: v.get('userFriendlyName') for v in payload.values() if isinstance(v, dict) and 'name' in v}
+    buses = {names[b['name']]: b for b in result['busbars']}
+    for name, row in buses.items():
+        assert (row['vm_pu'] is None) == (name in cut_off), name
 
 
 @pytest.mark.parametrize('grid', GRIDS)
