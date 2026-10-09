@@ -328,8 +328,47 @@ class MicrogridTs:
                 it['target_now_w'] = target
         self._apply_sources()
         self._apply_smoothing(t)
+        self._hold_pcs_supercapacitors()
+        self._pcs_step_windows()
         for b in self.batteries:
             self._set_battery(b, b['set_mw'])
+
+    def _pcs_step_windows(self):
+        """
+        Each grid-forming PCS's window for this step: what its store can give
+        and take over it, within its own. An island shares its power within
+        them: the eSTATCOM's 7.5 MW-s is 0.13 MW over a minute.
+        """
+        pe = self.pe
+        for it in self.items:
+            rec, obj = it['rec'], it['obj']
+            if it['via'] != 'pcs' or rec['table'] != 'gen' or not rec['in_service']:
+                continue
+            dis, ch = obj.p_limits()
+            hi = pe._electrisim_stage_output(available_w(obj, max(dis, 0.0), self.dt) / 1e6, rec['eta'], rec['p_nl_mw'])
+            lo = pe._electrisim_stage_output(available_w(obj, -max(ch, 0.0), self.dt) / 1e6, rec['eta'], rec['p_nl_mw'])
+            rec['p_max_step'] = min(max(hi, 0.0), rec['p_max_mw'])
+            rec['p_min_step'] = max(min(lo, 0.0), rec['p_min_mw'])
+
+    def _hold_pcs_supercapacitors(self):
+        """
+        A grid-forming PCS on supercapacitors with no set power - an eSTATCOM -
+        holds its store at its charge at the start: it draws from the network
+        what its store leaks and what returns it there, as a smoothing
+        converter does over a long step. At none, its supercapacitors leaked
+        0.66 MJ an hour against 7.5 MJ and ended the day below their minimum.
+        """
+        net, pe = self.net, self.pe
+        for it in self.items:
+            rec, obj = it['rec'], it['obj']
+            if (it['via'] != 'pcs' or rec['table'] != 'gen' or obj.kind != 'Supercapacitor' or not rec['in_service']
+                    or abs(rec.get('p_set_ac') or 0.0) > 1e-12):
+                continue
+            e_ref = it.setdefault('e_ref_j', stored_energy_j(obj))
+            p_dc = (stored_energy_j(obj) - e_ref) / self.dt / 1e6
+            if getattr(obj, 'r_leak', 0) > 0:
+                p_dc -= obj.v0 ** 2 / obj.r_leak / 1e6
+            net.gen.at[rec['index'], 'p_mw'] = pe._electrisim_stage_output(p_dc, rec['eta'], rec['p_nl_mw'])
 
     def _apply_sources(self):
         """PV arrays and SOFCs at their present power: their converters' outputs, or their PCS's."""

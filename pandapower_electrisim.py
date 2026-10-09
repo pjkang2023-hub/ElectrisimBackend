@@ -1933,7 +1933,9 @@ def _electrisim_runpp(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, **kwargs)
     """
     _electrisim_drop_unsupplied_converters(net)
     if not _electrisim_live_dc_diodes(net):
-        return _electrisim_runpp_settled(net, max_rounds, tolerance_mw, **kwargs)
+        out = _electrisim_runpp_settled(net, max_rounds, tolerance_mw, **kwargs)
+        _electrisim_warn_island_short(net)
+        return out
     _electrisim_start_dc_diodes(net)
     calm = 0                                    # rounds since a diode last switched
     for _ in range(30):
@@ -1944,10 +1946,12 @@ def _electrisim_runpp(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, **kwargs)
                                       for d in _electrisim_live_dc_diodes(net)] else 0
         if not changed:
             _electrisim_warn_unsupplied_dc(net)
+            _electrisim_warn_island_short(net)
             return None
         kwargs = {**kwargs, 'init': 'results'}
     _electrisim_warn(net, 'The DC diodes had not settled after 30 load flows: '
                           'each is as the last one left it.')
+    _electrisim_warn_island_short(net)
     return None
 
 
@@ -3358,8 +3362,13 @@ def _electrisim_pcs_opf_limits(net, rec):
     In the OPF a PCS is dispatched within its power window, its Q within the
     box its rating leaves at either end of that window (inside its circle,
     which pandapower's OPF cannot take): sqrt(S^2 - max(|P_max|, |P_min|)^2).
+    On supercapacitors - seconds of energy, not a dispatch's hour - it holds
+    its set power and gives reactive power: the 800 VDC AI factory's
+    eSTATCOM, free to the OPF, exported 14.7 MW from 7.5 MW-s.
     """
     p_hi, p_lo = rec['p_max_mw'], rec['p_min_mw']
+    if rec['source']['kind'] == 'Supercapacitor':
+        p_hi = p_lo = min(max(rec.get('p_set_ac', 0.0), p_lo), p_hi)
     q_box = math.sqrt(max(rec['s_rated'] ** 2 - max(abs(p_hi), abs(p_lo)) ** 2, 0.0))
     table, idx = rec['table'], rec['index']
     for col, value in (('controllable', True), ('min_p_mw', p_lo), ('max_p_mw', max(p_hi, p_lo + 1e-6)),
@@ -3525,27 +3534,10 @@ def _electrisim_settle_pcs(net):
         if rec['table'] == 'gen' and rec['island'] is not None and rec['index'] in net.res_gen.index:
             islands.setdefault(rec['island'], []).append(rec)
     island_gens = getattr(net, 'electrisim_island_gens', None) or {}
+    if not hasattr(net, 'electrisim_island_short'):
+        net.electrisim_island_short = {}
     for n, group in islands.items():
-        # The island's imbalance: what its members deliver beyond their set points - the
-        # reference PCS takes it all in the load flow - shared by their weights.
-        gens = island_gens.get(n, [])
-        dp = sum(float(net.res_gen.at[r['index'], 'p_mw']) - r['p_set_ac'] for r in group)
-        dp += sum(float(net.res_gen.at[g['index'], 'p_mw']) - g['p_set'] for g in gens if g['index'] in net.res_gen.index)
-        w_sum = sum(_electrisim_pcs_weight(r) for r in group) + sum(g['weight'] for g in gens)
-        for rec in group:
-            share = _electrisim_pcs_weight(rec) / w_sum * dp
-            rec['df_pu'] = -rec['droop_pf'] * share / rec['s_rated']
-            if rec['reference']:
-                continue
-            target = rec['p_set_ac'] + share
-            worst = max(worst, abs(target - float(net.gen.at[rec['index'], 'p_mw'])))
-            net.gen.at[rec['index'], 'p_mw'] = target
-        for g in gens:
-            # Its governor's share, within its rating; beyond it the PCS take the rest.
-            target = min(max(g['p_set'] + g['weight'] / w_sum * dp, 0.0), g['p_max'])
-            g['df_pu'] = -g['r'] * (target - g['p_set']) / g['s_rated']
-            worst = max(worst, abs(target - float(net.gen.at[g['index'], 'p_mw'])))
-            net.gen.at[g['index'], 'p_mw'] = target
+        worst = max(worst, _electrisim_share_island(net, n, group, island_gens.get(n, [])))
     # Q-V droop of the grid-forming PCS: its voltage set point lowered by its Q.
     for rec in recs:
         if rec['table'] == 'gen' and rec.get('droop_qv_lf', rec['droop_qv']) > 0 and rec['index'] in net.res_gen.index:
@@ -3565,6 +3557,92 @@ def _electrisim_settle_pcs(net):
             worst = max(worst, abs(target - q_now))
             net.sgen.at[rec['index'], 'q_mvar'] = new
     return worst
+
+
+def _electrisim_share_island(net, n, group, gens):
+    """
+    An island's power shared by droop within each member's limits, at one
+    frequency: each gives P_set + W d (W its S / droop, d the frequency's
+    fall), held within its window - a PCS its source's (in a time series
+    the step's, what its store can give for it), a machine 0 to its rating -
+    with d where together they give what the island needs, the reference
+    (slack) PCS one with room. All at their limits, the island is short.
+    Shared by weight alone, an eSTATCOM on seconds of supercapacitors took
+    58 % of an island's 20 MW, and the substation BESS with hours of it 42 %.
+    Returns the largest change of a set point (MW).
+    """
+    units = []
+    for rec in group:
+        lo = rec.get('p_min_step', rec['p_min_mw'])
+        hi = rec.get('p_max_step', rec['p_max_mw'])
+        units.append({'rec': rec, 'index': rec['index'], 'p_set': rec['p_set_ac'], 'w': _electrisim_pcs_weight(rec),
+                      'lo': min(lo, hi), 'hi': max(lo, hi), 'pcs': True})
+    for g in gens:
+        if g['index'] in net.res_gen.index:
+            units.append({'rec': g, 'index': g['index'], 'p_set': g['p_set'], 'w': g['weight'], 'lo': 0.0,
+                          'hi': g['p_max'], 'pcs': False})
+    if not units:
+        return 0.0
+    need = sum(float(net.res_gen.at[u['index'], 'p_mw']) for u in units)
+    clamp = lambda u, d: min(max(u['p_set'] + u['w'] * d, u['lo']), u['hi'])    # noqa: E731
+    total = lambda d: sum(clamp(u, d) for u in units)                           # noqa: E731
+    lo_d, hi_d = -1.0, 1.0
+    while total(hi_d) < need and hi_d < 1e6:
+        hi_d *= 2.0
+    while total(lo_d) > need and lo_d > -1e6:
+        lo_d *= 2.0
+    for _ in range(200):
+        mid = 0.5 * (lo_d + hi_d)
+        if total(mid) < need:
+            lo_d = mid
+        else:
+            hi_d = mid
+    d = 0.5 * (lo_d + hi_d)
+    room = sum(u['hi'] for u in units)
+    floor = sum(u['lo'] for u in units)
+    weighted = [u for u in units if u['w'] > 0]
+    if need > room and weighted:
+        d = max((u['hi'] - u['p_set']) / u['w'] for u in weighted)     # where the last reached its limit
+    elif need < floor and weighted:
+        d = min((u['lo'] - u['p_set']) / u['w'] for u in weighted)
+    for u in units:
+        u['target'] = clamp(u, d)
+        u['free'] = u['lo'] + 1e-9 < u['p_set'] + u['w'] * d < u['hi'] - 1e-9
+    net.electrisim_island_short[n] = max(need - room, 0.0) if need > room else min(need - floor, 0.0)
+    # The reference: the PCS with room and the largest weight; with none, the one it was.
+    pcs_units = [u for u in units if u['pcs']]
+    ref = next((u for u in pcs_units if u['rec']['reference']), None)
+    if ref is None or not ref['free']:
+        free = [u for u in pcs_units if u['free']]
+        new = max(free, key=lambda u: u['w']) if free else ref
+        if new is not None and new is not ref:
+            if ref is not None:
+                ref['rec']['reference'] = False
+                net.gen.at[ref['index'], 'slack'] = False
+            new['rec']['reference'] = True
+            net.gen.at[new['index'], 'slack'] = True
+            net.gen.at[new['index'], 'slack_weight'] = 1.0
+            ref = new
+    worst = 0.0
+    for u in units:
+        u['rec']['df_pu'] = -d                 # one frequency: f = f0 (1 - d)
+        if u is ref:
+            continue
+        worst = max(worst, abs(u['target'] - float(net.gen.at[u['index'], 'p_mw'])))
+        net.gen.at[u['index'], 'p_mw'] = u['target']
+    return worst
+
+
+def _electrisim_warn_island_short(net):
+    """An island its PCS and machines cannot balance within their limits, named once."""
+    for n, short in (getattr(net, 'electrisim_island_short', None) or {}).items():
+        if abs(short) <= 1e-6:
+            continue
+        members = [r['label'] for r in getattr(net, 'electrisim_pcs', None) or [] if r.get('island') == n]
+        what = (f"short by {short:.3f} MW: its grid-forming PCS and machines are at their limits"
+                if short > 0 else f"{-short:.3f} MW over what its PCS and machines can take in")
+        _electrisim_warn(net, f"The island formed by {', '.join(members)} is {what}; "
+                              "its reference PCS carries the difference beyond its limit.")
 
 
 def _electrisim_der_dc_point(obj, p):
