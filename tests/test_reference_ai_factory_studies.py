@@ -14,6 +14,11 @@ contingency.
 20a, part 2: the optimal power flow in merit order, a day's time series with
 the microgrid dispatch, and the back-up case - the grid lost and the turbine
 off, ten minutes on storage.
+
+20b: faults and protection - ANSI earth faults through the 400 A neutral
+resistors, DC faults at a lineup's bus, a shelf, the catcher's bus and the
+rack's 50 V bus, a shelf fault's selectivity, arc flash by voltage class, and
+the harmonic study.
 """
 import contextlib
 import io
@@ -393,3 +398,181 @@ def test_backup_ten_minutes_on_storage(client):
     assert stores['Lineup A DC Store']['drawn_mwh'] < 1e-3 and stores['Hall B DC Store 1']['drawn_mwh'] < 1e-3
     st = stores['Substation DC Store 1']
     assert st['drawn_mwh'] == pytest.approx(st['stored_start_mwh'] - st['stored_end_mwh'], abs=1e-9)
+
+
+# --- 20b: faults and protection ------------------------------------------------------------------------
+
+R_N = 34.5e3 / math.sqrt(3) / 400                  # the 34.5 kV neutral resistors, 400 A
+
+
+def _dc_fault(client, bus, duration_ms='20'):
+    from test_dc_fault import STUDY
+    p = _payload()
+    cell = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
+    p['0'] = {**STUDY, 'fault_bus': cell[bus], 'duration_ms': duration_ms, 'frequency': '60'}
+    out = _post(client, p)
+    (f,) = out['dcfault']['faults']
+    return out, f
+
+
+def test_ansi_earth_faults_through_the_neutral_resistors(client):
+    """
+    ANSI on the short-circuit request: a 34.5 kV earth fault is held by its
+    transformer's 400 A resistor - 3 V_ph / |2 Z1 + Z0 + 3 R_N|, a little under
+    V_ph / R_N at 1.0 pu (ANSI adds no PCS current, as IEC does). The buses
+    behind an ungrounded winding - the BESS's, the eSTATCOM's, the turbine's
+    delta - have none; the 0.48 kV lineups, solidly grounded, some 130 kA.
+    """
+    from test_reference_grids import ANSI_PARAMS
+    p = _payload('sc1ph_')
+    p['0'] = {**ANSI_PARAMS, 'fault_type': '1ph', 'frequency_hz': 60, 'user_email': 't@t'}
+    rows = _by_label(p, _post(client, p)['busbars'])
+    for bus in ('34.5 kV Bus 1', '34.5 kV Bus 2'):
+        assert 0.39 < rows[bus]['i_first_sym_ka'] < 34.5 / math.sqrt(3) / R_N, bus
+    for bus in ('Substation BESS 0.69 kV', 'eSTATCOM 0.69 kV', 'Gas turbine 13.8 kV'):
+        assert rows[bus]['i_first_sym_ka'] == pytest.approx(0.0, abs=1e-9), bus
+    for bus in ('Lineup A 0.48 kV', 'Lineup B 0.48 kV', 'Catcher B 0.48 kV'):
+        assert 100 < rows[bus]['i_first_sym_ka'] < 150, bus
+
+
+def test_dc_fault_on_a_lineup_bus_the_diodes_block(client):
+    """
+    A bolted fault on Lineup A's 800 V bus: its four rectifiers' DC links, its
+    store's converter's output capacitor and the bus coupler's input capacitor
+    discharge into it, and the rectifiers' diode bridges feed it alike; the
+    shelves behind their diodes give nothing back - what is behind shelf A1
+    (the rack's converters and filter) only trades current among itself - and
+    the catcher, behind the shelves' other diodes, none. The study lists every
+    DC element; those beyond the faulted section carry only their own small
+    transients, under 1 % of the fault's peak.
+    """
+    out, f = _dc_fault(client, 'Lineup A 800 V')
+    contrib = {(c['kind'], c['name']): c for c in f['contributions']}
+    rect = [c for (k, n), c in contrib.items() if n.startswith('Lineup A rectifier')]
+    assert len(rect) == 8                                   # each its DC link and its diode bridge
+    links = [c for c in rect if 'DC-link' in c['kind']]
+    assert len(links) == 4 and max(c['ip_ka'] for c in links) - min(c['ip_ka'] for c in links) < 1e-6
+    assert ('DC/DC output capacitor', 'Lineup A DC Store converter') in contrib
+    assert ('DC/DC input capacitor', 'DC bus coupler A-B') in contrib
+    for (k, n), c in contrib.items():
+        if n.startswith(('Catcher B rectifier', 'Shelf A')):          # behind the diodes: nothing
+            assert abs(c['ip_ka']) < 1e-3 and abs(c['at_peak_ka']) < 1e-3, n
+        elif not n.startswith(('Lineup A', 'DC bus coupler', 'Rack A1')):
+            assert abs(c['ip_ka']) < 0.01 * f['ip_ka'], n
+    behind = sum(c['at_peak_ka'] for (k, n), c in contrib.items() if n.startswith('Rack A1'))
+    assert abs(behind) < 1e-3 * f['ip_ka']
+    bridges = [c['ik_ka'] for c in rect if 'diodes' in c['kind']]
+    assert f['ik_ka'] == pytest.approx(sum(bridges), rel=0.01) and 100 < f['ik_ka'] < 120
+
+
+def test_dc_fault_on_the_catcher_bus(client):
+    """
+    A bolted fault on the catcher's 784 V bus: its four rectifiers and its
+    store's converter feed it; the shelves, behind their diodes from it, give
+    nothing back - neither do Lineups A and B, which reach it only through them.
+    """
+    out, f = _dc_fault(client, 'Catcher B 800 V')
+    names = {c['name'] for c in f['contributions'] if abs(c['at_peak_ka']) > 1e-3 * f['ip_ka']}
+    assert {f'Catcher B rectifier {k}' for k in range(1, 5)} <= names
+    assert 'Catcher B DC Store converter' in names
+    for c in f['contributions']:
+        if c['name'].startswith('Shelf '):                                 # behind their diodes: nothing
+            assert abs(c['ip_ka']) < 1e-3, c['name']
+        elif c['name'].startswith(('Lineup A', 'Lineup B')):
+            assert abs(c['ip_ka']) < 0.01 * f['ip_ka'] and abs(c['ik_ka']) < 1e-3, c['name']
+    assert f['v_prefault_kv'] == pytest.approx(0.784, abs=1e-6)
+
+
+def test_dc_fault_at_the_rack_50_v(client):
+    """
+    A bolted fault on rack A1's 50 V bus: its supercapacitors - four 130 F
+    modules behind 4 mohm each, 1 mohm together - give V0 / ESR, 50 kA, at
+    once and decay with ESR C = 0.52 s: some 46 kA over the run's last 60 Hz
+    period. The 800 / 50 V supply and the 50 / 12 V converters block, their
+    capacitors discharging.
+    """
+    out, f = _dc_fault(client, 'Rack A1 50 V')
+    sc = next(c for c in f['contributions'] if c['name'] == 'Rack A1 supercapacitors')
+    assert sc['ip_ka'] == pytest.approx(50 / 0.001 / 1e3, rel=0.01)
+    t_mid = 0.050 - 0.5 / 60                                  # the middle of the run's last period
+    assert sc['ik_ka'] == pytest.approx(50 * math.exp(-t_mid / (0.001 * 520)), rel=0.02)
+    assert f['ik_ka'] == pytest.approx(sc['ik_ka'], rel=1e-3)
+    kinds = {(c['kind'], c['name']) for c in f['contributions'] if c['ip_ka'] > 1.0}
+    assert ('DC/DC output capacitor', 'Rack A1 power supply 800/50 V') in kinds
+    assert ('DC/DC input capacitor', 'Rack A1 50/12 V converters') in kinds
+
+
+def test_a_shelf_fault_trips_its_breaker_and_its_catcher_group(client):
+    """
+    A bolted fault on shelf A2, fed forward through both its diodes - from
+    Lineup A's rectifiers and the catcher's. Its own breaker sees 147 kA
+    prospective, far over its 3 kA trip, and opens in 10 us at some 2 kA,
+    within its 30 kA. The catcher's side has a breaker per group, not per
+    shelf: catcher group A's sees 137 kA over its 12 kA trip and must open
+    too, taking the catcher from all six Lineup A shelves - the shelf's own
+    breaker does not clear it alone. Every other breaker carries its load.
+    """
+    out, f = _dc_fault(client, 'Shelf A2 800 V', duration_ms='60')
+    feeds = {c['name'] for c in f['contributions'] if 'diodes' in c['kind']}
+    assert {f'Lineup A rectifier {k}' for k in range(1, 5)} | {f'Catcher B rectifier {k}' for k in range(1, 5)} <= feeds
+    rows = _spec_rows()
+    trips = {b['label']: b['ip_ka'] > rows[b['label']]['trip_current_ka'] for b in out['dcfault']['breakers']}
+    assert {k for k, v in trips.items() if v} == {'Shelf A2 breaker', 'Catcher group A breaker'}
+    own = next(b for b in out['dcfault']['breakers'] if b['label'] == 'Shelf A2 breaker')
+    assert own['i_open_ka'] < own['breaking_capacity_ka'] and not own['exceeds'] and own['ip_ka'] > 100
+
+
+def test_arc_flash_by_voltage_class(client):
+    """
+    Each bus as the typical equipment of its class: 34.5 and 245 kV by Ralph
+    Lee, the rest by IEEE 1584-2018. The 0.48 kV lineups' 127-143 kA and the
+    0.69 kV PCS buses' 112-146 kA are past the standard's 106 and 65 kA: each
+    is studied at the limit and said so - the lineups' 8 MVA transformers at
+    6 % give fault levels beyond IEEE 1584.
+    """
+    from test_reference_grids import _ieee1584, _lee
+    p = _payload()
+    p['0'] = {'typ': 'ArcFlashPandaPower Parameters', 'electrode_config': 'VCB', 'equipment_mode': 'by_voltage',
+              'working_distance_mm': '455', 'conductor_gap_mm': '25', 'enclosure_height_mm': '508',
+              'enclosure_width_mm': '508', 'enclosure_depth_mm': '508', 'clearing_time_s': '0.2',
+              'clearing_time_min_s': '0.2', 'user_email': 't@t'}
+    out = _post(client, p)
+    rows = {r['name']: r for r in out['arc_flash']}
+    for bus in ('34.5 kV Bus 1', '34.5 kV Bus 2', 'Grid 245 kV'):
+        assert rows[bus]['method'] == 'RalphLee'
+        assert rows[bus]['incident_energy_cal_cm2'] == pytest.approx(_lee(rows[bus], 910)[0], rel=1e-6), bus
+    for bus in ('Lineup A 0.48 kV', 'Lineup B 0.48 kV', 'Catcher B 0.48 kV'):
+        row = rows[bus]
+        assert row['method'] == 'IEEE1584-2018' and row['ikss_ka'] > 106
+        capped = dict(row, ikss_ka=106.0)
+        assert row['incident_energy_cal_cm2'] == pytest.approx(_ieee1584(capped, 32, 610, (508, 508, 508)), rel=1e-6)
+        assert any(w.startswith(f'Bus {bus}: Ibf=') and 'LV model max 106 kA' in w for w in out['warnings'])
+    for bus in ('Substation BESS 0.69 kV', 'eSTATCOM 0.69 kV'):
+        assert any(w.startswith(f'Bus {bus}: Ibf=') and '65 kA' in w for w in out['warnings'])
+
+
+def test_harmonics_run_but_the_converters_inject_none(client, tmp_path):
+    """
+    The harmonic study (OpenDSS) runs at 60 Hz and reports every AC bus, the
+    DC network left out and said so. Its converters are the constant loads
+    their AC sides draw, with no spectrum: the rectifiers and SSTs inject
+    nothing, so every bus reads 0 % THD - IEEE 519 at 245 kV cannot be judged
+    until a converter carries its own harmonic spectrum.
+    """
+    import opendssdirect as dss
+    with open(os.path.join(HERE, 'reference', 'reference_radial.diagram_harmonic_payload.json'),
+              encoding='utf-8') as handle:
+        params = json.load(handle)['0']
+    p = _payload()
+    p['0'] = {**params, 'frequency': '60'}
+    before = dss.Basic.DataPath()
+    dss.Basic.DataPath(str(tmp_path))
+    try:
+        out = _post(client, p)
+    finally:
+        dss.Basic.DataPath(before)
+    assert out['harmonic_analysis']['executed']
+    assert any('DC network is left out' in w for w in out.get('warnings', []))
+    buses = _by_label(p, out['busbars'])
+    assert len(buses) == 10
+    assert all(b['vthd_percent'] == pytest.approx(0.0, abs=1e-9) for b in buses.values())
