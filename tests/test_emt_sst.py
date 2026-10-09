@@ -353,6 +353,29 @@ def test_dc_dc_converter_holds_its_output(client, quiet, model):
     assert 0.995 < bus['v_min_pu'] and bus['v_max_pu'] < 1.005
 
 
+@pytest.mark.parametrize('model', ['average', 'switching'])
+def test_dc_dc_converter_holds_its_terminal_behind_its_esr(client, quiet, model):
+    """
+    The same converter, its output capacitor behind 12 mohm: its 417 A drop
+    5 V there, a tenth of 48 V. It holds 48 V at its terminal - its bus - not
+    at its capacitor, which starts and stays the drop above; and its bridge's
+    current is the racks', with no charge of that drop counted as current at
+    its first sample.
+    """
+    from test_dc_dc_converter import BUS_48, LOAD_48, _conv
+    from test_dc_elements import _with
+    request = _emt(_with(_drawn_request(), BUS_48, dict(LOAD_48, filter_c_uf='50000'),
+                         _conv('k1', 'dc_b', 'dc_48', emt_model=model, c_out_esr_mohm='12')),
+                   time_step_us='1', duration_ms='10')
+    result = _post(client, quiet, request)
+    (k1,) = [c for c in result['emt']['converters'] if c['kind'] == 'DC/DC']
+    assert k1['blocked_ms'] is None and k1['limited_ms'] == 0
+    assert k1['v_dc_min_kv'] == pytest.approx(0.048, rel=0.005)
+    assert k1['i_peak_ka'] == pytest.approx(0.02 / 0.048, rel=0.05)
+    bus = next(b for b in result['emt']['buses'] if b['label'] == 'DC 48 V')
+    assert 0.995 < bus['v_min_pu'] and bus['v_max_pu'] < 1.005
+
+
 def test_sst_with_a_grid_forming_inverter(client, quiet):
     """
     The design note's case: the SST's grid-forming inverter holding an

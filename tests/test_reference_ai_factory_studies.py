@@ -782,6 +782,33 @@ def test_tds_ride_through_ieee2800_the_turbine_slips_at_the_pcs_limits(client):
     assert max(est['current_pu']) > 2.0 and max(est['q_mvar']) > 15.0
 
 
+def test_emt_the_rack_holds_its_12_v(client):
+    """
+    The EMT study with no disturbance, 20 ms: rack A1's 12 V bus holds from
+    t = 0, as the load flow has it. Its 50 / 12 V converters pass the GPUs'
+    1 MW at 83 kA, within their limit (1.2 pu, 110 kA), and none of the
+    rack's converters limits or blocks. At 12 V their output capacitor's ESR
+    and ESL and the GPUs' filter's R and L are the 800 V ones scaled by
+    (12 / 800)^2: at 0.1 mohm, an 800 V converter's - 0.76 pu here - their
+    ESR dropped 8.3 V at 83 kA, and their bus fell to some 2 V within 5 ms.
+    """
+    p = _payload()
+    p['0'] = {'typ': 'EmtStudy Parameters', 'user_email': 't@t', 'duration_ms': '20', 'frequency': '60'}
+    emt = _post(client, p)['emt']
+    buses = {b['label']: b for b in emt['buses']}
+    for label, band in (('Rack A1 12 V', 0.001), ('Rack A1 50 V', 0.01)):
+        assert 1 - band < buses[label]['v_min_pu'] and buses[label]['v_max_pu'] < 1 + band, label
+    gpus, = (l for l in emt['loads'] if l['label'] == 'Rack A1 GPUs 12 V')
+    assert gpus['t_lost_ms'] is None and gpus['v_min_pu'] > 0.99
+    conv = {c['label']: c for c in emt['converters']}
+    vrm, psu = conv['Rack A1 50/12 V converters'], conv['Rack A1 power supply 800/50 V']
+    for c in (vrm, psu):
+        assert c['blocked_ms'] is None and c['limited_ms'] == 0, c['label']
+    assert vrm['v_dc_min_kv'] == pytest.approx(0.012, rel=1e-3)
+    assert vrm['i_peak_ka'] == pytest.approx(1.0 / 0.012, rel=0.02) and vrm['i_peak_ka'] < vrm['current_limit_ka']
+    assert not emt['converters_blocked']
+
+
 def test_emt_ride_through_ieee2800_the_800_v_where_it_holds(client):
     """
     IEEE 2800's envelope at 245 kV in the EMT study, 0 pu from 20 ms: 100 ms

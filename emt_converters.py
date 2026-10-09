@@ -118,6 +118,9 @@ def dcdc_capacitors(c_out_mf, rated, vn_in, vn_out):
     return 4e-3 * rated / vn_in ** 2, c_out
 
 
+# A DC/DC converter's sense of its output capacitor's ESR drop (Hz): a decade below its voltage loop's 300 Hz.
+SENSE_HZ = 30.0
+
 # A VSC's current loop bandwidth (Hz) unless it gives its own. At a few kHz of switching, against a
 # weak network - an island no grid holds - a loop this fast meets the network's own resonance; f_sw / 20
 # (250 Hz at 5 kHz) is usual for converters of some MW.
@@ -627,7 +630,12 @@ class DcDc:
       phase shift would leave the leakage current a DC offset - one its
       windings' small resistance hardly damps - which the half step avoids.
     Its control: its output voltage (a PI loop, its output current fed
-    forward), lowered with its power in droop; or its set power - or the
+    forward), lowered with its power in droop - at its terminals, past its
+    output capacitor's ESR, which here carries its whole output current (at
+    12 V and some MW, a drop of volts): its capacitor's voltage less the
+    ESR's drop, that filtered at SENSE_HZ as a remote sense is, its loop
+    closed on its capacitor - the ESR's RC with its bus's capacitance kept
+    out of it; or its set power - or the
     power a reference function gives at each sample (``p_ref``: its PV
     array's MPPT, its SOFC's operating power, its store's smoothing power);
     the current its output bridge delivers limited
@@ -683,7 +691,6 @@ class DcDc:
         # Its steady state: the load flow's power through it.
         i_out0 = p_out / max(v_out, 1.0)
         i_in0 = p_in_mw * 1e6 / max(v_in, 1.0)
-        self.phi0 = self._phi(i_out0, v_in)[0]
 
         # Its terminals: input and output capacitors, the currents to its buses. Each capacitor's ESR
         # and ESL are in its terminal's branch, as a VSC's: a fault on its bus meets them there as
@@ -695,6 +702,10 @@ class DcDc:
         v_in_node, v_out_node = v_in - esr_in * i_in0, v_out + esr_out * i_out0
         self.in_node = ckt.node(f'{label} input', v_in_node)
         self.out_node = ckt.node(f'{label} output', v_out_node)
+        # Its bridges work between its capacitors: its phase shift and transformer currents for their voltages.
+        self.phi0 = self._phi(i_out0, v_in_node)[0]
+        # Its output voltage is its terminals', its capacitor's less its ESR's drop - filtered, from the start.
+        self.esr_out, self.drop = esr_out, esr_out * i_out0
         self.k_in = ckt.add_rl(term_in, self.in_node, r_ci, l_ci, i0=i_in0)
         ckt.add_c(0, self.in_node, c_in, w0=-v_in_node)
         self.k_out = ckt.add_rl(self.out_node, term_out, r_co, l_co, i0=i_out0)
@@ -707,8 +718,8 @@ class DcDc:
         if switching:
             # Its bridges: legs A, B on its input, C, D on its output; each leg's switches to either pole.
             legs = {}
-            for name, pole, v0 in (('A', self.in_node, v_in), ('B', self.in_node, v_in),
-                                   ('C', self.out_node, v_out), ('D', self.out_node, v_out)):
+            for name, pole, v0 in (('A', self.in_node, v_in_node), ('B', self.in_node, v_in_node),
+                                   ('C', self.out_node, v_out_node), ('D', self.out_node, v_out_node)):
                 x = ckt.node(f'{label} leg {name}', v0 / 2)
                 legs[name] = (x, ckt.add_switch(x, pole, closed=False), ckt.add_switch(x, 0, closed=False))
                 ckt.add_diode(x, pole, V_F)
@@ -719,11 +730,11 @@ class DcDc:
             l_m = 1000.0 * self.n ** 2 * self.l_lk
             r2 = 1e-4 * vn_out ** 2 / rated
             n = self.n
-            i1, i2 = self._steady_currents(v_in, v_out, self.phi0, l_m)
+            i1, i2 = self._steady_currents(v_in_node, v_out_node, self.phi0, l_m)
             ckt.add_coupled([legs['A'][0], legs['C'][0]], [legs['B'][0], legs['D'][0]],
                             np.diag([n * n * r2, r2]), np.array([[l_m, l_m / n], [l_m / n, l_m / n ** 2 + self.l_lk]]),
                             i0=[i1, i2])
-        self._start(v_in, v_out, i_out0)
+        self._start(v_in_node, v_out_node, i_out0)
         self._prime(ckt)
 
     # --- its phase shift --------------------------------------------------------------
@@ -861,6 +872,8 @@ class DcDc:
             i_bridge_m = i_out_m + self.c_out * (v_out - self.v_out_last) / elapsed
             t_s, dt = self.t_next, self.t_sample
         self.v_out_last = v_out
+        self.drop += (self.esr_out * i_out_m - self.drop) * min(2.0 * math.pi * SENSE_HZ * dt, 1.0)
+        v_out_m -= self.drop
         # Its output current: for its output voltage, or its set power; limited.
         if self.mode == 'voltage':
             # In droop its set point falls with the power it delivers.
@@ -886,7 +899,7 @@ class DcDc:
         changed = False
         if self.model == 'switching':
             # Its losses, by the power it passed since its last sample.
-            p_out = v_out_m * i_bridge_m
+            p_out = (v_out_m + self.drop) * i_bridge_m
             state.set_source_value(self.k_src_in, (stage_input(p_out, self.eta, self.p_nl) - p_out) / max(v_in, 1.0))
             half = int(round(t_s / self.t_sample))
             self._set_bridge(state, 0, half % 2 == 0)
@@ -897,6 +910,6 @@ class DcDc:
         if self.t_sample is not None:
             self.t_next = t_s + self.t_sample
             state.at(self.t_next, _breakpoint, soft=None)
-        p_out = v_out_m * i_bridge_m
+        p_out = (v_out_m + self.drop) * i_bridge_m
         self.trace.append((t_s, stage_input(p_out, self.eta, self.p_nl), p_out, v_in_m, v_out_m, i_bridge_m))
         return changed
