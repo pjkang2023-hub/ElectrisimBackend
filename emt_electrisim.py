@@ -976,8 +976,11 @@ def emt_study(net, params, in_data=None):
                             'their voltages moving; run without profiles, with a load step, to see whether they settle.')
     for load in b.loads:
         v = sim['v'][:, load['node']]
+        # When it lost its supply, if it did: its voltage under half its own, as the verdict takes it.
+        lost = np.flatnonzero(np.abs(v) < 0.5 * load['vn'])
         result['loads'].append({'label': load['label'], 'id': load['id'], 'constant_power': load['constant_power'],
                                 'v_min_pu': _round(float(np.min(v)) / load['vn']),
+                                't_lost_ms': _round(float(t[lost[0]]) * 1e3) if len(lost) else None,
                                 'verdict': _oscillation_verdict(t, v, t_last, load['vn'], min_span)
                                 if load['constant_power'] and judge else None})
         if load['constant_power'] and result['loads'][-1]['verdict'] == 'oscillates, growing':
@@ -1165,7 +1168,10 @@ def _der_result(rec, model):
     out = {'label': model.label, 'id': rec['id'], 'kind': model.kind, 'coupling': rec['coupling']}
     if len(tr):
         p = tr[:, 1] * tr[:, 2]
+        # The energy it gave through the run (MJ; taken, negative): how far a store was drawn.
+        given = float(np.trapezoid(p, tr[:, 0])) / 1e6 if len(tr) > 1 else 0.0
         out.update(p_start_mw=_round(p[0] / 1e6), p_end_mw=_round(p[-1] / 1e6), v_end_kv=_round(tr[-1, 1] / 1e3),
+                   energy_given_mj=_round(given),
                    v_min_kv=_round(float(np.min(tr[:, 1])) / 1e3), **{f'{key}_start': _round(tr[0, 3] * scale),
                                                                        f'{key}_end': _round(tr[-1, 3] * scale)})
         rows = emt_der.waveform(model.trace)

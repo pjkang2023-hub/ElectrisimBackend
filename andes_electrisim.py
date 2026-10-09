@@ -14,6 +14,7 @@ from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 
 import grid_voltage_profile as gvp
 
@@ -426,6 +427,29 @@ def _pcs_plants(in_data: Dict[str, Any], warnings: List[str]) -> List[Dict[str, 
     return out
 
 
+def _pcs_store(rec: Dict[str, Any]) -> Optional[Dict[str, float]]:
+    """
+    A PCS's store: its energy (MWh), its state of charge at the start and its
+    window's ends, its charge and discharge efficiencies. A battery's state of
+    charge; a supercapacitor's usable energy, 1/2 C (V^2 - V_min^2), as a share
+    of its energy at its rated voltage; a flywheel's, 1/2 J w^2, as a share of
+    its energy at full speed (speed squared). None for a PV array or an SOFC
+    system: no store.
+    """
+    obj, kind = rec["source"]["obj"], rec["source"]["kind"]
+    if kind == "Battery":
+        return dict(en=obj.energy_kwh / 1e3, soc0=obj.soc0, soc_min=obj.soc_min, soc_max=obj.soc_max,
+                    eta_c=obj.eta_charge, eta_d=1.0)
+    if kind == "Supercapacitor":
+        usable = obj.energy(obj.v_rated)[1]
+        return dict(en=usable / 3.6e9, soc0=obj.energy()[1] / max(usable, 1e-12), soc_min=0.0, soc_max=1.0,
+                    eta_c=1.0, eta_d=1.0)
+    if kind == "Flywheel":
+        return dict(en=obj.e_max / 3.6e9, soc0=obj.s0 ** 2, soc_min=obj.s_min ** 2, soc_max=1.0,
+                    eta_c=obj.eta, eta_d=obj.eta)
+    return None
+
+
 def _add_pcs_dynamics(ss: Any, rec: Dict[str, Any], n: int, bus: Any, static_idx: str, freq: float,
                       sn_base: float, defaults_applied: List[str]) -> Dict[str, Any]:
     """
@@ -456,22 +480,11 @@ def _add_pcs_dynamics(ss: Any, rec: Dict[str, Any], n: int, bus: Any, static_idx
     common = dict(bus=bus, gen=static_idx, Sn=s, fn=freq, pqflag=0, ialim=max(rec["k"], 0.1),
                   qmx=1.0, qmn=-1.0, **trips)
     if kind in ("Battery", "Flywheel", "Supercapacitor"):
-        if kind == "Battery":
-            en, soc0, soc_min, soc_max = obj.energy_kwh / 1e3, obj.soc0, obj.soc_min, obj.soc_max
-            eta_c, eta_d = obj.eta_charge, 1.0
-        elif kind == "Supercapacitor":
-            # Its usable energy, 1/2 C (V^2 - V_min^2), as a share of its energy at its rated voltage.
-            usable = obj.energy(obj.v_rated)[1]
-            en, soc0, soc_min, soc_max = usable / 3.6e9, obj.energy()[1] / max(usable, 1e-12), 0.0, 1.0
-            eta_c = eta_d = 1.0
-        else:
-            # Its energy, 1/2 J w^2, as a share of its energy at full speed: speed squared.
-            en, soc0, soc_min, soc_max = obj.e_max / 3.6e9, obj.s0 ** 2, obj.s_min ** 2, 1.0
-            eta_c = eta_d = obj.eta
+        st = _pcs_store(rec)
         idx = _add_model_safe(ss, "ESD1", defaults_applied, label, idx=f"ESD1_PCS_{n}",
                               name=f"ESD1_{rec['label']}", pmx=max(rec["p_max_ac"], -rec["p_min_ac"], 1e-6) / s,
-                              En=max(en, 1e-9), SOCinit=soc0, SOCmin=soc_min, SOCmax=soc_max,
-                              EtaC=eta_c, EtaD=eta_d, **common)
+                              En=max(st["en"], 1e-9), SOCinit=st["soc0"], SOCmin=st["soc_min"],
+                              SOCmax=st["soc_max"], EtaC=st["eta_c"], EtaD=st["eta_d"], **common)
         return {"model": "ESD1", "model_idx": idx}
     # A PV array, and an SOFC system: its power order is constant through a run, so the ramp limit
     # and minimum load REGCA1 + REECA1 gave it never acted, while REGCA1's low-voltage gain stalled
@@ -606,6 +619,103 @@ def _converter_ac_loads(net: Any) -> List[Tuple[str, float, float, str]]:
         if rec.get("bus_lvac") is not None and r.get("p_lv_ac_mw") is not None:
             out.append((name(rec["bus_lvac"]), -r["p_lv_ac_mw"], -(r.get("q_lv_ac_mvar") or 0.0), f"{rec['label']} (LV AC)"))
     return out
+
+
+def _converter_dc_reach(net: Any) -> Tuple[Dict[str, List[Tuple[float, str]]], Dict[str, List[Dict[str, Any]]]]:
+    """
+    Each converter's DC loads, by label: (rated MW, load name) for every DC
+    load its DC side reaches - through DC cables, conducting diodes and DC/DC
+    converters, as the load flow left them. Its AC draw follows them. And the
+    stores smoothing them: each DC/DC converter in smoothing mode on that DC
+    network, its rating and time constant.
+    """
+    import pandapower_electrisim as pe
+    if not len(getattr(net, "bus_dc", [])):
+        return {}, {}
+    parent = {int(b): int(b) for b in net.bus_dc.index}
+
+    def root(b):
+        while parent[b] != b:
+            parent[b] = parent[parent[b]]
+            b = parent[b]
+        return b
+
+    def join(a, b):
+        if a in parent and b in parent:
+            parent[root(int(a))] = root(int(b))
+
+    for i in net.line_dc.index:
+        if bool(net.line_dc.at[i, "in_service"]):
+            join(int(net.line_dc.at[i, "from_bus_dc"]), int(net.line_dc.at[i, "to_bus_dc"]))
+    for c in getattr(net, "electrisim_dc_dc_converters", None) or []:
+        if c.get("in_service", True):
+            join(c["bus_in"], c["bus_out"])
+    loads: Dict[int, List[Tuple[float, str]]] = {}
+    ld = net.load_dc
+    for i in ld.index:
+        if pe._electrisim_is_aux(ld, i) or not bool(ld.at[i, "in_service"]):
+            continue
+        rated = ld.at[i, "electrisim_p_rated_mw"] if "electrisim_p_rated_mw" in ld.columns else np.nan
+        w = float(rated) if pd.notna(rated) else float(ld.at[i, "p_dc_mw"])
+        loads.setdefault(root(int(ld.at[i, "bus_dc"])), []).append((w, str(ld.at[i, "name"])))
+    smoothers: Dict[int, List[Dict[str, Any]]] = {}
+    for c in getattr(net, "electrisim_dc_dc_converters", None) or []:
+        if c.get("in_service", True) and c.get("control") == "smoothing" and int(c["bus_out"]) in parent:
+            sm = c.get("smoothing") or {}
+            smoothers.setdefault(root(int(c["bus_out"])), []).append({
+                "label": c["label"], "rated_mw": float(c.get("rated_mw") or 0.0),
+                "tau_s": max(float(sm.get("tau_s", 10.0)), 1e-6)})
+    out: Dict[str, List[Tuple[float, str]]] = {}
+    smoothing: Dict[str, List[Dict[str, Any]]] = {}
+    label = lambda table, i: str(getattr(net, "user_friendly_names", {}).get(net[table].at[i, "name"], net[table].at[i, "name"]))
+
+    def add(key, bus):
+        out[key] = loads.get(root(bus), [])
+        smoothing[key] = smoothers.get(root(bus), [])
+
+    for table in ("vsc", "b2b_vsc"):
+        df = net.get(table)
+        if df is None or not len(df):
+            continue
+        for i in df.index:
+            if not pe._electrisim_is_aux(df, i) and int(df.at[i, "bus_dc"]) in parent:
+                add(label(table, i), int(df.at[i, "bus_dc"]))
+    for rec in getattr(net, "electrisim_ssts", None) or []:
+        if rec.get("bus_lvdc") is not None and int(rec["bus_lvdc"]) in parent:
+            add(f"{rec['label']} (MV)", int(rec["bus_lvdc"]))
+    return out, smoothing
+
+
+def _smoothed_mix(mix, stores: List[Dict[str, Any]], tf: float, repeat: bool):
+    """
+    What a DC network's converters draw when stores smooth its loads: the
+    loads' mix, each store taking its fast part, P_rack - LPF_tau(P_rack),
+    within its rating (as the EMT study's and the time series' smoothing
+    controllers do; its state of charge's pull back to its reference, slow
+    against a run of seconds, left out). One series over the run, per unit
+    of the loads' total; its filters start at the loads' mean, as after long
+    smoothing.
+    """
+    import load_profiles_electrisim as _lp
+    total = sum(w for w, _, _ in mix)
+    finest = min(float(np.median(np.diff(t))) for _, t, _ in mix if len(t) > 1)
+    dt = min(finest / 4.0, 0.005)
+    grid = np.arange(0.0, tf + 2 * dt, dt)
+    rack = sum(w * np.asarray(_lp.sample_profile(t, p, grid, repeat), dtype=float) for w, t, p in mix)
+    span = max(float(t[-1] - t[0]) + (float(t[-1] - t[-2]) if len(t) > 1 else 0.0) for _, t, _ in mix)
+    mean = _mix_value(mix, 0.0, span, repeat) * total if span > 0 else float(rack[0])
+    net = rack.copy()
+    for st in stores:
+        a = 1.0 - math.exp(-dt / st["tau_s"])
+        y = np.empty_like(rack)
+        y[0] = mean
+        for k in range(1, len(rack)):
+            y[k] = y[k - 1] + (rack[k] - y[k - 1]) * a
+        p = np.clip((rack - y) / len(stores), -st["rated_mw"], st["rated_mw"])
+        net -= p
+    # At the profiles' own step: finer would only cut the run into more pieces.
+    out_t = np.arange(0.0, tf + 2 * finest, finest)
+    return [(total, out_t, np.interp(out_t, grid, net) / total)]
 
 
 def build_system(
@@ -958,17 +1068,49 @@ def build_system(
         if flow is None:
             warnings.append(f"The DC network's converters are left out: its load flow failed ({flow_problem}).")
     converter_loads = _converter_ac_loads(flow) if flow is not None else []
+    # A converter's AC draw follows the profiles of the DC loads it reaches - their mix, by rated
+    # power - its losses with it: the racks' training cycle reached no machine, held at the load flow's.
+    reach, smoothing = _converter_dc_reach(flow) if flow is not None and profile_library else ({}, {})
+    dc_assigned = _lp.dc_load_assignments(in_data) if profile_library else {}
+    following, smoothed = [], set()
     for bus_name, p_mw, q_mvar, label in converter_loads:
         bus = bus_map.get(bus_name)
         if bus is None:
             continue
         pq_i += 1
+        mix, total = [], 0.0
+        for w, name in reach.get(label, []):
+            total += w
+            prof = profile_library.get(dc_assigned.get(name, {}).get("profile_id"))
+            if prof is not None and w > 0:
+                mix.append((w, prof["t"] - prof["t"][0], prof["p"]))
+        f0 = 1.0
+        if mix and total > 0:
+            # The rest of its loads at their rated power.
+            mix.append((total - sum(m[0] for m in mix), np.array([0.0, 1.0]), np.array([1.0, 1.0])))
+            mix = [m for m in mix if m[0] > 1e-12]
+            stores = smoothing.get(label) or []
+            if stores:
+                mix = _smoothed_mix(mix, stores, _sf(params.get("tf"), 10.0), profile_repeat)
+                smoothed.update(st["label"] for st in stores)
+            f0 = _mix_value(mix, 0.0, None, profile_repeat)
+            following.append(label)
+            profiled_loads.append({
+                "idx": f"PQ_{pq_i}", "name": f"{label} (DC network)", "profile": "its DC loads' profiles",
+                "mix": mix, "t": mix[0][1], "p": mix[0][2], "q_mode": "pf",
+                "p_rated": p_mw / sn_base, "q_rated": q_mvar / sn_base,
+            })
         ss.add("PQ", idx=f"PQ_{pq_i}", name=f"{label} (DC network)", bus=bus, Vn=bus_vn.get(bus, 110.0),
-               p0=p_mw / sn_base, q0=q_mvar / sn_base)
+               p0=p_mw * f0 / sn_base, q0=q_mvar * f0 / sn_base)
     if converter_loads:
+        held = [c for c in converter_loads if c[3] not in following]
         warnings.append(
-            "The DC network is in this study as its converters' AC power from the load flow, held through the run "
-            "(as loads are): " + ", ".join(f"{label} {p:.4g} MW" for _, p, _, label in converter_loads)
+            "The DC network is in this study as its converters' AC power from the load flow"
+            + (", each following the profiles of the DC loads it reaches (their mix by rated power, its losses "
+               "with it)" if following else "")
+            + (f", less the fast part their smoothing stores take ({', '.join(sorted(smoothed))})" if smoothed else "")
+            + (", held through the run (as loads are): " + ", ".join(f"{label} {p:.4g} MW" for _, p, _, label in held)
+               if held else "")
             + ". The DC network's own dynamics are the EMT study's.")
 
     # --- Storage: a fixed P/Q, positive while charging (pandapower's sign) ---
@@ -1506,7 +1648,9 @@ def build_system(
             "source": rec["source"]["label"], "s_rated_mva": rec["s_rated"], "p_mw": rec["p_ac"],
             "q_mvar": rec["q"], "p_max_mw": rec["p_max_ac"], "p_min_mw": rec["p_min_ac"],
             "vm_set_pu": rec["vm_set_pu"], "droop_qv": rec["droop_qv"], "q_mode": rec["q_mode"],
-            "qv_droop": rec["qv_droop"], "q_max_mvar": rec["q_max"], "on_slack_bus": bus in slack_v0 or holds, **ids,
+            "qv_droop": rec["qv_droop"], "q_max_mvar": rec["q_max"], "on_slack_bus": bus in slack_v0 or holds,
+            "current_limit_pu": rec["k"], "eta": rec["eta"], "p_nl_mw": rec["p_nl_mw"], "store": _pcs_store(rec),
+            **ids,
         }
 
     if gen_count + renewable_count == 0:
@@ -1702,6 +1846,12 @@ def _pcs_series(ss, meta: Dict[str, Any], idx: np.ndarray) -> List[Dict[str, Any
                 row["soc_percent"] = [_clean_num(100.0 * float(x)) for x in soc]
         if g["model"] == "GENCLS":
             row["frequency_hz"] = [_clean_num(float(x) * meta["frequency"]) for x in col(model.omega)[idx]]
+            v = v_bus[:, ss.Bus.idx2uid(g["bus"])] if v_bus is not None else np.ones(len(p))
+            cur = np.hypot(p, q) * sn / np.maximum(v, 1e-3) / g["s_rated_mva"]
+            row["current_pu"] = [_clean_num(float(x)) for x in cur[idx]]
+            limits = meta.get("pcs_limits")
+            if limits is not None:
+                row.update(limits.series(name, np.asarray(ss.dae.ts.t, dtype=float)[idx]))
         out.append(row)
     return out
 
@@ -1815,8 +1965,21 @@ def _restore_prefault_state_on_clearing(ss) -> None:
     fault.tc.callback = clear
 
 
+def _mix_value(mix, t0: float, t1: Optional[float], repeat: bool) -> float:
+    """A mix of profiles, (weight, t, p) each: its value at t0, or its mean over t0..t1."""
+    import load_profiles_electrisim as _lp
+    total = sum(w for w, _, _ in mix)
+    if t1 is None:
+        return sum(w * float(_lp.sample_profile(t, p, [t0], repeat)[0]) for w, t, p in mix) / total
+    return sum(w * _lp.average_profile(t, p, t0, t1, repeat) for w, t, p in mix) / total
+
+
 def _lp_sample(load: Dict[str, Any], times, repeat: bool):
     import load_profiles_electrisim as _lp
+    if load.get("mix"):
+        total = sum(w for w, _, _ in load["mix"])
+        return sum(w * np.asarray(_lp.sample_profile(t, p, times, repeat), dtype=float)
+                   for w, t, p in load["mix"]) / total
     return _lp.sample_profile(load["t"], load["p"], times, repeat)
 
 
@@ -1824,8 +1987,135 @@ def _lp_sample(load: Dict[str, Any], times, repeat: bool):
 _PROFILE_MAX_PIECES = 2000
 
 
+_PCS_CHECK_S = 0.02          # how often a grid-forming PCS's current and store are looked at (s)
+_PCS_X_MAX = 50.0            # its virtual impedance at most, times its own
+
+
+class _GridFormingLimits:
+    """
+    A grid-forming PCS within its limits through the run. GENCLS, its virtual
+    machine, is a voltage behind a reactance with neither: it gave whatever
+    current a fault or an island asked, from a store that never emptied.
+
+    Its current: past its limit (current_limit_pu of its rating), its virtual
+    impedance rises - the reactance its voltage is behind - until its current
+    is held at the limit, and falls back to its own as the current does: the
+    current limit grid-forming inverters use (a virtual impedance). Its store:
+    its state of charge from its DC power, its AC power over its efficiency
+    and its no-load loss; empty while giving, or full while taking, it stops
+    (tripped), its Q with it. Looked at every check_s, so a limit acts within
+    one check.
+    """
+
+    def __init__(self, ss, meta: Dict[str, Any], check_s: float):
+        self.ss, self.meta, self.check_s = ss, meta, check_s
+        self.units = []
+        gencls = list(ss.GENCLS.idx.v) if getattr(ss, "GENCLS", None) is not None and ss.GENCLS.n else []
+        for name, g in meta["gen_map"].items():
+            if not (g.get("pcs") and g.get("control") == "grid_forming" and g.get("model") == "GENCLS"):
+                continue
+            if g.get("model_idx") not in gencls:
+                continue
+            i = gencls.index(g["model_idx"])
+            st = g.get("store")
+            self.units.append({
+                "name": name, "g": g, "i": i, "x0": float(ss.GENCLS.xq.v[i]),
+                "k": max(_sf(g.get("current_limit_pu"), 1.2), 0.05), "store": st,
+                "soc": st["soc0"] if st else None, "last": None, "running": True,
+                "hist_t": [], "hist_soc": [], "hist_x": [], "limited_from": None, "limited_s": 0.0,
+                "peak_pu": 0.0, "stopped_at": None, "why_stopped": None,
+            })
+        self.active = bool(self.units)
+
+    def _current_pu(self, u) -> Tuple[float, float]:
+        ss, sn = self.ss, self.meta["sn_mva"]
+        i = u["i"]
+        p, q = float(ss.GENCLS.Pe.v[i]), float(ss.GENCLS.Qe.v[i])
+        v = float(ss.Bus.v.v[ss.Bus.idx2uid(u["g"]["bus"])])
+        return p * sn, math.hypot(p, q) * sn / max(v, 1e-3) / u["g"]["s_rated_mva"]
+
+    def check(self, t: float) -> None:
+        ss = self.ss
+        tripped = False
+        for u in self.units:
+            if not u["running"]:
+                continue
+            i = u["i"]
+            p_ac, cur = self._current_pu(u)
+            u["peak_pu"] = max(u["peak_pu"], cur)
+            # Its store: the DC power it gave since the last look, trapezoidal.
+            st = u["store"]
+            g = u["g"]
+            p_dc = p_ac / g["eta"] + g["p_nl_mw"] if p_ac >= 0 else p_ac * g["eta"] + g["p_nl_mw"]
+            if st and u["last"] is not None:
+                t_last, p_last = u["last"]
+                pm = 0.5 * (p_dc + p_last)
+                drawn = pm / st["eta_d"] if pm > 0 else pm * st["eta_c"]
+                u["soc"] -= drawn * (t - t_last) / (max(st["en"], 1e-12) * 3600.0)
+            u["last"] = (t, p_dc)
+            # Its current: the virtual impedance that holds it at its limit.
+            x = float(ss.GENCLS.xq.v[i])
+            if cur > u["k"] * 1.001:
+                x_new = min(x * cur / u["k"], u["x0"] * _PCS_X_MAX)
+                if u["limited_from"] is None:
+                    u["limited_from"] = t
+            elif x > u["x0"] and cur < u["k"] * 0.98:
+                x_new = max(x * cur / u["k"], u["x0"])
+            else:
+                x_new = x
+            if x > u["x0"] * 1.0001:
+                u["limited_s"] += self.check_s
+            if x_new != x:
+                ss.GENCLS.xq.v[i] = x_new
+            if st and ((u["soc"] <= st["soc_min"] and p_dc > 0) or (u["soc"] >= st["soc_max"] and p_dc < 0)):
+                u["soc"] = min(max(u["soc"], st["soc_min"]), st["soc_max"])
+                u["running"], u["stopped_at"] = False, t
+                u["why_stopped"] = "emptied" if p_dc > 0 else "filled"
+                ss.set_status("GENCLS", g["model_idx"], 0)
+                tripped = True
+            u["hist_t"].append(t)
+            u["hist_soc"].append(u["soc"])
+            u["hist_x"].append(x_new / u["x0"])
+        if tripped:
+            ss.TDS.custom_event = True
+
+    def report(self, warnings: List[str]) -> None:
+        for u in self.units:
+            g = u["g"]
+            if u["limited_from"] is not None:
+                warnings.append(
+                    f"PCS '{g['name']}' reached its current limit ({u['k']:g} pu of its rating) at "
+                    f"t = {u['limited_from']:.3f} s: its virtual impedance held it there, for "
+                    f"{u['limited_s']:.3g} s in all.")
+            if u["stopped_at"] is not None:
+                what = {"Battery": "battery", "Supercapacitor": "supercapacitors",
+                        "Flywheel": "flywheel"}.get(g["source_kind"], "store")
+                warnings.append(
+                    f"PCS '{g['name']}': its {what} {u['why_stopped']} at t = {u['stopped_at']:.3f} s, and it "
+                    f"stopped - its P and Q with it.")
+
+    def series(self, name: str, times: np.ndarray) -> Dict[str, Any]:
+        u = next((u for u in self.units if u["name"] == name), None)
+        if u is None or not u["hist_t"]:
+            return {}
+        out: Dict[str, Any] = {
+            "current_limit_pu": u["k"], "peak_current_pu": _clean_num(u["peak_pu"]),
+            "current_limited_from_s": _clean_num(u["limited_from"]) if u["limited_from"] is not None else None,
+            "stopped_s": _clean_num(u["stopped_at"]) if u["stopped_at"] is not None else None,
+            "stopped_because": u["why_stopped"],
+            "virtual_impedance_x": [_clean_num(float(x)) for x in
+                                    np.interp(times, u["hist_t"], u["hist_x"])],
+        }
+        if u["store"]:
+            soc = np.interp(times, u["hist_t"], u["hist_soc"])
+            key = "speed_percent" if u["g"]["source_kind"] == "Flywheel" else "soc_percent"
+            out[key] = [_clean_num(100.0 * (math.sqrt(max(float(x), 0.0)) if key == "speed_percent" else float(x)))
+                        for x in soc]
+        return out
+
+
 def _run_tds_following_profiles(ss, profiled: List[Dict[str, Any]], tf: float, repeat: bool,
-                                warnings: List[str]) -> bool:
+                                warnings: List[str], limits: Optional[_GridFormingLimits] = None) -> bool:
     """
     Run the time-domain simulation in short pieces, setting each profiled
     load's power before each piece.
@@ -1847,17 +2137,32 @@ def _run_tds_following_profiles(ss, profiled: List[Dict[str, Any]], tf: float, r
         load["i"] = position[load["idx"]]
         # The bus voltage the services were computed at.
         load["v0"] = float(ss.PQ.v.v[load["i"]]) or 1.0
-    finest = min(float(np.median(np.diff(load["t"]))) for load in profiled)
-    step = max(finest, tf / _PROFILE_MAX_PIECES)
-    if step > finest * (1 + 1e-9):
-        warnings.append(f"Load profiles applied in {step:.4g} s pieces, coarser than their "
-                        f"{finest:g} s samples, to keep the run to {_PROFILE_MAX_PIECES} pieces; "
-                        "each piece uses the profile's mean over it.")
+    step = tf
+    if profiled:
+        finest = min(float(np.median(np.diff(t))) for load in profiled
+                     for _, t, _ in (load.get("mix") or [(1.0, load["t"], None)]) if len(t) > 1)
+        step = max(finest, tf / _PROFILE_MAX_PIECES)
+        if step > finest * (1 + 1e-9):
+            warnings.append(f"Load profiles applied in {step:.4g} s pieces, coarser than their "
+                            f"{finest:g} s samples, to keep the run to {_PROFILE_MAX_PIECES} pieces; "
+                            "each piece uses the profile's mean over it.")
+    if limits is not None and limits.active:
+        step = min(step, limits.check_s)
+        limits.check(0.0)
+    # The pieces' ends on a grid of the step, none near an event (an Alter of
+    # the grid's voltage, a fault, a trip): a piece ending on one stopped the
+    # run there - ANDES resumed on the event's time with no step to take - or
+    # passed it by. Each event falls inside a piece, as in one run.
+    events = getattr(ss, "switch_times", None)
+    events = np.asarray(events if events is not None else [], dtype=float).ravel()
+    n = max(int(math.ceil(tf / step - 1e-9)), 1)
+    ends = [min(k * step, tf) for k in range(1, n)]
+    ends = [e for e in ends if not (events.size and np.min(np.abs(events - e)) < 0.25 * step)] + [tf]
     t0 = 0.0
-    while t0 < tf - 1e-12:
-        t1 = min(t0 + step, tf)
+    for t1 in ends:
         for load in profiled:
-            f = _lp.average_profile(load["t"], load["p"], t0, t1, repeat)
+            f = (_mix_value(load["mix"], t0, t1, repeat) if load.get("mix")
+                 else _lp.average_profile(load["t"], load["p"], t0, t1, repeat))
             i, v0 = load["i"], load["v0"]
             p = load["p_rated"] * f
             ss.PQ.Ppf.v[i], ss.PQ.Ipeq.v[i], ss.PQ.Req.v[i] = p, p / v0, p / v0 ** 2
@@ -1868,6 +2173,8 @@ def _run_tds_following_profiles(ss, profiled: List[Dict[str, Any]], tf: float, r
         if not ss.TDS.run():
             return False
         t0 = t1
+        if limits is not None and limits.active:
+            limits.check(float(ss.dae.t))
     return True
 
 
@@ -1921,11 +2228,19 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
         _check_init(ss, meta["warnings"])
         _restore_prefault_state_on_clearing(ss)
         profiled = meta.get("profiled_loads") or []
-        if profiled:
+        limits = None
+        if _sb(params.get("pcs_limits"), True):
+            # Not finer than the run's own step: a piece shorter than it is one short step.
+            check_s = max(_sf(params.get("pcs_check_s"), _PCS_CHECK_S), float(ss.TDS.config.tstep or 0.0))
+            limits = _GridFormingLimits(ss, meta, check_s)
+        meta["pcs_limits"] = limits
+        if profiled or (limits is not None and limits.active):
             tds_ok = _run_tds_following_profiles(ss, profiled, tf, meta.get("profile_repeat", True),
-                                                 meta["warnings"])
+                                                 meta["warnings"], limits)
         else:
             tds_ok = bool(ss.TDS.run())
+        if limits is not None:
+            limits.report(meta["warnings"])
         t = np.asarray(ss.dae.ts.t, dtype=float)
         if not tds_ok and len(t):
             # The run used to end with converged=false and no word of why;
@@ -2001,6 +2316,7 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
                 })
 
         pcs = _pcs_series(ss, meta, idx)
+        swing_metrics = _swing_metrics(ss, t, meta, params)
 
         # Frequency estimate from mean omega (pu → Hz); without a machine, the grid-forming PCS's
         freq_hz = None
@@ -2134,6 +2450,7 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
                 "frequency_nadir_hz": _clean_num(freq_nadir) if freq_nadir is not None else None,
                 "frequency_final_hz": _clean_num(freq_settling) if freq_settling is not None else None,
             },
+            "swing": swing_metrics,
             "load_profiles": [{
                 "load": load["name"],
                 "profile": load["profile"],
@@ -2157,6 +2474,85 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
             "message": str(e),
             "exception": traceback.format_exc(),
         })
+
+
+def _swing_one(t: np.ndarray, x: np.ndarray, t_from: float, band: Tuple[float, float]) -> Optional[Dict[str, Any]]:
+    """A power's swing from t_from on: peak to peak, its steepest ramp, its spectrum, its share in a band."""
+    keep = (t >= t_from) & np.isfinite(x)
+    t, x = t[keep], x[keep]
+    if len(t) < 8 or t[-1] - t[0] <= 0:
+        return None
+    dt = float(np.median(np.diff(t)))
+    grid = np.arange(t[0], t[-1] + dt * 0.5, dt)
+    y = np.interp(grid, t, x)
+    ramp = np.abs(np.diff(y)) / dt
+    y0 = y - y.mean()
+    win = np.hanning(len(y0))
+    spec = np.abs(np.fft.rfft(y0 * win)) * 2.0 / win.sum()          # amplitude, MW
+    freq = np.fft.rfftfreq(len(y0), dt)
+    order = np.argsort(spec[1:])[::-1][:5] + 1
+    in_band = (freq >= band[0]) & (freq <= band[1])
+    # RMS from the windowed amplitudes: a sine's power spreads over the window's
+    # equivalent noise bandwidth (1.5 bins for Hann).
+    enbw = len(win) * float(np.sum(win ** 2)) / float(win.sum()) ** 2
+    rms = lambda a: float(np.sqrt(np.sum(np.square(a)) / 2.0 / enbw))     # noqa: E731
+    keep_n = min(len(freq), 400)
+    pick = np.unique(np.linspace(0, len(freq) - 1, keep_n).astype(int))
+    return {
+        "mean_mw": _clean_num(float(y.mean())),
+        "peak_to_peak_mw": _clean_num(float(y.max() - y.min())),
+        "max_ramp_mw_per_s": _clean_num(float(ramp.max())) if len(ramp) else None,
+        "dominant": [{"f_hz": _clean_num(float(freq[k])), "amplitude_mw": _clean_num(float(spec[k]))} for k in order],
+        "band_hz": [band[0], band[1]],
+        # A band past the run's Nyquist frequency is not seen: its RMS is None, not 0.
+        "band_resolved": bool(band[1] <= 0.5 / dt),
+        "band_rms_mw": (_clean_num(rms(spec[in_band])) if in_band.any() else 0.0) if band[1] <= 0.5 / dt else None,
+        "total_rms_mw": _clean_num(rms(spec[1:])),
+        "nyquist_hz": _clean_num(0.5 / dt),
+        "spectrum": {"f_hz": [_clean_num(float(freq[k])) for k in pick],
+                     "amplitude_mw": [_clean_num(float(spec[k])) for k in pick]},
+    }
+
+
+def _swing_metrics(ss, t: np.ndarray, meta: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    The power swing at the grid and at each machine through the run: peak to
+    peak (MW), its steepest ramp (MW/s), its strongest frequencies, and its
+    RMS within a band about a machine's torsional mode (default 20 +/- 5 Hz)
+    against its whole - the screen the 800 VDC AI factory paper asks for. From
+    the time the run settles (swing_from_s, default 1 s).
+    """
+    t = np.asarray(t, dtype=float)
+    t_from = _sf(params.get("swing_from_s"), 1.0)
+    mode = _sf(params.get("torsional_mode_hz"), 20.0)
+    half = _sf(params.get("torsional_band_hz"), 5.0)
+    band = (max(mode - half, 0.0), mode + half)
+    out: Dict[str, Any] = {"from_s": t_from, "band_hz": [band[0], band[1]], "grid": [], "machines": []}
+    sn = meta["sn_mva"]
+    for model, key in (("Slack", "grid"), ("GENROU", "machines"), ("GENCLS", "machines")):
+        m = getattr(ss, model, None)
+        var = "p" if model == "Slack" else "Pe"
+        if m is None or m.n == 0 or not hasattr(m, var):
+            continue
+        values = tds_values(ss, getattr(m, var))
+        for i in range(m.n):
+            mid = str(m.idx.v[i])
+            if mid.startswith(("GENCLS_PCS_", "Slack_PCS_")):
+                continue
+            col = values[:, i] if values.ndim == 2 else values
+            if len(col) != len(t):
+                continue
+            row = _swing_one(t, np.asarray(col, dtype=float) * sn, t_from, band)
+            if row is not None:
+                row.update(id=mid, name=str(m.name.v[i]), model=model)
+                out[key].append(row)
+    rows = out["grid"] + out["machines"]
+    if rows and not all(r["band_resolved"] for r in rows):
+        meta["warnings"].append(
+            f"The torsional band {band[0]:g}-{band[1]:g} Hz reaches past what the run resolves "
+            f"({rows[0]['nyquist_hz']:.3g} Hz at its time step): set a time step (tstep) under "
+            f"{0.5 / band[1]:.3g} s to screen it.")
+    return out
 
 
 _STATE_MEANING = {

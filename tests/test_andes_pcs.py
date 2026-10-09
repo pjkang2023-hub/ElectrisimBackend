@@ -129,8 +129,12 @@ def test_an_island_held_only_by_pcs_rides_through_a_fault(client, quiet):
     with quiet():
         result = json.loads(client.post('/', json=request).get_data(as_text=True))
     assert not result.get('error') and result['converged'] is True, result.get('message')
-    assert result['time'][-1] == pytest.approx(5.0) and not result['warnings'], result['warnings']
+    # The fault takes it to its current limit, which its virtual impedance holds it at.
+    assert result['time'][-1] == pytest.approx(5.0) and len(result['warnings']) == 1, result['warnings']
+    assert result['warnings'][0].startswith("PCS 'GA' reached its current limit (1.2 pu of its rating) at t = 1.0")
     (pcs,) = result['pcs']
+    t, i = np.asarray(result['time']), np.asarray(pcs['current_pu'])
+    assert i[(t > 1.07) & (t < 1.1)].max() <= 1.2 * 1.03
     flow = _post(client, quiet, _two_buses(_der('Battery', 'ba', capacity_kwh=1000),
                                            _pcs('ga', 'a', 'ba', control='grid_forming', s_rated_mva=1.0),
                                            grid=False, params=LF))

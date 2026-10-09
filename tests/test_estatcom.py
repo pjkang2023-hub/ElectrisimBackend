@@ -56,10 +56,12 @@ def test_the_load_flow_holds_its_bus_on_its_droop(client, quiet):
 
 def test_andes_it_answers_a_dip_and_returns(client, quiet):
     """
-    A 30 % grid dip for 0.5 s: its reactive power rises - ANDES's virtual
-    machine has no current limit, so beyond its rating - and returns after.
-    Its active power swings as the dip steps in and out (its store answering,
-    as a grid-forming converter's does) and returns to none.
+    A 30 % grid dip for 0.5 s: its reactive power rises to its current limit,
+    1.2 pu of its rating, which its virtual impedance holds it at from the
+    next look (each step) - before, ANDES's virtual machine had none and went
+    past it - and returns after. Its active power swings as the dip steps in
+    and out (its store answering, as a grid-forming converter's does) and
+    returns to none.
     """
     out = _post(client, quiet, _two_buses(*_estatcom(), params=_tds(
         grid_voltage_profile='custom', grid_voltage_table='0, 0.7; 0.5, 1.0', grid_voltage_start_s=1)))
@@ -67,11 +69,42 @@ def test_andes_it_answers_a_dip_and_returns(client, quiet):
     t = np.asarray(out['time'])
     (pcs,) = out['pcs']
     assert pcs['model'] == 'GENCLS'
-    q, p = np.asarray(pcs['q_mvar']), np.asarray(pcs['p_mw'])
+    q, p, i = np.asarray(pcs['q_mvar']), np.asarray(pcs['p_mw']), np.asarray(pcs['current_pu'])
     q0 = np.interp(0.9, t, q)
-    assert np.interp(1.3, t, q) > q0 + 0.2
+    assert np.interp(1.3, t, q) > q0 + 0.1
+    assert pcs['current_limit_pu'] == 1.2 and 1.0 < pcs['current_limited_from_s'] < 1.05
+    held = (t > 1.1) & (t < 1.5)
+    assert i[held].max() <= 1.2 * 1.03 and i[held].min() >= 1.2 * 0.97
+    assert any("PCS 'EST' reached its current limit (1.2 pu of its rating)" in w for w in out['warnings'])
     assert np.interp(2.5, t, q) == pytest.approx(q0, abs=1e-3)
+    assert np.interp(2.5, t, pcs['virtual_impedance_x']) == 1.0
     assert np.abs(p).max() < 0.5 and abs(np.interp(2.5, t, p)) < 1e-3
+
+
+def test_andes_its_store_empties_and_it_stops(client, quiet):
+    """
+    Holding an island alone, it gives the load from its supercapacitor -
+    0.5 x 50 F x (720^2 - 400^2) V^2, 8.96 MJ usable - until it is empty, then
+    stops: before, its store never emptied. It empties when the DC power it
+    gave, its AC power over its efficiency and its no-load loss, reaches its
+    energy.
+    """
+    request = _two_buses(_der('Supercapacitor', 'sc', **SC),
+                         _pcs('est', 'a', 'sc', control='grid_forming', s_rated_mva=1.0), grid=False,
+                         params=_tds(tf=20))
+    out = _post(client, quiet, request)
+    (pcs,) = out['pcs']
+    t = np.asarray(out['time'])
+    stop = pcs['stopped_s']
+    assert pcs['stopped_because'] == 'emptied' and stop is not None
+    p = np.asarray(pcs['p_mw'])
+    before = t <= stop
+    p_dc = p[before] / 0.98                                    # its efficiency, 98 %; no no-load loss
+    given = float(np.sum(0.5 * (p_dc[1:] + p_dc[:-1]) * np.diff(t[before]))) + p_dc[0] * t[0]
+    assert given == pytest.approx(0.5 * 50 * (720 ** 2 - 400 ** 2) / 1e6, rel=0.01)
+    assert pcs['soc_percent'][0] == pytest.approx(100 * USABLE, abs=0.5) and min(pcs['soc_percent']) == 0.0
+    assert any(f"PCS 'EST': its supercapacitors emptied at t = {stop:.3f} s, and it stopped" in w
+               for w in out['warnings'])
 
 
 def test_andes_grid_following_is_a_store(quiet):
