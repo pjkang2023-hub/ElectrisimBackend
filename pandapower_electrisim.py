@@ -1935,6 +1935,7 @@ def _electrisim_runpp(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, **kwargs)
     if not _electrisim_live_dc_diodes(net):
         out = _electrisim_runpp_settled(net, max_rounds, tolerance_mw, **kwargs)
         _electrisim_warn_island_short(net)
+        _electrisim_warn_rectifier_limits(net)
         return out
     _electrisim_start_dc_diodes(net)
     calm = 0                                    # rounds since a diode last switched
@@ -1947,11 +1948,13 @@ def _electrisim_runpp(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, **kwargs)
         if not changed:
             _electrisim_warn_unsupplied_dc(net)
             _electrisim_warn_island_short(net)
+            _electrisim_warn_rectifier_limits(net)
             return None
         kwargs = {**kwargs, 'init': 'results'}
     _electrisim_warn(net, 'The DC diodes had not settled after 30 load flows: '
                           'each is as the last one left it.')
     _electrisim_warn_island_short(net)
+    _electrisim_warn_rectifier_limits(net)
     return None
 
 
@@ -1966,8 +1969,11 @@ def _electrisim_runpp_settled(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, *
     droop = any(c.get('control') == 'droop' for c in getattr(net, 'electrisim_dc_dc_converters', None) or [])
     for conv in getattr(net, 'electrisim_dc_dc_converters', None) or []:
         conv.pop('limit_hold', None)            # its limit may hold again, the network having changed
+    rated = _electrisim_rated_rectifiers(net)
+    for st in rated.values():
+        st['hold'] = False
     pcs = _electrisim_pcs_to_settle(net)
-    if not getattr(net, 'electrisim_ders', None) and not droop and not pcs:
+    if not getattr(net, 'electrisim_ders', None) and not droop and not pcs and not rated:
         return _electrisim_runpp_converters(net, max_rounds, tolerance_mw, **kwargs)
     for _ in range(60):
         _electrisim_runpp_converters(net, max_rounds, tolerance_mw, **kwargs)
@@ -2917,7 +2923,91 @@ def _electrisim_settle_ders(net):
     # Converters in droop: within their rating.
     for conv in getattr(net, 'electrisim_dc_dc_converters', None) or []:
         worst = max(worst, _electrisim_droop_within_rating(net, conv))
+    worst = max(worst, _electrisim_rectifiers_within_rating(net))
     return worst
+
+
+def _electrisim_rated_rectifiers(net):
+    """
+    The VSCs that hold their DC bus's voltage and have a rating: {index: their
+    state}, kept on the network - each one's set voltage, and its limit (the
+    share of its power it is held to) when its rating binds.
+    """
+    states = getattr(net, 'electrisim_rectifier_limits', None)
+    if states is None:
+        states = {}
+        df = net.get('vsc')
+        if df is not None and len(df) and 'rated_mva' in df.columns:
+            for vi in df.index:
+                if _electrisim_is_aux(df, vi) or str(df.at[vi, 'control_mode_dc']) != 'vm_pu':
+                    continue
+                rated = safe_float(df.at[vi, 'rated_mva'], 0.0)
+                if rated > 0:
+                    states[int(vi)] = {'rated': rated, 'vm': float(df.at[vi, 'control_value_dc']),
+                                       'limit': None, 'hold': False}
+        net.electrisim_rectifier_limits = states
+    return states
+
+
+def _electrisim_rectifiers_within_rating(net):
+    """
+    A VSC holding its DC bus beyond its rating delivers its rating instead -
+    its apparent power at its AC side at most its rated MVA - and its bus
+    sags: whatever else holds it, a store in droop, takes the rest. Back to
+    holding its voltage once its bus would rise to its set voltage. With
+    nothing else to hold its bus, it holds it beyond its rating until the
+    next settling. Before, a rectifier held its 800 V whatever it carried,
+    so its bus's stores never helped. Returns how far its power moved (MW).
+    """
+    worst = 0.0
+    for vi, st in _electrisim_rated_rectifiers(net).items():
+        if vi not in net.vsc.index or not bool(net.vsc.at[vi, 'in_service']) or vi not in net.res_vsc.index:
+            continue
+        p, q = float(net.res_vsc.at[vi, 'p_mw']), float(net.res_vsc.at[vi, 'q_mvar'])
+        p_dc = float(net.res_vsc.at[vi, 'p_dc_mw'])
+        bus = int(net.vsc.at[vi, 'bus_dc'])
+        v = float(net.res_bus_dc.at[bus, 'vm_pu']) if bus in net.res_bus_dc.index else np.nan
+        if st['limit'] is None:
+            if st['hold'] or not np.isfinite(p) or math.hypot(p, q) <= st['rated'] * (1.0 + 1e-9) or p <= 0:
+                continue
+            st['limit'] = True
+            net.vsc.at[vi, 'control_mode_dc'] = 'p_mw'
+        elif not np.isfinite(v):
+            # Nothing else holds its bus: it holds it, beyond its rating.
+            st['limit'], st['hold'] = None, True
+            net.vsc.at[vi, 'control_mode_dc'] = 'vm_pu'
+            net.vsc.at[vi, 'control_value_dc'] = st['vm']
+            worst = max(worst, 1.0)
+            continue
+        elif v >= st['vm'] * (1.0 - 1e-6):
+            # Within its rating again: it holds its voltage.
+            st['limit'] = None
+            net.vsc.at[vi, 'control_mode_dc'] = 'vm_pu'
+            net.vsc.at[vi, 'control_value_dc'] = st['vm']
+            worst = max(worst, 1.0)
+            continue
+        # Its DC power scaled by the share of its AC power its rating allows.
+        allowed = math.sqrt(max(st['rated'] ** 2 - q * q, 0.0))
+        target = p_dc * allowed / p if p > 0 else p_dc
+        if abs(target - p_dc) > 1e-9 or str(net.vsc.at[vi, 'control_mode_dc']) == 'p_mw':
+            worst = max(worst, abs(target - p_dc))
+            net.vsc.at[vi, 'control_value_dc'] = target
+    return worst
+
+
+def _electrisim_warn_rectifier_limits(net):
+    """Each VSC its rating holds, named once, with the voltage its bus sags to."""
+    for vi, st in (getattr(net, 'electrisim_rectifier_limits', None) or {}).items():
+        label = net.user_friendly_names.get(net.vsc.at[vi, 'name'], net.vsc.at[vi, 'name']) \
+            if hasattr(net, 'user_friendly_names') else net.vsc.at[vi, 'name']
+        bus = int(net.vsc.at[vi, 'bus_dc'])
+        if st['limit']:
+            v = float(net.res_bus_dc.at[bus, 'vm_pu']) if bus in net.res_bus_dc.index else np.nan
+            _electrisim_warn(net, f"VSC '{label}' is at its rating, {st['rated']:g} MVA: its DC bus sags to "
+                                  f"{v:.4f} pu and what else holds it carries the rest.")
+        elif st['hold']:
+            _electrisim_warn(net, f"VSC '{label}' carries more than its rating, {st['rated']:g} MVA: nothing "
+                                  "else holds its DC bus, so it holds it beyond its rating.")
 
 
 def _electrisim_droop_within_rating(net, conv):
@@ -11489,6 +11579,47 @@ def _contingency_inverter_sources(net):
     return out
 
 
+def _contingency_dc_load_mw(net):
+    """Each DC bus's load (MW), from the base case: what a bus left without supply drops."""
+    out = {}
+    ld = getattr(net, 'load_dc', None)
+    if ld is None or not len(ld):
+        return out
+    for i in ld.index:
+        if bool(ld.at[i, 'in_service']) and not _electrisim_is_aux(ld, i):
+            b = int(ld.at[i, 'bus_dc'])
+            out[b] = out.get(b, 0.0) + max(float(ld.at[i, 'p_dc_mw']), 0.0)
+    return out
+
+
+def _contingency_ties(net):
+    """The bus ties a site would close on losing a supply: bus-to-bus switches left open."""
+    sw = getattr(net, 'switch', None)
+    if sw is None or not len(sw):
+        return []
+    return [i for i in sw.index if sw.at[i, 'et'] == 'b' and not bool(sw.at[i, 'closed'])]
+
+
+def _contingency_transfer(net_cont, ties):
+    """
+    After an outage, each open bus tie with a live bus on one side and a dead
+    one on the other closes - the transfer a site's scheme makes - and the
+    load flow runs again. The ties closed, by name.
+    """
+    closed = []
+    for _ in range(len(ties)):
+        res = net_cont.res_bus
+        live = lambda b: b in res.index and np.isfinite(res.at[b, 'vm_pu'])
+        go = [i for i in ties if not bool(net_cont.switch.at[i, 'closed'])
+              and live(int(net_cont.switch.at[i, 'bus'])) != live(int(net_cont.switch.at[i, 'element']))]
+        if not go:
+            break
+        net_cont.switch.at[go[0], 'closed'] = True
+        closed.append(_contingency_friendly_name(net_cont, net_cont.switch.at[go[0], 'name']))
+        _electrisim_runpp(net_cont, algorithm='nr', calculate_voltage_angles=True)
+    return closed
+
+
 def contingency_analysis(net, contingency_params):
     """
     Perform contingency analysis on the network.
@@ -11581,6 +11712,26 @@ def contingency_analysis(net, contingency_params):
                         'description': f"Outage of generator {gen_name}"
                     })
         
+        # Converters: each rectifier (VSC), solid-state transformer and DC/DC converter. The
+        # contingency study took out transformers, generators and PCS only; on a DC site the
+        # converters are most of what can fail.
+        if element_type == 'converter' or element_type == 'all':
+            vsc = getattr(net, 'vsc', None)
+            if vsc is not None and len(vsc):
+                for i in vsc.index:
+                    if bool(vsc.at[i, 'in_service']) and not _electrisim_is_aux(vsc, i):
+                        name = _contingency_friendly_name(net, vsc.at[i, 'name'])
+                        contingency_cases.append({'name': f"VSC_{name}", 'type': 'vsc', 'element_idx': i,
+                                                  'description': f"Outage of converter {name}"})
+            for k, rec in enumerate(getattr(net, 'electrisim_ssts', None) or []):
+                if rec.get('in_service', True):
+                    contingency_cases.append({'name': f"SST_{rec['label']}", 'type': 'sst', 'element_idx': k,
+                                              'description': f"Outage of converter {rec['label']}"})
+            for k, rec in enumerate(getattr(net, 'electrisim_dc_dc_converters', None) or []):
+                if rec.get('in_service', True):
+                    contingency_cases.append({'name': f"DCDC_{rec['label']}", 'type': 'dcdc', 'element_idx': k,
+                                              'description': f"Outage of converter {rec['label']}"})
+
         # Each PCS, with the source behind it.
         if element_type == 'generator' or element_type == 'all':
             for k, rec in enumerate(getattr(net, 'electrisim_pcs', None) or []):
@@ -11599,6 +11750,9 @@ def contingency_analysis(net, contingency_params):
         critical_contingencies = []
         
         bus_load_mw, bus_gen_mw = _contingency_bus_power(net)
+        dc_load_mw = _contingency_dc_load_mw(net)
+        transfer = str(contingency_params.get('auto_transfer', 'true')).lower() != 'false'
+        ties = _contingency_ties(net) if transfer else []
 
         # Store base case results
         base_case_results = {
@@ -11629,10 +11783,28 @@ def contingency_analysis(net, contingency_params):
                     rec = net_cont.electrisim_pcs[contingency_case['element_idx']]
                     rec['in_service'] = False
                     net_cont[rec['table']].loc[rec['index'], 'in_service'] = False
-                
+                elif contingency_case['type'] == 'vsc':
+                    net_cont.vsc.loc[contingency_case['element_idx'], 'in_service'] = False
+                elif contingency_case['type'] == 'sst':
+                    rec = net_cont.electrisim_ssts[contingency_case['element_idx']]
+                    rec['in_service'] = False
+                    for table, idx in rec['aux'] + [st['input'] for st in rec['stages']] + [st['output'] for st in rec['stages']]:
+                        if idx is not None and idx in net_cont[table].index:
+                            net_cont[table].at[idx, 'in_service'] = False
+                elif contingency_case['type'] == 'dcdc':
+                    _electrisim_set_dc_dc_in_service(
+                        net_cont, net_cont.electrisim_dc_dc_converters[contingency_case['element_idx']], False)
+
                 # Run power flow for contingency case
                 _electrisim_runpp(net_cont, algorithm='nr', calculate_voltage_angles=True)
-                
+                # A supply lost: the open bus ties close where they would restore it.
+                ties_closed = _contingency_transfer(net_cont, ties) if ties else []
+                if ties_closed:
+                    contingency_case = {**contingency_case,
+                                        'outage_name': contingency_case['description'].split(' ', 3)[-1],
+                                        'description': contingency_case['description']
+                                        + f" (bus tie {', '.join(ties_closed)} closed)"}
+
                 # Check for violations
                 case_violations = []
 
@@ -11661,6 +11833,27 @@ def contingency_analysis(net, contingency_params):
                         'lost_load_mw': load_mw,
                         'lost_generation_mw': gen_mw,
                     })
+                # The DC buses left without supply, and their load: it was not counted.
+                lost_dc = 0.0
+                res_dc = getattr(net_cont, 'res_bus_dc', None)
+                if res_dc is not None and len(res_dc):
+                    for bus_idx in net_cont.bus_dc.index[net_cont.bus_dc.in_service.fillna(False).astype(bool)]:
+                        if _electrisim_is_aux(net_cont.bus_dc, bus_idx) or bus_idx not in res_dc.index:
+                            continue
+                        if np.isfinite(res_dc.at[bus_idx, 'vm_pu']):
+                            continue
+                        load_mw = dc_load_mw.get(int(bus_idx), 0.0)
+                        lost_dc += load_mw
+                        bus_name = _contingency_friendly_name(net, net_cont.bus_dc.loc[bus_idx, 'name'])
+                        case_violations.append({
+                            'type': 'supply',
+                            'element': f"DC_Bus_{bus_name}",
+                            'description': f'Loss of supply: DC bus without supply, {load_mw:.3f} MW load cut off',
+                            'severity': 'high' if load_mw > 0 else 'medium',
+                            'lost_load_mw': load_mw,
+                            'lost_generation_mw': 0.0,
+                        })
+                lost_load += lost_dc
                 
                 # Check voltage violations
                 if voltage_limits:
@@ -11728,11 +11921,13 @@ def contingency_analysis(net, contingency_params):
                     'name': contingency_case['name'],
                     'description': contingency_case['description'],
                     # The element taken out, by name ("Outage of line L4" -> "L4").
-                    'outage': contingency_case['description'].split(' ', 3)[-1],
+                    'outage': contingency_case.get('outage_name') or contingency_case['description'].split(' ', 3)[-1],
                     'converged': True,
                     'violations': case_violations,
                     'lost_load_mw': lost_load,
+                    'lost_dc_load_mw': lost_dc,
                     'lost_generation_mw': lost_gen,
+                    'ties_closed': ties_closed,
                     'max_loading_percent': max(loadings) if loadings else 0.0,
                     'bus_results': [],
                     'line_results': [],

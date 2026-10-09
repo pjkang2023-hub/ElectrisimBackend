@@ -322,10 +322,16 @@ def _opendss_converter_stand_ins(in_data, frequency):
     def add(row, side, bus_field, p_draw, q_draw):
         element = converters.get(row.get('name'))
         bus = element.get(bus_field) if element else None
-        if bus and finite(p_draw, q_draw):
+        # A converter carrying nothing (a catcher's rectifier at rest) is left out: a load of no
+        # power injects 0/0 of its fundamental, and every harmonic solve came out NaN - read as 0 % THD.
+        if bus and finite(p_draw, q_draw) and math.hypot(float(p_draw), float(q_draw)) >= 1e-3:
             stand_ins.append({'name': f"{row['name']}_{side}", 'bus': bus, 'p_mw': float(p_draw),
                               'q_mvar': float(q_draw),
-                              'label': element.get('userFriendlyName') or row['name']})
+                              'label': element.get('userFriendlyName') or row['name'],
+                              # A PCS's or an SST's LV inverter: its own choice; a rectifier's AC
+                              # side, or an SST's MV, an active front end's unless told.
+                              'spectrum': element.get('spectrum') or ('afe' if side in ('ac', 'mv') else 'none'),
+                              'spectrum_csv': element.get('spectrum_csv') or ''})
 
     for row in result.get('pcs') or []:
         if finite(row.get('p_mw'), row.get('q_mvar')):
@@ -348,14 +354,16 @@ def _opendss_create_converter_stand_in(dss, stand_in, BusbarsDictVoltage, Busbar
     A constant-P/Q load (or Model 1 generator where it supplies) for one
     converter's AC side. Delta: a converter has no neutral, and wye on the
     delta winding of its transformer it would be the only path to ground.
-    No harmonic spectrum - its distortion is not modelled.
+    Its harmonic current spectrum: an active front end's (two-level, with its
+    line filter) by default, a six-pulse bridge's, none, or a custom table.
+    Before, it had none and every bus read 0 % THD.
     """
     bus_name = BusbarsDictConnectionToName.get(stand_in['bus'])
     kv = BusbarsDictVoltage.get(bus_name) if bus_name else None
     if not kv:
         return
     name = _sanitize_opendss_name(stand_in['name'])
-    spectrum = _no_harmonics_spectrum(dss, execute_dss_command)
+    spectrum = _converter_spectrum(dss, stand_in, name, execute_dss_command)
     p_kw, q_kvar = stand_in['p_mw'] * 1000.0, stand_in['q_mvar'] * 1000.0
     if p_kw >= 0:
         execute_dss_command(
@@ -365,6 +373,43 @@ def _opendss_create_converter_stand_in(dss, stand_in, BusbarsDictVoltage, Busbar
         execute_dss_command(
             f"New Generator.{name} Bus1={bus_name} Phases=3 conn=delta kV={kv} kW={-p_kw:.4f} "
             f"kvar={-q_kvar:.4f} Model=1 Vminpu=0.5 Vmaxpu=2.0 spectrum={spectrum}")
+
+
+# A converter's harmonic currents, % of its fundamental. Generic values, ours, for a
+# study before a vendor's data: a two-level active front end at some 5 kHz behind its
+# LCL filter (current THD near 3 %, inside IEEE 519's 5 % TDD), and a six-pulse diode
+# bridge behind a 3 % line reactor (characteristic orders 6k +/- 1).
+CONVERTER_SPECTRA = {
+    'afe': "5,2.0,0\n7,1.5,0\n11,0.8,0\n13,0.6,0\n17,0.4,0\n19,0.3,0\n23,0.2,0\n25,0.2,0",
+    'six_pulse': "5,17.5,0\n7,11.1,0\n11,4.5,0\n13,2.9,0\n17,1.5,0\n19,1.0,0\n23,0.9,0\n25,0.8,0",
+}
+
+# IEEE 519-2022, Table 1: the voltage distortion limits at a point of common coupling, by
+# its voltage - (up to kV, individual harmonic %, THD %).
+IEEE519_VOLTAGE_LIMITS = ((1.0, 5.0, 8.0), (69.0, 3.0, 5.0), (161.0, 1.5, 2.5), (float('inf'), 1.0, 1.5))
+
+
+def ieee519_voltage_limits(kv):
+    """IEEE 519-2022's limits for a bus of ``kv``: (individual harmonic %, THD %)."""
+    for top, single, thd in IEEE519_VOLTAGE_LIMITS:
+        if kv <= top:
+            return single, thd
+    return IEEE519_VOLTAGE_LIMITS[-1][1:]
+
+
+def _converter_spectrum(dss, stand_in, name, execute_dss_command):
+    """The OpenDSS spectrum for a converter's stand-in: its named one, a custom table, or none."""
+    choice = str(stand_in.get('spectrum') or 'afe').strip().lower()
+    if choice == 'none':
+        return _no_harmonics_spectrum(dss, execute_dss_command)
+    csv_text = stand_in.get('spectrum_csv', '') if choice == 'custom' else CONVERTER_SPECTRA.get(choice)
+    if not csv_text:
+        return _no_harmonics_spectrum(dss, execute_dss_command)
+    spectrum_name = _sanitize_opendss_name(f"{name}_spectrum")
+    csv_text = "1,100,0\n" + csv_text if not str(csv_text).lstrip().startswith('1,') else csv_text
+    if _create_spectrum_from_csv(dss, spectrum_name, csv_text, execute_dss_command):
+        return spectrum_name
+    return _no_harmonics_spectrum(dss, execute_dss_command)
 
 
 def _opendss_warn_dc_left_out(in_data, stand_ins=None, failure=None):
@@ -6755,6 +6800,16 @@ def harmonic_analysis(in_data, frequency, mode, algorithm, loadmodel, max_iterat
             for h in harmonic_orders:
                 per_h[str(h)] = round(bus_harmonic_v.get(bus_key, {}).get(h, 0.0), 6)
             bus_entry["harmonic_voltages_kv"] = per_h
+            # IEEE 519-2022's voltage limits for the bus's class, against its THD and its
+            # largest single harmonic.
+            kv_nom = next((float(v) for k, v in BusbarsDictVoltage.items() if str(k).lower() == bus_key), None)
+            if kv_nom and v1 > 0:
+                single_lim, thd_lim = ieee519_voltage_limits(kv_nom)
+                worst = float(max((100.0 * float(bus_harmonic_v.get(bus_key, {}).get(h, 0.0)) / v1
+                                   for h in harmonic_orders), default=0.0))
+                bus_entry["ieee519"] = {"thd_limit_percent": thd_lim, "individual_limit_percent": single_lim,
+                                        "max_individual_percent": round(worst, 3),
+                                        "ok": bool(bus_entry["vthd_percent"] <= thd_lim and worst <= single_lim)}
 
     if "lines" in base_result:
         for line_entry in base_result["lines"]:
