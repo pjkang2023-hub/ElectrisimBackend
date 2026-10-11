@@ -1231,6 +1231,11 @@ def shortcircuit_ansi(net, in_data, in_data_full=None) -> str:
 
         internal_name = net.bus.at[bus_idx, "name"]
         cell_id = net.bus.at[bus_idx, "id"] if "id" in net.bus.columns else internal_name
+        # No fault current - an earth fault where there is no earth return path, behind an
+        # ungrounded winding: its X/R, multiplying factors and fault impedance describe no
+        # current, and read as if there were one (an X/R of 48 beside 0 kA).
+        no_current = not (i_fc_sym and i_fc_sym > 1e-6)
+        blank = (lambda v: None) if no_current else _clean
         busbar_list.append({
             "name": _clean(internal_name),
             "id": _clean(cell_id),
@@ -1240,12 +1245,12 @@ def shortcircuit_ansi(net, in_data, in_data_full=None) -> str:
             "i_first_peak_ka": _clean(i_fc_peak),
             "i_interrupting_ka": _clean(i_interrupting),
             "i_steady_ka": _clean(i_steady),
-            "xr_first": _clean(xr_fc),
-            "xr_interrupting": _clean(xr_int),
-            "rk_ohm": _clean(r_ohm),
-            "xk_ohm": _clean(x_ohm),
-            "mf_peak": _clean(mf_peak),
-            "mf_interrupting": _clean(mf_int_symm),
+            "xr_first": blank(xr_fc),
+            "xr_interrupting": blank(xr_int),
+            "rk_ohm": blank(r_ohm),
+            "xk_ohm": blank(x_ohm),
+            "mf_peak": blank(mf_peak),
+            "mf_interrupting": blank(mf_int_symm),
         })
 
     device_duties = _compute_device_duties(net, bus_results, freq_hz, cp_cycles)

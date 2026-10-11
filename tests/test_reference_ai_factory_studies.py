@@ -446,6 +446,8 @@ def test_ansi_earth_faults_through_the_neutral_resistors(client):
         assert 0.39 < rows[bus]['i_first_sym_ka'] < 34.5 / math.sqrt(3) / R_N, bus
     for bus in ('Substation BESS 0.69 kV', 'eSTATCOM 0.69 kV', 'Gas turbine 13.8 kV'):
         assert rows[bus]['i_first_sym_ka'] == pytest.approx(0.0, abs=1e-9), bus
+        # No current, so no X/R or multiplying factor: an X/R of 48 beside 0 kA read as a fault.
+        assert rows[bus]['xr_first'] is None and rows[bus]['mf_peak'] is None, bus
     for bus in ('Lineup A 0.48 kV', 'Lineup B 0.48 kV', 'Catcher B 0.48 kV'):
         assert 100 < rows[bus]['i_first_sym_ka'] < 150, bus
 
