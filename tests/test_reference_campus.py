@@ -395,6 +395,17 @@ def test_short_circuit_matches_hand_built(campus, fault, case):
         sc.calc_sc(oracle, fault=fault, case=case, ip=True, ith=True, tk_s=1.0, kappa_method='C', r_fault_ohm=0.0,
                    x_fault_ohm=0.0, check_connectivity=True, branch_results=False, lv_tol_percent=6,
                    topology='auto', inverse_y=True)
+    if fault == '1ph':
+        # A bus with no earth return path (behind an ungrounded delta) has no earth-fault current:
+        # by hand, the network without its current sources gives it none (under 1 A).
+        bare = copy.deepcopy(oracle)
+        bare.sgen['in_service'] = False
+        with _silent():
+            sc.calc_sc(bare, fault=fault, case=case, ip=False, ith=False, kappa_method='C', r_fault_ohm=0.0,
+                       x_fault_ohm=0.0, check_connectivity=True, branch_results=False, lv_tol_percent=6,
+                       topology='auto', inverse_y=True)
+        no_path = bare.res_bus_sc['ikss_ka'].fillna(0.0) < 1e-3
+        oracle.res_bus_sc.loc[no_path[no_path].index, 'ikss_ka'] = 0.0
     differ = []
     for ident, idx in oids['bus'].items():
         want = float(oracle.res_bus_sc.at[idx, 'ikss_ka'])

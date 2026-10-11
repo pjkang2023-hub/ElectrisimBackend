@@ -43,6 +43,7 @@ before _payload, .diagram_harmonic_payload.json and
 new drawing still computes the spec's answers.
 """
 
+import copy
 import json
 import math
 import os
@@ -93,6 +94,20 @@ def run_sc(net, fault='3ph', case='max', lv_tol_percent=10, topology='auto', inv
     sc.calc_sc(net, fault=fault, case=case, ip=True, ith=True, tk_s=1.0, kappa_method='C',
                r_fault_ohm=0.0, x_fault_ohm=0.0, check_connectivity=False, branch_results=True,
                lv_tol_percent=lv_tol_percent, topology=topology, inverse_y=inverse_y)
+    if fault == '1ph' and len(net.sgen) and net.sgen['in_service'].any():
+        # As the backend: a bus with no earth return path (a delta tertiary, say) has no earth-fault
+        # current - without the current sources it has none (under 1 A); pandapower added theirs.
+        bare = copy.deepcopy(net)
+        bare.sgen['in_service'] = False
+        # check_connectivity=True: with False pandapower keeps the element flags of the last power
+        # flow, and the current sources taken out stayed in.
+        sc.calc_sc(bare, fault=fault, case=case, kappa_method='C', r_fault_ohm=0.0, x_fault_ohm=0.0,
+                   check_connectivity=True, branch_results=False, lv_tol_percent=lv_tol_percent,
+                   topology=topology, inverse_y=inverse_y)
+        no_path = bare.res_bus_sc.index[bare.res_bus_sc['ikss_ka'].fillna(0.0) < 1e-3]
+        for col in ('ikss_ka', 'ip_ka', 'ith_ka'):
+            if col in net.res_bus_sc.columns:
+                net.res_bus_sc.loc[net.res_bus_sc.index.intersection(no_path), col] = 0.0
     return net
 
 

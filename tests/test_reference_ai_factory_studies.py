@@ -1044,3 +1044,26 @@ def test_emt_variant_bus_stores_sized_for_their_bus_ride_through(client):
     for b in emt['buses']:
         if b['label'].endswith('800 V'):
             assert b['v_min_pu'] > 0.94, b['label']
+
+
+def test_iec_earth_faults_where_there_is_no_earth_path(client):
+    """
+    IEC's single-phase short circuit at maximum: the BESS PCS bus, the
+    eSTATCOM's and the turbine's sit behind ungrounded deltas, with no earth
+    return path - ANSI gives them none. pandapower still added the PCS
+    current sources' contribution: 11.3 kA at the BESS bus and 15.3 kA at the
+    eSTATCOM's, exactly 1.2 x their ratings, 0.46 kA at the turbine's. They
+    read 0 now, said so; every earthed bus is as it was - the lineups' 153 kA,
+    34.5 kV through its resistors and the PCS, the grid's 12 kA.
+    """
+    p = _payload('sc1ph_')
+    out = _post(client, p)
+    buses = _by_label(p, out['busbars'])
+    for b in ('Substation BESS 0.69 kV', 'eSTATCOM 0.69 kV', 'Gas turbine 13.8 kV'):
+        assert buses[b]['ikss_ka'] == 0.0 and buses[b]['ip_ka'] == 0.0 and buses[b]['ith_ka'] == 0.0, b
+    assert any(w.startswith('No earth return path at Substation BESS 0.69 kV, eSTATCOM 0.69 kV, Gas turbine 13.8 kV')
+               for w in out['warnings'])
+    assert buses['Lineup B 0.48 kV']['ikss_ka'] == pytest.approx(153.05, abs=0.01)
+    assert buses['Grid 245 kV']['ikss_ka'] == pytest.approx(12.04, abs=0.01)
+    for b in ('34.5 kV Bus 1', '34.5 kV Bus 2'):
+        assert buses[b]['ikss_ka'] > 0.43 and buses[b]['ip_ka'] > buses[b]['ikss_ka'], b    # the 400 A resistor and more

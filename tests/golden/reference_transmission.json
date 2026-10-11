@@ -171,7 +171,7 @@
       "xk0_ohm": 1.9481371544
     },
     "TERT": {
-      "ikss_ka": 0.0256594755,
+      "ikss_ka": 0.0,
       "rk0_ohm": Infinity,
       "xk0_ohm": Infinity
     },

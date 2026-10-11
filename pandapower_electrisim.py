@@ -1754,6 +1754,34 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
             lines.append(f"    {key}={value!r},")
         lines.append(")")
         lines.append("")
+        if fault_type == '1ph':
+            # As Electrisim does: a bus with no earth return path gets no earth-fault current,
+            # whatever pandapower's current sources added there.
+            lines.append("# No earth return path (behind an ungrounded delta): no earth-fault current.")
+            lines.append("# Without the current sources such a bus has none (under 1 A).")
+            lines.append("import copy")
+            lines.append("_bare = copy.deepcopy(net)")
+            lines.append("for _t in ('sgen', 'storage'):")
+            lines.append("    if len(_bare[_t]):")
+            lines.append("        _bare[_t]['in_service'] = False")
+            lines.append("sc.calc_sc(")
+            lines.append("    _bare,")
+            lines.append(f"    fault={fault_type!r},")
+            lines.append(f"    case={fault_location!r},")
+            lines.append(f"    bus={_export_py_literal(sc_bus)},")
+            lines.append("    kappa_method='C',")
+            lines.append(f"    r_fault_ohm={r_fault_ohm},")
+            lines.append(f"    x_fault_ohm={x_fault_ohm},")
+            lines.append("    check_connectivity=True,")
+            lines.append("    branch_results=False,")
+            for key, value in _sc_iec_options(sc).items():
+                lines.append(f"    {key}={value!r},")
+            lines.append(")")
+            lines.append("_no_path = _bare.res_bus_sc.index[_bare.res_bus_sc['ikss_ka'].fillna(0.0) < 1e-3]")
+            lines.append("for _c in ('ikss_ka', 'ip_ka', 'ith_ka'):")
+            lines.append("    if _c in net.res_bus_sc.columns:")
+            lines.append("        net.res_bus_sc.loc[net.res_bus_sc.index.intersection(_no_path), _c] = 0.0")
+            lines.append("")
         lines.append("# Print short-circuit results")
         lines.append("print('\\nBus SC Results:')")
         lines.append("print(net.res_bus_sc)")
@@ -10921,6 +10949,50 @@ def _electrisim_sc_storage_as_current_sources(net):
             net.sgen.at[idx, col] = value
 
 
+# Under 1 A without the current sources is no earth path: an ungrounded bus's comes out some 0.1 A
+# (a turbine's behind its delta), a resistance-earthed 34.5 kV bus's 438 A.
+_SC_EARTH_PATH_KA = 1e-3
+
+
+def _electrisim_sc_no_earth_path(net, sc_kwargs):
+    """
+    An earth fault on a bus with no earth return path - behind an ungrounded
+    delta, say - draws next to nothing. pandapower adds a current source's
+    contribution (a PCS's, a converter's) to a single-phase fault whatever
+    the zero-sequence network: on the AI factory a BESS PCS bus behind its
+    delta read 11.3 kA, the eSTATCOM's 15.3 kA, exactly their current limits,
+    where ANSI reads none. Run again with the current sources out: a bus with
+    no fault current then has no earth path, and its earth-fault current is
+    0, said so.
+    """
+    sources = [t for t in ('sgen', 'storage') if len(net[t]) and net[t]['in_service'].any()]
+    if not sources or not len(getattr(net, 'res_bus_sc', [])):
+        return
+    probe = deepcopy(net)
+    for t in sources:
+        probe[t]['in_service'] = False
+    try:
+        sc.calc_sc(probe, **sc_kwargs)
+    except Exception:
+        return
+    res, bare = net.res_bus_sc, probe.res_bus_sc
+    cut = [b for b in res.index if b in bare.index and np.isfinite(res.at[b, 'ikss_ka']) and res.at[b, 'ikss_ka'] > 0
+           and not (np.isfinite(bare.at[b, 'ikss_ka']) and bare.at[b, 'ikss_ka'] > _SC_EARTH_PATH_KA)]
+    if not cut:
+        return
+    named = [b for b in cut if res.at[b, 'ikss_ka'] > _SC_EARTH_PATH_KA]     # a residue under 1 A goes silently
+    for col in ('ikss_ka', 'ip_ka', 'ith_ka'):
+        if col in res.columns:
+            res.loc[cut, col] = 0.0
+    if not named:
+        return
+    names = getattr(net, 'user_friendly_names', {}) or {}
+    labels = [str(names.get(net.bus.at[b, 'name'], net.bus.at[b, 'name'])) for b in named]
+    _electrisim_warn(net, f"No earth return path at {', '.join(labels)}: an earth fault there draws next to "
+                          "nothing, so its single-phase fault current is 0 (the converters' current sources alone "
+                          "had given one).")
+
+
 def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=None):
     
     # Add diagnostic prints
@@ -11055,7 +11127,7 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
             return_all_currents=False,  # Changed: False gives max/min per branch with simple index
             **iec_options,
         )
-        
+
         # Check if ip_ka and ith_ka calculations failed (all NaN) for single-phase faults
         if fault_type == '1ph' and net.res_bus_sc['ip_ka'].isna().all() and net.res_bus_sc['ith_ka'].isna().all():
             # pandapower computes no peak or thermal current for an earth
@@ -11073,6 +11145,12 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
             # (shortcircuit.currents._calc_ith: f = 50): its thermal current at the network's.
             net.res_bus_sc['ith_ka'] = _iec_ith_at_frequency(net.res_bus_sc['ikss_ka'], net.res_bus_sc['ith_ka'],
                                                              float(net.f_hz))
+        if fault_type == '1ph':
+            # After the peak and thermal currents are filled in: they are filled only where none were.
+            _electrisim_sc_no_earth_path(net, dict(
+                fault=fault_type, case=fault_location, bus=bus, ip=ip, ith=ith, tk_s=tk_s, kappa_method='C',
+                r_fault_ohm=r_fault_ohm, x_fault_ohm=x_fault_ohm, check_connectivity=True,
+                branch_results=False, return_all_currents=False, **iec_options))
 
     except Exception as e:
         
@@ -11373,6 +11451,9 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
         'inverse_y': iec_options['inverse_y'],
         'standard': 'iec60909',
     }
+    # Its warnings - the DC network set aside, a bus with no earth path - reached only the server log.
+    if getattr(net, 'warnings', None):
+        result['warnings'] = list(dict.fromkeys(net.warnings))
 
     if export_python and in_data_full is not None and Busbars is not None:
         try:
