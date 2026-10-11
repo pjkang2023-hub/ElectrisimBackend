@@ -1954,6 +1954,47 @@ def _electrisim_drop_unsupplied_converters(net):
 
 def _electrisim_runpp(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, **kwargs):
     """
+    The load flow, and again for each DC/DC converter it finds with no supply
+    at its input: such a converter is out, and what only it held goes with it.
+    Its output was a source of its own (an auxiliary converter holding it), so
+    with its input dead it still supplied it: on the AI factory, rack A1's
+    800/50 V supply out left its 50 V bus dead but its 12 V GPUs served - none
+    of their 1 MW counted lost.
+    """
+    out = _electrisim_runpp_once(net, max_rounds, tolerance_mw, **kwargs)
+    for _ in range(len(getattr(net, 'electrisim_dc_dc_converters', None) or [])):
+        if not _electrisim_drop_dc_dc_without_input(net):
+            break
+        out = _electrisim_runpp_once(net, max_rounds, tolerance_mw, **kwargs)
+    return out
+
+
+def _electrisim_drop_dc_dc_without_input(net):
+    """Each in-service DC/DC converter whose input bus has no voltage, out, said so. True if any."""
+    res = getattr(net, 'res_bus_dc', None)
+    if res is None or not len(res):
+        return False
+    names = getattr(net, 'user_friendly_names', {}) or {}
+    dropped = []
+    for rec in getattr(net, 'electrisim_dc_dc_converters', None) or []:
+        if not rec.get('in_service', True):
+            continue
+        bus = rec.get('bus_in')
+        if bus is None or bus not in res.index or not bool(net.bus_dc.at[bus, 'in_service']):
+            continue
+        if np.isfinite(res.at[bus, 'vm_pu']):
+            continue
+        _electrisim_set_dc_dc_in_service(net, rec, False)
+        bus_label = names.get(net.bus_dc.at[bus, 'name'], net.bus_dc.at[bus, 'name'])
+        dropped.append(f"{rec['label']} (input {bus_label})")
+    if dropped:
+        _electrisim_warn(net, 'No supply at the input of ' + ', '.join(dropped) + ': out of service, '
+                              'and what only it supplied with it.')
+    return bool(dropped)
+
+
+def _electrisim_runpp_once(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, **kwargs):
+    """
     The load flow with the DC diodes settled around it: each conducting or
     blocking as the voltages of the last load flow set it, its forward drop
     at the current it carries - repeating until none changes. Converters with

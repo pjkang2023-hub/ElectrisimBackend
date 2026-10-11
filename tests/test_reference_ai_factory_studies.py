@@ -295,15 +295,21 @@ def test_contingency_each_transformer_source_and_converter(client, base):
     converters = [l for l in (f'Lineup {x} rectifier {k}' for x in 'AB' for k in range(1, 5))] + [
         f'Catcher B rectifier {k}' for k in range(1, 5)] + [f'Hall B SST {k}' for k in range(1, 4)] + [
         'Lineup A DC Store converter', 'Lineup B DC Store converter', 'Catcher B DC Store converter',
-        'DC bus coupler A-B', 'Rack A1 power supply 800/50 V', 'Hall B DC Store 1 converter',
+        'DC bus coupler A-B', 'Hall B DC Store 1 converter',
         'Hall B DC Store 2 converter', 'Hall B supercapacitors converter']
     for name in converters:
         assert cases[name]['lost_load_mw'] == pytest.approx(0.0, abs=1e-6), name
     vrm = cases['Rack A1 50/12 V converters']
     assert vrm['lost_dc_load_mw'] == pytest.approx(1.0, abs=1e-6) and vrm['lost_load_mw'] == pytest.approx(1.0, abs=1e-6)
     assert [v['element'] for v in vrm['violations'] if v['type'] == 'supply'] == ['DC_Bus_Rack A1 12 V']
+    # The rack's 800/50 V supply out: its 50 V bus dead, so its 50/12 V stage has no input and the GPUs
+    # go too - a converter with a dead input supplied its output, and their 1 MW went uncounted.
+    psu = cases['Rack A1 power supply 800/50 V']
+    assert psu['lost_dc_load_mw'] == pytest.approx(1.0, abs=1e-6)
+    assert sorted(v['element'] for v in psu['violations'] if v['type'] == 'supply') == [
+        'DC_Bus_Rack A1 12 V', 'DC_Bus_Rack A1 50 V']
     for name, c in cases.items():
-        if name not in lost and name not in converters and not name.startswith(('T1', 'T2', 'Rack A1 50/12')):
+        if name not in lost and name not in converters and not name.startswith(('T1', 'T2', 'Rack A1')):
             assert 'PCS' in name or 'eSTATCOM' in name, name
             assert not c['violations'] and c['lost_load_mw'] == 0
 
