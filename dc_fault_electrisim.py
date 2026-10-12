@@ -605,18 +605,47 @@ def _unresolved(builder, bus, params):
     return [(label, (r + r_f) * c) for b, r, c, label in builder.stiff_caps if b == bus and (r + r_f) * c < 10 * dt]
 
 
-def fault_at(builder, bus, params):
-    """Simulate a pole-to-pole fault on DC bus ``bus``; its currents in IEC terms."""
-    ckt = copy.deepcopy(builder.ckt)
-    r_f = _fault_r(params)
-    k_f = ckt.add_r(builder.bus_node[bus], 0, r_f)
+def _run_window(builder, params):
+    """The run's end, time step and fine-step window."""
     dt = _time_step(params)
     t_end = max(_f(params.get('duration_ms'), 200.0), 0.1) * 1e-3
     if builder.has_converter:
         # Ik is the mean over the last AC period: three of them at least.
         t_end = max(t_end, 3.0 / builder.f_hz)
-    t_fine = min(t_end, 0.01)
+    return t_end, dt, min(t_end, 0.01)
+
+
+def _no_fault(builder, params):
+    """
+    The network's own run with no fault, once a study: its converters
+    blocked from the start as in the fault runs, the loads' filter inductors
+    carry their pre-fault current on from the DC-link capacitors - in every
+    lineup, faulted or not, some 1.5 kA from each rectifier's for 0.4 ms.
+    An element whose current the fault leaves as it is feeds it none.
+    """
+    if getattr(builder, '_baseline', None) is None:
+        t_end, dt, t_fine = _run_window(builder, params)
+        builder._baseline = copy.deepcopy(builder.ckt).simulate(t_end, dt, dt_coarse=min(10 * dt, 2e-5),
+                                                                 t_fine=t_fine)
+    return builder._baseline
+
+
+def fault_at(builder, bus, params):
+    """Simulate a pole-to-pole fault on DC bus ``bus``; its currents in IEC terms."""
+    ckt = copy.deepcopy(builder.ckt)
+    r_f = _fault_r(params)
+    k_f = ckt.add_r(builder.bus_node[bus], 0, r_f)
+    t_end, dt, t_fine = _run_window(builder, params)
     sim = ckt.simulate(t_end, dt, dt_coarse=min(10 * dt, 2e-5), t_fine=t_fine)
+    base = _no_fault(builder, params)
+    def fault_part(i_of):
+        # An element's current, or none where it is its own with no fault - in another lineup
+        # the fault does not reach, the network settling from its load-flow state. Not the
+        # current less that one throughout: a diode blocking at the fault holds its shelf where
+        # with no fault it would settle, and the difference would be the settling's.
+        i = i_of(sim)
+        moved = float(np.max(np.abs(i - np.interp(sim['t'], base['t'], i_of(base))))) if len(i) else 0.0
+        return np.zeros_like(i) if moved <= max(1.0, 0.01 * float(np.max(np.abs(i), initial=0.0))) else i
     t = sim['t']
     period = 1.0 / builder.f_hz if builder.has_converter else None
     i_f = sim['i_r'][:, k_f]
@@ -633,7 +662,7 @@ def fault_at(builder, bus, params):
         'diodes': [],
     }
     for kind, label, cid, port in builder.contributions:
-        i = _current(sim, port)
+        i = fault_part(lambda s, port=port: _current(s, port))
         c_terms = iec_terms(t, i, period)
         out['contributions'].append({
             'kind': kind, 'name': label, 'id': cid,
@@ -643,7 +672,7 @@ def fault_at(builder, bus, params):
             'waveform': _waveform(t, i, None, t_fine, 150, 100),
         })
     if builder.cable_caps:
-        i = sum(sim['i_c'][:, k] for k in builder.cable_caps)
+        i = fault_part(lambda s: sum(s['i_c'][:, k] for k in builder.cable_caps))
         c_terms = iec_terms(t, i, period)
         out['contributions'].append({
             'kind': 'Cable capacitance', 'name': 'DC cables', 'id': '',

@@ -467,7 +467,9 @@ def test_dc_fault_on_a_lineup_bus_the_diodes_block(client):
     (the rack's converters and filter) only trades current among itself - and
     the catcher, behind the shelves' other diodes, none. The study lists every
     DC element; those beyond the faulted section carry only their own small
-    transients, under 1 % of the fault's peak.
+    transients, under 1 % of the fault's peak. Lineup B's rectifiers none: the
+    1.5 kA each DC link gave at the start - its loads' filters drawing their
+    pre-fault current on, as with no fault at all - is not the fault's.
     """
     out, f = _dc_fault(client, 'Lineup A 800 V')
     contrib = {(c['kind'], c['name']): c for c in f['contributions']}
@@ -482,6 +484,9 @@ def test_dc_fault_on_a_lineup_bus_the_diodes_block(client):
             assert abs(c['ip_ka']) < 1e-3 and abs(c['at_peak_ka']) < 1e-3, n
         elif not n.startswith(('Lineup A', 'DC bus coupler', 'Rack A1')):
             assert abs(c['ip_ka']) < 0.01 * f['ip_ka'], n
+    for (k, n), c in contrib.items():
+        if n.startswith('Lineup B rectifier'):
+            assert c['ip_ka'] == 0.0 and c['ik_ka'] == 0.0, (k, n)
     behind = sum(c['at_peak_ka'] for (k, n), c in contrib.items() if n.startswith('Rack A1'))
     assert abs(behind) < 1e-3 * f['ip_ka']
     bridges = [c['ik_ka'] for c in rect if 'diodes' in c['kind']]
