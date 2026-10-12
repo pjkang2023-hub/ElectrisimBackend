@@ -33,6 +33,10 @@ def _conv(name, bus_in, bus_out, **fields):
 
 def _der(kind, name, bus, **fields):
     row = {'typ': f'{kind}0', 'name': name, 'id': f'cell-{name}', 'userFriendlyName': name.upper(), 'bus': bus}
+    if kind == 'Battery':
+        # These tests' closed forms take one string's 62.5 mOhm (left blank, R0 comes from its
+        # capacity: test_battery_resistance_from_its_capacity).
+        row['r0_mohm'] = '62.5'
     row.update({k: str(v) for k, v in fields.items()})
     return row
 
@@ -232,6 +236,26 @@ def test_converter_in_droop(client, quiet):
     v = _vm(result, 'r48')
     assert k48['p_out_mw'] == pytest.approx(0.02 * (1.0 - v) * v / 0.05, rel=1e-6)
     assert v == pytest.approx(0.9743, abs=1e-3)
+
+
+@pytest.mark.parametrize('vn_v, capacity_kwh, r0_mohm', [
+    (800, 224, 62.5),        # one string of 250 cells: the 62.5 mOhm every battery once had
+    (1000, 5000, 4.375),     # the factory's lineup stores: 312.5 cells in series, 17.9 strings
+    (1500, 20000, 2.4609),   # the campus BESS
+])
+def test_battery_resistance_from_its_capacity(vn_v, capacity_kwh, r0_mohm):
+    """
+    A battery by its ratings with no R0 takes it from its capacity: the cell
+    (0.25 mOhm, 3.2 V, 280 Ah) in series to its voltage and in parallel to its
+    capacity, 2.2 % of its voltage at 1 C whatever its size. A fixed 62.5 mOhm
+    gave a 5 MWh store 14 times its resistance; given, R0 is kept.
+    """
+    b = der.build(_der('Battery', 'x', 'y', sizing='ratings', vn_v=vn_v, capacity_kwh=capacity_kwh, r0_mohm=''))
+    assert b.r0 * 1e3 == pytest.approx(r0_mohm, rel=1e-4)
+    assert b.r0 * b.ah / b.vn == pytest.approx(0.25e-3 * 280 / 3.2, rel=1e-9)      # its drop at 1 C, per unit
+    assert b.state(0.0, vn_v)['r0_mohm'] == pytest.approx(r0_mohm, rel=1e-4)
+    given = der.build(_der('Battery', 'x', 'y', sizing='ratings', vn_v=vn_v, capacity_kwh=capacity_kwh, r0_mohm='7'))
+    assert given.r0 == pytest.approx(7e-3)
 
 
 @pytest.mark.parametrize('kind, ratings, blocks', [

@@ -74,7 +74,7 @@ FIELDS = {**DER_FIELDS, **DC_FIELDS}
 # takes its dialog's default, as a drawn element does on its drop.
 DEFAULTS = {'Battery': {'vn_v': '800',
              'capacity_kwh': '224',
-             'r0_mohm': '62.5',
+             'r0_mohm': '',          # blank: from its capacity (der_electrisim.Battery)
              'cells_series': '250',
              'strings_parallel': '1',
              'cell_v': '3.2',

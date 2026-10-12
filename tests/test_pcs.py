@@ -99,7 +99,7 @@ def test_grid_following_battery_pv_and_sofc(client, quiet):
     assert p1['p_dc_mw'] == pytest.approx(0.2 / ETA) and p1['loss_mw'] == pytest.approx(0.2 / ETA - 0.2)
     b = der.build(battery)
     i = 0.2 / ETA * 1e6 / p1['v_dc_v']
-    assert p1['v_dc_v'] == pytest.approx(b.ocv() - 0.0875 * i, rel=1e-9)
+    assert p1['v_dc_v'] == pytest.approx(b.ocv() - (b.r0 + b.r1) * i, rel=1e-9)     # R0 from its 500 kWh, R1 40 % of it
     assert ders['cell-b1']['coupling'] == 'pcs' and ders['cell-b1']['p_mw'] == pytest.approx(0.2 / ETA)
     v_mp, _, p_mp = der.build(pv).mpp()
     assert pcs['cell-p2']['p_mw'] == pytest.approx(ETA * p_mp / 1e6, rel=1e-9)

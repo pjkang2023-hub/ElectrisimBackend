@@ -141,7 +141,17 @@ class Battery(_Der):
             self.vn = _pos(el.get('vn_v'), 800.0)
             kwh = _f(el.get('capacity_kwh'), 0.0)
             self.ah = kwh * 1e3 / self.vn if kwh > 0 else _pos(el.get('capacity_ah'), 280.0)
-            self.r0 = _f(el.get('r0_mohm'), 62.5) * 1e-3
+            # R0 given, or from its capacity: its cells (0.25 mOhm, 3.2 V, 280 Ah by default) in series
+            # to its voltage and in parallel to its capacity - 2.2 % of its voltage at 1 C, whatever
+            # its size. A fixed 62.5 mOhm (one 224 kWh string) gave a 5 MWh store 14 times its
+            # resistance: at 2.5 kA it sagged 156 V and its converter blocked at 0.8 pu.
+            r0_mohm = _f(el.get('r0_mohm'), float('nan'))
+            if math.isfinite(r0_mohm) and r0_mohm > 0:
+                self.r0 = r0_mohm * 1e-3
+            else:
+                v_cell, ah_cell = _pos(el.get('cell_v'), 3.2), _pos(el.get('cell_ah'), 280.0)
+                self.r0 = _pos(el.get('cell_r_mohm'), 0.25) * 1e-3 * (self.vn / v_cell) / (self.ah / ah_cell)
+                self.r0_from_capacity = True
         # Its RC pair's resistance: in mOhm, or as a share of R0 (40 % by default).
         r1_mohm = _f(el.get('r1_mohm'), float('nan'))
         self.r1 = r1_mohm * 1e-3 if math.isfinite(r1_mohm) else max(_f(el.get('r1_percent'), 40.0), 0.0) / 100.0 * self.r0
@@ -178,7 +188,7 @@ class Battery(_Der):
     def state(self, i, v):
         c_rate = i / self.ah if self.ah > 0 else 0.0
         out = {'soc_percent': 100.0 * self.soc0, 'ocv_v': self.ocv(), 'c_rate': c_rate,
-               'energy_kwh': self.energy_kwh, 'capacity_ah': self.ah}
+               'energy_kwh': self.energy_kwh, 'capacity_ah': self.ah, 'r0_mohm': self.r0 * 1e3}
         if c_rate > self.c_rate_dis + 1e-9:
             self.notes.append(f'discharging at {c_rate:.2f} C, above its {self.c_rate_dis:g} C')
         if -c_rate > self.c_rate_ch + 1e-9:

@@ -1126,15 +1126,15 @@ def test_emt_variant_bus_stores_sized_for_their_bus_ride_through(client):
     """
     Found in 20c: through IEEE 2800's 0 pu, Lineup A's, the catcher's and
     Hall B's racks lost their 800 V - their stores' converters, 2.5 MW
-    against some 6 MW, blocked at 0.8 pu, their batteries behind 62.5 mOhm
-    sagging under the current. Converters of 7 MW (6 MW in Hall B) on banks
-    of 5 mOhm hold every 800 V bus above 0.94 pu; only the SSTs block, their
-    MV gone, and Hall B's stores carry it.
+    against some 6 MW, blocked at 0.8 pu. Converters of 7 MW (6 MW in Hall B)
+    hold every 800 V bus above 0.94 pu; only the SSTs block, their MV gone,
+    and Hall B's stores carry it. The batteries as they are: their R0 from
+    their capacity, 4.4 mOhm. At the fixed 62.5 mOhm they once had they sagged
+    to 0.8 pu under the current, their converters blocked, and the variant
+    needed 5 mOhm banks as well.
     """
     stores = ('Lineup A DC Store', 'Lineup B DC Store', 'Catcher B DC Store', 'Hall B DC Store 1', 'Hall B DC Store 2')
-    p = _variant(_payload(), {
-        **{f'{s} converter': {'rated_mw': '6' if s.startswith('Hall B') else '7'} for s in stores},
-        **{s: {'r0_mohm': '5'} for s in stores}})
+    p = _variant(_payload(), {f'{s} converter': {'rated_mw': '6' if s.startswith('Hall B') else '7'} for s in stores})
     p['0'] = {'typ': 'EmtStudy Parameters', 'user_email': 't@t', 'duration_ms': '100', 'frequency': '60',
               'grid_voltage_profile': 'ieee2800', 'grid_voltage_start_ms': '20'}
     emt = _post(client, p)['emt']
