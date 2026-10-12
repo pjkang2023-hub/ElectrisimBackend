@@ -4499,6 +4499,10 @@ def _electrisim_set_aside_dc_network(net, study, why="pandapower's optimal power
                     label = str(names.get(name, name))
                     ld = pp.create_load(net, int(net.vsc.at[i, 'bus']), p_mw=p, q_mvar=q, name=f'{name} AC side')
                     net.load.at[ld, 'electrisim_aux'] = True
+                    if 'id' in net.vsc.columns and 'id' in net.load.columns:
+                        # Its VSC's cell: with none, NaN in the result, which is not JSON - the
+                        # frontend could not read the OPF's answer at all.
+                        net.load.at[ld, 'id'] = net.vsc.at[i, 'id']
                     names[f'{name} AC side'] = f'{label} (AC side)'
                     kept.append(f'{label} {p:.4g} MW')
                 net.user_friendly_names = names

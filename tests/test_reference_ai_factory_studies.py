@@ -49,12 +49,18 @@ def _spec_rows():
     return {r.get('name', r['id']): r for k, rows in spec.items() if isinstance(rows, list) for r in rows if 'id' in r}
 
 
+def _not_json(token):
+    raise ValueError(f'{token} in the response: not JSON, the frontend cannot read it')
+
+
 def _post(client, payload):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
         response = client.post('/', json=payload)
     assert response.status_code == 200, response.get_data(as_text=True)[:400]
-    out = json.loads(response.get_data(as_text=True))
+    # Strict, as the browser's JSON.parse: Python's reads NaN, which left the frontend unable
+    # to read an OPF answer with one in it.
+    out = json.loads(response.get_data(as_text=True), parse_constant=_not_json)
     assert not out.get('error'), out.get('message') or out.get('exception')
     return out
 
