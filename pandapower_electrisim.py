@@ -3104,6 +3104,22 @@ def _electrisim_droop_within_rating(net, conv):
     rated = conv['rated_mw'] if conv['rated_mw'] > 0 else 1.0
     low = -rated if conv['bidirectional'] else 0.0
     r, v0 = conv['droop_r_ohm'], conv['droop_v0_kv']
+    hand = conv.get('handover_mw')
+    if hand is not None:
+        # Handed its bus's load in an island short of power (the time series): its source delivers
+        # that, within its rating, whatever its droop would - the rectifiers holding the bus draw
+        # the less. With nothing else to hold its bus it holds it in droop, as at its limit.
+        v_out = float(net.res_bus_dc.at[conv['bus_out'], 'vm_pu']) * float(net.bus_dc.at[conv['bus_out'], 'vn_kv'])
+        if not np.isfinite(v_out) or v_out <= 0:
+            conv['handover_mw'] = None
+            net.vsc.at[vsc, 'control_mode_dc'] = 'vm_pu'
+            net.vsc.at[vsc, 'control_value_dc'] = conv['vm_out_pu']
+            return 1.0
+        p = min(max(hand, low), rated)
+        conv['limit'] = None
+        net.vsc.at[vsc, 'control_mode_dc'] = 'p_mw'
+        net.vsc.at[vsc, 'control_value_dc'] = -(p + (p / v_out) ** 2 * r)
+        return abs(delivered - p)
     if conv.get('limit') is None:
         if low - 1e-9 * rated <= delivered <= rated * (1.0 + 1e-9) or conv.get('limit_hold'):
             return 0.0

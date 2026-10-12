@@ -278,6 +278,30 @@ class MicrogridTs:
                                            'rated': conv['rated_mw'] if conv['rated_mw'] > 0 else 1.0})
         for b in self.batteries:
             b['set_mw'] = b['conv']['p_set_mw'] if b['kind'] == 'conv' else b['item']['rec']['p_set_ac']
+        # The hand-over: each store behind a converter in droop on an 800 V bus, and what feeds that
+        # bus from the AC network - its rectifiers, its SSTs. In an island short of power the stores
+        # take their buses' load from them before any is shed; held at their 800 V by the rectifiers
+        # their droop gave nothing, and two-thirds of the back-up case's load was shed.
+        self.handover = []
+        for c in self.convs:
+            if c.get('control') != 'droop' or not c['in_service'] or c.get('droop_line') is None:
+                continue
+            store = next((it for it in self.items if it['via'] == 'dc' and it['rec']['bus'] == c['bus_in']
+                          and it['obj'].kind in ('Battery', 'Supercapacitor', 'Flywheel')), None)
+            if store is not None:
+                self.handover.append({'conv': c, 'store': store})
+        self.feeders = {}
+        vsc = net.vsc if 'vsc' in net and len(net.vsc) else None
+        for h in self.handover:
+            bus = h['conv']['bus_out']
+            if bus in self.feeders:
+                continue
+            rect = [int(i) for i in vsc.index if int(vsc.at[i, 'bus_dc']) == bus
+                    and not ('electrisim_aux' in vsc.columns and vsc.at[i, 'electrisim_aux'] == True)] if vsc is not None else []
+            ssts = [rec['stages'][0]['input'][1] for rec in getattr(net, 'electrisim_ssts', None) or []
+                    if rec.get('bus_lvdc') == bus and rec['in_service']]
+            self.feeders[bus] = {'vsc': rect, 'sst_loads': ssts}
+        self.handover_steps = {}
         self.demand_lpf = None
         self.rows, self.pcs_rows, self.balance = [], [], []
         self.unserved_j = self.curtailed_j = 0.0
@@ -309,6 +333,8 @@ class MicrogridTs:
         self.base_ac = {i: (float(net.load.at[i, 'p_mw']), float(net.load.at[i, 'q_mvar'])) for i in self.real_ac}
         self.base_dc = {i: float(net.load_dc.at[i, 'p_dc_mw']) for i in self.dc_loads}
         self.shed, self.curtail = 1.0, 1.0
+        for h in self.handover:              # each step from its droop: handed over again if short
+            self._release(h['conv'])
         for it in self.items:
             obj = it['obj']
             if obj.kind == 'PV Array' and (it.get('g') or it.get('t_amb')):
@@ -506,13 +532,25 @@ class MicrogridTs:
             p_dc = pe._electrisim_dc_dc_input_power(p_ac, rec['eta'], rec['p_nl_mw'])
             avail = available_w(obj, p_dc * 1e6, self.dt) / 1e6
             actual += p_ac
-            target += pe._electrisim_stage_output(avail, rec['eta'], rec['p_nl_mw'])
+            # Discharging, what it can give this step is its window: what its store gives at its present
+            # output was never more than that output, so no surplus showed and load once over-shed
+            # stayed shed. Charging, what its store can take at its present output, as before.
+            can = pe._electrisim_stage_output(avail, rec['eta'], rec['p_nl_mw'])
+            target += rec['p_max_step'] if rec.get('p_max_step') is not None and p_ac >= 0 else can
+        # Settled just inside the window, between 3 and 1 tolerances under it: settled on it, within
+        # a tolerance either side, a battery left at its floor ran some joules past it over a minute.
         tol = 1e-7
-        if actual > target + tol and actual > 0:
-            # Short: shed load.
-            self.shed = max(self.shed * max(target, 0.0) / actual, 0.0)
-        elif actual < target - tol and self.shed < 1.0 and target > 0:
-            self.shed = min(self.shed * target / max(actual, 1e-9), 1.0)
+        aim = target - 2 * tol
+        if actual > target - tol and actual > 0:
+            # Short: the 800 V stores take their buses' load from the rectifiers first; then shed load.
+            if self.shed >= 1.0 and self._hand_over(actual - aim):
+                return True
+            self.shed = max(self.shed - (actual - aim) / self._sheddable_mw(), 0.0)
+        elif actual < target - 3 * tol and self.shed < 1.0 and target > 0:
+            self.shed = min(self.shed + (aim - actual) / self._sheddable_mw(), 1.0)
+        elif actual < target - 3 * tol and self._hand_back(aim - actual):
+            # Room again: the stores give back what the PCS can carry.
+            return True
         elif actual < target - tol and target <= 0:
             # Surplus they cannot take: curtail PV.
             pv = sum(self._pv_output_mw())
@@ -528,6 +566,90 @@ class MicrogridTs:
         for i, p in self.base_dc.items():
             self._set_dc_load(i, p * self.shed)
         return True
+
+    def _sheddable_mw(self):
+        """
+        The loads shedding scales, at their full power: the shed factor moves by the shortfall over
+        them. Scaled by the PCS's output over their limit instead, the load that is not shed - the
+        chillers - made each step over-shed and the restoring creep back, unsettled after 20 load flows.
+        """
+        total = sum(p for p, _ in self.base_ac.values()) + sum(self.base_dc.values())
+        return max(total, 1e-6)
+
+    def _bus_feed_mw(self, bus):
+        """What the AC network feeds an 800 V bus now: its rectifiers' AC draw and its SSTs' MV draw."""
+        net = self.net
+        f = self.feeders.get(bus) or {}
+        feed = sum(float(net.res_vsc.at[i, 'p_mw']) for i in f.get('vsc', [])
+                   if i in net.res_vsc.index and bool(net.vsc.at[i, 'in_service']) and np.isfinite(net.res_vsc.at[i, 'p_mw']))
+        feed += sum(float(net.load.at[i, 'p_mw']) for i in f.get('sst_loads', [])
+                    if i in net.load.index and bool(net.load.at[i, 'in_service']))
+        return feed
+
+    def _hand_over(self, short_mw):
+        """
+        The island short by ``short_mw``: each 800 V store takes more of its bus's load, by its
+        spare - its converter's rating, what its store can give over the step - and no more than
+        its bus's rectifiers and SSTs still carry (a store does not feed the island back through
+        them). True when something was handed over.
+        """
+        pe = self.pe
+        spare = []
+        for h in self.handover:
+            c, obj = h['conv'], h['store']['obj']
+            if not obj.in_service:
+                continue
+            now = pe._electrisim_dc_dc_delivered_mw(self.net, c)
+            now = now if math.isfinite(now) else 0.0
+            rated = c['rated_mw'] if c['rated_mw'] > 0 else 0.0
+            # What its store can give over the step at its converter's rating.
+            p_dc = pe._electrisim_dc_dc_input_power(rated, c['eta'], c['p_nl_mw'])
+            can = pe._electrisim_stage_output(available_w(obj, p_dc * 1e6, self.dt) / 1e6, c['eta'], c['p_nl_mw'])
+            spare.append((h, now, max(min(rated, can) - now, 0.0)))
+        # No more than its bus is fed from the AC side, shared among the bus's stores by their spare.
+        by_bus = {}
+        for h, now, s in spare:
+            by_bus.setdefault(h['conv']['bus_out'], []).append([h, now, s])
+        total = 0.0
+        for bus, rows in by_bus.items():
+            room = max(self._bus_feed_mw(bus), 0.0)
+            want = sum(r[2] for r in rows)
+            if want > room > 0:
+                for r in rows:
+                    r[2] *= room / want
+            elif room <= 1e-9:
+                for r in rows:
+                    r[2] = 0.0
+            total += sum(r[2] for r in rows)
+        if total <= 1e-6:
+            return False
+        give = min(short_mw, total)
+        for rows in by_bus.values():
+            for h, now, s in rows:
+                if s > 0:
+                    h['conv']['handover_mw'] = now + give * s / total
+        return True
+
+    def _hand_back(self, surplus_mw):
+        """The PCS with room again: the stores give back, in proportion, up to the surplus. True if any did."""
+        held = [h['conv'] for h in self.handover if (h['conv'].get('handover_mw') or 0.0) > 1e-9]
+        total = sum(c['handover_mw'] for c in held)
+        if total <= 1e-9:
+            return False
+        take = min(surplus_mw, total)
+        for c in held:
+            c['handover_mw'] = max(c['handover_mw'] - take * c['handover_mw'] / total, 0.0)
+        return True
+
+    def _release(self, c):
+        """A store back in droop: its source holds its set voltage behind its virtual resistance."""
+        if c.get('handover_mw') is None:
+            return
+        c['handover_mw'] = None
+        net = self.net
+        if c.get('vsc') is not None and c['vsc'] in net.vsc.index:
+            net.vsc.at[c['vsc'], 'control_mode_dc'] = 'vm_pu'
+            net.vsc.at[c['vsc'], 'control_value_dc'] = c['vm_out_pu']
 
     def _set_dc_load(self, i, p_mw):
         """
@@ -558,6 +680,9 @@ class MicrogridTs:
 
     def after_step(self, t, converged):
         net, pe, dt = self.net, self.pe, self.dt
+        handed = sum(h['conv'].get('handover_mw') or 0.0 for h in self.handover)
+        if handed > 1e-6:
+            self.handover_steps[t] = handed
         # The diagram's loads: an SST's MV draw counted too was its hall's load twice, and, moving as the
         # load flow settled it, read as load not served on a network on the grid.
         loads = sum(float(net.load.at[i, 'p_mw']) for i in self.real_ac if bool(net.load.at[i, 'in_service']))
@@ -665,6 +790,9 @@ class MicrogridTs:
             if s['limited']:
                 self.notes.append(f"DC/DC Converter '{s['conv']['label']}': its store's limits cut in at "
                                   f"{s['limited']} of {len(rows)} steps.")
+        if self.handover_steps:
+            self.notes.append(f'The island was short of power at {len(self.handover_steps)} steps: the 800 V stores '
+                              f'took their buses\' load from the rectifiers, up to {max(self.handover_steps.values()):.3g} MW.')
         if self.unserved_steps:
             self.notes.append(f'The island ran short at {len(self.unserved_steps)} steps: '
                               f'{self.unserved_j / 3.6e9:.4g} MWh of load was not served.')

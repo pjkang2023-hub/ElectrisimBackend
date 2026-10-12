@@ -467,11 +467,14 @@ def test_backup_ten_minutes_on_storage(client):
     droop within what each can give for the step: the four substation BESS at
     their window's top, 2.53 MW each; the eSTATCOM, its 7.5 MW-s gone in the
     first minute, nothing after; the island at the frequency the BESS reached
-    their limits, f0 (1 - P_max droop / S). The rest is shed: some 6.7 of
-    20.5 MW served. Shared by weight alone, the eSTATCOM took 58 % of the
-    island, every load was shed and no step after the first solved. The
-    800 V stores give nothing: the island holds the AC, the rectifiers the
-    800 V (they have no power limit here).
+    their limits, f0 (1 - P_max droop / S). Short of power, the 800 V stores
+    take their buses' load from the rectifiers before any is shed - Lineups
+    A and B and Hall B's two at their converters' 2.5 MW; the catcher's none,
+    its bus carrying no load (a store does not feed the island back through
+    the rectifiers). The rest is shed: some 16.5 of 20.5 MW served, where
+    the stores, held at their 800 V by the rectifiers, gave nothing and 6.7
+    MW was served. Shared by weight alone, the eSTATCOM once took 58 % of
+    the island, every load was shed and no step after the first solved.
     """
     payload = _variant(_payload('timeseries_'), {'Grid': {'in_service': 'false'},
                                                  'Gas turbine': {'in_service': 'false'},
@@ -483,8 +486,9 @@ def test_backup_ten_minutes_on_storage(client):
     assert len(steps) == 10 and all(st['converged'] for st in steps)
     for st, load in zip(steps, _step_loads(payload, 60.0, 10)):
         assert st['load_mw'] + st['unserved_mw'] == pytest.approx(load, abs=1e-6), st['time_step']
-        assert 6.5 < st['load_mw'] < 7.0
+        assert 16.0 < st['load_mw'] < 17.5
     assert any('ran short' in n for n in mg['notes'])
+    assert any("the 800 V stores took their buses' load from the rectifiers" in n for n in mg['notes'])
     rows = _spec_rows()
     by_step = {}
     for r in mg['pcs']:
@@ -492,7 +496,7 @@ def test_backup_ten_minutes_on_storage(client):
     row = rows['Substation BESS PCS 1']
     for t, pcs in by_step.items():
         bess = [pcs[f'Substation BESS PCS {k}']['p_mw'] for k in range(1, 5)]
-        assert max(bess) - min(bess) < 1e-6 and 2.52 < bess[0] < 2.54, t        # their window, falling with their voltage
+        assert max(bess) - min(bess) < 1e-6 and 2.52 < bess[0] < 2.56, t        # their window, falling with their voltage
         f = 60.0 * (1 - bess[0] * row['droop_pf_percent'] / 100 / row['s_rated_mva'])
         for r in pcs.values():
             assert r['frequency_hz'] == pytest.approx(f, abs=1e-6), (t, r['label'])
@@ -500,7 +504,10 @@ def test_backup_ten_minutes_on_storage(client):
             assert pcs['eSTATCOM']['p_mw'] == pytest.approx(0.0, abs=1e-3), t
     stores = {st['label']: st for st in mg['stores']}
     assert stores['eSTATCOM supercapacitors']['soc_max_percent'] < 1.0
-    assert stores['Lineup A DC Store']['drawn_mwh'] < 1e-3 and stores['Hall B DC Store 1']['drawn_mwh'] < 1e-3
+    # Ten minutes at their converters' 2.5 MW output: some 0.42 MWh from each battery; the catcher's none.
+    for label in ('Lineup A DC Store', 'Lineup B DC Store', 'Hall B DC Store 1', 'Hall B DC Store 2'):
+        assert 0.40 < stores[label]['drawn_mwh'] < 0.44, label
+    assert stores['Catcher B DC Store']['drawn_mwh'] < 1e-3
     st = stores['Substation DC Store 1']
     assert st['drawn_mwh'] == pytest.approx(st['stored_start_mwh'] - st['stored_end_mwh'], abs=1e-9)
 
