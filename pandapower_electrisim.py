@@ -2916,6 +2916,11 @@ def _electrisim_dc_bus_has_network(net, bus):
         real = ld if 'electrisim_dcdc_role' not in ld.columns else ld[ld['electrisim_dcdc_role'].isna()]
         if (real['bus_dc'] == bus).any():
             return True
+    # A DC breaker joining it to another bus: a cable once the breakers are applied, after the
+    # sources and stores. A rack's supercapacitors on their own bus behind a breaker were left out.
+    for el in getattr(net, '_electrisim_pending_dc_breakers', None) or []:
+        if el.get('et') == 'bus_dc' and bus in (_electrisim_dc_bus(net, el.get('bus')), _electrisim_dc_bus(net, el.get('element'))):
+            return True
     return False
 
 

@@ -388,6 +388,29 @@ def test_fault_fed_by_a_battery_and_a_supercapacitor_on_the_bus(client, quiet):
     assert b2['ik_ka'] == pytest.approx(own['ik_ka'], rel=1e-6)
 
 
+def test_a_store_behind_a_bus_breaker_is_kept_and_protected(client, quiet):
+    """
+    A supercapacitor on its own bus, joined to the network's by a solid-state
+    breaker: the stores were built before the breakers, so its bus looked cut
+    off and it was left out ("on a DC bus nothing else reaches"). Kept now, it
+    feeds a fault on the network's bus through the breaker, which interrupts
+    di/dt x its opening time, V / L x 10 us, within its capacity.
+    """
+    breaker = {'typ': 'DC Breaker0', 'name': 'qs', 'id': 'cell-qs', 'userFriendlyName': 'QS', 'bus': 'dc_b',
+               'element': 'scb', 'et': 'bus_dc', 'closed': 'true', 'rated_current_ka': '5', 'trip_current_ka': '10',
+               'breaking_capacity_ka': '30', 'opening_time_ms': '0.01', 'limiting_inductance_mh': '0.01'}
+    result = _run(client, quiet, _bus('scb', 0.8),
+                  _der('Supercapacitor', 'sc', 'scb', coupling='direct', sizing='modules', modules_series=15),
+                  breaker, study={'duration_ms': 20})
+    assert not any('nothing else reaches' in w for w in result.get('warnings', []))
+    f = _by_id(result['dcfault']['faults'])['cell-dc_b']
+    sc = next(c for c in f['contributions'] if c['name'] == 'SC')
+    assert sc['ip_ka'] > 1.0
+    (qs,) = (b for b in result['dcfault']['breakers'] if b['label'] == 'QS')
+    v0 = f['v_prefault_kv'] * 1e3
+    assert qs['i_open_ka'] == pytest.approx(v0 / 10e-6 * 10e-6 / 1e3, rel=0.15) and not qs['exceeds']
+
+
 def test_battery_fault_current_closed_form(client, quiet):
     """
     A battery alone on its converter's bus: E' behind R0 and L, E' its OCV

@@ -1077,6 +1077,67 @@ def test_variant_a_breaker_per_shelf_on_the_catcher_side_is_selective(client):
     assert all(not b['exceeds'] for b in out['dcfault']['breakers'])
 
 
+def _rack_supercap_breaker(payload):
+    """The rack's supercapacitors on their own 50 V bus, behind a solid-state breaker onto the rack's."""
+    import copy
+    key = {v.get('userFriendlyName'): k for k, v in payload.items() if isinstance(v, dict)}
+    rack, sc, proto = (payload[key[n]] for n in ('Rack A1 50 V', 'Rack A1 supercapacitors', 'Shelf A1 breaker'))
+    bus = copy.deepcopy(rack)
+    bus.update(name='sc_bus_rk', id='sc-bus-rk', userFriendlyName='Rack A1 supercapacitor 50 V')
+    payload[bus['name']] = bus
+    sc['bus'] = bus['name']
+    brk = copy.deepcopy(proto)
+    brk.update(name='sc_brk_rk', id='sc-brk-rk', userFriendlyName='Rack A1 supercapacitor breaker', bus=rack['name'],
+               et='bus_dc', element=bus['name'], rated_voltage_kv='0.06', rated_current_ka='5', trip_current_ka='10',
+               breaking_capacity_ka='30', opening_time_ms='0.01', limiting_inductance_mh='0.0005')
+    payload[brk['name']] = brk
+    return rack['name']
+
+
+def _supercap_amps(emt):
+    sc = next(d for d in emt['ders'] if d['label'] == 'Rack A1 supercapacitors')
+    w = sc['waveform']
+    return [p / max(v, 1e-9) for p, v in zip(w['p_mw'], w['v_kv'])]     # kA
+
+
+def test_variant_a_breaker_clears_the_rack_supercapacitors(client):
+    """
+    Found running the DC fault study from the frontend: a fault on rack A1's
+    50 V bus drew 50 kA from its supercapacitors (V0 / ESR, 1 mOhm), nothing
+    between them and the bus. On their own bus behind a solid-state breaker
+    (5 kA rated, 10 kA trip, 30 kA breaking, 10 us, 0.5 uH): the DC fault
+    study has it interrupt V / L x 10 us, some 1 kA, of a 50 kA prospective
+    that would reach its 30 kA in 0.46 ms; in EMT it trips at 10 kA and opens
+    0.125 ms into the fault at some 11 kA, and the supercapacitors give none
+    after. A 50 % step in the rack's load draws at most some 1.3 kA from
+    them (3.3 kA recharging): it does not trip.
+    """
+    from test_dc_fault import STUDY
+    p = _payload()
+    rack = _rack_supercap_breaker(p)
+    p['0'] = {**STUDY, 'fault_bus': rack, 'duration_ms': '50', 'frequency': '60'}
+    out = _post(client, p)
+    (brk,) = (b for b in out['dcfault']['breakers'] if b['label'] == 'Rack A1 supercapacitor breaker')
+    assert brk['ip_ka'] == pytest.approx(50.0, rel=0.02) and not brk['exceeds']
+    assert brk['i_open_ka'] == pytest.approx(0.05 / 0.5e-6 * 10e-6, rel=0.05)              # 1 kA
+    assert brk['t_reaches_capacity_ms'] < 0.6
+
+    p['0'] = {'typ': 'EmtStudy Parameters', 'user_email': 't@t', 'duration_ms': '20', 'frequency': '60',
+              'fault_bus': rack, 'fault_time_ms': '5', 'fault_resistance_mohm': '0'}
+    emt = _post(client, p)['emt']
+    (eb,) = (b for b in emt['breakers'] if b['label'] == 'Rack A1 supercapacitor breaker')
+    assert 5.0 < eb['opened_ms'] < 5.3 and 10.0 < eb['i_open_ka'] < 30.0
+    assert not eb['exceeds_capacity'] and not eb['exceeds_energy']
+    assert abs(_supercap_amps(emt)[-1]) < 0.01
+
+    p['0'] = {'typ': 'EmtStudy Parameters', 'user_email': 't@t', 'duration_ms': '40', 'frequency': '60',
+              'step_load': 'Rack A1 GPUs 12 V', 'step_percent': '50', 'step_time_ms': '5'}
+    emt = _post(client, p)['emt']
+    (eb,) = (b for b in emt['breakers'] if b['label'] == 'Rack A1 supercapacitor breaker')
+    assert eb['opened_ms'] is None
+    assert max(abs(i) for i in _supercap_amps(emt)) < 5.0
+
+
 def test_variant_lineup_transformers_at_10_percent_bring_the_lv_into_ieee_1584(client):
     """
     Found in 20b: the 0.48 kV lineups at 127-143 kA, past IEEE 1584's 106 kA.
