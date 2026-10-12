@@ -14953,17 +14953,13 @@ def time_series_simulation(net, timeseries_params):
             display_name = get_display_name(user_friendly_name, bus_name, 'Bus', idx, 'timeseries')
             vm_values = [all_busbars[i].vm_pu for i in range(len(all_busbars)) 
                         if all_busbars[i].name == display_name]
-            if vm_values:  # Check if list is not empty
+            # A bus with no rows - a converter's own AC bus, left out of the results - is left
+            # out here too: it read as "Bus no. 11" at 0.0000 pu, a dead bus.
+            if vm_values:
                 vm_stats[display_name] = {
                     'min_vm_pu': min(vm_values),
                     'max_vm_pu': max(vm_values),
                     'avg_vm_pu': sum(vm_values) / len(vm_values)
-                }
-            else:
-                vm_stats[display_name] = {
-                    'min_vm_pu': 0.0,
-                    'max_vm_pu': 0.0,
-                    'avg_vm_pu': 0.0
                 }
         
         loading_stats = {}
@@ -14973,17 +14969,11 @@ def time_series_simulation(net, timeseries_params):
             display_name = get_display_name(user_friendly_name, line_name, 'Line', idx, 'timeseries')
             loading_values = [all_lines[i].loading_percent for i in range(len(all_lines)) 
                              if all_lines[i].name == display_name]
-            if loading_values:  # Check if list is not empty
+            if loading_values:   # none: no rows, left out as a bus with none is
                 loading_stats[display_name] = {
                     'min_loading_percent': min(loading_values),
                     'max_loading_percent': max(loading_values),
                     'avg_loading_percent': sum(loading_values) / len(loading_values)
-                }
-            else:
-                loading_stats[display_name] = {
-                    'min_loading_percent': 0.0,
-                    'max_loading_percent': 0.0,
-                    'avg_loading_percent': 0.0
                 }
         
         transformer_stats = {}

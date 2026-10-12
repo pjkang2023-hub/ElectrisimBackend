@@ -434,6 +434,10 @@ def test_time_series_the_dc_network_per_element(client):
     for d in summary['dcdiodes']:
         if 'from lineup' in d['name']:
             assert d['flags_true_steps']['conducting'] == 24, d['name']
+    # The voltage statistics the AC buses alone: the converters' own AC buses, with no rows,
+    # read as "Bus no. 11" at 0.0000 pu.
+    stats = out['voltage_statistics']
+    assert len(stats) == 10 and all(v['min_vm_pu'] > 0.9 for v in stats.values()), stats
     shelf = next(r for r in summary['loadsdc'] if r['name'] == 'Shelf A2 racks')
     assert shelf['stats']['p_mw']['min'] <= shelf['stats']['p_mw']['mean'] <= shelf['stats']['p_mw']['max']
 
