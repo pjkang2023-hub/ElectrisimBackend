@@ -399,6 +399,63 @@ def test_time_series_a_day_with_dispatch(client):
         assert st['drawn_mwh'] == pytest.approx(0.002 * 24, rel=1e-3)
 
 
+def test_time_series_the_dc_network_per_element(client):
+    """
+    The time series' DC network, each element each hour, as the load flow
+    gives it: every DC load, bus, rectifier, converter, diode and breaker (and
+    the AC breakers and chillers) a row a step and its range over the day.
+    Each hour the DC loads and the AC loads are the dispatch's load; a
+    rectifier's loading is its apparent power over its rating; the shelves'
+    diodes from their lineups conduct all day.
+    """
+    payload = _payload('timeseries_')
+    out = _post(client, payload)
+    dc = out['dc']
+    assert dc['steps_omitted'] is False and dc['step_cap'] == 168
+    summary, steps = dc['summary'], dc['steps']
+    for kind, n in (('loadsdc', 22), ('dcbuses', 26), ('vscs', 12), ('ssts', 3), ('dcdcconverters', 9),
+                    ('dcdiodes', 24), ('dcbreakers', 24), ('linedcs', 2), ('switches', 10), ('motors', 2)):
+        assert len(summary[kind]) == n, kind
+        assert len(steps[kind]) == 24 * n, kind
+    ac = {}
+    for r in out['loads']:
+        ac[r['time_step']] = ac.get(r['time_step'], 0.0) + r['p_mw']
+    dc_load = {}
+    for r in steps['loadsdc']:
+        dc_load[r['time_step']] = dc_load.get(r['time_step'], 0.0) + r['p_mw']
+    for st in out['microgrid']['steps']:
+        t = st['time_step']
+        assert dc_load[t] + ac[t] == pytest.approx(st['load_mw'], abs=1e-6), t
+    rated = {v['id']: float(v['rated_mva']) for v in payload.values()
+             if isinstance(v, dict) and v.get('rated_mva') not in (None, '') and str(v.get('typ', '')).startswith('VSC')}
+    rect = next(r for r in steps['vscs'] if r['name'] == 'Lineup A rectifier 1' and r['time_step'] == 5)
+    assert rect['loading_percent'] == pytest.approx(
+        100 * math.hypot(rect['p_mw'], rect.get('q_mvar', 0.0)) / rated[rect['id']], rel=1e-9)
+    for d in summary['dcdiodes']:
+        if 'from lineup' in d['name']:
+            assert d['flags_true_steps']['conducting'] == 24, d['name']
+    shelf = next(r for r in summary['loadsdc'] if r['name'] == 'Shelf A2 racks')
+    assert shelf['stats']['p_mw']['min'] <= shelf['stats']['p_mw']['mean'] <= shelf['stats']['p_mw']['max']
+
+
+def test_time_series_dc_rows_capped(client, monkeypatch):
+    """
+    Over the cap the per-step DC rows are left out - a year hourly would run to
+    a million - and said so; each element's range over the run is still given.
+    (The cap lowered to 4 here, with a 6-step run.)
+    """
+    import pandapower_electrisim as pe
+    monkeypatch.setattr(pe, 'TS_DC_ROW_CAP', 4)
+    payload = _payload('timeseries_')
+    payload['0'] = {**payload['0'], 'time_steps': '6'}
+    out = _post(client, payload)
+    dc = out['dc']
+    assert dc['steps'] is None and dc['steps_omitted'] is True and dc['step_cap'] == 4
+    assert len(dc['summary']['loadsdc']) == 22
+    assert all(r['steps'] == 6 for r in dc['summary']['loadsdc'])
+    assert any('left out over 4 steps' in n for n in out['notes'])
+
+
 def test_backup_ten_minutes_on_storage(client):
     """
     The paper's back-up case: the grid lost, the turbine off, the bus tie

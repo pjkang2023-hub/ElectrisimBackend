@@ -8654,6 +8654,149 @@ def _as_calculate_voltage_angles(value):
     raise ValueError(f"Calculate voltage angles must be 'auto', true or false, not {value!r}.")
 
 
+def _electrisim_dc_results(net, warn=True):
+    """
+    The DC network's results after a load flow, as the load flow returns them:
+    DC buses, loads and sources, DC capacitors, breakers and diodes, SSTs,
+    the sources and stores with their PCS, grounding transformers, DC/DC
+    converters, VSCs, B2B VSCs and DC cables. The load flow and each time
+    series step alike. ``warn``: say so of a VSC beyond its rating.
+    """
+    out = {}
+
+    # DC buses: not a converter stage's own, nor a battery's cells.
+    if hasattr(net, 'res_bus_dc') and not net.res_bus_dc.empty:
+        out['dcbuses'] = [
+            {'name': net.bus_dc.at[i, 'name'], 'id': _electrisim_row_id(net.bus_dc, i),
+             'vm_pu': row['vm_pu'], 'p_mw': row['p_mw']}
+            for i, row in net.res_bus_dc.iterrows()
+            if not (_electrisim_is_aux(net.bus_dc, i) or _electrisim_is_hidden(net.bus_dc, i))]
+
+    # DC loads: not a DC/DC converter's input or output.
+    if hasattr(net, 'res_load_dc') and not net.res_load_dc.empty:
+        out['loadsdc'] = [
+            {'name': net.load_dc.at[i, 'name'], 'id': _electrisim_row_id(net.load_dc, i), 'p_mw': row['p_dc_mw']}
+            for i, row in net.res_load_dc.iterrows() if not _electrisim_is_aux(net.load_dc, i)]
+
+    # DC sources: their power from what their bus draws (res_source_dc does not give it).
+    if hasattr(net, 'res_source_dc') and not net.res_source_dc.empty:
+        src_i = _electrisim_source_dc_currents_ka(net)
+        sources = []
+        for i, row in net.res_source_dc.iterrows():
+            if _electrisim_is_hidden(net.source_dc, i):
+                continue   # a battery's cells: reported with it
+            vm_src = _electrisim_source_dc_vm(net, i)
+            p_src = (src_i[i] * vm_src * float(net.bus_dc.at[int(net.source_dc.at[i, 'bus_dc']), 'vn_kv'])
+                     if i in src_i and vm_src is not None else row['p_dc_mw'])
+            sources.append({'name': net.source_dc.at[i, 'name'], 'id': _electrisim_row_id(net.source_dc, i),
+                            'vm_pu': vm_src, 'p_mw': p_src})
+        if sources:
+            out['sourcesdc'] = sources
+
+    # DC capacitors: their bus voltage and the energy they hold, E = C V^2 / 2.
+    if getattr(net, 'electrisim_dc_capacitors', None) and hasattr(net, 'res_bus_dc'):
+        dccaps = []
+        for cap in net.electrisim_dc_capacitors:
+            if cap.get('electrisim_der'):
+                continue   # a supercapacitor: reported with the sources and stores
+            bus = cap['bus_dc']
+            vm = net.res_bus_dc.at[bus, 'vm_pu'] if bus in net.res_bus_dc.index else None
+            v_kv = vm * float(net.bus_dc.at[bus, 'vn_kv']) if vm is not None and np.isfinite(vm) else None
+            dccaps.append({
+                'name': cap['name'], 'id': cap['id'], 'vm_pu': vm,
+                'energy_kj': 0.5 * cap['c_mf'] * 1e-3 * (v_kv * 1e3) ** 2 / 1e3 if v_kv is not None and cap['in_service'] else None,
+            })
+        out['dccapacitors'] = dccaps
+
+    # DC breakers: open or closed, the current through each and its loading.
+    if getattr(net, 'electrisim_dc_breakers', None):
+        breakers = []
+        for rec in net.electrisim_dc_breakers:
+            i_ka = _electrisim_dc_breaker_current_ka(net, rec)
+            rated = rec['rated_current_ka']
+            breakers.append({
+                'name': rec['name'], 'id': rec['id'], 'closed': rec['closed'],
+                'i_ka': i_ka if np.isfinite(i_ka) else None,
+                'loading_percent': 100.0 * i_ka / rated if rated > 0 and np.isfinite(i_ka) else None,
+                'rated_current_ka': rated, 'breaking_capacity_ka': rec['breaking_capacity_ka'],
+            })
+        out['dcbreakers'] = breakers
+
+    # DC diodes: conducting or blocking, the current through each, its drop and loss.
+    if getattr(net, 'electrisim_dc_diodes', None):
+        out['dcdiodes'] = [_electrisim_dc_diode_result(net, d) for d in net.electrisim_dc_diodes]
+
+    # Solid-state transformers: each stage's power, losses and loading; MV P and Q; port voltages.
+    if getattr(net, 'electrisim_ssts', None):
+        out['ssts'] = [_electrisim_sst_result(net, r) for r in net.electrisim_ssts]
+
+    # Sources and stores: power, voltage, current and state; the PCS, and those behind them.
+    pcs_out = [_electrisim_pcs_result(net, r) for r in getattr(net, 'electrisim_pcs', None) or []]
+    ders_out = [_electrisim_der_result(net, r) for r in getattr(net, 'electrisim_ders', None) or []]
+    ders_out += [r.pop('_source') for r in pcs_out if r.get('_source')]
+    for r in pcs_out:
+        r.pop('_source', None)
+    if ders_out:
+        out['ders'] = ders_out
+    if pcs_out:
+        out['pcs'] = pcs_out
+    gts = _electrisim_grounding_results(net)
+    if gts:
+        out['groundingtransformers'] = gts
+
+    # DC/DC converters: input and output power, losses, loading, both port voltages.
+    if getattr(net, 'electrisim_dc_dc_converters', None):
+        out['dcdcconverters'] = [_electrisim_dc_dc_result(net, c) for c in net.electrisim_dc_dc_converters]
+
+    # VSCs: not a DC/DC converter's output stage. Beyond its rating, said as an SST's or a PCS's is.
+    if hasattr(net, 'res_vsc') and not net.res_vsc.empty:
+        vscs = []
+        for i, row in net.res_vsc.iterrows():
+            if _electrisim_is_aux(net.vsc, i):
+                continue
+            vsc_name = net.vsc.at[i, 'name'] if 'name' in net.vsc.columns else f'VSC_{i}'
+            vsc_id = net.vsc.at[i, 'id'] if 'id' in net.vsc.columns else str(i)
+            rated = float(net.vsc.at[i, 'rated_mva']) if 'rated_mva' in net.vsc.columns else 0.0
+            s_vsc = math.hypot(float(row['p_mw']), float(row.get('q_mvar') or 0.0))
+            if warn and rated > 0 and np.isfinite(s_vsc) and s_vsc > rated * (1 + 1e-6):
+                label = getattr(net, 'user_friendly_names', {}).get(vsc_name, vsc_name)
+                _electrisim_warn(net, f"VSC '{label}' is loaded to {100 * s_vsc / rated:.1f} % of its rating.")
+            vscs.append({'name': vsc_name, 'id': vsc_id, 'p_mw': row['p_mw'], 'vm_pu': row.get('vm_pu', 0.0),
+                         'q_mvar': row.get('q_mvar'), 'p_dc_mw': row.get('p_dc_mw'), 'vm_dc_pu': row.get('vm_dc_pu')})
+        out['vscs'] = vscs
+
+    # B2B VSCs.
+    if hasattr(net, 'res_b2b_vsc') and not net.res_b2b_vsc.empty:
+        b2bs = []
+        for i, row in net.res_b2b_vsc.iterrows():
+            b2bs.append({
+                'name': net.b2b_vsc.at[i, 'name'] if 'name' in net.b2b_vsc.columns else f'B2B_VSC_{i}',
+                'id': net.b2b_vsc.at[i, 'id'] if 'id' in net.b2b_vsc.columns else str(i),
+                'p_mw': row['p_mw'], 'q_mvar': row.get('q_mvar'), 'vm_pu': row.get('vm_pu'),
+                'p_dc_mw_p': row.get('p_dc_mw_p'), 'p_dc_mw_m': row.get('p_dc_mw_m'),
+                'vm_dc_pu_p': row.get('vm_dc_pu_p'), 'vm_dc_pu_m': row.get('vm_dc_pu_m')})
+        if b2bs:
+            out['b2bvscs'] = b2bs
+
+    # DC cables (line_dc): not a DC breaker's coupler, a DC diode, or a battery's resistance.
+    if hasattr(net, 'res_line_dc') and not net.res_line_dc.empty:
+        lines = []
+        for i, row in net.res_line_dc.iterrows():
+            if 'electrisim_dc_breaker' in net.line_dc.columns and net.line_dc.at[i, 'electrisim_dc_breaker'] == True:
+                continue
+            if _electrisim_is_dc_diode(net, i) or _electrisim_is_hidden(net.line_dc, i):
+                continue
+            lines.append({
+                'name': net.line_dc.at[i, 'name'] if 'name' in net.line_dc.columns else f'LineDC_{i}',
+                'id': net.line_dc.at[i, 'id'] if 'id' in net.line_dc.columns else str(i),
+                'p_from_mw': row.get('p_from_mw', 0.0), 'p_to_mw': row.get('p_to_mw', 0.0),
+                'pl_mw': row.get('pl_mw', 0.0), 'vm_from_pu': row.get('vm_from_pu', 0.0),
+                'vm_to_pu': row.get('vm_to_pu', 0.0), 'i_from_ka': row.get('i_from_ka', 0.0),
+                'i_to_ka': row.get('i_to_ka', 0.0), 'loading_percent': row.get('loading_percent', 0.0)})
+        out['linedcs'] = lines
+    return out
+
+
 def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=False, in_data=None, Busbars=None,
               run_control_trafo2w=False, run_control_trafo3w=False, run_control_shunt=False):
             #pandapower - rozpływ mocy
@@ -10482,97 +10625,9 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                     result = {**result, **sscs.__dict__}                    
                        
                                         
-                #DC Bus
-                if(hasattr(net, 'res_bus_dc') and not net.res_bus_dc.empty):
-                    for index, row in net.res_bus_dc.iterrows():    
-                        if _electrisim_is_aux(net.bus_dc, index) or _electrisim_is_hidden(net.bus_dc, index):
-                            continue   # a converter stage's own element, or a battery's cells
-                        dcbus = DcBusOut(name=net.bus_dc.at[index, 'name'], id=_electrisim_row_id(net.bus_dc, index), vm_pu=row['vm_pu'], p_mw=row['p_mw'])        
-                        dcbusesList.append(dcbus) 
-                        dcbuses = DcBusesOut(dcbuses = dcbusesList) 
-                    result = {**result, **DcBusesOut(dcbuses = dcbusesList).__dict__}
-                
-                #Load DC
-                if(hasattr(net, 'res_load_dc') and not net.res_load_dc.empty):
-                    for index, row in net.res_load_dc.iterrows():    
-                        if _electrisim_is_aux(net.load_dc, index):
-                            continue   # a DC/DC converter's input or output
-                        loaddc = LoadDcOut(name=net.load_dc.at[index, 'name'], id=_electrisim_row_id(net.load_dc, index), p_mw=row['p_dc_mw'])        
-                        loadsdcList.append(loaddc) 
-                        loadsdc = LoadsDcOut(loadsdc = loadsdcList) 
-                    result = {**result, **LoadsDcOut(loadsdc = loadsdcList).__dict__}
-                
-                #Source DC
-                if(hasattr(net, 'res_source_dc') and not net.res_source_dc.empty):
-                    # Its power from what its bus draws: res_source_dc does not give it.
-                    src_i = _electrisim_source_dc_currents_ka(net)
-                    for index, row in net.res_source_dc.iterrows():    
-                        if _electrisim_is_hidden(net.source_dc, index):
-                            continue   # a battery's cells: reported with it
-                        vm_src = _electrisim_source_dc_vm(net, index)
-                        p_src = (src_i[index] * vm_src * float(net.bus_dc.at[int(net.source_dc.at[index, 'bus_dc']), 'vn_kv'])
-                                 if index in src_i and vm_src is not None else row['p_dc_mw'])
-                        sourcedc = SourceDcOut(name=net.source_dc.at[index, 'name'], id=_electrisim_row_id(net.source_dc, index), vm_pu=vm_src, p_mw=p_src)        
-                        sourcesdcList.append(sourcedc) 
-                        sourcesdc = SourcesDcOut(sourcesdc = sourcesdcList) 
-                    result = {**result, **sourcesdc.__dict__}
-                
-                # DC capacitors: their bus voltage and the energy they hold, E = C V^2 / 2.
-                if getattr(net, 'electrisim_dc_capacitors', None) and hasattr(net, 'res_bus_dc'):
-                    dccaps = []
-                    for cap in net.electrisim_dc_capacitors:
-                        if cap.get('electrisim_der'):
-                            continue   # a supercapacitor: reported with the sources and stores
-                        bus = cap['bus_dc']
-                        vm = net.res_bus_dc.at[bus, 'vm_pu'] if bus in net.res_bus_dc.index else None
-                        v_kv = vm * float(net.bus_dc.at[bus, 'vn_kv']) if vm is not None and np.isfinite(vm) else None
-                        dccaps.append({
-                            'name': cap['name'], 'id': cap['id'], 'vm_pu': vm,
-                            'energy_kj': 0.5 * cap['c_mf'] * 1e-3 * (v_kv * 1e3) ** 2 / 1e3 if v_kv is not None and cap['in_service'] else None,
-                        })
-                    result = {**result, 'dccapacitors': dccaps}
-
-                # DC breakers: open or closed, the current through each and its loading.
-                if getattr(net, 'electrisim_dc_breakers', None):
-                    breakers = []
-                    for rec in net.electrisim_dc_breakers:
-                        i_ka = _electrisim_dc_breaker_current_ka(net, rec)
-                        rated = rec['rated_current_ka']
-                        breakers.append({
-                            'name': rec['name'], 'id': rec['id'], 'closed': rec['closed'],
-                            'i_ka': i_ka if np.isfinite(i_ka) else None,
-                            'loading_percent': 100.0 * i_ka / rated if rated > 0 and np.isfinite(i_ka) else None,
-                            'rated_current_ka': rated, 'breaking_capacity_ka': rec['breaking_capacity_ka'],
-                        })
-                    result = {**result, 'dcbreakers': breakers}
-
-                # DC diodes: conducting or blocking, the current through each, its drop and loss.
-                if getattr(net, 'electrisim_dc_diodes', None):
-                    result = {**result, 'dcdiodes': [_electrisim_dc_diode_result(net, d)
-                                                     for d in net.electrisim_dc_diodes]}
-
-                # Solid-state transformers: each stage's power, losses and loading; MV P and Q; port voltages.
-                if getattr(net, 'electrisim_ssts', None):
-                    result = {**result, 'ssts': [_electrisim_sst_result(net, r) for r in net.electrisim_ssts]}
-
-                # Sources and stores: power, voltage, current and state; the PCS, and those behind them.
-                pcs_out = [_electrisim_pcs_result(net, r) for r in getattr(net, 'electrisim_pcs', None) or []]
-                ders_out = [_electrisim_der_result(net, r) for r in getattr(net, 'electrisim_ders', None) or []]
-                ders_out += [r.pop('_source') for r in pcs_out if r.get('_source')]
-                for r in pcs_out:
-                    r.pop('_source', None)
-                if ders_out:
-                    result = {**result, 'ders': ders_out}
-                if pcs_out:
-                    result = {**result, 'pcs': pcs_out}
-                gts = _electrisim_grounding_results(net)
-                if gts:
-                    result = {**result, 'groundingtransformers': gts}
-
-                # DC/DC converters: input and output power, losses, loading, both port voltages.
-                if getattr(net, 'electrisim_dc_dc_converters', None):
-                    result = {**result, 'dcdcconverters': [_electrisim_dc_dc_result(net, c)
-                                                           for c in net.electrisim_dc_dc_converters]}
+                # The DC network: buses, loads, sources, capacitors, breakers, diodes, SSTs, sources and
+                # stores, DC/DC converters, VSCs and DC cables - the time series' steps alike.
+                result = {**result, **_electrisim_dc_results(net)}
 
                 #Switch (net.res_switch: p_from_mw, q_from_mvar, p_to_mw, q_to_mvar, i_ka, loading_percent)
                 if(hasattr(net, 'res_switch') and not net.res_switch.empty):
@@ -10592,34 +10647,6 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                         switches = SwitchesOut(switches = switchesList) 
                     result = {**result, **switches.__dict__}
                 
-                #VSC
-                if(hasattr(net, 'res_vsc') and not net.res_vsc.empty):
-                    for index, row in net.res_vsc.iterrows():
-                        if _electrisim_is_aux(net.vsc, index):
-                            continue   # a DC/DC converter's output stage
-                        vsc_name = net.vsc.at[index, 'name'] if 'name' in net.vsc.columns else f'VSC_{index}'
-                        vsc_id = net.vsc.at[index, 'id'] if 'id' in net.vsc.columns else str(index)
-                        # Beyond its rating, said as an SST's or a PCS's is.
-                        rated = float(net.vsc.at[index, 'rated_mva']) if 'rated_mva' in net.vsc.columns else 0.0
-                        s_vsc = math.hypot(float(row['p_mw']), float(row.get('q_mvar') or 0.0))
-                        if rated > 0 and np.isfinite(s_vsc) and s_vsc > rated * (1 + 1e-6):
-                            label = getattr(net, 'user_friendly_names', {}).get(vsc_name, vsc_name)
-                            _electrisim_warn(net, f"VSC '{label}' is loaded to {100 * s_vsc / rated:.1f} % of its rating.")
-                        vsc = VSCOut(name=vsc_name, id=vsc_id, p_mw=row['p_mw'], vm_pu=row.get('vm_pu', 0.0), q_mvar=row.get('q_mvar'), p_dc_mw=row.get('p_dc_mw'), vm_dc_pu=row.get('vm_dc_pu'))
-                        vscsList.append(vsc) 
-                        vscs = VSCsOut(vscs = vscsList) 
-                    result = {**result, **VSCsOut(vscs = vscsList).__dict__}
-                
-                #B2B VSC
-                if(hasattr(net, 'res_b2b_vsc') and not net.res_b2b_vsc.empty):
-                    for index, row in net.res_b2b_vsc.iterrows():    
-                        b2b_name = net.b2b_vsc.at[index, 'name'] if 'name' in net.b2b_vsc.columns else f'B2B_VSC_{index}'
-                        b2b_id = net.b2b_vsc.at[index, 'id'] if 'id' in net.b2b_vsc.columns else str(index)
-                        b2bvsc = B2bVSCOut(name=b2b_name, id=b2b_id, p_mw=row['p_mw'], q_mvar=row.get('q_mvar'), vm_pu=row.get('vm_pu'), p_dc_mw_p=row.get('p_dc_mw_p'), p_dc_mw_m=row.get('p_dc_mw_m'), vm_dc_pu_p=row.get('vm_dc_pu_p'), vm_dc_pu_m=row.get('vm_dc_pu_m'))        
-                        b2bvscsList.append(b2bvsc) 
-                        b2bvscs = B2bVSCsOut(b2bvscs = b2bvscsList) 
-                    result = {**result, **b2bvscs.__dict__}
-                
                 #DCLine (old HVDC link element - pp.create_dcline)
                 if(net.res_dcline.empty):
                     pass
@@ -10630,57 +10657,6 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                             dclines = ImpedancesOut(dclines = dclinesList) 
                         result = {**result, **dclines.__dict__}         
                 
-                # DC Grid Line (line_dc element - pp.create_line_dc)
-                # This is part of DC grid modeling (bus_dc + line_dc + vsc)
-                if hasattr(net, 'res_line_dc') and not net.res_line_dc.empty:
-                    print(f"Processing res_line_dc results: {len(net.res_line_dc)} items")
-                    
-                    class LineDcOut(object):
-                        def __init__(self, name: str, id: str, p_from_mw: float, p_to_mw: float, pl_mw: float, 
-                                     vm_from_pu: float, vm_to_pu: float, i_from_ka: float, i_to_ka: float, loading_percent: float):
-                            self.name = name
-                            self.id = id
-                            self.p_from_mw = p_from_mw
-                            self.p_to_mw = p_to_mw
-                            self.pl_mw = pl_mw
-                            self.vm_from_pu = vm_from_pu
-                            self.vm_to_pu = vm_to_pu
-                            self.i_from_ka = i_from_ka
-                            self.i_to_ka = i_to_ka
-                            self.loading_percent = loading_percent
-                    
-                    class LineDcsOut(object):
-                        def __init__(self, linedcs: List[LineDcOut]):
-                            self.linedcs = linedcs
-                    
-                    linedcsList = []
-                    for index, row in net.res_line_dc.iterrows():
-                        if 'electrisim_dc_breaker' in net.line_dc.columns and net.line_dc.at[index, 'electrisim_dc_breaker'] == True:
-                            continue   # a DC breaker's coupler, reported with the breakers
-                        if _electrisim_is_dc_diode(net, index):
-                            continue   # a DC diode, reported with the diodes
-                        if _electrisim_is_hidden(net.line_dc, index):
-                            continue   # a battery's resistance, reported with it
-                        line_dc_name = net.line_dc.at[index, 'name'] if 'name' in net.line_dc.columns else f'LineDC_{index}'
-                        line_dc_id = net.line_dc.at[index, 'id'] if 'id' in net.line_dc.columns else str(index)
-                        
-                        linedc = LineDcOut(
-                            name=line_dc_name,
-                            id=line_dc_id,
-                            p_from_mw=row.get('p_from_mw', 0.0),
-                            p_to_mw=row.get('p_to_mw', 0.0),
-                            pl_mw=row.get('pl_mw', 0.0),
-                            vm_from_pu=row.get('vm_from_pu', 0.0),
-                            vm_to_pu=row.get('vm_to_pu', 0.0),
-                            i_from_ka=row.get('i_from_ka', 0.0),
-                            i_to_ka=row.get('i_to_ka', 0.0),
-                            loading_percent=row.get('loading_percent', 0.0)
-                        )
-                        linedcsList.append(linedc)
-                    
-                    linedcs = LineDcsOut(linedcs=linedcsList)
-                    result = {**result, **linedcs.__dict__}
-                    print(f"Added {len(linedcsList)} line_dc results to response")
                            
                 # Generate Python code if export is requested
                 if export_python and in_data and Busbars:
@@ -14513,6 +14489,106 @@ def _ts_advance_storage(state, hours=1.0):
             st['energy'] += st.get('p_now', 0.0) * hours
 
 
+# The time series' per-step rows for the DC network (and the AC breakers and motors), returned
+# up to this many steps: a week hourly. Beyond it - a year hourly, an hour by the second - the
+# per-element summary alone, as the rows would run to a million.
+TS_DC_ROW_CAP = 168
+
+# A DC result's ratings and settings: the same every step, so left out of its per-step row.
+_TS_DC_STATIC = frozenset((
+    'rated_mw', 'rated_current_ka', 'breaking_capacity_ka', 'capacity_ah', 'energy_kwh', 'v_f_v',
+    'current_limit_pu', 'q_capability_mvar', 'frequency_hz', 'p_max_mw', 'p_min_mw', 'link_kv',
+    'in_service', 'closed', 'islanded', 'capacitance_f', 'usable_kj',
+))
+
+
+def _ts_dc_rows(net, include_ders, vsc_rated):
+    """
+    One time step's DC results as the load flow gives them (_electrisim_dc_results),
+    each element's numbers and flags alone; an SST its stages' total loss and most
+    loaded stage, a VSC its loading from its rating. The AC breakers and motors with
+    them: the time series' AC tables leave them out. ``include_ders``: the sources
+    and stores and their PCS, unless the microgrid dispatch reports them.
+    """
+    ufn = getattr(net, 'user_friendly_names', {}) or {}
+    res = _electrisim_dc_results(net, warn=False)
+    if not include_ders:
+        res.pop('ders', None)
+        res.pop('pcs', None)
+    res.pop('groundingtransformers', None)
+    if hasattr(net, 'res_switch') and not net.res_switch.empty:
+        res['switches'] = [{'name': net.switch.at[i, 'name'], 'id': _electrisim_row_id(net.switch, i),
+                            'i_ka': row.get('i_ka'), 'loading_percent': row.get('loading_percent')}
+                           for i, row in net.res_switch.iterrows()]
+    if 'motor' in net and len(net.motor) and hasattr(net, 'res_motor') and not net.res_motor.empty:
+        res['motors'] = [{'name': net.motor.at[i, 'name'], 'id': _electrisim_row_id(net.motor, i),
+                          'p_mw': row.get('p_mw'), 'q_mvar': row.get('q_mvar')}
+                         for i, row in net.res_motor.iterrows()]
+    out = {}
+    for kind, items in res.items():
+        rows = []
+        for r in items or []:
+            if not isinstance(r, dict):
+                continue
+            name = r.get('name')
+            row = {'id': None if r.get('id') is None else str(r.get('id')),
+                   'name': r.get('label') or ufn.get(name, name)}
+            for k, v in r.items():
+                if k in ('id', 'name', 'label') or k in _TS_DC_STATIC:
+                    continue
+                if isinstance(v, (bool, np.bool_)):
+                    row[k] = bool(v)
+                elif isinstance(v, (int, float, np.integer, np.floating)) and np.isfinite(v):
+                    row[k] = float(v)
+            if kind == 'ssts':
+                stages = [st for st in r.get('stages') or [] if isinstance(st, dict)]
+                losses = [st['loss_mw'] for st in stages if st.get('loss_mw') is not None and np.isfinite(st['loss_mw'])]
+                loads = [st['loading_percent'] for st in stages
+                         if st.get('loading_percent') is not None and np.isfinite(st['loading_percent'])]
+                if losses:
+                    row['loss_mw'] = float(sum(losses))
+                if loads:
+                    row['loading_percent'] = float(max(loads))
+            elif kind == 'vscs' and row['id'] in vsc_rated and 'p_mw' in row:
+                rated = vsc_rated[row['id']]
+                row['loading_percent'] = 100.0 * math.hypot(row['p_mw'], row.get('q_mvar', 0.0)) / rated
+            rows.append(row)
+        out[kind] = rows
+    return out
+
+
+def _ts_dc_summary(steps):
+    """
+    Each element's range over the run from its per-step rows: of each number its
+    min, max and mean and the steps of its extremes; of each flag the steps it held.
+    """
+    acc = {}
+    for t, by_kind in enumerate(steps):
+        for kind, rows in (by_kind or {}).items():
+            for row in rows:
+                key = (kind, row['id'] if row['id'] is not None else row['name'])
+                e = acc.setdefault(key, {'kind': kind, 'id': row['id'], 'name': row['name'], 'num': {}, 'flag': {}})
+                for k, v in row.items():
+                    if k in ('id', 'name'):
+                        continue
+                    if isinstance(v, bool):
+                        e['flag'][k] = e['flag'].get(k, 0) + (1 if v else 0)
+                    else:
+                        e['num'].setdefault(k, []).append((t, v))
+    out = {}
+    for e in acc.values():
+        stats = {}
+        for k, tv in e['num'].items():
+            vals = [v for _, v in tv]
+            t_min = min(tv, key=lambda p: p[1])[0]
+            t_max = max(tv, key=lambda p: p[1])[0]
+            stats[k] = {'min': min(vals), 'max': max(vals), 'mean': sum(vals) / len(vals),
+                        't_min': t_min, 't_max': t_max}
+        out.setdefault(e['kind'], []).append({'id': e['id'], 'name': e['name'], 'steps': len(steps),
+                                              'stats': stats, 'flags_true_steps': e['flag']})
+    return out
+
+
 def _ts_run_powerflow(net, timeseries_params, time_index, prev_converged):
     """Run PF for one time step; warm-start from previous step when possible (pandapower timeseries style)."""
     algorithm = timeseries_params.get('algorithm', 'nr')
@@ -14659,6 +14735,15 @@ def time_series_simulation(net, timeseries_params):
         # The microgrid's sources and stores: their profiles, states, smoothing and dispatch.
         import microgrid_ts_electrisim as _mg
         mg = _mg.MicrogridTs.create(net, timeseries_params, step_s, time_steps)
+        # The DC network each step, as the load flow reports it: its AC tables alone were kept,
+        # and every DC element - the racks, rectifiers, converters, diodes - had nothing to show.
+        dc_steps = []
+        dc_failed = None
+        vsc_rated = ({str(net.vsc.at[i, 'id']): float(net.vsc.at[i, 'rated_mva'])
+                      for i in net.vsc.index
+                      if 'id' in net.vsc.columns and 'rated_mva' in net.vsc.columns
+                      and np.isfinite(safe_float(net.vsc.at[i, 'rated_mva'])) and safe_float(net.vsc.at[i, 'rated_mva']) > 0}
+                     if 'vsc' in net and len(net.vsc) else {})
 
         for t in range(time_steps):
             if orig_load_p is not None:
@@ -14695,6 +14780,11 @@ def time_series_simulation(net, timeseries_params):
                 mg.after_step(t, prev_converged)
             else:
                 prev_converged = _ts_run_powerflow(net, timeseries_params, t, prev_converged)
+            try:
+                dc_steps.append(_ts_dc_rows(net, include_ders=mg is None, vsc_rated=vsc_rated))
+            except Exception as dc_ex:   # noqa: BLE001 - said in the notes; the AC results stand
+                dc_steps.append({})
+                dc_failed = dc_failed or f'step {t}: {dc_ex}'
             _ts_advance_storage(storage_state, hours=step_hours)
             ufn = getattr(net, 'user_friendly_names', {}) or {}
             for idx, st in storage_state.items():
@@ -14926,6 +15016,22 @@ def time_series_simulation(net, timeseries_params):
                              f"{abs(st['p_mw']):.3g} MW, it runs {'full' if st['p_mw'] > 0 else 'empty'} "
                              f"{when} and is idle after.")
 
+        # Each DC element's range over the run; its per-step rows up to TS_DC_ROW_CAP steps.
+        dc_out = None
+        if any(dc_steps):
+            dc_out = {'summary': _ts_dc_summary(dc_steps), 'step_cap': TS_DC_ROW_CAP,
+                      'steps': None, 'steps_omitted': time_steps > TS_DC_ROW_CAP}
+            if time_steps <= TS_DC_ROW_CAP:
+                dc_out['steps'] = {}
+                for t, by_kind in enumerate(dc_steps):
+                    for kind, rows in by_kind.items():
+                        dc_out['steps'].setdefault(kind, []).extend({**row, 'time_step': t} for row in rows)
+            else:
+                notes.append(f"The DC network's per-step results are left out over {TS_DC_ROW_CAP} steps "
+                             f"({time_steps} run): each DC element's range over the run is given.")
+        if dc_failed:
+            notes.append(f"The DC network's results could not be read at {dc_failed}.")
+
         # A preset only reads as the run's when some element followed it:
         # with a profile of its own for every element, "constant" described
         # nothing that ran.
@@ -14948,6 +15054,7 @@ def time_series_simulation(net, timeseries_params):
             'externalgrids': all_ext_grids,
             'storages': all_storages,
             'microgrid': microgrid,
+            'dc': dc_out,
             'notes': notes,
             'voltage_statistics': vm_stats,
             'loading_statistics': loading_stats,
