@@ -6628,10 +6628,19 @@ def harmonic_analysis(in_data, frequency, mode, algorithm, loadmodel, max_iterat
     all_harmonics = sorted(set([1] + harmonic_orders))
     h_str = '[' + ','.join(str(h) for h in all_harmonics) + ']'
     execute_dss_command(f'set harmonics={h_str}')
-    try:
-        execute_dss_command('set mode=harmonics')
-    except Exception as e:
-        return json.dumps({"error": f"OpenDSS could not enter harmonics mode: {e}"})
+    # Entering harmonics mode writes the circuit's saved voltages to a file; on Windows the file
+    # just written can be held a moment (a virus scan, the last run's handle) and the study failed
+    # with "being used by another process" - the next run passed. A few short retries.
+    import time as _time
+    for attempt in range(4):
+        try:
+            execute_dss_command('set mode=harmonics')
+            break
+        except Exception as e:
+            if attempt < 3 and 'used by another process' in str(e):
+                _time.sleep(0.5 * (attempt + 1))
+                continue
+            return json.dumps({"error": f"OpenDSS could not enter harmonics mode: {e}"})
 
     # ---- Step 5: Apply harmonic-specific modifications and solve harmonics ----
 
