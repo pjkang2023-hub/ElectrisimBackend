@@ -101,8 +101,13 @@ def _json_serialize_default(obj):
 
 
 def _jsonify_safe(obj):
-    """Deep-convert numpy/pandas scalars and arrays so Flask jsonify succeeds."""
-    return json.loads(json.dumps(obj, default=_json_serialize_default))
+    """
+    Deep-convert numpy/pandas scalars and arrays so Flask jsonify succeeds, and
+    NaN/Inf to None: a DC OPF has no reactive power, every Q NaN, and the
+    browser's JSON.parse rejected the whole answer.
+    """
+    plain = json.loads(json.dumps(obj, default=_json_serialize_default))
+    return _sanitize_for_strict_json(plain)
 
 
 def _blank_numeric(value):

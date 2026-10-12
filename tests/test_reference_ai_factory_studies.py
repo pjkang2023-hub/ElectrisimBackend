@@ -351,6 +351,23 @@ def test_optimal_power_flow_in_merit_order(client):
     assert out['total_cost'] == pytest.approx(sum(r['marginal_cost'] * r['p_mw'] for r in rows), rel=1e-6)
 
 
+def test_dc_optimal_power_flow(client):
+    """
+    The OPF dialog's DC OPF: active power alone, so the same merit order - the
+    turbine to its 35 MW, the grid taking the rest - and no reactive power:
+    each Q none, not NaN, which is not JSON (the frontend could not read the
+    answer). Voltages are 1 pu by the method.
+    """
+    payload = _payload('opf_')
+    payload['0'] = {**payload['0'], 'opf_type': 'dc'}
+    out = _post(client, payload)                    # strict: a NaN fails here
+    assert out['opf_converged'] is True
+    gens = _by_label(payload, out['generators'])
+    turbine = next(r for k, r in gens.items() if k.startswith('Gas turbine'))
+    assert turbine['p_mw'] == pytest.approx(35.0, abs=1e-3)
+    assert all(r['q_mvar'] is None for r in out['busbars'])
+    assert all(r['vm_pu'] == pytest.approx(1.0) for r in out['busbars'])
+
 def test_time_series_a_day_with_dispatch(client):
     """
     The time-series dialog's request at 60 Hz: 24 hourly steps with the
