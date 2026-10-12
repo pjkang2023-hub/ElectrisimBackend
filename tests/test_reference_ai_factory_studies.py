@@ -664,12 +664,12 @@ def test_arc_flash_by_voltage_class(client):
 
 
 def _harmonics(client, tmp_path, spectrum=None):
+    # The harmonic dialog's own request, 60 Hz: its loads carry the drawing's spectrum (the CDU
+    # and fan loads "none"). The load flow's request carries none, so every load fell to
+    # OpenDSS's defaultload - a six-pulse rectifier's - and injected harmonics the drawing has not.
     import opendssdirect as dss
-    with open(os.path.join(HERE, 'reference', 'reference_radial.diagram_harmonic_payload.json'),
-              encoding='utf-8') as handle:
-        params = json.load(handle)['0']
-    p = _payload()
-    p['0'] = {**params, 'frequency': '60'}
+    p = _payload('harmonic_')
+    assert p['0']['analysisType'] == 'harmonic' and p['0']['frequency'] == '60'
     if spectrum:
         for v in p.values():
             if isinstance(v, dict) and str(v.get('typ', '')).startswith('VSC'):
@@ -694,7 +694,9 @@ def test_harmonics_the_converters_inject_and_ieee_519_is_judged(client, tmp_path
     want of a spectrum alone - a converter carrying nothing (the catcher's
     rectifiers at rest) was a load of no power, its 0/0 harmonic current made
     every solve NaN. With active front ends all pass; with six-pulse diode
-    bridges the lineups' 0.48 kV buses fail on a single harmonic.
+    bridges Lineup A's 0.48 kV bus fails on a single harmonic and Lineup B's
+    comes within a few tenths of its 5 %, the CDU and fan loads injecting none
+    as drawn (with OpenDSS's default load spectrum both failed).
     """
     p, buses = _harmonics(client, tmp_path)
     assert len(buses) == 10
@@ -707,8 +709,9 @@ def test_harmonics_the_converters_inject_and_ieee_519_is_judged(client, tmp_path
             buses['Lineup A 0.48 kV']['ieee519']['thd_limit_percent']) == (5.0, 8.0)
 
     _, six = _harmonics(client, tmp_path, spectrum='six_pulse')
-    for name in ('Lineup A 0.48 kV', 'Lineup B 0.48 kV'):
-        assert not six[name]['ieee519']['ok'] and six[name]['ieee519']['max_individual_percent'] > 5.0, name
+    lineup_a, lineup_b = six['Lineup A 0.48 kV']['ieee519'], six['Lineup B 0.48 kV']['ieee519']
+    assert not lineup_a['ok'] and lineup_a['max_individual_percent'] > 5.0
+    assert lineup_b['ok'] and 4.5 < lineup_b['max_individual_percent'] < 5.0
     assert six['Grid 245 kV']['ieee519']['ok']
     assert six['Grid 245 kV']['vthd_percent'] > 2 * buses['Grid 245 kV']['vthd_percent']
 
