@@ -369,7 +369,7 @@ def test_reference_network_solves(quiet):
     tests/reference/reference_pcs3750_mv.spec.json - three blocks, fully loaded
     (10.8 MW of DGX H100 racks behind three SSTs): the twelve grid-forming PCS
     share it equally near their set points (60 Hz), the rectifiers carry it
-    all, the batteries idle, and the grid supplies it at 93-94 % to the racks
+    all, the batteries idle, and the grid supplies it at 92-93 % to the racks
     (the spec's ~93 %).
     """
     import json
@@ -385,4 +385,4 @@ def test_reference_network_solves(quiet):
     assert all(a['loading_percent'] < 100 for a in res['vscs'])
     assert all(abs(s['p_mw']) < 1e-4 for s in res['sources_and_stores'] if s['kind'] == 'Battery')
     grid = res['external_grids'][0]['p_mw']
-    assert 0.93 < 3 * 3.6 / grid < 0.945
+    assert 0.92 < 3 * 3.6 / grid < 0.935

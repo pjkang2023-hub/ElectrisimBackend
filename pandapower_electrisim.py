@@ -2163,7 +2163,15 @@ def _electrisim_runpp_dc_loads(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, 
     powers they would have reached.
     """
     if not _electrisim_has_dc_load_models(net):
-        return _electrisim_pp_runpp(net, _electrisim_facts_angle_start(net, kwargs))
+        try:
+            return _electrisim_pp_runpp(net, _electrisim_facts_angle_start(net, kwargs))
+        except pp.LoadflowNotConverged:
+            if kwargs.get('init') != 'results':
+                raise
+            # A warm start that cannot reach a point far from the last: once more, cold. The SSTs'
+            # inputs stepping from no load to 11 MW in one round, with one PCS holding the island's
+            # balance, sent every later load flow of a block-out case through the halving below.
+            return _electrisim_pp_runpp(net, _electrisim_facts_angle_start(net, {**kwargs, 'init': 'auto'}))
     ld = net.load_dc
     rows = [i for i in ld.index if pd.notna(ld.at[i, 'electrisim_share_p'])]
     lo = {i: 0.0 for i in rows}       # powers known to be too low (g < 0)
@@ -2175,7 +2183,15 @@ def _electrisim_runpp_dc_loads(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, 
         init = kwargs.get('init', 'auto')
         if init not in starts:
             starts[init] = _electrisim_facts_angle_start(net, kwargs)
-        _electrisim_pp_runpp(net, starts[init])
+        try:
+            _electrisim_pp_runpp(net, starts[init])
+        except pp.LoadflowNotConverged:
+            if init != 'results':
+                raise
+            # From the last results it may not reach a point far from them; from a cold start it may.
+            if 'auto' not in starts:
+                starts['auto'] = _electrisim_facts_angle_start(net, {**kwargs, 'init': 'auto'})
+            _electrisim_pp_runpp(net, starts['auto'])
 
     def halve():
         for i in rows:

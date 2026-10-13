@@ -537,8 +537,8 @@ class GridFormingVsc(Vsc):
         self.ki_2 = 2 * math.pi * 10.0
         self.v2_f = np.zeros(2)                   # its bus's negative-sequence voltage (d, q), half-cycle mean
         self.i2_f = np.zeros(2)                   # its negative-sequence current, half-cycle mean
-        self.acc_2 = np.zeros(4)                  # their running integrals, and their history over a half cycle
-        self.hist_2 = collections.deque([(0.0, np.zeros(4))])
+        self.acc_2 = np.zeros(6)                  # their running integrals, and their history over a half cycle
+        self.hist_2 = collections.deque([(0.0, np.zeros(6))])
         self.e2 = np.zeros(2)                     # the negative-sequence voltage it adds
         self.neg_trace = []                       # (t, |V2| / |V1|, |I2|)
         e_ph, v_ph, i_ph = self.e_ph0, self.v_ph0, self.i_ph0
@@ -604,7 +604,7 @@ class GridFormingVsc(Vsc):
         # Its negative sequence first: what it carries there comes off its positive-sequence limit.
         i_lim = self.i_max
         if self.unbalance_control:
-            i_lim = self._negative_sequence(t_s, v, i, theta, dt, math.hypot(v_d, v_q))
+            self._negative_sequence(t_s, v, i, theta, dt, math.hypot(v_d, v_q), i_mag)
         i_est = math.hypot(e_d - v_d, e_q - v_q) / math.hypot(self.r, self.w_gf * self.l)
         if i_est > i_lim:
             k = i_lim / i_est
@@ -638,32 +638,42 @@ class GridFormingVsc(Vsc):
         self.freq_trace.append((t_s, self.w_gf / (2 * math.pi)))
         return 'soft' if changed else False
 
-    def _negative_sequence(self, t_s, v, i, theta, dt, v1):
+    def _negative_sequence(self, t_s, v, i, theta, dt, v1, i1):
         """
         One sample of its negative-sequence control: its bus's V2 integrated
         into the negative-sequence voltage it adds, its I2 held within its
-        limit. Returns the current left for its positive sequence.
+        limit and within the headroom its positive sequence leaves (i_max - |I1|):
+        the positive sequence first. Given the priority instead, at full load
+        it took the positive sequence's current, the backbone sagged to 0.67 pu
+        and the SSTs, drawing constant power, blocked.
         """
         # Averaged over the last half cycle: the positive sequence turns at 2f in this frame, and a
         # half cycle's mean takes it out exactly (a first-order filter left 13 % of it, against a
         # 2-4 % unbalance).
-        x = np.concatenate([park(v, -theta), park(i, -theta)])
+        # Its positive-sequence current too: measured at an instant it carries the negative sequence's
+        # 2f ripple, and the headroom left at each ripple's peak squeezed the control to nothing.
+        x = np.concatenate([park(v, -theta), park(i, -theta), park(i, theta)])
         self.acc_2 = self.acc_2 + x * dt
         self.hist_2.append((t_s, self.acc_2.copy()))
         window = math.pi / self.w0
         while len(self.hist_2) > 2 and self.hist_2[1][0] <= t_s - window:
             self.hist_2.popleft()
         t0, acc0 = self.hist_2[0]
-        if t_s - t0 > 1e-12:
-            mean = (self.acc_2 - acc0) / (t_s - t0)
-            self.v2_f, self.i2_f = mean[:2], mean[2:]
+        if t_s - t0 < window * (1.0 - 1e-6):
+            # Not yet a half cycle of it: its mean still holds the positive sequence, and integrating
+            # that would wind up some 150 V of negative sequence in 8 ms.
+            return
+        mean = (self.acc_2 - acc0) / (t_s - t0)
+        self.v2_f, self.i2_f = mean[:2], mean[2:4]
+        i1 = float(np.hypot(*mean[4:6]))
         i2 = float(np.hypot(*self.i2_f))
-        if i2 > self.i2_max > 0:
-            self.e2 *= self.i2_max / i2           # held at its limit, its integrator with it
+        limit = min(self.i2_max, max(self.i_max - i1, 0.0))
+        if i2 > limit:
+            self.e2 *= limit / i2 if i2 > 0 else 0.0     # held at its limit, its integrator with it
+            self.limited_2 = getattr(self, 'limited_2', 0.0) + dt
         else:
             self.e2 -= self.ki_2 * self.v2_f * dt
         self.neg_trace.append((t_s, float(np.hypot(*self.v2_f)) / max(v1, 1.0), i2))
-        return max(self.i_max - min(i2, self.i2_max), 0.5 * self.i_max)
 
 
 class DcDc:
