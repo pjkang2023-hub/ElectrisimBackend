@@ -153,7 +153,9 @@ def test_source_on_a_dc_bus_behind_the_pcs(client, quiet):
     """
     The battery alone on a DC bus the PCS's DC side reaches is the same as one
     wired straight to it, and that DC bus is the PCS's own, not reported. A
-    DC bus with a network on it is a VSC's: the PCS is left out.
+    DC bus with a network on it: the PCS draws its DC side from that network,
+    as a double-conversion UPS's inverter does from its DC link (it was left
+    out before).
     """
     request = _drawn_request()
     lv = _lv(request)
@@ -164,9 +166,11 @@ def test_source_on_a_dc_bus_behind_the_pcs(client, quiet):
         assert on_bus['pcs'][0][key] == pytest.approx(straight['pcs'][0][key], rel=1e-9), key
     assert 'cell-link' not in _by_id(on_bus['dcbuses'])
     assert not any('LINK' in w for w in on_bus.get('warnings', []))
-    network = _post(client, quiet, _with(_drawn_request(), _pcs('p9', lv, bus_dc='dc_b')))
-    assert not network.get('pcs')
-    assert any("PCS 'P9' is left out: its DC side must be one source or store" in w for w in network['warnings'])
+    network = _post(client, quiet, _with(_drawn_request(), _pcs('p9', lv, bus_dc='dc_b', p_set_mw=0.1)))
+    (p9,) = network['pcs']
+    assert p9['source_kind'] == 'DC bus' and p9['p_mw'] == pytest.approx(0.1, rel=1e-6)
+    assert p9['p_dc_mw'] > p9['p_mw'] and p9['v_dc_v'] > 0
+    assert not any("PCS 'P9' is left out" in w for w in network.get('warnings', []))
 
 
 def test_rating_and_capability(client, quiet):

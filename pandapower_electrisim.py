@@ -20,6 +20,7 @@ from pandapower.timeseries import DFData
 from copy import deepcopy
 import weakref
 import der_electrisim
+import converter_rating
 
 from storage_q_capability import resolve_storage_pq
 from sc_fault_location import (
@@ -2047,13 +2048,19 @@ def _electrisim_runpp_settled(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, *
     for st in rated.values():
         st['hold'] = False
     pcs = _electrisim_pcs_to_settle(net)
-    if not getattr(net, 'electrisim_ders', None) and not droop and not pcs and not rated:
+    if (not getattr(net, 'electrisim_ders', None) and not droop and not pcs and not rated
+            and not _electrisim_follow_load_vscs(net)):
         return _electrisim_runpp_converters(net, max_rounds, tolerance_mw, **kwargs)
+    # A VSC following its bus's load starts each round as the first did: from the last results, a
+    # rectifier whose power had moved converged to a collapsed root (its 505 V bus at 0 p.u.) or not at
+    # all - pandapower's VSC is started from its last internal voltages, far from its new operating point.
+    warm = not _electrisim_follow_load_vscs(net)
     for _ in range(60):
         _electrisim_runpp_converters(net, max_rounds, tolerance_mw, **kwargs)
         if max(_electrisim_settle_ders(net), _electrisim_settle_pcs(net)) <= 1e-8:
             return None
-        kwargs = {**kwargs, 'init': 'results'}
+        if warm:
+            kwargs = {**kwargs, 'init': 'results'}
     _electrisim_warn(net, 'The sources, stores and PCS had not settled after 60 load flows: '
                           'their voltages and powers are those of the last one.')
     return None
@@ -2913,7 +2920,9 @@ def _electrisim_dc_bus_has_network(net, bus):
             return True
     ld = net.load_dc
     if len(ld):
-        real = ld if 'electrisim_dcdc_role' not in ld.columns else ld[ld['electrisim_dcdc_role'].isna()]
+        # A load, or a PCS's DC side (a double-conversion UPS's inverter on its DC link).
+        real = ld if 'electrisim_dcdc_role' not in ld.columns else ld[ld['electrisim_dcdc_role'].isna()
+                                                                      | (ld['electrisim_dcdc_role'] == 'pcs')]
         if (real['bus_dc'] == bus).any():
             return True
     # A DC breaker joining it to another bus: a cable once the breakers are applied, after the
@@ -3003,6 +3012,107 @@ def _electrisim_settle_ders(net):
     for conv in getattr(net, 'electrisim_dc_dc_converters', None) or []:
         worst = max(worst, _electrisim_droop_within_rating(net, conv))
     worst = max(worst, _electrisim_rectifiers_within_rating(net))
+    worst = max(worst, _electrisim_settle_follow_load(net))
+    return worst
+
+
+def _electrisim_vsc_rating_result(net, vi):
+    """
+    A VSC's rating where it runs and its loading against it - its rating at
+    its AC bus's voltage (current-limited below nominal) - and its DC current.
+    """
+    out = {'rated_mva': None, 'loading_percent': None, 'i_dc_ka': None, 'derating_factor': None}
+    df = net.vsc
+    rated = safe_float(df.at[vi, 'rated_mva'], 0.0) if 'rated_mva' in df.columns else 0.0
+    if 'derating_factor' in df.columns and pd.notna(df.at[vi, 'derating_factor']):
+        out['derating_factor'] = float(df.at[vi, 'derating_factor'])
+    if vi not in net.res_vsc.index:
+        return out
+    p, q, p_dc = (float(net.res_vsc.at[vi, c]) for c in ('p_mw', 'q_mvar', 'p_dc_mw'))
+    if rated > 0:
+        out['rated_mva'] = rated
+        bus = int(df.at[vi, 'bus'])
+        vm = float(net.res_bus.at[bus, 'vm_pu']) if bus in net.res_bus.index else 1.0
+        if np.isfinite(p) and np.isfinite(q):
+            out['loading_percent'] = 100.0 * math.hypot(p, q) / (rated * converter_rating.voltage_factor(vm))
+    b = int(df.at[vi, 'bus_dc'])
+    if b in net.res_bus_dc.index and np.isfinite(p_dc):
+        v_kv = float(net.res_bus_dc.at[b, 'vm_pu']) * float(net.bus_dc.at[b, 'vn_kv'])
+        out['i_dc_ka'] = abs(p_dc) / v_kv if v_kv > 0 else None
+    return out
+
+
+def _electrisim_follow_load_vscs(net):
+    """The VSCs following their DC bus's load: {index: the charge (MW) they add for its batteries}."""
+    df = net.get('vsc')
+    if df is None or not len(df) or 'electrisim_follow_charge_mw' not in df.columns:
+        return {}
+    on = df['in_service'].fillna(False).astype(bool) & df['electrisim_follow_charge_mw'].notna()
+    return {int(i): float(df.at[i, 'electrisim_follow_charge_mw']) for i in df.index[on]}
+
+
+def _electrisim_settle_follow_load(net):
+    """
+    Each VSC following its DC bus's load: it delivers what its bus's loads
+    draw plus its charge for the batteries that hold the bus - moved each
+    round by what those batteries deliver above the charge they should take,
+    shared between the bus's followers by rating - within its rating, the
+    batteries taking the rest. A bus with no battery to hold it: the follower
+    holds it at 1.0 p.u. instead, said once. Returns how far it moved (MW).
+    """
+    follow = _electrisim_follow_load_vscs(net)
+    if not follow or 'res_vsc' not in net or not len(net.res_vsc):
+        return 0.0
+    bats = {}
+    for rec in getattr(net, 'electrisim_ders', None) or []:
+        if rec['kind'] == 'Battery' and rec['coupling'] == 'direct' and rec['obj'].in_service:
+            bats.setdefault(rec['bus'], []).append(rec)
+    by_bus = {}
+    for vi in follow:
+        by_bus.setdefault(int(net.vsc.at[vi, 'bus_dc']), []).append(vi)
+    worst = 0.0
+    names = getattr(net, 'user_friendly_names', {}) or {}
+    for bus, vscs in by_bus.items():
+        if bus not in bats:
+            for vi in vscs:
+                net.vsc.at[vi, 'control_mode_dc'] = 'vm_pu'
+                net.vsc.at[vi, 'control_value_dc'] = 1.0
+                net.vsc.at[vi, 'electrisim_follow_charge_mw'] = np.nan
+                _electrisim_warn(net, f"VSC '{names.get(net.vsc.at[vi, 'name'], net.vsc.at[vi, 'name'])}' follows its "
+                                      "DC bus's load, but no battery on that bus holds its voltage: it holds it at "
+                                      "1.0 p.u. instead.")
+            worst = max(worst, 1.0)
+            continue
+        line = net.res_line_dc['p_to_mw'] if 'res_line_dc' in net and 'p_to_mw' in net.res_line_dc.columns else None
+        delivered = 0.0                              # by the bus's batteries, MW
+        for rec in bats[bus]:
+            li = rec['parts'].get('line')
+            if line is None or li not in line.index or not np.isfinite(line.at[li]):
+                delivered = np.nan
+                break
+            delivered += -float(line.at[li])
+        if not np.isfinite(delivered):
+            continue
+        charge = sum(follow[vi] for vi in vscs)
+        shift = delivered + charge                   # what the followers should add, MW
+        weights = [max(safe_float(net.vsc.at[vi, 'rated_mva'], 0.0), 0.0) or 1.0 for vi in vscs]
+        for vi, w in zip(vscs, weights):
+            if vi not in net.res_vsc.index:
+                continue
+            now = -float(net.vsc.at[vi, 'control_value_dc'])          # into its DC bus, MW
+            target = now + shift * w / sum(weights)
+            rated = safe_float(net.vsc.at[vi, 'rated_mva'], 0.0)
+            p_ac, q = float(net.res_vsc.at[vi, 'p_mw']), float(net.res_vsc.at[vi, 'q_mvar'])
+            ac = int(net.vsc.at[vi, 'bus'])
+            if ac in net.res_bus.index and np.isfinite(net.res_bus.at[ac, 'vm_pu']):
+                rated *= converter_rating.voltage_factor(float(net.res_bus.at[ac, 'vm_pu']))   # current-limited
+            if rated > 0:
+                # Within its rating: its AC side scales with what it delivers (its own losses with it).
+                allowed = math.sqrt(max(rated * rated - (q * q if np.isfinite(q) else 0.0), 0.0))
+                scale = now / p_ac if np.isfinite(p_ac) and p_ac > 1e-9 and now > 1e-9 else 1.0
+                target = min(max(target, -allowed * scale), allowed * scale)
+            worst = max(worst, abs(target - now))
+            net.vsc.at[vi, 'control_value_dc'] = -target
     return worst
 
 
@@ -3087,6 +3197,18 @@ def _electrisim_warn_rectifier_limits(net):
         elif st['hold']:
             _electrisim_warn(net, f"VSC '{label}' carries more than its rating, {st['rated']:g} MVA: nothing "
                                   "else holds its DC bus, so it holds it beyond its rating.")
+    for vi in _electrisim_follow_load_vscs(net):
+        rated = safe_float(net.vsc.at[vi, 'rated_mva'], 0.0)
+        if rated <= 0 or vi not in net.res_vsc.index:
+            continue
+        s = math.hypot(float(net.res_vsc.at[vi, 'p_mw']), float(net.res_vsc.at[vi, 'q_mvar']))
+        ac = int(net.vsc.at[vi, 'bus'])
+        vm = float(net.res_bus.at[ac, 'vm_pu']) if ac in net.res_bus.index else 1.0
+        rated *= converter_rating.voltage_factor(vm)
+        if np.isfinite(s) and s >= rated * (1.0 - 1e-6):
+            label = (getattr(net, 'user_friendly_names', {}) or {}).get(net.vsc.at[vi, 'name'], net.vsc.at[vi, 'name'])
+            _electrisim_warn(net, f"VSC '{label}' follows its DC bus's load to its rating, {rated:.4g} MVA: the "
+                                  "batteries on its bus carry the rest.")
 
 
 def _electrisim_droop_within_rating(net, conv):
@@ -3404,36 +3526,52 @@ def _electrisim_build_pcs(net, Busbars, study):
         # Its source: wired to its DC side, or alone on the DC bus its DC side reaches.
         src = next((d for d in ders if el.get('der') and d.get('name') == el.get('der')), None)
         bus_dc = _electrisim_dc_bus(net, el.get('bus_dc')) if el.get('bus_dc') else None
+        network = False
         if src is None and bus_dc is not None:
             on_bus = [d for d in ders if _electrisim_dc_bus(net, d.get('bus')) == bus_dc]
-            alone = (len(on_bus) == 1 and not _electrisim_dc_bus_has_network(net, bus_dc)
-                     and not any(bus_dc in (c['bus_in'], c['bus_out']) for c in convs))
-            if not alone:
-                _electrisim_warn(net, f"PCS '{label}' is left out: its DC side must be one source or store, alone on "
-                                      "its DC bus. A DC network joins an AC bus through a VSC.")
-                continue
-            src = on_bus[0]
-        if src is None:
+            elsewhere = (_electrisim_dc_bus_has_network(net, bus_dc)
+                         or any(bus_dc in (c['bus_in'], c['bus_out']) for c in convs))
+            if len(on_bus) == 1 and not elsewhere:
+                src = on_bus[0]
+            elif on_bus or elsewhere:
+                # Its DC side a DC network - a double-conversion UPS's DC link, its rectifier's and its
+                # batteries' bus: it draws its AC power's input from that bus, whatever holds it.
+                # Refused before: a PCS took one source alone on its bus, or none.
+                network = True
+        if src is None and not network:
             _electrisim_warn(net, f"PCS '{label}' has no battery, supercapacitor, flywheel, SOFC system or PV array "
                                   "on its DC side, so it is left out.")
             continue
-        ders.remove(src)
-        kind = der_electrisim.kind_of(src.get('typ'))
-        src_label = src.get('userFriendlyName') or src.get('name')
-        if bus_dc is not None and bus_dc in net.bus_dc.index:
-            net.bus_dc.drop(bus_dc, inplace=True)       # the PCS's own DC link: its source's terminals
-        # A supercapacitor behind a PCS, grid-forming, is an eSTATCOM: a STATCOM with an energy store
-        # (GE Vernova's FACTSFLEX). It was refused - a supercapacitor joined a DC bus only - so the
-        # 800 V AI factory reference had no way to draw one.
-        try:
-            obj = der_electrisim.build(src)
-        except ValueError as e:
-            _electrisim_warn(net, f"PCS '{label}' is left out: {e}")
-            continue
-        on = _electrisim_in_service(el) and obj.in_service
-        s_rated = safe_float(el.get('s_rated_mva'), 1.0)
+        if network:
+            kind, src_label, obj = 'DC bus', str(net.bus_dc.at[bus_dc, 'name']), None
+            src = {'name': net.bus_dc.at[bus_dc, 'name'], 'id': ''}
+        else:
+            ders.remove(src)
+            kind = der_electrisim.kind_of(src.get('typ'))
+            src_label = src.get('userFriendlyName') or src.get('name')
+            if bus_dc is not None and bus_dc in net.bus_dc.index:
+                net.bus_dc.drop(bus_dc, inplace=True)       # the PCS's own DC link: its source's terminals
+            # A supercapacitor behind a PCS, grid-forming, is an eSTATCOM: a STATCOM with an energy store
+            # (GE Vernova's FACTSFLEX). It was refused - a supercapacitor joined a DC bus only - so the
+            # 800 V AI factory reference had no way to draw one.
+            try:
+                obj = der_electrisim.build(src)
+            except ValueError as e:
+                _electrisim_warn(net, f"PCS '{label}' is left out: {e}")
+                continue
+        on = _electrisim_in_service(el) and (network or obj.in_service)
+        s_nameplate = safe_float(el.get('s_rated_mva'), 1.0)
+        if s_nameplate <= 0:
+            s_nameplate = 1.0
+        # Its rating where it runs: derated by its inlet air and altitude (converter_rating).
+        derate = converter_rating.derating(el)
+        for note in derate['notes']:
+            _electrisim_warn(net, f"PCS '{label}': {note}.")
+        s_rated = s_nameplate * derate['factor']
         if s_rated <= 0:
-            s_rated = 1.0
+            _electrisim_warn(net, f"PCS '{label}' is derated to nothing at its inlet air and altitude, so it is "
+                                  "left out.")
+            continue
         eta = safe_float(el.get('efficiency_percent'), 98.0) / 100.0
         if not 0 < eta <= 1:
             eta = 1.0
@@ -3452,9 +3590,19 @@ def _electrisim_build_pcs(net, Busbars, study):
             'k': safe_float(el.get('current_limit_pu'), 1.2),
             'current_loop_hz': safe_float(el.get('current_loop_hz'), 500.0),   # the EMT study's
             'source': {'obj': obj, 'kind': kind, 'name': src.get('name'), 'label': src_label, 'id': src.get('id', ''),
-                       'coupling': 'pcs', 'parts': {}, 'bus': None},
+                       'coupling': 'pcs', 'parts': {}, 'bus': int(bus_dc) if network else None},
             'table': None, 'index': None, 'island': None, 'reference': False, 'df_pu': 0.0, 'qv_hist': None,
+            's_nameplate': s_nameplate, 'derating': derate, 'q_max_pu': converter_rating.q_max_pu(el),
+            'overload': converter_rating.overload_steps(el.get('overload_curve')),
+            'dc_bus': int(bus_dc) if network else None, 'dc_load': None,
+            # The EMT study's: grid-forming, its bus's negative-sequence voltage held at zero.
+            'unbalance_control': _electrisim_boolish(el.get('unbalance_control'), False),
+            'i2_limit_pu': safe_float(el.get('i2_limit_pu'), 0.3),
         }
+        if network:
+            # Its DC side: what its AC side delivers, drawn from its bus with its losses (settled with the load flow).
+            rec['dc_load'] = _electrisim_new_load_dc(net, int(bus_dc), 0.0, f'{name} DC side', on,
+                                                     electrisim_aux=True, electrisim_dcdc_role='pcs')
         vn_ac = safe_float(el.get('vn_ac_kv'), 0.0)
         if vn_ac > 0 and abs(vn_ac - vn) > 0.1 * vn:
             _electrisim_warn(net, f"PCS '{label}': its AC side is rated {vn_ac:g} kV, its bus is {vn:g} kV - "
@@ -3474,10 +3622,13 @@ def _electrisim_build_pcs(net, Busbars, study):
                 net.sgen.at[idx, col] = value
             rec.update(table='sgen', index=int(idx))
         else:
-            idx = pp.create_gen(net, bus, p_mw=p_ac, vm_pu=rec['vm_set_pu'], max_q_mvar=s_rated, min_q_mvar=-s_rated,
+            q_cap = s_rated * (rec['q_max_pu'] or 1.0)
+            idx = pp.create_gen(net, bus, p_mw=p_ac, vm_pu=rec['vm_set_pu'], max_q_mvar=q_cap, min_q_mvar=-q_cap,
                                 max_p_mw=s_rated, min_p_mw=-s_rated, **common)
             rec.update(table='gen', index=int(idx))
         net[rec['table']].at[rec['index'], 'electrisim_pcs'] = True
+        if network:
+            net.load_dc.at[rec['dc_load'], 'p_dc_mw'] = _electrisim_dc_dc_input_power(p_ac, eta, rec['p_nl_mw'])
         if 'OptimalPowerFlow' in str(study):
             _electrisim_pcs_opf_limits(net, rec)
         net.electrisim_pcs.append(rec)
@@ -3505,7 +3656,7 @@ def _electrisim_pcs_set_point(net, rec):
         _electrisim_warn(net, f"PCS '{rec['label']}': {p_ac:.4g} MW is more than its rating ({s:g} MVA), "
                               f"so it delivers {math.copysign(s, p_ac):.4g} MW.")
         p_ac = math.copysign(s, p_ac)
-    q_max = math.sqrt(max(s * s - p_ac * p_ac, 0.0))
+    q_max = converter_rating.q_limit(s, p_ac, rec.get('q_max_pu'))
     if rec['q_mode'] == 'pf':
         pf = min(max(abs(rec['pf']), 1e-3), 1.0)
         q = math.copysign(abs(p_ac) * math.tan(math.acos(pf)), rec['pf'])
@@ -3515,7 +3666,8 @@ def _electrisim_pcs_set_point(net, rec):
         q = rec['q_set_mvar']
     if abs(q) > q_max + 1e-12:
         _electrisim_warn(net, f"PCS '{rec['label']}': its Q ({q:.4g} Mvar) is held to {math.copysign(q_max, q):.4g} "
-                              f"Mvar by its rating, its active power first.")
+                              f"Mvar by its rating, its active power first"
+                              + (f", within {100 * rec['q_max_pu']:g} % of it." if rec.get('q_max_pu') else "."))
         q = math.copysign(q_max, q)
     rec['q_max'] = q_max
     return p_ac, q
@@ -3535,10 +3687,17 @@ def _electrisim_pcs_window(rec):
         p_lo = _electrisim_stage_output(obj.p_min_frac * obj.p_rated / 1e6, eta, p_nl)
     elif src['kind'] == 'PV Array':
         p_hi, p_lo = max(_electrisim_stage_output(obj.mpp()[2] / 1e6, eta, p_nl), 0.0), 0.0
+    elif src['kind'] == 'DC bus':
+        # On a DC network: its rating, either way - what holds its bus answers for the energy.
+        p_hi, p_lo = math.inf, -math.inf
     else:
         dis, ch = obj.p_limits()
         p_hi = _electrisim_stage_output(dis / 1e6, eta, p_nl) if dis > 0 else 0.0
         p_lo = _electrisim_stage_output(-ch / 1e6, eta, p_nl) if ch > 0 else 0.0
+    # With a short-time overload, up to its highest step: an island's grid-forming PCS then share a load
+    # beyond their ratings equally by droop - each warned of its overload - where three held at 100 %
+    # and the reference carried the rest (118 %).
+    s = s * max([m for _, m in rec.get('overload') or []] or [1.0])
     return min(p_hi, s), max(p_lo, -s)
 
 
@@ -3554,7 +3713,7 @@ def _electrisim_pcs_opf_limits(net, rec):
     p_hi, p_lo = rec['p_max_mw'], rec['p_min_mw']
     if rec['source']['kind'] == 'Supercapacitor':
         p_hi = p_lo = min(max(rec.get('p_set_ac', 0.0), p_lo), p_hi)
-    q_box = math.sqrt(max(rec['s_rated'] ** 2 - max(abs(p_hi), abs(p_lo)) ** 2, 0.0))
+    q_box = converter_rating.q_limit(rec['s_rated'], max(abs(p_hi), abs(p_lo)), rec.get('q_max_pu'))
     table, idx = rec['table'], rec['index']
     for col, value in (('controllable', True), ('min_p_mw', p_lo), ('max_p_mw', max(p_hi, p_lo + 1e-6)),
                        ('min_q_mvar', -q_box), ('max_q_mvar', q_box)):
@@ -3691,7 +3850,7 @@ def _electrisim_pcs_to_settle(net):
     return [r for r in getattr(net, 'electrisim_pcs', None) or []
             if r['in_service'] and r['table'] in ('gen', 'sgen')
             and (r['table'] == 'gen' and (r['island'] is not None or r.get('droop_qv_lf', r['droop_qv']) > 0)
-                 or r['q_mode'] == 'qv')]
+                 or r['q_mode'] == 'qv' or r.get('dc_load') is not None)]
 
 
 def _electrisim_secant(rec, key, x, g, x_min, x_max):
@@ -3723,6 +3882,16 @@ def _electrisim_settle_pcs(net):
         net.electrisim_island_short = {}
     for n, group in islands.items():
         worst = max(worst, _electrisim_share_island(net, n, group, island_gens.get(n, [])))
+    # On a DC network: its DC side draws what its AC side delivers, with its losses.
+    for rec in recs:
+        res = net[f"res_{rec['table']}"]
+        if rec.get('dc_load') is None or rec['index'] not in res.index:
+            continue
+        p = float(res.at[rec['index'], 'p_mw'])
+        if np.isfinite(p):
+            p_dc = _electrisim_dc_dc_input_power(p, rec['eta'], rec['p_nl_mw'])
+            worst = max(worst, abs(p_dc - float(net.load_dc.at[rec['dc_load'], 'p_dc_mw'])))
+            net.load_dc.at[rec['dc_load'], 'p_dc_mw'] = p_dc
     # Q-V droop of the grid-forming PCS: its voltage set point lowered by its Q.
     for rec in recs:
         if rec['table'] == 'gen' and rec.get('droop_qv_lf', rec['droop_qv']) > 0 and rec['index'] in net.res_gen.index:
@@ -3878,6 +4047,16 @@ def _electrisim_der_dc_point(obj, p):
     return v, note
 
 
+def _electrisim_overload_note(steps, ratio):
+    """What a converter's short-time overload makes of a load flow's loading above its rating, as a clause."""
+    if not steps:
+        return ''
+    t = converter_rating.overload_time(steps, ratio)
+    if t <= 0:
+        return f", beyond its short-time overload ({100 * max(m for _, m in steps):g} %)"
+    return f" - within its short-time overload for {t:g} s, not continuously"
+
+
 def _electrisim_pcs_result(net, rec):
     """A PCS's AC and DC power, loading, losses and frequency; its source's report, under '_source'."""
     src = rec['source']
@@ -3896,12 +4075,23 @@ def _electrisim_pcs_result(net, rec):
     s = math.hypot(p, q)
     p_dc = _electrisim_dc_dc_input_power(p, rec['eta'], rec['p_nl_mw'])
     f_n = float(getattr(net, 'f_hz', 50.0) or 50.0)
+    vm = float(net.res_bus.at[rec['bus'], 'vm_pu']) if rec['bus'] in net.res_bus.index else None
+    # Its rating at its bus's voltage: current-limited below nominal (converter_rating).
+    s_avail = rec['s_rated'] * converter_rating.voltage_factor(vm if vm is not None else 1.0)
     out.update(p_mw=p + 0.0, q_mvar=q + 0.0, s_mva=s, loading_percent=100.0 * s / rec['s_rated'],
-               q_capability_mvar=math.sqrt(max(rec['s_rated'] ** 2 - p * p, 0.0)),
-               vm_pu=float(net.res_bus.at[rec['bus'], 'vm_pu']) if rec['bus'] in net.res_bus.index else None,
-               p_dc_mw=p_dc, loss_mw=p_dc - p, frequency_hz=f_n * (1.0 + rec['df_pu']))
-    if s > rec['s_rated'] * 1.0001:
-        _electrisim_warn(net, f"PCS '{rec['label']}' is loaded to {out['loading_percent']:.1f} % of its rating.")
+               q_capability_mvar=converter_rating.q_limit(rec['s_rated'], p, rec.get('q_max_pu')),
+               vm_pu=vm, p_dc_mw=p_dc, loss_mw=p_dc - p, frequency_hz=f_n * (1.0 + rec['df_pu']),
+               s_nameplate_mva=rec.get('s_nameplate', rec['s_rated']), s_available_mva=s_avail,
+               derating_factor=rec.get('derating', {}).get('factor', 1.0))
+    if s > s_avail * 1.0001:
+        _electrisim_warn(net, f"PCS '{rec['label']}' is loaded to {100.0 * s / s_avail:.1f} % of its rating"
+                         + (f" at its bus's {vm:.3f} pu" if vm is not None and vm < 1.0 else "")
+                         + _electrisim_overload_note(rec.get('overload'), s / s_avail) + ".")
+    if src['kind'] == 'DC bus':
+        v = (float(net.res_bus_dc.at[rec['dc_bus'], 'vm_pu']) * float(net.bus_dc.at[rec['dc_bus'], 'vn_kv']) * 1e3
+             if rec['dc_bus'] in net.res_bus_dc.index else None)
+        out['v_dc_v'] = v if v is not None and np.isfinite(v) else None
+        return out
     v, note = _electrisim_der_dc_point(src['obj'], p_dc * 1e6)
     if note:
         src['obj'].notes.append(note)
@@ -7385,10 +7575,17 @@ def create_other_elements(in_data,net,x, Busbars):
             # Control parameters
             control_mode_ac = in_data[x].get('control_mode_ac', 'vm_pu')  # 'vm_pu' or 'q_mvar'
             control_value_ac = safe_float(in_data[x].get('control_value_ac', in_data[x].get('vm_pu', 1.0)))
-            control_mode_dc = in_data[x].get('control_mode_dc', 'p_mw')  # 'vm_pu' or 'p_mw'
+            control_mode_dc = in_data[x].get('control_mode_dc', 'p_mw')  # 'vm_pu', 'p_mw' or 'follow_load'
             control_value_dc = safe_float(in_data[x].get('control_value_dc', in_data[x].get('p_mw', 0.0)))
-            
-            vsc_idx = pp.create_vsc(net, bus=bus_idx, bus_dc=bus_dc_idx, 
+            # Follow its DC bus's load: a double-conversion UPS's rectifier, no DC voltage loop - it delivers
+            # what its bus's loads draw plus control_value_dc MW into its batteries, which hold the bus's
+            # voltage (settled with the load flow, _electrisim_settle_follow_load).
+            follow = str(control_mode_dc).strip().lower() == 'follow_load'
+            charge_mw = control_value_dc if follow else None
+            if follow:
+                control_mode_dc, control_value_dc = 'p_mw', -control_value_dc
+
+            vsc_idx = pp.create_vsc(net, bus=bus_idx, bus_dc=bus_dc_idx,
                          r_ohm=r_ohm, x_ohm=x_ohm, r_dc_ohm=r_dc_ohm,
                          control_mode_ac=control_mode_ac, control_value_ac=control_value_ac,
                          control_mode_dc=control_mode_dc, control_value_dc=control_value_dc,
@@ -7409,7 +7606,20 @@ def create_other_elements(in_data,net,x, Busbars):
             if 'emt_model' not in net.vsc.columns:
                 net.vsc['emt_model'] = 'average'
             net.vsc.at[vsc_idx, 'emt_model'] = 'switching' if in_data[x].get('emt_model') == 'switching' else 'average'
-            
+            # Its rating where it runs: derated by its inlet air and altitude (converter_rating); its
+            # short-time overload; following its bus's load, the charge it adds.
+            derate = converter_rating.derating(in_data[x])
+            for note in derate['notes']:
+                _electrisim_warn(net, f"VSC '{element_name}': {note}.")
+            for col, value in (('rated_mva_nameplate', float(net.vsc.at[vsc_idx, 'rated_mva'])),
+                               ('derating_factor', derate['factor']),
+                               ('overload_curve', str(in_data[x].get('overload_curve') or '')),
+                               ('electrisim_follow_charge_mw', charge_mw if follow else np.nan)):
+                if col not in net.vsc.columns:
+                    net.vsc[col] = np.nan if col != 'overload_curve' else ''
+                net.vsc.at[vsc_idx, col] = value
+            net.vsc.at[vsc_idx, 'rated_mva'] = float(net.vsc.at[vsc_idx, 'rated_mva']) * derate['factor']
+
             # Store user-friendly name for VSC
             vsc_name = in_data[x]['name']
             user_friendly_name = in_data[x].get('userFriendlyName', vsc_name)

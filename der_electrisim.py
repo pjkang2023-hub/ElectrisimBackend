@@ -102,8 +102,21 @@ LFP_OCV = ((0.0, 2.50), (0.05, 3.00), (0.10, 3.19), (0.20, 3.25), (0.30, 3.28), 
            (0.70, 3.32), (0.90, 3.35), (0.95, 3.40), (1.00, 3.60))
 
 
+# A sodium-ion NFPP (Na4Fe3(PO4)2P2O7) cell's open-circuit voltage, per unit of its 3.1 V nominal: a
+# sloping curve, not LFP's plateau, so its state of charge shows in its voltage. Generic, from published
+# NFPP half-cell curves - not a vendor's: 1.95-3.85 V a cell, 750-1,500 V for a 1,200 V nominal pack
+# (Peak Energy's GS1.1 window) - until cell data arrives.
+NFPP_OCV = ((0.0, 1.95), (0.05, 2.70), (0.10, 2.85), (0.20, 2.98), (0.30, 3.05), (0.50, 3.14),
+            (0.70, 3.24), (0.80, 3.32), (0.90, 3.45), (0.95, 3.58), (1.00, 3.85))
+OCV_PRESETS = {'lfp': (LFP_OCV, 3.2), 'nfpp': (NFPP_OCV, 3.1)}
+
+
 def _ocv_table(text, nominal):
-    """(SoC, OCV per unit) from 'soc:volts per cell' pairs or the LFP default."""
+    """(SoC, OCV per unit) from 'soc:volts per cell' pairs, a chemistry's name (LFP, NFPP) or the LFP default."""
+    preset = OCV_PRESETS.get(str(text or '').strip().lower())
+    if preset is not None:
+        table, v_nom = preset
+        return np.array([s for s, _ in table]), np.array([v / v_nom for _, v in table])
     pairs = []
     for part in str(text or '').replace(';', ',').replace('\n', ',').split(','):
         if ':' in part:

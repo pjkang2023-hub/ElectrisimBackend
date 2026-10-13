@@ -65,9 +65,12 @@ def test_fields_follow_the_dialogs():
         block = block[:block.index('\n    ]')]
         ids = [a or b for a, b in re.findall(r"(?:num|sel)\('(\w+)'|\bid: '(\w+)'", block)]
         assert tuple(i for i in ids if i not in ('name', 'in_service')) == layer.DER_FIELDS[kind], kind
+    # The converters' rating fields, shared by the PCS's and the VSC's dialogs.
+    rating = src[src.index('export const RATING_FIELDS = ['):]
+    rating = rating[:rating.index('\n];')]
     for kind, start in (('PCS', 'DER_PARAMETERS.PCS = ['), ('Grounding Transformer', "DER_PARAMETERS['Grounding Transformer'] = [")):
-        block = src[src.index(start):src.index('\n];', src.index(start))]
-        assert tuple(re.findall(r"(?:num|sel)\('(\w+)'", block)) == layer.DER_FIELDS[kind], kind
+        block = src[src.index(start):src.index('\n];', src.index(start))].replace('...RATING_FIELDS', rating)
+        assert tuple(re.findall(r"(?:num|sel|text)\('(\w+)'", block)) == layer.DER_FIELDS[kind], kind
     dc = open(os.path.join(JS, 'utils', 'dcPayload.js'), encoding='utf-8').read()
     for kind in ('DC Breaker', 'DC Diode', 'Solid-State Transformer', 'DC/DC Converter', 'DC Line'):
         case = dc[dc.index(f"case '{kind}'"):]

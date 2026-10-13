@@ -143,6 +143,8 @@ class _EmtBuilder:
         for rec in getattr(net, 'electrisim_pcs', None) or []:
             if rec['in_service'] and rec['index'] is not None:
                 self.skip.add((rec['table'], rec['index']))
+                if rec.get('dc_load') is not None:
+                    self.skip.add(('load_dc', rec['dc_load']))     # on a DC network: its converter draws it
         # The sources and stores: their load-flow stand-ins left out.
         for rec in getattr(net, 'electrisim_ders', None) or []:
             parts = rec['parts']
@@ -378,23 +380,33 @@ class _EmtBuilder:
             src = rec['source']
             obj = src['obj']
             p_dc = pe._electrisim_dc_dc_input_power(p_ac, rec['eta'], rec['p_nl_mw'])
-            v_dc, _ = pe._electrisim_der_dc_point(obj, p_dc * 1e6)
-            key = ('pcs', rec['name'])
-            self.vn[key], self.v_bus[key] = obj.v_nominal(), v_dc
-            term = self.ckt.node(f"{rec['label']} DC terminals", v_dc)
-            model = emt_der.build(self.ckt, obj, src['label'], term, v_dc, p_dc * 1e6 / max(v_dc, 1e-6))
-            model.id = src['id']
-            self.ders.append(({'id': src['id'], 'coupling': 'pcs', 'bus': None, 'label': src['label']}, model))
+            if src['kind'] == 'DC bus':
+                # On a DC network: its DC link on that network's bus, which the network holds.
+                if rec['dc_bus'] not in self.bus_node:
+                    self.warnings.append(f"PCS {rec['label']}: its DC bus is not in the EMT study, so it is left out.")
+                    continue
+                key, term = rec['dc_bus'], self.bus_node[rec['dc_bus']]
+                obj = None
+            else:
+                v_dc, _ = pe._electrisim_der_dc_point(obj, p_dc * 1e6)
+                key = ('pcs', rec['name'])
+                self.vn[key], self.v_bus[key] = obj.v_nominal(), v_dc
+                term = self.ckt.node(f"{rec['label']} DC terminals", v_dc)
+                model = emt_der.build(self.ckt, obj, src['label'], term, v_dc, p_dc * 1e6 / max(v_dc, 1e-6))
+                model.id = src['id']
+                self.ders.append(({'id': src['id'], 'coupling': 'pcs', 'bus': None, 'label': src['label']}, model))
             z = self.ac.vn[rec['bus']] ** 2 / (rec['s_rated'] * 1e6)
             kw = dict(p=-p_ac, q=-q_ac, p_dc=p_dc, rated_mva=rec['s_rated'], limit_pu=rec['k'], r_ohm=0.01 * z,
                       x_ohm=0.15 * z, mode_ac='q_mvar', model='average', eta=rec['eta'], p_nl_mw=rec['p_nl_mw'],
                       input_side='dc', current_loop_hz=rec.get('current_loop_hz', 500.0))
             if rec['table'] == 'gen':
                 conv = GridFormingVsc(self, rec['label'], rec['bus'], key, term, 1e-4, block, mode_dc='p_mw',
-                                      droop_pf=rec['droop_pf'], droop_qv=rec['droop_qv'], **kw)
+                                      droop_pf=rec['droop_pf'], droop_qv=rec['droop_qv'],
+                                      unbalance_control=rec.get('unbalance_control', False),
+                                      i2_limit_pu=rec.get('i2_limit_pu', 0.3), **kw)
                 conv.control_mode = 'grid_forming'
             else:
-                pv = obj.kind == 'PV Array'
+                pv = obj is not None and obj.kind == 'PV Array'
                 conv = Vsc(self, rec['label'], rec['bus'], key, term, 1e-4, block,
                            mode_dc='vm_pu' if pv else 'p_mw', **kw)
                 if pv:
@@ -1004,6 +1016,28 @@ def _rms(t, y, period):
     return np.sqrt(np.maximum((sq - back) / period, 0.0))
 
 
+def _vuf_end(t, v, f_hz):
+    """
+    A bus's voltage unbalance factor over the run's last cycle (%): its
+    negative- over its positive-sequence voltage, each phase's fundamental
+    fitted by least squares (its DC offset aside). None for a short run.
+    """
+    period = 1.0 / f_hz
+    last = t >= t[-1] - period
+    if last.sum() < 16 or t[last][-1] - t[last][0] < 0.9 * period:
+        return None
+    w = 2 * math.pi * f_hz
+    x = np.column_stack([np.cos(w * t[last]), np.sin(w * t[last]), np.ones(last.sum())])
+    ph = []
+    for k in range(3):
+        coef, *_ = np.linalg.lstsq(x, v[last, k], rcond=None)
+        ph.append(complex(coef[0], -coef[1]))        # a cos + b sin = Re((a - j b) e^{jwt})
+    a = complex(math.cos(2 * math.pi / 3), math.sin(2 * math.pi / 3))
+    v1 = (ph[0] + a * ph[1] + a * a * ph[2]) / 3.0
+    v2 = (ph[0] + a * a * ph[1] + a * ph[2]) / 3.0
+    return _round(100.0 * abs(v2) / abs(v1)) if abs(v1) > 1e-9 else None
+
+
 def _ac_results(sim, ac, net, t_fine, fault):
     """Three-phase bus voltages with their lowest rms over a cycle, phase currents, the fault's."""
     if not ac.nodes:
@@ -1026,7 +1060,7 @@ def _ac_results(sim, ac, net, t_fine, fault):
                     rms_min, t_min = float(r[j]), float(t[j])
                 rms_end.append(float(r[-1]))
         buses.append({'name': str(net.bus.at[b, 'name']), 'id': _row_id(net, 'bus', b), 'label': _label(net, 'bus', b),
-                      'vn_kv': ac.vn[b] / 1e3,
+                      'vn_kv': ac.vn[b] / 1e3, 'vuf_end_percent': _vuf_end(t, sim['v'][:, nodes], ac.f_hz),
                       'v_rms_min_pu': _round(rms_min / v_ph) if np.isfinite(rms_min) else None,
                       't_min_ms': _round(t_min * 1e3) if t_min is not None else None,
                       'v_rms_final_pu': _round(min(rms_end) / v_ph) if rms_end else None,
@@ -1111,6 +1145,14 @@ def _converter_result(conv, t_event):
                    i_peak_ka=_round(float(np.max(tr[:, 4])) / SQ2 / 1e3))
         # Its rms current over its last cycle: at a fault, its current limit.
         out['i_end_ka'] = _round(float(np.mean(tr[last, 4])) / SQ2 / 1e3)
+        # Its DC voltage's ripple over its last cycle, peak to peak: an unbalance's 2f, a switching ripple.
+        out['v_dc_ripple_end_v'] = _round(float(np.ptp(tr[last, 3])))
+    if getattr(conv, 'unbalance_control', False) and conv.neg_trace:
+        ng = np.array(conv.neg_trace)
+        last = ng[:, 0] >= ng[-1, 0] - 2 * math.pi / conv.w0
+        out.update(unbalance_control=True, vuf_end_percent=_round(100.0 * float(np.mean(ng[last, 1]))),
+                   i2_end_ka=_round(float(np.mean(ng[last, 2])) / SQ2 / 1e3),
+                   i2_limit_ka=_round(conv.i2_max / SQ2 / 1e3))
     if getattr(conv, 'freq_trace', None):
         f = np.array(conv.freq_trace)
         out.update(f_min_hz=_round(float(np.min(f[:, 1]))), f_max_hz=_round(float(np.max(f[:, 1]))),

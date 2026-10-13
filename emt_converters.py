@@ -44,6 +44,7 @@ integrators set to hold it; the switching model's currents start at its
 average-value model's, its ripple building from there.
 """
 
+import collections
 import math
 
 import numpy as np
@@ -504,20 +505,42 @@ class GridFormingVsc(Vsc):
     the reactor's current that its reference voltage would drive, estimated
     from the reactor's impedance.
     Its DC side draws what its bridge delivers, as an averaged VSC's.
+
+    With its unbalance control on, it also holds its AC bus's negative-sequence
+    voltage at zero: that voltage, in a frame turning backwards at its angle
+    (positive sequence shows there as 2f ripple),
+    integrated into a negative-sequence voltage of its own (10 Hz; its
+    measurement the mean over the last half cycle) - the
+    current an unbalanced load draws in negative sequence then flows from it,
+    not through the load's own voltage. Its negative-sequence current is held
+    within i2_limit_pu of its current limit (its voltage scaled back, its
+    integrator held), and its positive-sequence limit lowered by what it
+    carries. Its DC side then carries the 2f power ripple the two sequences
+    make together (P2 ~ 1.5 |V1| |I2|).
     """
 
     def __init__(self, builder, label, ac_bus, bus_dc, term, r_dc, block_pu, *, droop_pf=0.02, droop_qv=0.05,
-                 tau_f=0.02, **kw):
+                 tau_f=0.02, unbalance_control=False, i2_limit_pu=0.3, **kw):
         super().__init__(builder, label, ac_bus, bus_dc, term, r_dc, block_pu, **kw)
-        self._gf_start(droop_pf, droop_qv, tau_f)
+        self._gf_start(droop_pf, droop_qv, tau_f, unbalance_control, i2_limit_pu)
 
     @classmethod
-    def standalone(cls, droop_pf=0.02, droop_qv=0.05, tau_f=0.02, **kw):
+    def standalone(cls, droop_pf=0.02, droop_qv=0.05, tau_f=0.02, unbalance_control=False, i2_limit_pu=0.3, **kw):
         self = super().standalone(**kw)
-        self._gf_start(droop_pf, droop_qv, tau_f)
+        self._gf_start(droop_pf, droop_qv, tau_f, unbalance_control, i2_limit_pu)
         return self
 
-    def _gf_start(self, droop_pf, droop_qv, tau_f):
+    def _gf_start(self, droop_pf, droop_qv, tau_f, unbalance_control=False, i2_limit_pu=0.3):
+        # Its negative-sequence control: off, or holding its bus's V2 at zero.
+        self.unbalance_control = bool(unbalance_control)
+        self.i2_max = min(max(i2_limit_pu, 0.0), 1.0) * self.i_max
+        self.ki_2 = 2 * math.pi * 10.0
+        self.v2_f = np.zeros(2)                   # its bus's negative-sequence voltage (d, q), half-cycle mean
+        self.i2_f = np.zeros(2)                   # its negative-sequence current, half-cycle mean
+        self.acc_2 = np.zeros(4)                  # their running integrals, and their history over a half cycle
+        self.hist_2 = collections.deque([(0.0, np.zeros(4))])
+        self.e2 = np.zeros(2)                     # the negative-sequence voltage it adds
+        self.neg_trace = []                       # (t, |V2| / |V1|, |I2|)
         e_ph, v_ph, i_ph = self.e_ph0, self.v_ph0, self.i_ph0
         self.th_e = float(np.angle(e_ph))
         self.e0 = abs(e_ph)
@@ -578,9 +601,13 @@ class GridFormingVsc(Vsc):
         i_d, i_q = park(i, theta)
         i_mag = math.hypot(i_d, i_q)
         v_d, v_q = park(v, theta)
+        # Its negative sequence first: what it carries there comes off its positive-sequence limit.
+        i_lim = self.i_max
+        if self.unbalance_control:
+            i_lim = self._negative_sequence(t_s, v, i, theta, dt, math.hypot(v_d, v_q))
         i_est = math.hypot(e_d - v_d, e_q - v_q) / math.hypot(self.r, self.w_gf * self.l)
-        if i_est > self.i_max:
-            k = self.i_max / i_est
+        if i_est > i_lim:
+            k = i_lim / i_est
             e_d, e_q = v_d + (e_d - v_d) * k, v_q + (e_q - v_q) * k
             self.limited_time += dt
         e_max = max(v_dc, 0.0) / SQ3
@@ -589,6 +616,8 @@ class GridFormingVsc(Vsc):
             e_d, e_q = e_d * e_max / mag, e_q * e_max / mag
         hold = self.t_sample or dt
         e = inverse_park(e_d, e_q, theta + 0.5 * self.w_gf * hold)
+        if self.unbalance_control:
+            e = e + inverse_park(self.e2[0], self.e2[1], -(theta + 0.5 * self.w_gf * hold))
         self.th_e = theta
         changed = False
         if self.model == 'switching':
@@ -608,6 +637,33 @@ class GridFormingVsc(Vsc):
         self.trace.append((t_s, p_now, q_now, v_dc, i_mag))
         self.freq_trace.append((t_s, self.w_gf / (2 * math.pi)))
         return 'soft' if changed else False
+
+    def _negative_sequence(self, t_s, v, i, theta, dt, v1):
+        """
+        One sample of its negative-sequence control: its bus's V2 integrated
+        into the negative-sequence voltage it adds, its I2 held within its
+        limit. Returns the current left for its positive sequence.
+        """
+        # Averaged over the last half cycle: the positive sequence turns at 2f in this frame, and a
+        # half cycle's mean takes it out exactly (a first-order filter left 13 % of it, against a
+        # 2-4 % unbalance).
+        x = np.concatenate([park(v, -theta), park(i, -theta)])
+        self.acc_2 = self.acc_2 + x * dt
+        self.hist_2.append((t_s, self.acc_2.copy()))
+        window = math.pi / self.w0
+        while len(self.hist_2) > 2 and self.hist_2[1][0] <= t_s - window:
+            self.hist_2.popleft()
+        t0, acc0 = self.hist_2[0]
+        if t_s - t0 > 1e-12:
+            mean = (self.acc_2 - acc0) / (t_s - t0)
+            self.v2_f, self.i2_f = mean[:2], mean[2:]
+        i2 = float(np.hypot(*self.i2_f))
+        if i2 > self.i2_max > 0:
+            self.e2 *= self.i2_max / i2           # held at its limit, its integrator with it
+        else:
+            self.e2 -= self.ki_2 * self.v2_f * dt
+        self.neg_trace.append((t_s, float(np.hypot(*self.v2_f)) / max(v1, 1.0), i2))
+        return max(self.i_max - min(i2, self.i2_max), 0.5 * self.i_max)
 
 
 class DcDc:

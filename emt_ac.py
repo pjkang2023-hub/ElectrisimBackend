@@ -468,7 +468,43 @@ class AcBuilder:
                 self._impedance_load(b, _f(net[res].at[i, 'p_mw']), _f(net[res].at[i, 'q_mvar']), _label(net, table, i),
                                      self.profiles.get(i) if table == 'load' else None)
         if 'asymmetric_load' in net and len(net.asymmetric_load):
-            self.left_out.add('asymmetric loads')
+            for i in net.asymmetric_load.index:
+                b = int(net.asymmetric_load.at[i, 'bus'])
+                if not bool(net.asymmetric_load.at[i, 'in_service']) or b not in self.nodes or ('asymmetric_load', i) in self.skip:
+                    continue
+                self._asymmetric_load(i, b)
+
+    def _asymmetric_load(self, i, b):
+        """
+        An asymmetric load: each phase's (or, delta, each line's: a-b, b-c, c-a)
+        P and Q as a constant impedance at its bus's voltage - an ungrounded star
+        (a three-wire network carries no neutral) or a delta. Its unbalance is
+        the EMT study's own: the balanced load flow it starts from has none.
+        """
+        ckt, w, net = self.ckt, self.w, self.net
+        row = net.asymmetric_load.loc[i]
+        scale = _f(row.get('scaling', 1.0), 1.0)
+        v_ll = (float(net.res_bus.at[b, 'vm_pu']) if b in net.res_bus.index else 1.0) * self.vn[b]
+        delta = str(row.get('type', 'wye')).strip().lower() == 'delta'
+        nodes = self.nodes[b]
+        label = _label(net, 'asymmetric_load', i)
+        if delta:
+            pairs = [(nodes[0], nodes[1]), (nodes[1], nodes[2]), (nodes[2], nodes[0])]
+            v2 = v_ll * v_ll
+        else:
+            star = ckt.node(f'{label} star point')
+            ckt.add_r(star, 0, R_BIAS)
+            pairs = [(n, star) for n in nodes]
+            v2 = v_ll * v_ll / 3.0
+        for k, (a, c) in enumerate(pairs):
+            p = _f(row.get(f'p_{"abc"[k]}_mw'), 0.0) * scale * 1e6
+            q = _f(row.get(f'q_{"abc"[k]}_mvar'), 0.0) * scale * 1e6
+            if p > 1e-6:
+                ckt.add_r(a, c, v2 / p)
+            if q > 1e-6:
+                ckt.add_rl(a, c, 0.0, v2 / q / w)
+            elif q < -1e-6:
+                ckt.add_c(a, c, -q / (w * v2))
 
     def _generation(self):
         net, ckt, w = self.net, self.ckt, self.w

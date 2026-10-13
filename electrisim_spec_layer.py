@@ -39,7 +39,9 @@ DER_FIELDS = {
                  'loss_percent', 'irradiance_wm2', 'ambient_c', 'irradiance_profile_id', 'temperature_profile_id'),
     'PCS': ('control', 's_rated_mva', 'vn_ac_kv', 'efficiency_percent', 'no_load_loss_kw', 'p_set_mw', 'q_mode',
             'q_set_mvar', 'pf', 'qv_droop_percent', 'vm_set_pu', 'droop_pf_percent', 'droop_qv_percent',
-            'current_limit_pu', 'current_loop_hz', 'opf_marginal_cost_eur_per_mwh'),
+            'current_limit_pu', 'current_loop_hz', 'inlet_c', 'altitude_m', 'derate_temp_curve',
+            'derate_altitude_curve', 'overload_curve', 'q_max_percent', 'unbalance_control', 'i2_limit_pu',
+            'opf_marginal_cost_eur_per_mwh'),
     'Grounding Transformer': ('vn_kv', 'i_rated_a', 't_rated_s', 'r_n_ohm', 'x_n_ohm', 'x0_ohm', 'r0_ohm'),
 }
 DC_FIELDS = {
@@ -67,7 +69,8 @@ DC_FIELDS = {
                         'c_out_esr_mohm', 'c_out_esl_uh', 'c_in_esr_mohm', 'c_in_esl_uh'),
     'VSC': ('r_ohm', 'x_ohm', 'r_dc_ohm', 'control_mode_ac', 'control_value_ac', 'control_mode_dc',
             'control_value_dc', 'rated_mva', 'dc_link_mf', 'dc_link_esr_mohm', 'dc_link_esl_uh', 'current_limit_pu',
-            'emt_model', 'spectrum', 'switching_khz', 'current_loop_hz'),
+            'emt_model', 'spectrum', 'switching_khz', 'current_loop_hz', 'inlet_c', 'altitude_m', 'derate_temp_curve',
+            'derate_altitude_curve', 'overload_curve'),
 }
 FIELDS = {**DER_FIELDS, **DC_FIELDS}
 # Each dialog's defaults (configureAttributes.js, derParameters.js): a field the spec leaves out
@@ -155,7 +158,17 @@ DEFAULTS = {'Battery': {'vn_v': '800',
          'current_loop_hz': '500',
          'opf_marginal_cost_eur_per_mwh': '',
          'control': 'grid_following',
-         'q_mode': 'q'},
+         'q_mode': 'q',
+         # Its rating where it runs (converter_rating): blank, its nameplate.
+         'inlet_c': '',
+         'altitude_m': '',
+         'derate_temp_curve': '',
+         'derate_altitude_curve': '',
+         'overload_curve': '',
+         'q_max_percent': '',
+         # Grid-forming: its negative-sequence voltage held to zero (EMT), within i2_limit_pu of its rating.
+         'unbalance_control': 'false',
+         'i2_limit_pu': '0.3'},
  'Grounding Transformer': {'vn_kv': '0',
                            'i_rated_a': '400',
                            't_rated_s': '10',
@@ -254,7 +267,12 @@ DEFAULTS = {'Battery': {'vn_v': '800',
          'emt_model': 'average',
          'spectrum': 'afe',
          'switching_khz': '5',
-         'current_loop_hz': '500'},
+         'current_loop_hz': '500',
+         'inlet_c': '',
+         'altitude_m': '',
+         'derate_temp_curve': '',
+         'derate_altitude_curve': '',
+         'overload_curve': ''},
  'DC Line': {'length_km': '0.1', 'r_ohm_per_km': '0.1', 'max_i_ka': '1', 'l_mh_per_km': '0.3', 'c_uf_per_km': '0.2'},
  'DC Diode': {'v_f_v': '1.6', 'r_on_mohm': '0.1', 'rated_current_ka': '1.5'}}
 
@@ -534,6 +552,7 @@ def results(net, r):
         out['vscs'] = [{
             'id': str(net.vsc.at[i, 'name']), 'p_mw': r(net.res_vsc.at[i, 'p_mw'], 5),
             'q_mvar': r(net.res_vsc.at[i, 'q_mvar'], 5), 'p_dc_mw': r(net.res_vsc.at[i, 'p_dc_mw'], 5),
+            **{k: (r(v, 5) if v is not None else None) for k, v in pe._electrisim_vsc_rating_result(net, i).items()},
         } for i in net.vsc.index if i in net.res_vsc.index and not pe._electrisim_is_aux(net.vsc, i)]
     pcs = [pe._electrisim_pcs_result(net, rec) for rec in getattr(net, 'electrisim_pcs', None) or []]
     ders = [pe._electrisim_der_result(net, rec) for rec in getattr(net, 'electrisim_ders', None) or []]

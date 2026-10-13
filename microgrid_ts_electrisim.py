@@ -209,7 +209,9 @@ class MicrogridTs:
         self.convs = list(getattr(net, 'electrisim_dc_dc_converters', None) or [])
         # Every element's record, with its object: DC-coupled ones, and those behind a PCS.
         self.items = [{'rec': r, 'obj': r['obj'], 'via': 'dc'} for r in self.ders]
-        self.items += [{'rec': r, 'obj': r['source']['obj'], 'via': 'pcs'} for r in self.pcs]
+        # (A PCS on a DC network has no source of its own: its bus's stores are among the DC-coupled ones.)
+        self.items += [{'rec': r, 'obj': r['source']['obj'], 'via': 'pcs'} for r in self.pcs
+                       if r['source']['obj'] is not None]
         for it in self.items:
             it['e0'] = stored_energy_j(it['obj'])
             it['drawn_j'] = 0.0
@@ -529,9 +531,13 @@ class MicrogridTs:
                 continue
             obj = rec['source']['obj']
             p_ac = float(net.res_gen.at[rec['index'], 'p_mw'])
+            actual += p_ac
+            if obj is None:
+                # On a DC network: its window, its rating - its bus's stores answer for themselves.
+                target += rec['p_max_mw']
+                continue
             p_dc = pe._electrisim_dc_dc_input_power(p_ac, rec['eta'], rec['p_nl_mw'])
             avail = available_w(obj, p_dc * 1e6, self.dt) / 1e6
-            actual += p_ac
             # Discharging, what it can give this step is its window: what its store gives at its present
             # output was never more than that output, so no surplus showed and load once over-shed
             # stayed shed. Charging, what its store can take at its present output, as before.
