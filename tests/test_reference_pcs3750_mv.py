@@ -342,3 +342,168 @@ def test_arc_flash_by_voltage_class(client, quiet):
         assert g['incident_energy_cal_cm2'] == pytest.approx(12.8, abs=0.2) and str(g['ppe_category']) == '3'
         assert 3.5 < rows[f'Block {b} 505 V load side']['incident_energy_cal_cm2'] < 4.5
         assert rows[f'Load backbone {b}']['incident_energy_cal_cm2'] < 1.5
+
+
+# --- Phase 25: dynamics (ANDES) -----------------------------------------------------------------------
+# ANDES on the drawn diagram: the backbone an island of twelve grid-forming PCS (virtual machines), the
+# SSTs' MV draw following the DGX H100 profile - a 0.1 -> 1.0 pu restart at 7 s - the PCS's DC side
+# (rectifier and GS1.1) holding through the run.
+
+def _andes(client, quiet, tf, line=''):
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    with open(SPEC_PATH, encoding='utf-8') as fh:
+        lp = {x['id']: {'name': x['name'], 'kind': x['kind'], 'dt': x['dt_s'], 't0': 0, 'p': x['values']}
+              for x in json.load(fh)['load_profiles']}
+    cell = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
+    p['0'] = {'typ': 'TransientStabilityAndes Parameters', 'frequency': '60', 'sn_mva': '100', 'tf': str(tf),
+              'tstep': '0', 'fault_bus': '', 'fault_enabled': 'false', 'toggle_line': cell.get(line, ''),
+              'toggle_t': '8.0', 'toggle_gen': '', 'poi_bus': cell['Utility 34.5 kV POI'],
+              'grid_voltage_profile': 'none', 'load_profiles': lp, 'user_email': 't@t'}
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    assert not out.get('error'), out.get('message')
+    return out
+
+
+def _at(g, key, t, times):
+    import numpy as np
+    return float(np.interp(t, np.array(times), np.array(g[key])))
+
+
+def test_andes_restart_step_shared_by_droop(client, quiet):
+    """
+    The island starts at the profile's 0.8 pu, its load shared by droop (each PCS
+    0.746 MW at 60 Hz - the holding one too: left alone it absorbed 1.2 MW and
+    sat at its limit); at 0.1 pu before the restart, 60.6 Hz; after it, 0.91 MW
+    each at 59.9 Hz, well within their current - 0.92 pu at most.
+    """
+    out = _andes(client, quiet, 10)
+    pcs = out['pcs']
+    assert len(pcs) == 12
+    for g in pcs:
+        assert _at(g, 'p_mw', 0.0, out['time']) == pytest.approx(0.746, abs=0.005)
+        assert _at(g, 'frequency_hz', 0.0, out['time']) == pytest.approx(60.0, abs=0.01)
+        assert 60.35 < _at(g, 'frequency_hz', 6.95, out['time']) < 60.7      # the load at 0.1 pu, over its set point
+        assert _at(g, 'p_mw', 7.05, out['time']) == pytest.approx(0.89, abs=0.03)
+        assert _at(g, 'frequency_hz', 7.05, out['time']) == pytest.approx(59.88, abs=0.04)
+        assert g['peak_current_pu'] < 0.95 and g['current_limited_from_s'] is None
+
+
+def test_andes_a_block_tripped_at_8_s(client, quiet):
+    """
+    Block 3's T2 out at 8 s, the racks at 0.85 pu: the other eight PCS take
+    1.16 MW each, 117 % - inside their 120 % for 10 s - at 59.5 Hz; past 10 s
+    over their rating their ceiling falls to it and the island sags further:
+    load must come off within 10 s of losing a block.
+    """
+    out = _andes(client, quiet, 20, line='Block 3 T2 0.505/34.5 kV Dy1 (505 V star floating)')
+    left = [g for g in out['pcs'] if not g['label'].startswith('Block 3')]
+    assert len(left) == 8
+    for g in left:
+        assert _at(g, 'p_mw', 8.5, out['time']) == pytest.approx(1.16, abs=0.02)
+        assert _at(g, 'frequency_hz', 8.5, out['time']) == pytest.approx(59.5, abs=0.03)
+        assert 1.15 < _at(g, 'current_pu', 8.5, out['time']) < 1.25
+        assert max(g['current_limit_series_pu']) == pytest.approx(1.5) and min(g['current_limit_series_pu']) == pytest.approx(1.0)
+    assert any("reached its short-time overload's ceiling" in w for w in out['warnings'])
+
+
+# --- Phase 25: the SSTs' constant power against the blocks' output impedance ---------------------
+
+def _backbone_source(blocks):
+    """The blocks' output impedance at the backbone: each PCS's 0.15 pu / 0.01 pu reactor and T2, in parallel."""
+    import math
+    zb_pcs = 34.5e3 ** 2 / (4 * 0.994e6)                  # a block's four PCS at 40 deg C, on 34.5 kV
+    zb_t2 = 34.5e3 ** 2 / 3.75e6
+    r = (0.01 * zb_pcs + 0.008 * zb_t2) / blocks
+    x = (0.15 * zb_pcs + 0.06 * zb_t2) / blocks
+    return r, x / (2 * math.pi * 60)
+
+
+@pytest.mark.parametrize('blocks, f_c_max', [(3, 151), (2, 101)])
+def test_constant_power_ssts_against_the_blocks(blocks, f_c_max):
+    """
+    The SSTs, 11.1 MW at 34.5 kV, are a negative conductance P / V^2 out to the
+    bandwidth of what sets their input power - their rectifiers' 30 Hz DC-link
+    voltage loop. Against the blocks' reactors and T2s the minor loop peaks at
+    0.10 (20 dB of margin; 0.15 with a block out). The loop reaches -1 if the
+    SSTs' power control is faster than ~300 Hz: under 151 Hz for 6 dB (101 Hz
+    with a block out). The spec's Nyquist check passes, with a bandwidth to keep.
+    """
+    import impedance_check as ic
+    r, l = _backbone_source(blocks)
+    v = ic.check(r, l, 11.1e6, 34.5e3, f_c_hz=30.0)
+    assert v['stable'] and v['peak_gain'] == pytest.approx(0.10 * 3 / blocks, rel=0.08)
+    assert v['f_c_max_hz'] == pytest.approx(f_c_max, rel=0.03)
+    fast = ic.check(r, l, 11.1e6, 34.5e3, f_c_hz=4 * f_c_max)
+    assert not fast['stable']
+
+
+# --- Phase 25: dynamics (EMT) ---------------------------------------------------------------------------
+
+def _emt(client, quiet, **params):
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    cell = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
+    params = {k: (cell[v] if isinstance(v, str) and v in cell else v) for k, v in params.items()}
+    p['0'] = {'typ': 'EmtStudy Parameters', 'frequency': '60', 'time_step_us': '20', 'user_email': 't@t', **params}
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    emt = out['emt']
+    return emt, {b['label']: b for b in emt['ac']['buses']}, {c['label']: c for c in emt['converters']}
+
+
+def test_emt_restart_step(client, quiet):
+    """
+    The profile from 6.8 s: the racks' 0.1 -> 1.0 pu restart in 100 ms. The PCS
+    carry it - 0.70 -> 0.88 MW, 82 % of their current limit - the island dips to
+    59.8 Hz and the backbone to 0.97 pu; the GS1.1 take the step on the DC links
+    (the rectifiers, ramp-limited, hold their power over the run). Nothing blocks.
+    """
+    with open(SPEC_PATH, encoding='utf-8') as fh:
+        lp = {x['id']: {'name': x['name'], 'kind': x['kind'], 'dt': x['dt_s'], 't0': 0, 'p': x['values']}
+              for x in json.load(fh)['load_profiles']}
+    emt, bus, conv = _emt(client, quiet, duration_ms='400', load_profiles=lp, profile_start_s='6.8', profile_repeat='true')
+    assert not emt['converters_blocked']
+    g = conv['Block 1 GFM 1 (6 x PCS157SE)']
+    assert g['p_start_mw'] == pytest.approx(0.70, abs=0.02) and g['p_end_mw'] == pytest.approx(0.88, abs=0.02)
+    assert 59.7 < g['f_min_hz'] < 59.9 and g['i_peak_ka'] < g['current_limit_ka']
+    assert bus['Load backbone 2']['v_rms_min_pu'] > 0.96
+    a = conv['Block 1 AFE 1 (6 x PCS157SE)']
+    assert a['p_end_mw'] == pytest.approx(a['p_start_mw'], abs=1e-3)
+    ders = {d['label']: d for d in emt['ders']}
+    assert ders['Block 1 DC1 GS1.1 A']['p_end_mw'] > 0.05
+
+
+def test_emt_backbone_fault_drops_the_ssts(client, quiet):
+    """
+    A bolted three-phase fault on backbone 2 for 100 ms: the PCS hold at their
+    current limit through it and the backbone recovers after; but the SSTs,
+    their MV side at zero, discharge their 50 kV links past their 80 % block in
+    2 ms and stay out - the racks lose supply. Ride-through of a backbone fault
+    is the SSTs' to give (their links, their restart), not the blocks'.
+    """
+    emt, bus, conv = _emt(client, quiet, duration_ms='300', ac_fault_bus='Load backbone 2', ac_fault_type='abcg',
+                          ac_fault_resistance_ohm='0.001', ac_fault_time_ms='20', ac_fault_duration_ms='100')
+    blocked = {b['label'] for b in emt['converters_blocked']}
+    assert {f'Hall {k} SST rectifier' for k in (1, 2, 3)} <= blocked
+    assert min(b['t_ms'] for b in emt['converters_blocked']) < 25
+    assert not any('GFM' in b or 'AFE' in b for b in blocked)
+    assert conv['Block 1 GFM 1 (6 x PCS157SE)']['limited_ms'] > 90
+    assert bus['Load backbone 2']['v_rms_final_pu'] > 0.95
+
+
+def test_emt_utility_single_phase_fault_ridden_through(client, quiet):
+    """
+    Phase a to ground at the utility POI for 100 ms: the 505 V grid side dips to
+    0.48 pu, the rectifiers current-limit some 70 ms and ride through, the DC
+    links sag 1 %; across the double conversion the backbone keeps 0.98 pu and
+    0.01 % unbalance - the racks never see the utility's fault.
+    """
+    emt, bus, conv = _emt(client, quiet, duration_ms='300', ac_fault_bus='Utility 34.5 kV POI', ac_fault_type='ag',
+                          ac_fault_resistance_ohm='0.001', ac_fault_time_ms='20', ac_fault_duration_ms='100')
+    assert not emt['converters_blocked']
+    assert bus['Block 1 505 V grid side']['v_rms_min_pu'] == pytest.approx(0.48, abs=0.03)
+    a = conv['Block 1 AFE 1 (6 x PCS157SE)']
+    assert 50 < a['limited_ms'] < 100 and a['v_dc_min_kv'] > 1.26
+    assert bus['Load backbone 2']['v_rms_min_pu'] > 0.97 and bus['Load backbone 2']['vuf_end_percent'] < 0.1

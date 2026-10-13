@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+import converter_rating
 import grid_voltage_profile as gvp
 
 GRID_PROFILE_V_FLOOR = 0.05     # pu: the lowest grid voltage ANDES applies
@@ -384,23 +385,42 @@ def _pcs_plants(in_data: Dict[str, Any], warnings: List[str]) -> List[Dict[str, 
     for el in rows:
         label = str(el.get("userFriendlyName") or el.get("name"))
         src = next((d for d in ders if el.get("der") and d.get("name") == el.get("der")), None)
+        network = False
         if src is None and el.get("bus_dc"):
-            on_bus = [d for d in ders if d.get("bus") == el.get("bus_dc")]
-            src = on_bus[0] if len(on_bus) == 1 else None
-        if src is None:
+            bus_dc = el.get("bus_dc")
+            on_bus = [d for d in ders if d.get("bus") == bus_dc]
+            # Anything else on its DC bus - a VSC, a load, a cable - makes it a DC network's (a UPS's DC
+            # link): it draws from that network, which the study takes as holding over its seconds.
+            others = any(isinstance(v, dict) and v is not el and bus_dc in (v.get("bus_dc"), v.get("bus"),
+                                                                              v.get("busFrom"), v.get("busTo"))
+                         and not der_electrisim.kind_of(v.get("typ")) for v in in_data.values())
+            if len(on_bus) == 1 and not others:
+                src = on_bus[0]
+            elif on_bus or others:
+                network = True
+        if src is None and not network:
             warnings.append(f"PCS '{label}' has no battery, supercapacitor, flywheel, SOFC system or PV array "
                             "on its DC side, so it is left out.")
             continue
-        kind = der_electrisim.kind_of(src.get("typ"))
-        try:
-            obj = der_electrisim.build(src)
-        except ValueError as e:
-            warnings.append(f"PCS '{label}' is left out: {e}")
-            continue
-        if not (_sb(el.get("in_service"), True) and obj.in_service):
-            continue
+        if network:
+            kind, obj = "DC bus", None
+            src = {"name": el.get("bus_dc"), "userFriendlyName": el.get("bus_dc")}
+            if not _sb(el.get("in_service"), True):
+                continue
+        else:
+            kind = der_electrisim.kind_of(src.get("typ"))
+            try:
+                obj = der_electrisim.build(src)
+            except ValueError as e:
+                warnings.append(f"PCS '{label}' is left out: {e}")
+                continue
+            if not (_sb(el.get("in_service"), True) and obj.in_service):
+                continue
         s_rated = _sf(el.get("s_rated_mva"), 1.0)
-        s_rated = s_rated if s_rated > 0 else 1.0
+        # Its rating where it runs, as the load flow has it (converter_rating).
+        s_rated = (s_rated if s_rated > 0 else 1.0) * converter_rating.derating(el)["factor"]
+        if s_rated <= 0:
+            continue
         eta = _sf(el.get("efficiency_percent"), 98.0) / 100.0
         rec = {
             "name": el.get("name"), "id": el.get("id", ""), "label": label, "bus": el.get("bus"),
@@ -416,6 +436,8 @@ def _pcs_plants(in_data: Dict[str, Any], warnings: List[str]) -> List[Dict[str, 
             "k": _sf(el.get("current_limit_pu"), 1.2),
             "source": {"obj": obj, "kind": kind, "name": src.get("name"),
                        "label": str(src.get("userFriendlyName") or src.get("name"))},
+            "q_max_pu": converter_rating.q_max_pu(el),
+            "overload": converter_rating.overload_steps(el.get("overload_curve")),
         }
         net = types.SimpleNamespace(warnings=[])
         rec["p_ac"], rec["q"] = _electrisim_pcs_set_point(net, rec)
@@ -495,6 +517,51 @@ def _add_pcs_dynamics(ss: Any, rec: Dict[str, Any], n: int, bus: Any, static_idx
     return {"model": "PVD1", "model_idx": idx}
 
 
+def _share_island_imbalance(ss, meta: Dict[str, Any], rounds: int = 3) -> bool:
+    """
+    An island held by a grid-forming PCS: what its power flow leaves the
+    holder beyond its dispatch - its loads at their profiles' start, not the
+    load flow's - shared by every grid-forming PCS in the island by its droop
+    (S / droop), as the load flow shares an island's load, and the power flow
+    rerun. Left to the holder alone, a UPS block's PCS absorbed 1.2 MW at the
+    start of a training cycle and sat at its current limit through the run.
+    """
+    sn = meta["sn_mva"]
+    pcs = [g for g in meta["gen_map"].values() if g.get("pcs") and g.get("control") == "grid_forming"
+           and g.get("droop_pf")]
+    holders = [g for g in pcs if g.get("holds")]
+    if not holders:
+        return True
+    slack_idx = list(ss.Slack.idx.v)
+    pv_idx = list(ss.PV.idx.v)
+    for _ in range(rounds):
+        moved = 0.0
+        for island in _islands(ss):
+            hold = next((g for g in holders if g["bus"] in island), None)
+            if hold is None:
+                continue
+            k = slack_idx.index(hold["static_idx"])
+            p_now = float(ss.Slack.p.v[k]) * sn
+            delta = p_now - hold["p_mw"]
+            if abs(delta) < 1e-6:
+                continue
+            members = [g for g in pcs if g["bus"] in island]
+            w = {id(g): g["s_rated_mva"] / g["droop_pf"] for g in members}
+            total = sum(w.values())
+            for g in members:
+                g["p_mw"] += delta * w[id(g)] / total
+                if g is hold:
+                    ss.Slack.set("p0", g["static_idx"], g["p_mw"] / sn, base="device")
+                else:
+                    ss.PV.set("p0", g["static_idx"], g["p_mw"] / sn, base="device")
+            moved = max(moved, abs(delta))
+        if moved < 1e-6:
+            return True
+        if not ss.PFlow.run():
+            return False
+    return True
+
+
 def _settle_pcs_set_points(ss, meta: Dict[str, Any], rounds: int = 30) -> bool:
     """
     The load flow's droops in ANDES's power flow, rerun until they hold: a
@@ -504,10 +571,18 @@ def _settle_pcs_set_points(ss, meta: Dict[str, Any], rounds: int = 30) -> bool:
     secant steps, as pandapower_electrisim._electrisim_settle_pcs.
     """
     sn = meta["sn_mva"]
-    plants = [g for g in meta["gen_map"].values() if g.get("pcs") and (
-        g["control"] == "grid_forming" and g["droop_qv"] > 0 and not g["on_slack_bus"]
-        or g["control"] == "grid_following" and g["q_mode"] == "qv")]
-    if not plants:
+    # Grid-forming PCS on one bus hold it together: one set point from their Q together - set apart,
+    # a UPS's four on its 505 V load bus fought over it and the power flow failed. On a slack's bus
+    # (an External Grid's, an island's holding PCS's) they follow it.
+    slack_buses = set(ss.Slack.bus.v)
+    by_bus: Dict[Any, List[Dict[str, Any]]] = {}
+    for g in meta["gen_map"].values():
+        if g.get("pcs") and g["control"] == "grid_forming" and g["droop_qv"] > 0:
+            by_bus.setdefault(g["bus"], []).append(g)
+    groups = [grp for b, grp in by_bus.items() if b not in slack_buses and not any(g["on_slack_bus"] for g in grp)]
+    plants = [g for g in meta["gen_map"].values() if g.get("pcs")
+              and g["control"] == "grid_following" and g["q_mode"] == "qv"]
+    if not plants and not groups:
         return True
     hist: Dict[str, Tuple[float, float]] = {}
 
@@ -524,17 +599,22 @@ def _settle_pcs_set_points(ss, meta: Dict[str, Any], rounds: int = 30) -> bool:
     pv_idx = list(ss.PV.idx.v)
     for _ in range(rounds):
         worst = 0.0
+        for grp in groups:
+            ks = [pv_idx.index(g["static_idx"]) for g in grp]
+            q = sum(float(ss.PV.q.v[k]) for k in ks) * sn
+            s_tot = sum(g["s_rated_mva"] for g in grp)
+            v_set = float(ss.PV.v0.v[ks[0]])
+            err = v_set - (grp[0]["vm_set_pu"] - grp[0]["droop_qv"] * q / s_tot)
+            worst = max(worst, abs(err))
+            if abs(err) > 1e-7:
+                v_new = secant(str(grp[0]["bus"]), v_set, err, 0.8, 1.2, 0.05)
+                for g in grp:
+                    ss.PV.set("v0", g["static_idx"], v_new, base="device")
         for g in plants:
             k = pv_idx.index(g["static_idx"])
             q = float(ss.PV.q.v[k]) * sn
             v = float(ss.Bus.v.v[ss.Bus.idx2uid(g["bus"])])
-            if g["control"] == "grid_forming":
-                v_set = float(ss.PV.v0.v[k])
-                err = v_set - (g["vm_set_pu"] - g["droop_qv"] * q / g["s_rated_mva"])
-                worst = max(worst, abs(err))
-                if abs(err) > 1e-7:
-                    ss.PV.set("v0", g["static_idx"], secant(g["static_idx"], v_set, err, 0.8, 1.2, 0.05), base="device")
-            else:
+            if True:
                 target = -(v - g["vm_set_pu"]) / max(g["qv_droop"], 1e-3) * g["s_rated_mva"]
                 target = max(min(target, g["q_max_mvar"]), -g["q_max_mvar"])
                 err = (q - target) / g["s_rated_mva"]
@@ -1649,7 +1729,7 @@ def build_system(
             "q_mvar": rec["q"], "p_max_mw": rec["p_max_ac"], "p_min_mw": rec["p_min_ac"],
             "vm_set_pu": rec["vm_set_pu"], "droop_qv": rec["droop_qv"], "q_mode": rec["q_mode"],
             "qv_droop": rec["qv_droop"], "q_max_mvar": rec["q_max"], "on_slack_bus": bus in slack_v0 or holds,
-            "current_limit_pu": rec["k"], "eta": rec["eta"], "p_nl_mw": rec["p_nl_mw"], "store": _pcs_store(rec),
+            "current_limit_pu": rec["k"], "overload": rec.get("overload") or [], "droop_pf": rec["droop_pf"], "holds": holds, "eta": rec["eta"], "p_nl_mw": rec["p_nl_mw"], "store": _pcs_store(rec),
             **ids,
         }
 
@@ -2021,6 +2101,10 @@ class _GridFormingLimits:
             self.units.append({
                 "name": name, "g": g, "i": i, "x0": float(ss.GENCLS.xq.v[i]),
                 "k": max(_sf(g.get("current_limit_pu"), 1.2), 0.05), "store": st,
+                # With a short-time overload its limit is the overload's ceiling for the time it has been
+                # over its rating (150 % for 1 s, 120 % to 10 s, then its rating), not a fixed one.
+                "clock": converter_rating.OverloadClock(g["overload"]) if g.get("overload") else None,
+                "hist_k": [],
                 "soc": st["soc0"] if st else None, "last": None, "running": True,
                 "hist_t": [], "hist_soc": [], "hist_x": [], "limited_from": None, "limited_s": 0.0,
                 "peak_pu": 0.0, "stopped_at": None, "why_stopped": None,
@@ -2055,6 +2139,9 @@ class _GridFormingLimits:
             u["last"] = (t, p_dc)
             # Its current: the virtual impedance that holds it at its limit.
             x = float(ss.GENCLS.xq.v[i])
+            if u["clock"] is not None:
+                u["k"] = u["clock"].step(cur, self.check_s)
+                u["hist_k"].append(u["k"])
             if cur > u["k"] * 1.001:
                 x_new = min(x * cur / u["k"], u["x0"] * _PCS_X_MAX)
                 if u["limited_from"] is None:
@@ -2082,7 +2169,12 @@ class _GridFormingLimits:
     def report(self, warnings: List[str]) -> None:
         for u in self.units:
             g = u["g"]
-            if u["limited_from"] is not None:
+            if u["limited_from"] is not None and u["clock"] is not None:
+                warnings.append(
+                    f"PCS '{g['name']}' reached its short-time overload's ceiling at t = {u['limited_from']:.3f} s "
+                    f"- {max(u['hist_k']):g} pu of its rating at first, {u['k']:g} pu at the end: its virtual "
+                    f"impedance held it there, for {u['limited_s']:.3g} s in all.")
+            elif u["limited_from"] is not None:
                 warnings.append(
                     f"PCS '{g['name']}' reached its current limit ({u['k']:g} pu of its rating) at "
                     f"t = {u['limited_from']:.3f} s: its virtual impedance held it there, for "
@@ -2106,6 +2198,8 @@ class _GridFormingLimits:
             "virtual_impedance_x": [_clean_num(float(x)) for x in
                                     np.interp(times, u["hist_t"], u["hist_x"])],
         }
+        if u["clock"] is not None and u["hist_k"]:
+            out["current_limit_series_pu"] = [_clean_num(float(x)) for x in np.interp(times, u["hist_t"], u["hist_k"])]
         if u["store"]:
             soc = np.interp(times, u["hist_t"], u["hist_soc"])
             key = "speed_percent" if u["g"]["source_kind"] == "Flywheel" else "soc_percent"
@@ -2197,7 +2291,7 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
         except Exception:
             pass
 
-        pf_ok = bool(ss.PFlow.run()) and _settle_pcs_set_points(ss, meta)
+        pf_ok = bool(ss.PFlow.run()) and _share_island_imbalance(ss, meta) and _settle_pcs_set_points(ss, meta)
         if not pf_ok:
             return json.dumps({
                 "error": True,
@@ -2637,7 +2731,7 @@ def run_eig(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
         eig_params["line_outage"] = ""
 
         ss, meta = build_system(in_data, eig_params)
-        pf_ok = bool(ss.PFlow.run()) and _settle_pcs_set_points(ss, meta)
+        pf_ok = bool(ss.PFlow.run()) and _share_island_imbalance(ss, meta) and _settle_pcs_set_points(ss, meta)
         if not pf_ok:
             return json.dumps({
                 "error": True,
