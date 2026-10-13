@@ -201,7 +201,8 @@ def _gen_dynamics(net, idx, row, where, problems):
 
 #: A switch's protection as its Protection tab names it: the device, the choices and the numbers.
 SWITCH_PROTECTION_CHOICES = {
-    'protection_type': ('none', 'ocr', 'fuse', 'earth_fault', 'directional', 'differential', 'distance'),
+    'protection_type': ('none', 'ocr', 'fuse', 'earth_fault', 'directional', 'differential', 'distance',
+                        'undervoltage'),
     'oc_relay_type': ('DTOC', 'IDMT', 'IDTOC'),
     'curve_type': ('standard_inverse', 'very_inverse', 'extremely_inverse', 'long_inverse',
                    'ieee_moderately_inverse', 'ieee_very_inverse', 'ieee_extremely_inverse'),
@@ -213,6 +214,7 @@ SWITCH_PROTECTION_NUMBERS = (
     'tms', 't_grade', 't_gg', 't_g', 't_diff', 'I_s_a', 'I_g_a', 'I_gg_a', 'overload_factor',
     'ct_current_factor', 'safety_factor', 'rated_i_a', 'I_e_a', 't_e', 'I_diff_a', 'diff_slope',
     'z1_r_ohm', 'z1_x_ohm', 't_z1', 'z2_r_ohm', 'z2_x_ohm', 't_z2', 'z3_r_ohm', 'z3_x_ohm', 't_z3',
+    'U_pu', 't_u', 'bf_time_s',
 )
 SWITCH_PROTECTION_TEXT = ('fuse_type', 'fuse_custom_name', 'fuse_custom_std_json')
 SWITCH_PROTECTION_FIELDS = tuple(SWITCH_PROTECTION_CHOICES) + SWITCH_PROTECTION_NUMBERS + SWITCH_PROTECTION_TEXT

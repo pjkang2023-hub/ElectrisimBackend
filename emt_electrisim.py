@@ -505,6 +505,10 @@ class _EmtBuilder:
             conv.control_mode = control
             conv.bus_out = b_out
             store = self._der_on(b_in)
+            if store is not None and store.kind == 'Supercapacitor':
+                # A supercapacitor works down to its own minimum voltage: at 80 % of its nominal, the
+                # converter of a rack buffer charged to 79 % blocked at its first step.
+                conv.block_in = min(conv.block_in, 0.9 * store.obj.v_min)
             if control == 'mppt' and store is not None and store.kind == 'PV Array':
                 # Perturb and observe on its PV array's voltage, from the load flow's maximum power point.
                 conv.mppt = emt_der.Mppt(store, conv, self.v_bus[b_in])
@@ -646,6 +650,8 @@ class _EmtBuilder:
             self.ac.follow_profiles(t, state)
         changed = False
         if self.ac.island is not None and self.ac.island_control(t, state):
+            changed = True
+        if self.ac.line_trips and self.ac.line_trip_control(t, state):
             changed = True
         for _, model in self.ders:
             model.control(t, state)
@@ -862,6 +868,22 @@ def emt_study(net, params, in_data=None):
             ac_fault = b.ac.fault(hit[0], kind, r_f, r_f, t_on, t_on + dur if dur > 0 else None)
             ac_fault.update(bus=hit[0], kind=kind, t=t_on, t_off=t_on + dur if dur > 0 else None)
             event_times.append(t_on + (dur if dur > 0 else 0.0))
+    elif b.ac.fault_point is not None:
+        # A fault along a line: at its point, the line built in two parts either side.
+        kind = str(params.get('ac_fault_type') or 'abcg').lower()
+        if kind not in ('ag', 'bg', 'cg', 'ab', 'bc', 'ca', 'abg', 'bcg', 'cag', 'abc', 'abcg'):
+            warnings_out.append(f'No AC fault of kind {kind}: the study runs without one.')
+        else:
+            t_on = _f(params.get('ac_fault_time_ms'), 20.0) * 1e-3
+            dur = _f(params.get('ac_fault_duration_ms'), 0.0) * 1e-3
+            r_f = max(_f(params.get('ac_fault_resistance_ohm'), 0.0), 1e-4)
+            li, frac = b.ac.fault_line
+            ac_fault = b.ac.fault(None, kind, r_f, r_f, t_on, t_on + dur if dur > 0 else None, nodes=b.ac.fault_point)
+            ac_fault.update(bus=None, line=li, label=f"{_label(net, 'line', li)}, {frac * 100:g} %",
+                            id=_row_id(net, 'line', li), kind=kind, t=t_on, t_off=t_on + dur if dur > 0 else None)
+            event_times.append(t_on + (dur if dur > 0 else 0.0))
+    if b.ac.line_trips:
+        event_times.append(b.ac.t_trip)
 
     # The grid's voltage following a profile (IEEE 2800's ride-through envelope, or a table): its
     # source's electromotive force stepped, a share of its own, behind its short-circuit impedance.
@@ -969,6 +991,12 @@ def emt_study(net, params, in_data=None):
     if b.ac.island is not None:
         result['island'] = {'t_ms': _round(b.ac.island['t'] * 1e3),
                             'opened_ms': [_round(x * 1e3) if x is not None else None for x in b.ac.island['opened']]}
+    if b.ac.line_trips:
+        # Each tripped line's breakers: from-end phases a, b, c, then the to-end's, as each opened.
+        result['line_trips'] = [{'line': tr['label'], 'id': _row_id(net, 'line', tr['line']),
+                                 't_trip_ms': _round(b.ac.t_trip * 1e3),
+                                 'opened_ms': [_round(x * 1e3) if x is not None else None for x in tr['opened']]}
+                                for tr in b.ac.line_trips]
     for conv, sm in b.smoothers:
         tr = np.array(sm.trace) if sm.trace else np.zeros((0, 3))
         row = next(r for r in result['converters'] if r['label'] == conv.label)
@@ -1086,7 +1114,10 @@ def _ac_results(sim, ac, net, t_fine, fault):
         branches.append(out)
     fault_out = None
     if fault:
-        fault_out = {'bus': _label(net, 'bus', fault['bus']), 'id': _row_id(net, 'bus', fault['bus']), 'kind': fault['kind'],
+        on_line = fault.get('line') is not None
+        fault_out = {'bus': fault['label'] if on_line else _label(net, 'bus', fault['bus']),
+                     'id': fault['id'] if on_line else _row_id(net, 'bus', fault['bus']), 'kind': fault['kind'],
+                     **({'line': fault['label']} if on_line else {}),
                      't_ms': fault['t'] * 1e3, 't_off_ms': fault['t_off'] * 1e3 if fault['t_off'] else None, 'phases': []}
         during = (t >= fault['t']) & (t <= (fault['t_off'] or t[-1]))
         for ph, k in zip(fault['phases'], fault['switches']):

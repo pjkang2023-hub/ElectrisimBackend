@@ -722,9 +722,11 @@ def test_line_differential_clears_each_backbone_cable(client, quiet, fault, k, i
     carry it through and restrain. A fault on a hall feeder: its breaker's
     overcurrent, 0.1 s. Nothing miscoordinates or trips needlessly. The earth
     faults, the zigzag's zero sequence, likewise (pandapower gives their branch
-    currents no angles: magnitudes, added inside the zone). At 1.5 pu the
-    T2s' 505 V overcurrent picks up too (6.8 kA against 5.1 kA): a backup at
-    0.5-0.8 s that takes the whole island off; at 1.2 pu there is none.
+    currents no angles: magnitudes, added inside the zone). The inverters'
+    own undervoltage trip on each T2's 505 V breaker (Phase 28: 0.5 pu for
+    0.5 s) sees its bus at 0.08 pu in a three-phase fault, at either limit: the
+    backup, which takes the whole island off. An earth fault it does not see
+    (nor can the study: pandapower gives no phase voltages for one).
     """
     out = _protection(client, quiet, fault=fault, k_pcs=k)
     s = out['summary']
@@ -734,8 +736,9 @@ def test_line_differential_clears_each_backbone_cable(client, quiet, fault, k, i
         t = _trips(sc)
         tripped = {n for n, r in t.items() if r['tripped'] and r['t_trip_s'] < 0.3}
         backup = {n for n, r in t.items() if r['tripped'] and r['t_trip_s'] >= 0.3}
-        assert backup == ({f'Block {b} T2 LV breaker' for b in (1, 2, 3)} if k == 1.5 else set())
-        assert all(t[n]['t_trip_s'] >= 0.5 for n in backup)
+        assert backup == ({f'Block {b} T2 LV breaker' for b in (1, 2, 3)} if fault == '3ph' else set())
+        for n in backup:
+            assert t[n]['t_trip_s'] == 0.5 and t[n]['evaluation']['vm_pu'] < 0.1
         line = sc['fault_label'].split(',')[0]
         if line.startswith('Backbone cable'):
             a, b = line.split()[-1].split('-')
@@ -817,3 +820,86 @@ def test_gs11_breakers_against_a_quadrant_bus_fault(client, quiet):
         assert 700 < b['ip_far_side_ka'] < 950
     # The other quadrants' breakers carry nothing of it: each quadrant's DC bus is its own.
     assert all(b['ip_ka'] < 2.0 for n, b in brk.items() if not n.startswith('Block 1 DC1'))
+
+
+# --- Backup protection (Phase 28) ---------------------------------------------------------------
+
+@pytest.mark.parametrize('fault, by_relays', [('3ph', 0.5), ('1ph', None)])
+def test_a_failed_backbone_breaker(client, quiet, fault, by_relays):
+    """
+    Each primary breaker failing to open in turn. Breaker-failure protection
+    (50BF, 0.15 s) on the backbone's breakers then trips the rest of its
+    switchboard: the fault is off 0.15 s after the primary's trip, and that
+    switchboard's block, hall and other cable with it - at BB1 the zigzag's
+    breaker too, which leaves the backbone ungrounded. Without it, the backup
+    is the inverters' undervoltage trip at 0.5 s for a three-phase fault, which
+    takes the whole island off - and nothing for an earth fault.
+    """
+    out = _protection(client, quiet, fault=fault)
+    assert out['summary']['n_breaker_failure_uncleared'] == 0
+    for sc in out['scenarios']:
+        line = sc['fault_label'].split(',')[0]
+        rows = {r['failed_switch']: r for r in sc['breaker_failure']}
+        assert len(rows) == (2 if line.startswith('Backbone cable') else 1)
+        for name, r in rows.items():
+            assert r['t_clear_50bf_s'] == pytest.approx(r['t_primary_s'] + 0.15)
+            assert r['t_clear_s'] == r['t_clear_50bf_s'] and r['t_clear_relays_s'] == by_relays
+            bus = 'BB' + name[-1] if name.startswith('Cable') else f'BB{name.split()[1]}'
+            n = bus[-1]
+            # Every other breaker at its switchboard: the block's, the hall's, the cables'.
+            at_bus = {f'Block {n} T2 HV breaker', f'Hall {n} feeder breaker'} | {
+                f'Cable {a}-{b} breaker at {bus}' for a, b in (('BB1', 'BB2'), ('BB2', 'BB3'), ('BB3', 'BB1'))
+                if bus in (a, b)} | ({'Zigzag breaker'} if bus == 'BB1' else set())
+            assert set(r['opened_by_50bf']) == at_bus - {name}
+
+    bare = _protection(client, quiet, fault=fault, scheme=lambda name: {'bf_time_s': '0'})
+    left = bare['summary']['n_breaker_failure_uncleared']
+    assert left == (0 if fault == '3ph' else 9)
+
+
+def _emt_line_fault(client, quiet, buffers=False, **params):
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    if buffers:
+        _rack_buffers(p)
+    line = next(v['id'] for v in p.values() if isinstance(v, dict) and v.get('userFriendlyName') == 'Backbone cable BB1-BB2')
+    p['0'] = {'typ': 'EmtStudy Parameters', 'frequency': '60', 'time_step_us': '20', 'user_email': 't@t',
+              'duration_ms': '300', 'ac_fault_line': line, 'ac_fault_fraction': '0.5', 'ac_fault_type': 'abc',
+              'ac_fault_resistance_ohm': '0.001', 'ac_fault_time_ms': '20', 'ac_trip_time_ms': '70', **params}
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    return out['emt']
+
+
+def test_emt_backbone_cable_fault_cleared_by_its_87l(client, quiet):
+    """
+    A bolted fault halfway along backbone cable BB1-BB2 at 20 ms, its 87L
+    breakers told to open at 70 ms: each phase opens at its current's zero,
+    71.7-76 ms; the PCS hold at their limit through it (56 ms) and the
+    backbone, an open ring now, comes back. The SSTs do not: their 50 kV links
+    fall past their block in 2.2 ms; let them sag to 5 % and they block at
+    27-30 ms - the links' and output capacitors' energy carries the racks
+    7-10 ms, not the fault's 56. The rack buffers as modelled smooth the
+    racks' swing about the SST's supply and do not hold the 800 V bus without
+    it: they block when it collapses. Riding through a backbone fault needs
+    the SSTs' own ride-through, or rack storage that holds the bus.
+    """
+    emt = _emt_line_fault(client, quiet)
+    (trip,) = emt['line_trips']
+    assert trip['t_trip_ms'] == 70 and all(70 < t < 80 for t in trip['opened_ms'])
+    bus = {b['label']: b for b in emt['ac']['buses']}
+    for b in (1, 2, 3):
+        assert bus[f'Load backbone {b}']['v_rms_min_pu'] < 0.01
+        assert bus[f'Load backbone {b}']['v_rms_final_pu'] > 0.95
+    conv = {c['label']: c for c in emt['converters']}
+    assert 50 < conv['Block 1 GFM 1 (6 x PCS157SE)']['limited_ms'] < 60
+    blocked = {b['label']: b['t_ms'] for b in emt['converters_blocked']}
+    assert not any('GFM' in n or 'AFE' in n for n in blocked)
+    for h in (1, 2, 3):
+        assert 22 < blocked[f'Hall {h} SST rectifier'] < 23
+    deep = _emt_line_fault(client, quiet, vsc_block_pu='0.05')
+    assert all(26 < b['t_ms'] < 31 for b in deep['converters_blocked'] if 'SST' in b['label'])
+    buffered = _emt_line_fault(client, quiet, buffers=True)
+    held = {b['label']: b['t_ms'] for b in buffered['converters_blocked']}
+    for h in (1, 2, 3):
+        assert 22 < held[f'Hall {h} buffer converter'] < 30         # not at its first step (its store at 79 %)

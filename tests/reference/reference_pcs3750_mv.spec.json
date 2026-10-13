@@ -1272,7 +1272,8 @@
    "protection_type": "differential",
    "I_diff_a": 60,
    "diff_slope": 0.3,
-   "t_g": 0.05
+   "t_g": 0.05,
+   "bf_time_s": 0.15
   },
   {
    "id": "C_BB1_BB2_BB2",
@@ -1283,7 +1284,8 @@
    "protection_type": "differential",
    "I_diff_a": 60,
    "diff_slope": 0.3,
-   "t_g": 0.05
+   "t_g": 0.05,
+   "bf_time_s": 0.15
   },
   {
    "id": "C_BB2_BB3_BB2",
@@ -1294,7 +1296,8 @@
    "protection_type": "differential",
    "I_diff_a": 60,
    "diff_slope": 0.3,
-   "t_g": 0.05
+   "t_g": 0.05,
+   "bf_time_s": 0.15
   },
   {
    "id": "C_BB2_BB3_BB3",
@@ -1305,7 +1308,8 @@
    "protection_type": "differential",
    "I_diff_a": 60,
    "diff_slope": 0.3,
-   "t_g": 0.05
+   "t_g": 0.05,
+   "bf_time_s": 0.15
   },
   {
    "id": "C_BB3_BB1_BB3",
@@ -1316,7 +1320,8 @@
    "protection_type": "differential",
    "I_diff_a": 60,
    "diff_slope": 0.3,
-   "t_g": 0.05
+   "t_g": 0.05,
+   "bf_time_s": 0.15
   },
   {
    "id": "C_BB3_BB1_BB1",
@@ -1327,7 +1332,8 @@
    "protection_type": "differential",
    "I_diff_a": 60,
    "diff_slope": 0.3,
-   "t_g": 0.05
+   "t_g": 0.05,
+   "bf_time_s": 0.15
   },
   {
    "id": "B1_T1_HV",
@@ -1368,7 +1374,8 @@
    "protection_type": "differential",
    "I_diff_a": 20,
    "diff_slope": 0.3,
-   "t_g": 0.05
+   "t_g": 0.05,
+   "bf_time_s": 0.15
   },
   {
    "id": "B1_T2_LV",
@@ -1376,14 +1383,9 @@
    "element": "B1_T2",
    "et": "transformer",
    "name": "Block 1 T2 LV breaker",
-   "protection_type": "ocr",
-   "curve_type": "standard_inverse",
-   "tms": 1.0,
-   "t_grade": 0.3,
-   "t_gg": 0.1,
-   "t_g": 0.5,
-   "t_diff": 0.3,
-   "pickup_mode": "auto"
+   "protection_type": "undervoltage",
+   "U_pu": 0.5,
+   "t_u": 0.5
   },
   {
    "id": "B2_T1_HV",
@@ -1424,7 +1426,8 @@
    "protection_type": "differential",
    "I_diff_a": 20,
    "diff_slope": 0.3,
-   "t_g": 0.05
+   "t_g": 0.05,
+   "bf_time_s": 0.15
   },
   {
    "id": "B2_T2_LV",
@@ -1432,14 +1435,9 @@
    "element": "B2_T2",
    "et": "transformer",
    "name": "Block 2 T2 LV breaker",
-   "protection_type": "ocr",
-   "curve_type": "standard_inverse",
-   "tms": 1.0,
-   "t_grade": 0.3,
-   "t_gg": 0.1,
-   "t_g": 0.5,
-   "t_diff": 0.3,
-   "pickup_mode": "auto"
+   "protection_type": "undervoltage",
+   "U_pu": 0.5,
+   "t_u": 0.5
   },
   {
    "id": "B3_T1_HV",
@@ -1480,7 +1478,8 @@
    "protection_type": "differential",
    "I_diff_a": 20,
    "diff_slope": 0.3,
-   "t_g": 0.05
+   "t_g": 0.05,
+   "bf_time_s": 0.15
   },
   {
    "id": "B3_T2_LV",
@@ -1488,14 +1487,9 @@
    "element": "B3_T2",
    "et": "transformer",
    "name": "Block 3 T2 LV breaker",
-   "protection_type": "ocr",
-   "curve_type": "standard_inverse",
-   "tms": 1.0,
-   "t_grade": 0.3,
-   "t_gg": 0.1,
-   "t_g": 0.5,
-   "t_diff": 0.3,
-   "pickup_mode": "auto"
+   "protection_type": "undervoltage",
+   "U_pu": 0.5,
+   "t_u": 0.5
   },
   {
    "id": "F1_CB",
@@ -1510,7 +1504,8 @@
    "I_g_a": 100,
    "t_g": 0.1,
    "I_gg_a": 2000,
-   "t_gg": 0.05
+   "t_gg": 0.05,
+   "bf_time_s": 0.15
   },
   {
    "id": "F2_CB",
@@ -1525,7 +1520,8 @@
    "I_g_a": 100,
    "t_g": 0.1,
    "I_gg_a": 2000,
-   "t_gg": 0.05
+   "t_gg": 0.05,
+   "bf_time_s": 0.15
   },
   {
    "id": "F3_CB",
@@ -1540,7 +1536,8 @@
    "I_g_a": 100,
    "t_g": 0.1,
    "I_gg_a": 2000,
-   "t_gg": 0.05
+   "t_gg": 0.05,
+   "bf_time_s": 0.15
   }
  ],
  "dc_breakers": [

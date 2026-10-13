@@ -125,6 +125,11 @@ class AcBuilder:
         t_island = _f(params.get('island_time_ms'), -1.0) if str(params.get('island_time_ms') or '').strip() else -1.0
         # Islanding: {'t', 'switches': per grid phase, 'opened': its time, 'last': its last current}.
         self.island = {'t': t_island * 1e-3, 'switches': [], 'opened': [], 'last': []} if t_island >= 0 else None
+        # A fault along a line, and the lines' breakers that open on it (as their protection would).
+        self.fault_line = None   # (line index, fraction from its from-bus)
+        self.fault_point = None  # its [a, b, c] nodes there
+        self.line_trips = []     # {'line', 'label', 'switches', 'opened', 'last'}: each line's breakers, per phase
+        self.t_trip = None
 
     # --- buses and the phase shifts ------------------------------------------------
 
@@ -147,6 +152,7 @@ class AcBuilder:
         if not self.nodes:
             return self
         self._open_switches = self._switches()
+        self._line_events()
         self._phase_offsets()
         self._grids()
         self._lines()
@@ -279,9 +285,65 @@ class AcBuilder:
             self.series.append(('External grid', label, _row_id(net, 'ext_grid', gi), label,
                                 [('i_cp', g, k, 1.0) for k in range(3)]))
 
+    def _find_line(self, ident):
+        net = self.net
+        ident = str(ident).strip()
+        return next((li for li in net.line.index
+                     if ident in (str(net.line.at[li, 'name']), str(_row_id(net, 'line', li)), _label(net, 'line', li))),
+                    None)
+
+    def _line_events(self):
+        """
+        A fault along a line (ac_fault_line, at ac_fault_fraction of its length
+        from its from-bus), and from ac_trip_time_ms the breakers at both ends of
+        the lines in ac_trip_lines (the faulted line, by default) opening, each
+        phase at its current's zero - its differential protection clearing it.
+        """
+        p = self.params
+        name = str(p.get('ac_fault_line') or '').strip()
+        if name and name != 'none':
+            li = self._find_line(name)
+            if li is None:
+                self.warnings.append(f'No line {name} to fault: the study runs without a line fault.')
+            else:
+                frac = min(max(_f(p.get('ac_fault_fraction'), 0.5), 0.01), 0.99)
+                self.fault_line = (li, frac)
+        if not str(p.get('ac_trip_time_ms') or '').strip():
+            return
+        self.t_trip = _f(p.get('ac_trip_time_ms'), 0.0) * 1e-3
+        names = [x.strip() for x in str(p.get('ac_trip_lines') or '').split(',') if x.strip()]
+        if not names and self.fault_line is not None:
+            names = [str(_row_id(self.net, 'line', self.fault_line[0]))]
+        for name in names:
+            li = self._find_line(name)
+            if li is None:
+                self.warnings.append(f'No line {name} to trip.')
+            else:
+                self.line_trips.append({'line': li, 'label': _label(self.net, 'line', li), 'switches': [],
+                                        'opened': [], 'last': []})
+
+    def line_trip_control(self, t, state):
+        """From the trip time, each line breaker's phase opens as its current passes zero; True if one did."""
+        if self.t_trip is None or t < self.t_trip - 1e-12:
+            return False
+        changed = False
+        for trip in self.line_trips:
+            for n, k in enumerate(trip['switches']):
+                if trip['opened'][n] is not None:
+                    continue
+                i = float(state.i_sw[k])
+                last = trip['last'][n]
+                trip['last'][n] = i
+                if last is not None and (i == 0.0 or (i > 0) != (last > 0)):
+                    state.set_switch(k, False)
+                    trip['opened'][n] = t
+                    changed = True
+        return changed
+
     def _lines(self):
         net, ckt, w = self.net, self.ckt, self.w
         max_km = max(_f(self.params.get('ac_max_section_km'), 50.0), 1e-3)
+        trips = {tr['line']: tr for tr in self.line_trips}
         for li in net.line.index:
             fb, tb = int(net.line.at[li, 'from_bus']), int(net.line.at[li, 'to_bus'])
             if not bool(net.line.at[li, 'in_service']) or fb not in self.nodes or tb not in self.nodes or ('line', li) in self._open_switches:
@@ -294,24 +356,45 @@ class AcBuilder:
             r0 = r0 if r0 > 0 else r1
             x0 = x0 if x0 > 0 else x1
             c0 = c0 if c0 > 0 else c1
-            n_sec = max(1, int(math.ceil(km / max_km - 1e-9)))
-            sec = km / n_sec
-            rs, rm = _sequence_to_phase(r1 * sec / par, r0 * sec / par)
-            ls, lm = _sequence_to_phase(x1 * sec / par / w, x0 * sec / par / w)
-            cg = c0 * 1e-9 * sec * par
-            cl = max(c1 - c0, 0.0) / 3.0 * 1e-9 * sec * par
             label = _label(net, 'line', li)
-            ends = [self.nodes[fb]] + [[ckt.node(f'{label} section {k} {p}') for p in 'abc'] for k in range(1, n_sec)] + [self.nodes[tb]]
-            first = None
-            for k in range(n_sec):
-                g = ckt.add_coupled(ends[k], ends[k + 1], _matrix(rs, rm), _matrix(ls, lm))
-                first = g if first is None else first
-                for end in (ends[k], ends[k + 1]):
+            start, stop = self.nodes[fb], self.nodes[tb]
+            trip = trips.get(li)
+            if trip is not None:
+                # Its breakers, one per phase at each end, between its bus and its own end.
+                own_ends = []
+                for bus, side in ((fb, 'from'), (tb, 'to')):
+                    end = [ckt.node(f'{label} {side} end {p}') for p in 'abc']
                     for ph in range(3):
-                        if cg > 0:
-                            ckt.add_c(0, end[ph], cg / 2.0)
-                        if cl > 0:
-                            ckt.add_c(end[ph], end[(ph + 1) % 3], cl / 2.0)
+                        trip['switches'].append(ckt.add_switch(self.nodes[bus][ph], end[ph], closed=True))
+                        trip['opened'].append(None)
+                        trip['last'].append(None)
+                    own_ends.append(end)
+                start, stop = own_ends
+            # Its length in parts: at a fault along it, two, either side of the fault point.
+            parts = [(start, stop, km)]
+            if self.fault_line is not None and self.fault_line[0] == li:
+                frac = self.fault_line[1]
+                self.fault_point = [ckt.node(f'{label} fault point {p}') for p in 'abc']
+                parts = [(start, self.fault_point, km * frac), (self.fault_point, stop, km * (1.0 - frac))]
+            first = None
+            for n_part, (a_end, b_end, part_km) in enumerate(parts):
+                n_sec = max(1, int(math.ceil(part_km / max_km - 1e-9)))
+                sec = part_km / n_sec
+                rs, rm = _sequence_to_phase(r1 * sec / par, r0 * sec / par)
+                ls, lm = _sequence_to_phase(x1 * sec / par / w, x0 * sec / par / w)
+                cg = c0 * 1e-9 * sec * par
+                cl = max(c1 - c0, 0.0) / 3.0 * 1e-9 * sec * par
+                ends = [a_end] + [[ckt.node(f'{label} section {n_part}.{k} {p}') for p in 'abc']
+                                  for k in range(1, n_sec)] + [b_end]
+                for k in range(n_sec):
+                    g = ckt.add_coupled(ends[k], ends[k + 1], _matrix(rs, rm), _matrix(ls, lm))
+                    first = g if first is None else first
+                    for end in (ends[k], ends[k + 1]):
+                        for ph in range(3):
+                            if cg > 0:
+                                ckt.add_c(0, end[ph], cg / 2.0)
+                            if cl > 0:
+                                ckt.add_c(end[ph], end[(ph + 1) % 3], cl / 2.0)
             self.series.append(('Line', label, _row_id(net, 'line', li), f'{label} (from end)',
                                 [('i_cp', first, k, 1.0) for k in range(3)]))
 
@@ -593,7 +676,7 @@ class AcBuilder:
 
     # --- a fault -------------------------------------------------------------------------
 
-    def fault(self, bus, kind, r_pn, r_ng, t_on, t_off):
+    def fault(self, bus, kind, r_pn, r_ng, t_on, t_off, nodes=None):
         """
         A fault at ``bus`` from t_on: each faulted phase through r_pn to a star
         point, grounded through r_ng for a ground fault (as Simscape's
@@ -610,7 +693,7 @@ class AcBuilder:
         switches = []
         for k in phases:
             mid = ckt.node(f'AC fault {"abc"[k]}')
-            switches.append(ckt.add_switch(self.nodes[bus][k], mid, closed=False))
+            switches.append(ckt.add_switch((nodes or self.nodes[bus])[k], mid, closed=False))
             ckt.add_r(mid, star, r_pn)
         if kind.endswith('g'):
             mid = ckt.node('AC fault ground')

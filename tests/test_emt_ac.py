@@ -242,3 +242,25 @@ def test_three_phase_fault_is_balanced(client, quiet):
     rms = [p['i_rms_ka'] for p in phases]
     assert len(rms) == 3 and max(rms) == pytest.approx(min(rms), rel=0.02)
     assert _ac_bus(result, 'B1')['v_rms_final_pu'] < 0.01
+
+
+def test_fault_along_a_line_cleared_by_its_breakers(client, quiet):
+    """
+    A three-phase fault halfway along LA1, its breakers at both ends told to
+    open at 40 ms: each phase opens at its current's next zero, within a half
+    cycle; the substation recovers. A1 and A2 beyond it are an island of their
+    own: the rooftop PV, a current source at its load-flow output with no
+    anti-islanding trip, drives their loads' impedance far from 1 pu.
+    """
+    from test_dc_elements import _drawn_request
+    request = _drawn_request()
+    la1 = next(v['id'] for v in request.values() if isinstance(v, dict) and v.get('userFriendlyName') == 'LA1')
+    result = _run(client, quiet, ac_fault_line=la1, ac_fault_fraction=0.5, ac_fault_type='abc',
+                  ac_fault_time_ms=20, ac_trip_time_ms=40, duration_ms=120, time_step_us=20)
+    (trip,) = result['emt']['line_trips']
+    assert trip['line'] == 'LA1' and len(trip['opened_ms']) == 6
+    assert all(40 < t < 40 + 1e3 / 50 / 2 + 1 for t in trip['opened_ms'])
+    fault = result['emt']['ac']['fault']
+    assert fault['line'] == 'LA1, 50 %' and len(fault['phases']) == 3
+    assert _ac_bus(result, '20 kV substation')['v_rms_final_pu'] > 0.95
+    assert abs(_ac_bus(result, 'A2')['v_rms_final_pu'] - 1.0) > 0.1

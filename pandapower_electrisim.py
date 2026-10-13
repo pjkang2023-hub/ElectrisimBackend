@@ -17198,6 +17198,7 @@ _PROTECTION_KIND_EARTH_FAULT = "earth_fault"
 _PROTECTION_KIND_DIRECTIONAL = "directional"
 _PROTECTION_KIND_DIFF = "differential"
 _PROTECTION_KIND_DIST = "distance"
+_PROTECTION_KIND_UV = "undervoltage"
 _PROTECTION_KIND_NONE = "none"
 
 # OC relay subtype -> pandapower switch.type marker used internally by the library.
@@ -17282,6 +17283,7 @@ _PROT_KIND_SETTING_KEYS = {
     _PROTECTION_KIND_EARTH_FAULT: ("I_e_a", "t_e"),
     _PROTECTION_KIND_DIRECTIONAL: ("directional_mode", "I_g_a", "I_s_a", "t_g"),
     _PROTECTION_KIND_DIFF: ("I_diff_a", "diff_slope", "t_g"),
+    _PROTECTION_KIND_UV: ("U_pu", "t_u"),
     _PROTECTION_KIND_DIST: ("z1_r_ohm", "z1_x_ohm", "t_z1", "z2_r_ohm", "z2_x_ohm",
                             "t_z2", "z3_r_ohm", "z3_x_ohm", "t_z3"),
 }
@@ -17695,6 +17697,10 @@ def _prot_collect_switch_protection_specs(in_data):
             'directional_mode': str(row.get('directional_mode', 'forward') or 'forward').lower(),
             'I_diff_a': _prot_safe_float(row.get('I_diff_a')),
             'diff_slope': _prot_safe_float(row.get('diff_slope')),
+            'U_pu': _prot_safe_float(row.get('U_pu')),
+            't_u': _prot_safe_float(row.get('t_u')),
+            # Breaker failure (50BF): its breaker's own setting, whatever relay trips it.
+            'bf_time_s': _prot_safe_float(row.get('bf_time_s')),
             'z1_r_ohm': _prot_safe_float(row.get('z1_r_ohm')),
             'z1_x_ohm': _prot_safe_float(row.get('z1_x_ohm')),
             'z2_r_ohm': _prot_safe_float(row.get('z2_r_ohm')),
@@ -18199,7 +18205,7 @@ def _attach_protection_devices(net, specs, grading_mode='auto'):
 
         # --- Electrisim-side devices -----------------------------------------------
         elif kind in (_PROTECTION_KIND_EARTH_FAULT, _PROTECTION_KIND_DIRECTIONAL,
-                      _PROTECTION_KIND_DIFF, _PROTECTION_KIND_DIST):
+                      _PROTECTION_KIND_DIFF, _PROTECTION_KIND_DIST, _PROTECTION_KIND_UV):
             summaries.append({
                 'switch_id': sw_id,
                 'switch_name': spec.get('sw_name'),
@@ -18210,6 +18216,7 @@ def _attach_protection_devices(net, specs, grading_mode='auto'):
                     _PROTECTION_KIND_DIRECTIONAL: 'Directional OCR',
                     _PROTECTION_KIND_DIFF: 'Differential (87)',
                     _PROTECTION_KIND_DIST: 'Distance (21)',
+                    _PROTECTION_KIND_UV: 'Undervoltage (27)',
                 }[kind],
                 'engine': 'electrisim',
                 'attached': True,
@@ -18732,6 +18739,28 @@ def _prot_num(value, default=0.0):
     return x if np.isfinite(x) else default
 
 
+def _prot_switch_voltage_pu(net_sc, sw_idx):
+    """The fault's voltage (pu) at a switch's bus, from its element's branch results; None if not given."""
+    try:
+        sw = net_sc.switch.loc[int(sw_idx)]
+        et, element, bus = str(sw['et']), int(sw['element']), int(sw['bus'])
+    except (KeyError, TypeError, ValueError):
+        return None
+    sides = {'l': ('line', 'res_line_sc', (('from_bus', 'vm_from_pu'), ('to_bus', 'vm_to_pu'))),
+             't': ('trafo', 'res_trafo_sc', (('hv_bus', 'vm_hv_pu'), ('lv_bus', 'vm_lv_pu')))}.get(et)
+    if sides is None:
+        return None
+    table, res_name, cols = sides
+    res = getattr(net_sc, res_name, None)
+    if res is None or element not in res.index or element not in net_sc[table].index:
+        return None
+    for bus_col, vm_col in cols:
+        if int(net_sc[table].at[element, bus_col]) == bus and vm_col in res.columns:
+            vm = _prot_num(res.at[element, vm_col], np.nan)
+            return float(vm) if np.isfinite(vm) else None
+    return None
+
+
 def _prot_diff_zone_currents(net_sc, sw_idx, fault_bus_idx=None):
     """
     A differential relay's protected element - its switch's line (both halves
@@ -18850,6 +18879,17 @@ def _prot_custom_trip_rows(net_sc, attach_summaries, fault_type, fault_bus_idx=N
             detail = {'i_operate_a': operate, 'i_restraint_a': restraint,
                       'pickup_a': pickup, 'slope': slope,
                       **({'terminals_a': zone['terminals_a'], 'phasors': zone['phasors']} if zone else {})}
+        elif evaluator == _PROTECTION_KIND_UV:
+            # The voltage at its switch's bus, on its own side of its element: what an
+            # inverter's own undervoltage trip, or a 27 relay on its breaker, sees.
+            pickup = spec.get('U_pu') if spec.get('U_pu') is not None else 0.5
+            vm = _prot_switch_voltage_pu(net_sc, summary.get('sw_idx'))
+            tripped = vm is not None and vm < pickup
+            t_trip = (spec.get('t_u') if spec.get('t_u') is not None else 0.5) if tripped else None
+            detail = {'vm_pu': vm, 'pickup_pu': pickup, 'evaluated': vm is not None}
+            if vm is None:
+                detail['note'] = ("pandapower gives no branch voltages for an unbalanced fault: "
+                                  "the undervoltage element is not evaluated")
         elif evaluator == _PROTECTION_KIND_DIST:
             z_base = None
             try:
@@ -19201,7 +19241,55 @@ def _prot_reaches_source(adjacency, start, sources, blocked):
     return False
 
 
-def _prot_check_miscoordination(net, scenarios, t_diff):
+def _prot_breaker_failure(net, adjacency, element_node, fault_node, sources, rows, primaries, trip_time, label,
+                          bf_times):
+    """
+    Each primary breaker that trips, failing to open: what clears the fault
+    then. The other relays open their breakers at their trip times; a failed
+    breaker with breaker-failure protection (50BF) trips every other breaker
+    at its bus its delay after its relay did. The fault is cleared when no
+    source reaches it. One row per primary: the time by the relays alone, by
+    50BF, and the clearing time - None, the fault left on.
+    """
+    def edge_of(si):
+        sw = net.switch.loc[si]
+        return frozenset((('bus', int(sw['bus'])), element_node(sw['et'], sw['element'])))
+
+    def cleared_at(events):
+        adj = {n: set(v) for n, v in adjacency.items()}
+        for t, edges in sorted(events, key=lambda e: e[0]):
+            for edge in edges:
+                a, b = tuple(edge)
+                adj.get(a, set()).discard(b)
+                adj.get(b, set()).discard(a)
+            if not _prot_reaches_source(adj, fault_node, sources, ()):
+                return t
+        return None
+
+    out = []
+    for key in primaries:
+        t_p = trip_time(key)
+        if t_p is None:
+            continue
+        relays = [(trip_time(k), [edge_of(k)]) for k in rows if k != key and trip_time(k) is not None]
+        t_relays = cleared_at(relays)
+        bf = bf_times.get(key)
+        t_bf, opened = None, []
+        if bf is not None and bf > 0:
+            bus = int(net.switch.at[key, 'bus'])
+            at_bus = [si for si in net.switch.index if si != key and bool(net.switch.at[si, 'closed'])
+                      and (int(net.switch.at[si, 'bus']) == bus
+                           or (net.switch.at[si, 'et'] == 'b' and int(net.switch.at[si, 'element']) == bus))]
+            t_bf = cleared_at(relays + [(t_p + bf, [edge_of(si) for si in at_bus])])
+            opened = [_contingency_friendly_name(net, net.switch.at[si, 'name']) for si in at_bus]
+        times = [t for t in (t_relays, t_bf) if t is not None]
+        out.append({'failed_switch': label(key), 't_primary_s': t_p, 'bf_time_s': bf,
+                    't_clear_relays_s': t_relays, 't_clear_50bf_s': t_bf, 'opened_by_50bf': opened,
+                    't_clear_s': min(times) if times else None})
+    return out
+
+
+def _prot_check_miscoordination(net, scenarios, t_diff, bf_times=None):
     """
     Grade the relays of each fault by protection zone. The zone is what the
     fault reaches without passing a relay; the relays on its edge that lead
@@ -19324,6 +19412,8 @@ def _prot_check_miscoordination(net, scenarios, t_diff):
             clearing.append(t)
         t_clear = max(clearing) if clearing and None not in clearing else None
         scenario['clearing_time_s'] = t_clear
+        scenario['breaker_failure'] = _prot_breaker_failure(
+            net, adjacency, element_node, fault_node, sources, rows, primaries, trip_time, label, bf_times or {})
 
         common = {
             'sc_line_id': scenario.get('sc_line_id'),
@@ -19499,7 +19589,12 @@ def protection_coordination(net, prot_params, in_data):
 
         for scenario in scenarios:
             scenario['fault_label'] = _prot_fault_label(net, scenario)
-        miscoord, unwanted = _prot_check_miscoordination(net, scenarios, t_diff)
+        bf_times = {}
+        for sw_id, spec in specs.items():
+            sw_idx = _prot_resolve_sw_idx_for_id(net, sw_id)
+            if sw_idx is not None and spec.get('bf_time_s'):
+                bf_times[int(sw_idx)] = float(spec['bf_time_s'])
+        miscoord, unwanted = _prot_check_miscoordination(net, scenarios, t_diff, bf_times)
 
         n_tripped = sum(1 for sc_res in scenarios for trip in sc_res.get('trip', []) if trip.get('tripped'))
         response = {
@@ -19516,6 +19611,9 @@ def protection_coordination(net, prot_params, in_data):
                 'n_tripped': n_tripped,
                 'n_miscoordination': len(miscoord),
                 'n_unwanted_trips': len(unwanted),
+                # A primary breaker failing: the faults then left on, by nothing else clearing them.
+                'n_breaker_failure_uncleared': sum(1 for sc in scenarios for r in sc.get('breaker_failure') or []
+                                                   if r['t_clear_s'] is None),
                 'fault_type': fault_type,
                 'case': case,
                 'grading_mode': grading_mode,

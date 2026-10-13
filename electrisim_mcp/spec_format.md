@@ -149,8 +149,8 @@ locked-rotor contribution, and motor starting starts it.
 
 A switch's relay or fuse: its Protection tab's fields, drawn on the switch for
 the protection coordination study. `protection_type` (`none` default, `ocr`,
-`fuse`, `earth_fault`, `directional`, `differential`, `distance`), then the
-type's own:
+`fuse`, `earth_fault`, `directional`, `differential`, `distance`,
+`undervoltage`), then the type's own:
 - `ocr`: `oc_relay_type` (`DTOC`, `IDMT`, `IDTOC`), `curve_type`
   (`standard_inverse`, `very_inverse`, `extremely_inverse`, `long_inverse`,
   `ieee_moderately_inverse`, `ieee_very_inverse`, `ieee_extremely_inverse`),
@@ -163,7 +163,14 @@ type's own:
 - `directional`: `directional_mode` (`forward`, `reverse`), `I_g_a`, `I_s_a`, `t_g`;
 - `differential`: `I_diff_a`, `diff_slope`, `t_g` - the currents into the
   switch's line or transformer at each of its terminals compared;
-- `distance`: `z1_r_ohm`, `z1_x_ohm`, `t_z1`, and the same for zones 2 and 3.
+- `distance`: `z1_r_ohm`, `z1_x_ohm`, `t_z1`, and the same for zones 2 and 3;
+- `undervoltage`: `U_pu`, `t_u` - the voltage at the switch's bus in a
+  three-phase fault (an inverter's own undervoltage trip, or a 27 relay);
+  not evaluated for an unbalanced fault.
+And with any of them, `bf_time_s`: breaker-failure protection (50BF) - if the
+breaker fails to open, every other breaker at its bus trips this long after
+its relay did; the study reports what clears each fault with each primary
+breaker failed.
 Any other field on a switch is refused.
 
 ## DC and microgrid elements

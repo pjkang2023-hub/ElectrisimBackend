@@ -141,3 +141,56 @@ def test_breaker_in_front_of_a_battery_in_the_dc_fault_study(client, quiet):
     assert brk['exceeds'] is False
     # On the other bus the breaker is not beside the fault: no far side.
     assert 'i_open_far_side_ka' not in _fault(result, 'cell-dc_a')['breakers'][0]
+
+
+# --- The undervoltage relay (27) and breaker failure (50BF) -----------------------------------
+
+def test_undervoltage_relay_reads_its_buses_fault_voltage():
+    """
+    A 27 element on cable B-C's breaker at B: the fault halfway along A-B
+    pulls B down, read from the cable's branch results at B. An earth fault's
+    have no voltages: not evaluated, and said so.
+    """
+    net, bus = _faulted('3ph', line=0)
+    vm = float(net.res_line_sc.at[1, 'vm_from_pu'])
+    assert 0 < vm < 0.9
+    summaries = [{'sw_idx': 2, 'kind': 'undervoltage', 'custom_evaluator': 'undervoltage',
+                  'settings': {'U_pu': u, 't_u': 0.4}} for u in (vm + 0.05, vm - 0.05)]
+    rows = pe._prot_custom_trip_rows(net, summaries[:1], '3ph', bus) + pe._prot_custom_trip_rows(net, summaries[1:], '3ph', bus)
+    assert rows[0]['tripped'] and rows[0]['t_trip_s'] == 0.4 and rows[0]['evaluation']['vm_pu'] == pytest.approx(vm)
+    assert not rows[1]['tripped']
+    net, bus = _faulted('1ph', line=0)
+    (row,) = pe._prot_custom_trip_rows(net, summaries[:1], '1ph', bus)
+    assert not row['tripped'] and row['evaluation']['evaluated'] is False
+
+
+def test_breaker_failure_on_the_radial_grid(client, quiet):
+    """
+    Each feeder breaker failing to open on its feeder's fault: with 50BF
+    (0.15 s) the substation's other breakers trip and the fault is off 0.22 s
+    after it began - unless a source lies beyond the failed breaker: feeder
+    B's gas engine keeps feeding its fault, nothing clearing it. The relays
+    alone back up none (T1's pickup is above the feeders' fault current).
+    """
+    import json
+    from test_protection_inverters import MANUAL, REFERENCE_DIR
+    import os
+    with open(os.path.join(REFERENCE_DIR, 'reference_radial.diagram_protection_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    for v in p.values():
+        if isinstance(v, dict) and str(v.get('typ', '')).startswith('Switch') and v.get('protection_type') == 'ocr':
+            v.update(pickup_mode='manual', **MANUAL['reference_radial'].get(v['userFriendlyName'], MANUAL['reference_radial'][None]))
+            if v['userFriendlyName'] != 'CB_T1':
+                v['bf_time_s'] = '0.15'
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    assert out['summary']['n_breaker_failure_uncleared'] == 2
+    for sc in out['scenarios']:
+        (r,) = sc['breaker_failure']
+        assert r['t_clear_relays_s'] is None
+        others = {'CB_T1', 'CB_A', 'CB_B', 'Wind feeder breaker'} - {r['failed_switch']}
+        assert set(r['opened_by_50bf']) == others
+        if r['failed_switch'] == 'CB_B':
+            assert r['t_clear_s'] is None and sc['unprotected_sources'] == ['Gas engine']
+        else:
+            assert r['t_clear_s'] == pytest.approx(0.22)
