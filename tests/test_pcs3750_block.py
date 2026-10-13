@@ -360,3 +360,29 @@ def test_drawn_asymmetric_load_and_unbalance_control(client, quiet):
     (conv,) = [c for c in on['converters'] if c['label'] == 'P1']
     assert conv['unbalance_control'] and conv['i2_end_ka'] > 0 and conv['vuf_end_percent'] < 1.0
     assert not any('asymmetric loads' in w for w in on.get('warnings', []))
+
+
+# --- The reference network (Phase 22) -------------------------------------------------------------
+
+def test_reference_network_solves(quiet):
+    """
+    tests/reference/reference_pcs3750_mv.spec.json - three blocks, fully loaded
+    (10.8 MW of DGX H100 racks behind three SSTs): the twelve grid-forming PCS
+    share it equally near their set points (60 Hz), the rectifiers carry it
+    all, the batteries idle, and the grid supplies it at 93-94 % to the racks
+    (the spec's ~93 %).
+    """
+    import json
+    import os
+    path = os.path.join(os.path.dirname(__file__), 'reference', 'reference_pcs3750_mv.spec.json')
+    with open(path, encoding='utf-8') as fh:
+        spec = json.load(fh)
+    res = _solve(spec, quiet)
+    p = [g['p_mw'] for g in res['pcs']]
+    assert len(p) == 12 and max(p) - min(p) < 1e-6
+    assert res['pcs'][0]['frequency_hz'] == pytest.approx(60.0, abs=0.05)
+    assert all(g['loading_percent'] < 100 for g in res['pcs'])
+    assert all(a['loading_percent'] < 100 for a in res['vscs'])
+    assert all(abs(s['p_mw']) < 1e-4 for s in res['sources_and_stores'] if s['kind'] == 'Battery')
+    grid = res['external_grids'][0]['p_mw']
+    assert 0.93 < 3 * 3.6 / grid < 0.945

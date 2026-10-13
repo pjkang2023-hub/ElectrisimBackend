@@ -176,8 +176,14 @@ power), `load_profile_id` (a power profile).
 
 **vscs** - an AC/DC converter. `id`, **`bus`** (AC), **`bus_dc`** (DC),
 `r_ohm`, `x_ohm`, `r_dc_ohm`, `control_mode_ac` (`vm_pu` or `q_mvar`) with
-`control_value_ac`, `control_mode_dc` (`vm_pu` or `p_mw`) with
-`control_value_dc`, `rated_mva`, `dc_link_mf`, `dc_link_esr_mohm`,
+`control_value_ac`, `control_mode_dc` (`vm_pu`, `p_mw` or `follow_load` - a
+double-conversion UPS's rectifier: it delivers what its DC bus's loads draw
+plus `control_value_dc` MW to charge the batteries on that bus, which hold its
+voltage and carry what is beyond its rating) with `control_value_dc`,
+`rated_mva`, its rating where it runs (`inlet_c`, `altitude_m`,
+`derate_temp_curve`, `derate_altitude_curve` - "x:multiplier" pairs, the lowest
+factor that derates - and `overload_curve`, e.g. "1:1.5, 10:1.2"; blank: its
+nameplate), `dc_link_mf`, `dc_link_esr_mohm`,
 `dc_link_esl_uh`, `current_limit_pu`, `emt_model`, `switching_khz`,
 `current_loop_hz` (its current control's bandwidth in the EMT study, 500 Hz;
 in an island no grid holds, f_sw / 20 - 250 Hz at 5 kHz - keeps it clear of
@@ -224,7 +230,8 @@ breaker in front of it names it as its `element`.
 (`ratings` or `cells`), `vn_v`, `capacity_kwh`, `r0_mohm`, `cells_series`,
 `strings_parallel`, `cell_v`, `cell_ah`, `cell_r_mohm`, `r1_percent`, `tau1_s`,
 `soc_percent`, `soc_min_percent`, `soc_max_percent`, `c_rate_discharge`,
-`c_rate_charge`, `coulombic_efficiency_percent`, `ocv_table`, `l_uh`.
+`c_rate_charge`, `coulombic_efficiency_percent`, `ocv_table` ("soc:volts per
+cell" pairs, or `LFP` / `NFPP`), `l_uh`.
 
 **supercapacitors** - `id`, `bus`, `coupling`, `sizing`, `c_f`, `v_rated`,
 `esr_mohm`, `esl_uh`, `module_c_f`, `module_v`, `module_esr_mohm`,
@@ -251,11 +258,15 @@ own, or directly on a network bus), or behind a PCS - then give it no `bus`.
 (grid-forming, with a supercapacitor and no `p_set_mw`, an eSTATCOM).
 `id`, **`bus`** (AC), and its DC side: `source` (a battery, supercapacitor,
 flywheel, SOFC or PV array id) or `bus_dc` (a DC bus with its source alone on
-it). `control` (`grid_following` or `grid_forming`), `s_rated_mva`,
+it - or a DC network's bus, a UPS's DC link, which it draws from). `control`
+(`grid_following` or `grid_forming`), `s_rated_mva`,
 `vn_ac_kv`, `efficiency_percent`, `no_load_loss_kw`, `p_set_mw`, `q_mode`
 (`q`, `pf` or `qv`), `q_set_mvar`, `pf`, `qv_droop_percent`, `vm_set_pu`,
 `droop_pf_percent`, `droop_qv_percent`, `current_limit_pu`, `current_loop_hz`
-(grid-following, as a VSC's), `opf_marginal_cost_eur_per_mwh`. Draw its transformer to the network as an
+(grid-following, as a VSC's), its rating where it runs (as a VSC's),
+`q_max_percent` (Q capped at this share of its rating), `unbalance_control`
+(grid-forming, EMT: its bus's negative-sequence voltage held at zero) with
+`i2_limit_pu`, `opf_marginal_cost_eur_per_mwh`. Draw its transformer to the network as an
 ordinary transformer between its own LV bus and the network bus.
 
 **grounding_transformers** - a zigzag grounding transformer. `id`, **`bus`**
