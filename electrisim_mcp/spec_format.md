@@ -266,7 +266,10 @@ it - or a DC network's bus, a UPS's DC link, which it draws from). `control`
 (grid-following, as a VSC's), its rating where it runs (as a VSC's),
 `q_max_percent` (Q capped at this share of its rating), `unbalance_control`
 (grid-forming, EMT: its bus's negative-sequence voltage held at zero) with
-`i2_limit_pu`, `opf_marginal_cost_eur_per_mwh`. Draw its transformer to the network as an
+`i2_limit_pu`, on a DC network its DC link (`dc_link_mf`, 0: 4 ms of its
+rating; `dc_link_esr_mohm`, `dc_link_esl_uh`: EMT and DC fault - in a DC bus
+fault it blocks, its link discharging and its diodes feeding from its AC bus),
+`opf_marginal_cost_eur_per_mwh`. Draw its transformer to the network as an
 ordinary transformer between its own LV bus and the network bus.
 
 **grounding_transformers** - a zigzag grounding transformer. `id`, **`bus`**

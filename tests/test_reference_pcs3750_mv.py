@@ -214,3 +214,131 @@ def test_unbalance_control_at_full_load(client, quiet):
     assert not emt['converters_blocked']
     gfm = [c for c in emt['converters'] if 'GFM' in c['label']]
     assert len(gfm) == 12 and all(c['i2_end_ka'] > 0.08 for c in gfm)
+
+
+# --- Phase 24: faults and earthing ----------------------------------------------------------------
+# IEC 60909 on the drawn diagram: the islanded backbone's PCS as current sources at their limit (one of
+# them, in the study, a source with no zero sequence); ANSI on the same request; the DC fault study on a
+# quadrant's DC bus; arc flash by voltage class.
+
+IEC = {'typ': 'ShortCircuitPandaPower Parameters', 'fault_location': 'max', 'fault_bus_mode': 'all',
+       'fault_bus_ids': [], 'fault_bus_names': [], 'fault_impedance': '6', 'frequency': '60', 'topology': 'auto',
+       'tk_s': '1', 'r_fault_ohm': '0', 'x_fault_ohm': '0', 'inverse_y': 'True', 'user_email': 't@t'}
+I_LOAD_KA = 11.1 / (3 ** 0.5 * 34.5)          # the backbone's load current: 0.186 kA
+
+
+def _drawn_study(client, quiet, params, k_pcs=None, x_afe=None):
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    for v in p.values():
+        if isinstance(v, dict) and k_pcs and str(v.get('typ', '')).startswith('PCS'):
+            v['current_limit_pu'] = str(k_pcs)
+        if isinstance(v, dict) and x_afe and str(v.get('typ', '')).startswith('VSC'):
+            v['x_ohm'] = str(x_afe)
+    label = {v['name']: v.get('userFriendlyName') for v in p.values() if isinstance(v, dict) and 'name' in v}
+    p['0'] = params
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    assert not out.get('error'), out.get('message')
+    return out, label, p
+
+
+def _bus_ka(out, label):
+    return {label[r['name']]: r.get('ikss_ka', r.get('i_first_sym_ka')) for r in out['busbars']}
+
+
+@pytest.mark.parametrize('k, backbone_a', [(1.2, 239), (1.5, 299)])
+def test_three_phase_faults(client, quiet, k, backbone_a):
+    """
+    The 505 V grid side: 68 kA through T1 at 6 % (the spec's ~70 kA). The POI:
+    8.37 kA, the 500 MVA utility. The backbone: the twelve PCS at their limit,
+    k x 994 kVA each - 239 A at 1.2 pu, 299 A at 1.5 pu (the spec's ~95 A a
+    block for 1 s) - only 1.3-1.6 times the backbone's 186 A of load: no
+    overcurrent setting tells a fault from the load (differential, directional
+    and undervoltage elements, as the spec says).
+    """
+    out, label, _ = _drawn_study(client, quiet, {**IEC, 'fault_type': '3ph'}, k_pcs=k)
+    ka = _bus_ka(out, label)
+    for b in (1, 2, 3):
+        assert ka[f'Block {b} 505 V grid side'] == pytest.approx(68.2, abs=0.3)
+        assert ka[f'Load backbone {b}'] * 1e3 == pytest.approx(backbone_a, abs=2)
+    assert ka['Utility 34.5 kV POI'] == pytest.approx(8.37, abs=0.02)
+    assert 1.25 < ka['Load backbone 1'] / I_LOAD_KA < 1.65
+
+
+@pytest.mark.parametrize('k, backbone_a', [(1.2, 249), (1.5, 311)])
+def test_earth_faults(client, quiet, k, backbone_a):
+    """
+    The backbone's earth faults: the zigzag's zero sequence with the PCS's limited
+    positive and negative sequences, 249-311 A - inside its 400 A rating, and a
+    residual (51N) relay sees it plainly. The 505 V buses none: the grid side a
+    delta, the load side T2's star left floating, as the spec asks (solidly
+    grounded it gave 17 kA). The POI: the utility's own.
+    """
+    out, label, _ = _drawn_study(client, quiet, {**IEC, 'fault_type': '1ph'}, k_pcs=k)
+    ka = _bus_ka(out, label)
+    for b in (1, 2, 3):
+        assert ka[f'Load backbone {b}'] * 1e3 == pytest.approx(backbone_a, abs=3)
+        assert ka[f'Load backbone {b}'] < 0.4
+        assert ka[f'Block {b} 505 V grid side'] == pytest.approx(0, abs=1e-6)
+        assert ka[f'Block {b} 505 V load side'] == pytest.approx(0, abs=1e-6)
+    assert ka['Utility 34.5 kV POI'] == pytest.approx(8.40, abs=0.02)
+
+
+def test_ansi_earth_fault_on_the_backbone(client, quiet):
+    from test_reference_grids import ANSI_PARAMS
+    out, label, _ = _drawn_study(client, quiet, {**ANSI_PARAMS, 'fault_type': '1ph', 'frequency_hz': 60, 'user_email': 't@t'})
+    ka = _bus_ka(out, label)
+    assert 0.2 < ka['Load backbone 2'] < 0.4
+    assert ka['Block 1 505 V load side'] == pytest.approx(0, abs=1e-4)
+
+
+@pytest.mark.parametrize('x_afe, afe_ka, total_ka', [(None, 8.68, 67.3), (0.00943, 26.3, 84.9)])
+def test_dc_bus_fault_on_a_quadrant(client, quiet, x_afe, afe_ka, total_ka):
+    """
+    A bolted fault on Block 1's DC1. The two quadrant DC links discharge first,
+    some 400 kA each behind their 0.1 mOhm / 0.05 uH. Then, sustained: the GS1.1
+    pair 51 kA (25.7 kA a unit at the assumed 50 mOhm - its fuses must break
+    that at up to 1,500 V); the rectifier's diodes from the grid 8.7 kA behind
+    its 0.15 pu reactor - 26 kA behind the spec's illustrative 150 uH a module;
+    the inverter's diodes 7.2 kA from the 505 V load bus, which the other eleven
+    PCS hold at their limits. The spec's ~70 kA counts T1 alone: the batteries,
+    not the grid, carry most of it.
+    """
+    from test_dc_fault import STUDY
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
+        cells = {v.get('userFriendlyName'): v['name'] for v in json.load(fh).values() if isinstance(v, dict) and 'name' in v}
+    out, _, _ = _drawn_study(client, quiet, {**STUDY, 'fault_bus': cells['Block 1 DC1'], 'duration_ms': '20',
+                                             'frequency': '60'}, x_afe=x_afe)
+    (f,) = out['dcfault']['faults']
+    c = {(x['kind'], x['name']): x for x in f['contributions']}
+    bat = [x for (k, n), x in c.items() if k == 'Battery' and n.startswith('Block 1 DC1')]
+    assert len(bat) == 2 and all(x['ik_ka'] == pytest.approx(25.70, abs=0.05) for x in bat)
+    assert c[('VSC (diodes, blocked)', 'Block 1 AFE 1 (6 x PCS157SE)')]['ik_ka'] == pytest.approx(afe_ka, abs=0.1)
+    assert c[('PCS (diodes, blocked)', 'Block 1 GFM 1 (6 x PCS157SE)')]['ik_ka'] == pytest.approx(7.18, abs=0.1)
+    for kind, name in (('VSC DC-link capacitor', 'Block 1 AFE 1 (6 x PCS157SE)'),
+                       ('PCS DC-link capacitor', 'Block 1 GFM 1 (6 x PCS157SE)')):
+        assert 350 < c[(kind, name)]['ip_ka'] < 450
+    assert f['ik_ka'] == pytest.approx(total_ka, abs=0.3)
+    for (k, n), x in c.items():
+        if n.startswith(('Block 2', 'Block 3')) or ('AFE' in n and not n.startswith('Block 1 AFE 1')):
+            assert abs(x['ik_ka']) < 1e-3, n
+
+
+def test_arc_flash_by_voltage_class(client, quiet):
+    """
+    0.2 s clearing: the 505 V grid side, 68 kA bolted, 12.8 cal/cm2 (PPE 3); the
+    505 V load side, inverter-fed, 3.9 cal/cm2; the backbone, by Ralph Lee at its
+    0.24 kA, about 1 cal/cm2.
+    """
+    out, _, _ = _drawn_study(client, quiet, {
+        'typ': 'ArcFlashPandaPower Parameters', 'electrode_config': 'VCB', 'equipment_mode': 'by_voltage',
+        'working_distance_mm': '455', 'conductor_gap_mm': '25', 'enclosure_height_mm': '508',
+        'enclosure_width_mm': '508', 'enclosure_depth_mm': '508', 'clearing_time_s': '0.2',
+        'clearing_time_min_s': '0.2', 'frequency': '60', 'user_email': 't@t'})
+    rows = {r['name']: r for r in out['arc_flash']}
+    for b in (1, 2, 3):
+        g = rows[f'Block {b} 505 V grid side']
+        assert g['incident_energy_cal_cm2'] == pytest.approx(12.8, abs=0.2) and str(g['ppe_category']) == '3'
+        assert 3.5 < rows[f'Block {b} 505 V load side']['incident_energy_cal_cm2'] < 4.5
+        assert rows[f'Load backbone {b}']['incident_energy_cal_cm2'] < 1.5

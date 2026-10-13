@@ -221,6 +221,7 @@ class _Builder:
         self._sources()
         self._loads()
         self._converters()
+        self._pcs_on_dc_networks()
         self._dc_dc_capacitors()
         self._ders()
         self._tie_isolated()
@@ -441,6 +442,72 @@ class _Builder:
             row_id = _row_id(net, 'vsc', vi)
             self.contributions.append(('VSC (diodes, blocked)', label, row_id, ('diff', ('rl', k), cap)))
             self.contributions.append(('VSC DC-link capacitor', label, row_id, cap))
+            self.has_converter = True
+
+    def _pcs_on_dc_networks(self):
+        """
+        Each PCS on a DC network's bus - a double-conversion UPS's inverter on its
+        DC link: it blocks, its DC-link capacitor discharging and its diodes
+        rectifying its AC bus into the fault, behind its reactor (0.15 pu, as in
+        the EMT study). In an island its AC bus has no stiff source: the other
+        grid-forming PCS hold it, each to its current limit, so the source behind
+        its diodes is their voltage behind V^2 / sum(k S_rated) - their limits'
+        current at a bolted short. With a grid in its island, the AC short
+        circuit at its bus as a VSC's.
+        """
+        net, ckt = self.net, self.ckt
+        recs = [r for r in getattr(net, 'electrisim_pcs', None) or []
+                if r.get('dc_bus') is not None and r['in_service'] and r['dc_bus'] in self.bus_node]
+        if not recs:
+            return
+        w = 2.0 * math.pi * self.f_hz
+        thevenin = None
+        islands = {}
+        for r in getattr(net, 'electrisim_pcs', None) or []:
+            if r['in_service'] and r.get('island') is not None and r['table'] == 'gen':
+                islands.setdefault(r['island'], []).append(r)
+        for rec in recs:
+            bus_dc, ac_bus = rec['dc_bus'], rec['bus']
+            vm = _f(net.res_bus.at[ac_bus, 'vm_pu'], 1.0) if ac_bus in net.res_bus.index else 1.0
+            v_ll = vm * float(net.bus.at[ac_bus, 'vn_kv']) * 1e3
+            z_own = (rec['vn_kv'] * 1e3) ** 2 / (rec['s_rated'] * 1e6)
+            r_ac, x_ac = 0.01 * z_own, 0.15 * z_own
+            mates = [m for m in islands.get(rec.get('island'), []) if m is not rec]
+            if rec.get('island') is not None:
+                s_lim = sum(m['k'] * m['s_rated'] for m in mates) * 1e6
+                if s_lim <= 0:
+                    self.warnings.append(f"PCS '{rec['label']}': nothing else holds its island's AC bus, so its "
+                                         "diodes feed nothing into a fault on its DC bus.")
+                    x_ac += 1e6
+                else:
+                    x_ac += v_ll ** 2 / s_lim
+            else:
+                if thevenin is None:
+                    thevenin = _ac_thevenin(net, self.warnings)
+                rk, xk = thevenin.get(ac_bus, (0.0, 0.0))
+                r_ac, x_ac = r_ac + rk, x_ac + xk
+            amp = math.sqrt(2.0 / 3.0) * v_ll
+            v_dc = self._v(bus_dc)
+            label = rec['label']
+            phase0 = math.radians(_f(self.params.get('fault_angle_deg'), 0.0))
+            p_node = ckt.node(f'{label} DC+')
+            neutral = ckt.node(f'{label} AC neutral')
+            ckt.add_r(neutral, p_node, R_BIAS)
+            ckt.add_r(neutral, 0, R_BIAS)
+            for k_ph in range(3):
+                x = ckt.node(f'{label} phase {"abc"[k_ph]}')
+                ckt.add_rl(neutral, x, r_ac, x_ac / w, ac=(amp, w, phase0 - k_ph * 2.0 * math.pi / 3.0))
+                ckt.add_diode(x, p_node)
+                ckt.add_diode(0, x)
+            term = self.bus_node[bus_dc]
+            r_out = 1e-4 + rec.get('dc_link_esr_mohm', 0.0) * 1e-3
+            l_out = rec.get('dc_link_esl_uh', 0.0) * 1e-6
+            k = ckt.add_rl(p_node, term, r_out, l_out)
+            c_link = vsc_dc_link(rec.get('dc_link_mf', 0.0), rec['s_rated'] * 1e6, float(net.bus_dc.at[bus_dc, 'vn_kv']) * 1e3)
+            cap = self._cap(p_node, c_link, 0.0, 0.0, v_dc, f'{label} DC link', bus_dc if l_out <= 0 else None,
+                            max(r_out, R_FLOOR))
+            self.contributions.append(('PCS (diodes, blocked)', label, rec['id'], ('diff', ('rl', k), cap)))
+            self.contributions.append(('PCS DC-link capacitor', label, rec['id'], cap))
             self.has_converter = True
 
     def _dc_dc_capacitors(self):

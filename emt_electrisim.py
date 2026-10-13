@@ -398,7 +398,9 @@ class _EmtBuilder:
             z = self.ac.vn[rec['bus']] ** 2 / (rec['s_rated'] * 1e6)
             kw = dict(p=-p_ac, q=-q_ac, p_dc=p_dc, rated_mva=rec['s_rated'], limit_pu=rec['k'], r_ohm=0.01 * z,
                       x_ohm=0.15 * z, mode_ac='q_mvar', model='average', eta=rec['eta'], p_nl_mw=rec['p_nl_mw'],
-                      input_side='dc', current_loop_hz=rec.get('current_loop_hz', 500.0))
+                      input_side='dc', current_loop_hz=rec.get('current_loop_hz', 500.0),
+                      c_link_mf=rec.get('dc_link_mf', 0.0), c_link_esr_mohm=rec.get('dc_link_esr_mohm', 0.0),
+                      c_link_esl_uh=rec.get('dc_link_esl_uh', 0.0))
             if rec['table'] == 'gen':
                 conv = GridFormingVsc(self, rec['label'], rec['bus'], key, term, 1e-4, block, mode_dc='p_mw',
                                       droop_pf=rec['droop_pf'], droop_qv=rec['droop_qv'],

@@ -3614,6 +3614,10 @@ def _electrisim_build_pcs(net, Busbars, study):
             # The EMT study's: grid-forming, its bus's negative-sequence voltage held at zero.
             'unbalance_control': _electrisim_boolish(el.get('unbalance_control'), False),
             'i2_limit_pu': safe_float(el.get('i2_limit_pu'), 0.3),
+            # On a DC network, its DC-link capacitor (0: 4 ms of its rating), its ESR and ESL: EMT and DC fault.
+            'dc_link_mf': max(safe_float(el.get('dc_link_mf'), 0.0), 0.0),
+            'dc_link_esr_mohm': max(safe_float(el.get('dc_link_esr_mohm'), 0.0), 0.0),
+            'dc_link_esl_uh': max(safe_float(el.get('dc_link_esl_uh'), 0.0), 0.0),
         }
         if network:
             # Its DC side: what its AC side delivers, drawn from its bus with its losses (settled with the load flow).
@@ -3851,9 +3855,11 @@ def _electrisim_pcs_sc_islands(net):
         forming = [r for r in mates if r['control'] == 'grid_forming'] or mates
         ref = max(forming, key=lambda r: r['k'] * r['s_rated'])
         s_sc = ref['k'] * ref['s_rated']
+        # No zero sequence: a converter is three-wire. As a grounded source (X0 = X1) it gave an earth
+        # fault behind an ungrounded transformer winding - a UPS's 505 V load bus - 16 kA.
         g = pp.create_ext_grid(net, ref['bus'], vm_pu=1.0, name=f"{ref['name']} (as a source)", s_sc_max_mva=s_sc,
-                               s_sc_min_mva=s_sc, rx_max=0.1, rx_min=0.1, x0x_max=1.0, r0x0_max=0.1,
-                               x0x_min=1.0, r0x0_min=0.1)
+                               s_sc_min_mva=s_sc, rx_max=0.1, rx_min=0.1, x0x_max=1e6, r0x0_max=0.1,
+                               x0x_min=1e6, r0x0_min=0.1)
         net.ext_grid.at[g, 'id'] = ref['id']
         net.sgen.at[ref['index'], 'in_service'] = False
         ref['as_source'] = int(g)

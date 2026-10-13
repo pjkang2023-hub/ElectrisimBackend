@@ -88,9 +88,9 @@
    "sn_mva": 3.75,
    "vk_percent": 6,
    "vkr_percent": 0.8,
-   "vector_group": "Dyn",
+   "vector_group": "Dy",
    "shift_degree": 30,
-   "name": "Block 1 T2 0.505/34.5 kV Dy1"
+   "name": "Block 1 T2 0.505/34.5 kV Dy1 (505 V star floating)"
   },
   {
    "id": "B2_T1",
@@ -111,9 +111,9 @@
    "sn_mva": 3.75,
    "vk_percent": 6,
    "vkr_percent": 0.8,
-   "vector_group": "Dyn",
+   "vector_group": "Dy",
    "shift_degree": 30,
-   "name": "Block 2 T2 0.505/34.5 kV Dy1"
+   "name": "Block 2 T2 0.505/34.5 kV Dy1 (505 V star floating)"
   },
   {
    "id": "B3_T1",
@@ -134,9 +134,9 @@
    "sn_mva": 3.75,
    "vk_percent": 6,
    "vkr_percent": 0.8,
-   "vector_group": "Dyn",
+   "vector_group": "Dy",
    "shift_degree": 30,
-   "name": "Block 3 T2 0.505/34.5 kV Dy1"
+   "name": "Block 3 T2 0.505/34.5 kV Dy1 (505 V star floating)"
   }
  ],
  "lines": [
@@ -278,6 +278,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 1 AFE 1 (6 x PCS157SE)"
   },
   {
@@ -296,6 +298,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 1 AFE 2 (6 x PCS157SE)"
   },
   {
@@ -314,6 +318,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 1 AFE 3 (6 x PCS157SE)"
   },
   {
@@ -332,6 +338,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 1 AFE 4 (6 x PCS157SE)"
   },
   {
@@ -350,6 +358,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 2 AFE 1 (6 x PCS157SE)"
   },
   {
@@ -368,6 +378,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 2 AFE 2 (6 x PCS157SE)"
   },
   {
@@ -386,6 +398,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 2 AFE 3 (6 x PCS157SE)"
   },
   {
@@ -404,6 +418,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 2 AFE 4 (6 x PCS157SE)"
   },
   {
@@ -422,6 +438,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 3 AFE 1 (6 x PCS157SE)"
   },
   {
@@ -440,6 +458,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 3 AFE 2 (6 x PCS157SE)"
   },
   {
@@ -458,6 +478,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 3 AFE 3 (6 x PCS157SE)"
   },
   {
@@ -476,6 +498,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 3 AFE 4 (6 x PCS157SE)"
   }
  ],
@@ -497,6 +521,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 1 GFM 1 (6 x PCS157SE)"
   },
   {
@@ -516,6 +542,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 1 GFM 2 (6 x PCS157SE)"
   },
   {
@@ -535,6 +563,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 1 GFM 3 (6 x PCS157SE)"
   },
   {
@@ -554,6 +584,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 1 GFM 4 (6 x PCS157SE)"
   },
   {
@@ -573,6 +605,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 2 GFM 1 (6 x PCS157SE)"
   },
   {
@@ -592,6 +626,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 2 GFM 2 (6 x PCS157SE)"
   },
   {
@@ -611,6 +647,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 2 GFM 3 (6 x PCS157SE)"
   },
   {
@@ -630,6 +668,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 2 GFM 4 (6 x PCS157SE)"
   },
   {
@@ -649,6 +689,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 3 GFM 1 (6 x PCS157SE)"
   },
   {
@@ -668,6 +710,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 3 GFM 2 (6 x PCS157SE)"
   },
   {
@@ -687,6 +731,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 3 GFM 3 (6 x PCS157SE)"
   },
   {
@@ -706,6 +752,8 @@
    "inlet_c": 40,
    "derate_temp_curve": "35:1.10, 45:1.00, 50:0.95, 60:0",
    "overload_curve": "1:1.5, 10:1.2",
+   "dc_link_esr_mohm": 0.1,
+   "dc_link_esl_uh": 0.05,
    "name": "Block 3 GFM 4 (6 x PCS157SE)"
   }
  ],
