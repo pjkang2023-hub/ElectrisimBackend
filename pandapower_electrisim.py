@@ -7636,7 +7636,12 @@ def create_other_elements(in_data,net,x, Busbars):
             for col, value in (('rated_mva_nameplate', float(net.vsc.at[vsc_idx, 'rated_mva'])),
                                ('derating_factor', derate['factor']),
                                ('overload_curve', str(in_data[x].get('overload_curve') or '')),
-                               ('electrisim_follow_charge_mw', charge_mw if follow else np.nan)):
+                               ('electrisim_follow_charge_mw', charge_mw if follow else np.nan),
+                               # The time series': following its bus's load through a low-pass of this
+                               # time constant (0: at once) - a UPS rectifier ramp-limited to the load's
+                               # average, its batteries taking the swing.
+                               ('electrisim_follow_tau_s', max(safe_float(in_data[x].get('follow_tau_s'), 0.0), 0.0)
+                                if follow else np.nan)):
                 if col not in net.vsc.columns:
                     net.vsc[col] = np.nan if col != 'overload_curve' else ''
                 net.vsc.at[vsc_idx, col] = value

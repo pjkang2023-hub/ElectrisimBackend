@@ -507,3 +507,135 @@ def test_emt_utility_single_phase_fault_ridden_through(client, quiet):
     a = conv['Block 1 AFE 1 (6 x PCS157SE)']
     assert 50 < a['limited_ms'] < 100 and a['v_dc_min_kv'] > 1.26
     assert bus['Load backbone 2']['v_rms_min_pu'] > 0.97 and bus['Load backbone 2']['vuf_end_percent'] < 0.1
+
+
+# --- Phase 26: time series and energy ---------------------------------------------------------------
+
+def test_usable_energy_above_the_815_v_floor(spec):
+    """
+    The spec's open question: how much of the GS1.1's 750-1,500 V window is
+    usable above the PCS's 815 V floor. At 947 kW a bus - 581 A a unit at 815 V
+    - its 50 + 20 mOhm (R0 and its settled RC pair) drop 41 V: the floor is
+    reached at an OCV of 856 V, 1.7 % charge on the generic NFPP curve. Some
+    98 % of the 3.1 MWh is usable at full power; Peak's own curve decides it.
+    """
+    import der_electrisim as der
+    import numpy as np
+    row = next(b for b in spec['batteries'] if b['id'] == 'B1_GS1a')
+    gs = der.build({'typ': 'Battery0', 'name': 'gs', **{k: str(v) for k, v in row.items() if k not in ('id', 'name', 'bus')}})
+    i = 0.947e6 / 2 / 815.0
+    socs = np.linspace(0, 0.2, 20001)
+    v = np.array([gs.ocv(s) - (gs.r0 + gs.r1) * i for s in socs])
+    soc_floor = float(socs[np.argmax(v >= 815.0)])
+    assert gs.r0 + gs.r1 == pytest.approx(0.070)
+    assert gs.ocv(soc_floor) == pytest.approx(815 + 0.070 * i, abs=0.5)
+    assert soc_floor == pytest.approx(0.0174, abs=0.001)
+    assert 1 - soc_floor > 0.98
+
+
+def _rack_buffers(p):
+    """The spec's Option B at each hall: 93 Wh a rack (225 modules of 130 F, 15 in series), tau 10 s, a smoothing DC/DC."""
+    cell = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
+    for n in (1, 2, 3):
+        p[f'scb{n}'] = {'typ': f'DC Bus9{n}', 'name': f'scb{n}', 'id': f'scb{n}', 'vn_kv': '0.81', 'in_service': 'true',
+                        'userFriendlyName': f'Hall {n} buffer 0.81 kV'}
+        p[f'sc{n}'] = {'typ': f'Supercapacitor9{n}', 'name': f'sc{n}', 'id': f'sc{n}', 'userFriendlyName': f'Hall {n} rack buffer',
+                       'bus': f'scb{n}', 'coupling': 'converter', 'sizing': 'modules', 'module_c_f': '130',
+                       'module_v': '54', 'module_esr_mohm': '4', 'module_esl_uh': '0', 'modules_series': '15',
+                       'strings_parallel': '15', 'v0_percent': '79', 'v_min_percent': '50', 'p_rated_kw': '0',
+                       'r_leak_ohm': '10000', 'in_service': 'true'}
+        p[f'scc{n}'] = {'typ': f'DC/DC Converter9{n}', 'name': f'scc{n}', 'id': f'scc{n}',
+                        'userFriendlyName': f'Hall {n} buffer converter', 'bus_in': f'scb{n}',
+                        'bus_out': cell[f'Hall {n} 800 V DC'], 'control_mode': 'smoothing', 'rated_mw': '3.6',
+                        'vn_in_kv': '0.81', 'vn_out_kv': '0.8', 'efficiency_percent': '98', 'no_load_loss_kw': '1',
+                        'bidirectional': 'true', 'smoothing_tau_s': '10', 'soc_ref_percent': '50', 'soc_gain': '0.1',
+                        'in_service': 'true'}
+
+
+def _timeseries(client, quiet, steps, dt_s, outage=False, buffers=False):
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    if buffers:
+        _rack_buffers(p)
+    with open(SPEC_PATH, encoding='utf-8') as fh:
+        lp = {x['id']: {'name': x['name'], 'kind': x['kind'], 'dt': x['dt_s'], 't0': 0, 'p': x['values']}
+              for x in json.load(fh)['load_profiles']}
+    if outage:
+        for v in p.values():
+            if isinstance(v, dict) and str(v.get('typ', '')).startswith('External Grid'):
+                v['in_service'] = 'false'
+    p['0'] = {'typ': 'TimeSeriesSimulationPandaPower Parameters', 'time_steps': str(steps), 'time_step_s': str(dt_s),
+              'load_profiles': lp, 'load_profile': 'constant', 'generation_profile': 'constant',
+              'profile_mode': 'custom', 'element_profiles': {}, 'frequency': '60', 'algorithm': 'nr',
+              'calculate_voltage_angles': 'auto', 'init': 'auto', 'microgrid_dispatch': 'True', 'user_email': 't@t'}
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    assert not out.get('error'), out.get('message')
+    return out['microgrid']
+
+
+def test_training_cycle_the_rectifiers_hold_the_average(client, quiet):
+    """
+    30 s at 0.5 s steps: the restart at 7 s and a full 21 s training cycle.
+    Each quadrant's demand swings 0.14-0.88 MW (the steps' means) about its
+    0.72 MW average, ramping 1.4 MW/s; its rectifier, through its 60 s low-pass,
+    stays at 0.74-0.77 MW, ramping 0.01 MW/s - the grid sees a flat load. The
+    GS1.1 pair takes the swing, +0.15 / -0.61 MW (+0.21 / -0.66 MW at 0.1 s
+    steps; the spec's +256 / -597 kW about the cycle's mean).
+    """
+    mg = _timeseries(client, quiet, 60, 0.5)
+    rects = mg['rectifiers']
+    assert len(rects) == 12
+    for r in rects:
+        assert r['tau_s'] == 60
+        assert r['demand_mean_mw'] == pytest.approx(0.72, abs=0.01)
+        assert r['demand_max_mw'] - r['demand_min_mw'] > 0.7
+        assert r['rectifier_max_mw'] - r['rectifier_min_mw'] < 0.04
+        assert r['rectifier_ramp_mw_s'] < 0.02 < 1.0 < r['demand_ramp_mw_s']
+        assert r['batteries_max_mw'] == pytest.approx(0.145, abs=0.02)
+        assert r['batteries_min_mw'] == pytest.approx(-0.608, abs=0.02)
+    assert mg['unserved_mwh'] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_utility_outage_ride_through(client, quiet):
+    """
+    The utility out, 30 min steps, the racks at their cycle's average: the
+    rectifiers have no supply and the GS1.1 carry every quadrant, 0.32 MW a
+    unit. From 80 % they last 7-7.5 h - the spec's 6.5 h is at full block load
+    from full - their DC links falling from 1,267 V as they empty; then the
+    island sheds its load. Their energy adds up: delivered at their terminals
+    what their cells gave, less their losses.
+    """
+    mg = _timeseries(client, quiet, 20, 1800, outage=True)
+    gs = [s for s in mg['stores'] if s['kind'] == 'Battery']
+    assert len(gs) == 24
+    for s in gs:
+        assert s['stored_start_mwh'] == pytest.approx(0.8 * 3.1 * 0.981, abs=0.05)
+        assert s['soc_min_percent'] < 1.0
+        assert 0.99 * s['drawn_mwh'] <= s['delivered_mwh'] <= s['drawn_mwh']
+    rows = [r for r in mg['ders'] if r['label'] == 'Block 1 DC1 GS1.1 A']
+    carried = [r['time_step'] for r in rows if r['p_mw'] > 0.3]
+    assert 14 <= len(carried) <= 15                 # 7-7.5 h at 30 min a step
+    assert rows[1]['v_kv'] < rows[0]['v_kv'] - 0.01
+    short = [s for s in mg['steps'] if s['unserved_mw'] > 1.0]
+    assert short and min(s['time_step'] for s in short) >= 15
+
+
+def test_rack_buffers_take_the_swing_from_the_gs11(client, quiet):
+    """
+    The spec's Option B on each hall's 800 V bus. Each quadrant's demand now
+    swings some 0.2 pu about its average - the spec's 0.61-0.80 pu upstream -
+    not 0.1-0.9; the GS1.1 pair's swing falls about fourfold (to some
+    +0.03 / -0.16 MW at 0.1 s steps) and with it their swing wear, the spec's
+    0.36 -> 0.08 equivalent cycles a day. The supercapacitors' converters
+    never reach their 3.6 MW, nor their stores their window.
+    """
+    mg = _timeseries(client, quiet, 60, 0.5, buffers=True)
+    for r in mg['rectifiers']:
+        assert r['demand_max_mw'] - r['demand_min_mw'] < 0.25
+        assert r['batteries_min_mw'] > -0.25 and r['batteries_max_mw'] < 0.08
+    sm = mg['smoothing']
+    assert len(sm) == 3
+    for s in sm:
+        assert s['limited_steps'] == 0 and s['store_peak_mw'] < 3.6
+        assert s['feed_ramp_mw_s'] < 0.1 * s['rack_ramp_mw_s']

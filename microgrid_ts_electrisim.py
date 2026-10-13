@@ -27,6 +27,7 @@ Signs: a source's or store's power is positive delivering.
 import math
 
 import numpy as np
+import pandas as pd
 
 import der_electrisim
 import load_profiles_electrisim as lp
@@ -304,6 +305,16 @@ class MicrogridTs:
                     if rec.get('bus_lvdc') == bus and rec['in_service']]
             self.feeders[bus] = {'vsc': rect, 'sst_loads': ssts}
         self.handover_steps = {}
+        # Rectifiers following their DC bus's load through a low-pass (a UPS's, ramp-limited to the
+        # load's average): each step they deliver the filter's value, their bus's batteries the swing.
+        self.rectifiers = []
+        if vsc is not None and 'electrisim_follow_tau_s' in vsc.columns:
+            for i in vsc.index:
+                tau = vsc.at[i, 'electrisim_follow_tau_s']
+                if bool(vsc.at[i, 'in_service']) and pd.notna(tau) and float(tau) > 0:
+                    self.rectifiers.append({'vi': int(i), 'tau': float(tau), 'bus': int(vsc.at[i, 'bus_dc']),
+                                            'charge': float(vsc.at[i, 'electrisim_follow_charge_mw']), 'y': None,
+                                            'rows': []})
         self.demand_lpf = None
         self.rows, self.pcs_rows, self.balance = [], [], []
         self.unserved_j = self.curtailed_j = 0.0
@@ -355,7 +366,9 @@ class MicrogridTs:
                 obj.p_set = obj.p_operating()          # its minimum load and rating
                 it['target_now_w'] = target
         self._apply_sources()
+        self._battery_ocvs()
         self._apply_smoothing(t)
+        self._apply_rectifier_filters()
         self._hold_pcs_supercapacitors()
         self._pcs_step_windows()
         for b in self.batteries:
@@ -375,6 +388,33 @@ class MicrogridTs:
             dis, ch = obj.p_limits()
             hi = pe._electrisim_stage_output(available_w(obj, max(dis, 0.0), self.dt) / 1e6, rec['eta'], rec['p_nl_mw'])
             lo = pe._electrisim_stage_output(available_w(obj, -max(ch, 0.0), self.dt) / 1e6, rec['eta'], rec['p_nl_mw'])
+            rec['p_max_step'] = min(max(hi, 0.0), rec['p_max_mw'])
+            rec['p_min_step'] = max(min(lo, 0.0), rec['p_min_mw'])
+        # On a DC network: what its bus's batteries can give over the step, with what its rectifiers can
+        # still deliver (none without their AC supply), shared by the PCS on that bus. At its rating
+        # alone, a UPS's GS1.1 pair went on supplying the island at 0 % for hours in a utility outage.
+        net, vsc = self.net, self.net.vsc if 'vsc' in self.net and len(self.net.vsc) else None
+        for rec in self.pcs:
+            if rec.get('dc_bus') is None or rec['table'] != 'gen' or not rec['in_service']:
+                continue
+            bus = rec['dc_bus']
+            give = take = 0.0
+            for it in self.items:
+                r, obj = it['rec'], it['obj']
+                if it['via'] == 'dc' and r.get('coupling') == 'direct' and r['bus'] == bus and obj.kind == 'Battery':
+                    dis, ch = obj.p_limits()
+                    give += available_w(obj, max(dis, 0.0), self.dt) / 1e6
+                    take += -available_w(obj, -max(ch, 0.0), self.dt) / 1e6
+            if vsc is not None:
+                for i in vsc.index:
+                    if (int(vsc.at[i, 'bus_dc']) == bus and bool(vsc.at[i, 'in_service'])
+                            and not pe._electrisim_is_aux(vsc, i)):
+                        rated = float(vsc.at[i, 'rated_mva']) if 'rated_mva' in vsc.columns else 0.0
+                        give += rated if rated > 0 else rec['s_rated']
+                        take += rated if rated > 0 else rec['s_rated']
+            mates = sum(1 for m in self.pcs if m.get('dc_bus') == bus and m['in_service'])
+            hi = pe._electrisim_stage_output(give / max(mates, 1), rec['eta'], rec['p_nl_mw'])
+            lo = pe._electrisim_stage_output(-take / max(mates, 1), rec['eta'], rec['p_nl_mw'])
             rec['p_max_step'] = min(max(hi, 0.0), rec['p_max_mw'])
             rec['p_min_step'] = max(min(lo, 0.0), rec['p_min_mw'])
 
@@ -448,6 +488,54 @@ class MicrogridTs:
         if key not in self.obj_notes:
             self.obj_notes.add(key)
             self.notes.append(f"{it['obj'].kind} '{it['obj'].label}': {why}.")
+
+    def _battery_ocvs(self):
+        """
+        Each battery directly on a DC bus at its open-circuit voltage now, its
+        state of charge's: built at its first, it held it through a run - a
+        UPS's GS1.1 pair at 1,267 V from 75 % to empty, its energy counted at
+        that voltage and its DC link never sagging towards the 815 V floor.
+        """
+        net = self.net
+        for it in self.items:
+            rec, obj = it['rec'], it['obj']
+            if it['via'] == 'dc' and obj.kind == 'Battery' and rec.get('coupling') == 'direct':
+                cells = rec['parts'].get('cells')
+                if cells is not None and cells in net.vsc.index:
+                    net.vsc.at[cells, 'control_value_dc'] = obj.ocv() / rec['vn']
+
+    def _apply_rectifier_filters(self):
+        """Each filtered rectifier at its filter's value (plus its charge), its batteries taking the rest."""
+        vsc = self.net.vsc
+        for r in self.rectifiers:
+            if r['y'] is None:
+                continue                      # the first step: it follows at once, as in the load flow
+            vsc.at[r['vi'], 'electrisim_follow_charge_mw'] = np.nan
+            vsc.at[r['vi'], 'control_mode_dc'] = 'p_mw'
+            vsc.at[r['vi'], 'control_value_dc'] = -(r['y'] + r['charge'])
+
+    def _filter_rectifiers(self, t):
+        """After a step: each filtered rectifier's bus's demand - what it and the bus's batteries delivered - into its filter."""
+        net = self.net
+        if not self.rectifiers or 'res_vsc' not in net:
+            return
+        bat = {}
+        for it in self.items:
+            rec = it['rec']
+            if it['via'] == 'dc' and it['obj'].kind == 'Battery' and rec.get('coupling') == 'direct':
+                li = rec['parts'].get('line')
+                if li in net.res_line_dc.index and np.isfinite(net.res_line_dc.at[li, 'p_to_mw']):
+                    bat[rec['bus']] = bat.get(rec['bus'], 0.0) - float(net.res_line_dc.at[li, 'p_to_mw'])
+        for r in self.rectifiers:
+            vi = r['vi']
+            if vi not in net.res_vsc.index or not np.isfinite(net.res_vsc.at[vi, 'p_dc_mw']):
+                continue
+            fed = -float(net.res_vsc.at[vi, 'p_dc_mw'])
+            demand = fed + bat.get(r['bus'], 0.0) - r['charge']
+            a = 1.0 - math.exp(-self.dt / r['tau'])
+            r['y'] = demand if r['y'] is None else r['y'] + (demand - r['y']) * a
+            r['rows'].append({'time_step': t, 'demand_mw': demand, 'rectifier_mw': fed,
+                              'batteries_mw': bat.get(r['bus'], 0.0)})
 
     def _apply_smoothing(self, t):
         net, pe = self.net, self.pe
@@ -533,8 +621,8 @@ class MicrogridTs:
             p_ac = float(net.res_gen.at[rec['index'], 'p_mw'])
             actual += p_ac
             if obj is None:
-                # On a DC network: its window, its rating - its bus's stores answer for themselves.
-                target += rec['p_max_mw']
+                # On a DC network: its window this step, its bus's batteries' and rectifiers' (_pcs_step_windows).
+                target += rec.get('p_max_step', rec['p_max_mw']) if p_ac >= 0 else rec['p_max_mw']
                 continue
             p_dc = pe._electrisim_dc_dc_input_power(p_ac, rec['eta'], rec['p_nl_mw'])
             avail = available_w(obj, p_dc * 1e6, self.dt) / 1e6
@@ -689,6 +777,8 @@ class MicrogridTs:
         handed = sum(h['conv'].get('handover_mw') or 0.0 for h in self.handover)
         if handed > 1e-6:
             self.handover_steps[t] = handed
+        if converged:
+            self._filter_rectifiers(t)
         # The diagram's loads: an SST's MV draw counted too was its hall's load twice, and, moving as the
         # load flow settled it, read as load not served on a network on the grid.
         loads = sum(float(net.load.at[i, 'p_mw']) for i in self.real_ac if bool(net.load.at[i, 'in_service']))
@@ -802,7 +892,25 @@ class MicrogridTs:
         if self.unserved_steps:
             self.notes.append(f'The island ran short at {len(self.unserved_steps)} steps: '
                               f'{self.unserved_j / 3.6e9:.4g} MWh of load was not served.')
+        rectifiers = []
+        names = getattr(self.net, 'user_friendly_names', {}) or {}
+        for r in self.rectifiers:
+            rows = r['rows']
+            d = np.array([x['demand_mw'] for x in rows])
+            f = np.array([x['rectifier_mw'] for x in rows])
+            b = np.array([x['batteries_mw'] for x in rows])
+            ramp = lambda x: float(np.max(np.abs(np.diff(x))) / dt) if len(x) > 1 else 0.0   # noqa: E731
+            name = str(self.net.vsc.at[r['vi'], 'name'])
+            rectifiers.append({'name': name, 'label': names.get(name, name), 'tau_s': r['tau'],
+                               'demand_mean_mw': float(d.mean()) if len(d) else None,
+                               'demand_min_mw': float(d.min()) if len(d) else None,
+                               'demand_max_mw': float(d.max()) if len(d) else None,
+                               'rectifier_min_mw': float(f.min()) if len(f) else None,
+                               'rectifier_max_mw': float(f.max()) if len(f) else None,
+                               'batteries_min_mw': float(b.min()) if len(b) else None,
+                               'batteries_max_mw': float(b.max()) if len(b) else None,
+                               'demand_ramp_mw_s': ramp(d), 'rectifier_ramp_mw_s': ramp(f), 'series': rows})
         return {'dispatch': self.dispatch, 'time_step_s': dt, 'ders': self.rows, 'pcs': self.pcs_rows,
-                'stores': stores, 'smoothing': smoothing, 'steps': self.balance,
+                'stores': stores, 'smoothing': smoothing, 'rectifiers': rectifiers, 'steps': self.balance,
                 'unserved_mwh': self.unserved_j / 3.6e9, 'curtailed_mwh': self.curtailed_j / 3.6e9,
                 'notes': self.notes}

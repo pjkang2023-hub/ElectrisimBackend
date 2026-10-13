@@ -179,7 +179,8 @@ power), `load_profile_id` (a power profile).
 `control_value_ac`, `control_mode_dc` (`vm_pu`, `p_mw` or `follow_load` - a
 double-conversion UPS's rectifier: it delivers what its DC bus's loads draw
 plus `control_value_dc` MW to charge the batteries on that bus, which hold its
-voltage and carry what is beyond its rating) with `control_value_dc`,
+voltage and carry what is beyond its rating; `follow_tau_s`, its low-pass in
+the time series, 0: at once) with `control_value_dc`,
 `rated_mva`, its rating where it runs (`inlet_c`, `altitude_m`,
 `derate_temp_curve`, `derate_altitude_curve` - "x:multiplier" pairs, the lowest
 factor that derates - and `overload_curve`, e.g. "1:1.5, 10:1.2"; blank: its
