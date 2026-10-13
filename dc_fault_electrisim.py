@@ -614,14 +614,16 @@ class _Builder:
                 continue
             v, p = pe._electrisim_der_power(net, rec)
             i0 = p / max(v, 1e-6)
+            # Through its own breaker, when it has one: the bus's current into the store is -i0.
+            term, _ = self._terminal('der', rec['name'], bus, -i0)
             if rec['kind'] == 'Battery':
                 # Over a fault's milliseconds its RC branch (tens of seconds) holds its voltage: its
                 # open-circuit voltage less that, behind R0.
-                k = ckt.add_rl(0, self.bus_node[bus], obj.r0, obj.l, i0=i0, e0=v + obj.r0 * i0)
+                k = ckt.add_rl(0, term, obj.r0, obj.l, i0=i0, e0=v + obj.r0 * i0)
             else:
                 inner = ckt.node(f"{rec['label']} capacitor")
                 ckt.add_c(0, inner, obj.c, w0=-(v + obj.esr * i0))
-                k = ckt.add_rl(inner, self.bus_node[bus], obj.esr, obj.esl, i0=i0)
+                k = ckt.add_rl(inner, term, obj.esr, obj.esl, i0=i0)
             self.contributions.append((rec['kind'], rec['label'], rec['id'], ('rl', k)))
         if left_out:
             self.warnings.append(f"{', '.join(left_out)}: PV arrays, SOFC systems and flywheels feed a DC fault "
@@ -753,14 +755,24 @@ def fault_at(builder, bus, params):
         i_open = float(np.interp(t_open, t, i)) if t_open <= t_end else float('nan')
         cap = rec['breaking_capacity_ka'] * 1e3
         over = np.nonzero(i > cap)[0] if cap > 0 else []
-        out['breakers'].append({
+        row = {
             'name': rec['name'], 'id': rec['id'], 'label': rec['label'],
             'i_open_ka': _round(i_open * 1e-3), 'opening_time_ms': rec['opening_time_ms'],
             'ip_ka': _round(float(np.max(i)) * 1e-3), 'tp_ms': _round(float(t[int(np.argmax(i))]) * 1e3),
             'breaking_capacity_ka': rec['breaking_capacity_ka'],
             'exceeds': bool(cap > 0 and np.isfinite(i_open) and i_open > cap),
             't_reaches_capacity_ms': _round(float(t[over[0]]) * 1e3) if len(over) else None,
-        })
+        }
+        if rec['bus_dc'] == bus and rec['target'][0] != 'line_dc':
+            # On the faulted bus with what it switches right behind it: a fault on its far side, between
+            # it and that element, is the same bolted fault, and the breaker then carries the bus's
+            # current into it - all the fault's but that element's own (its current less the fault's,
+            # the fault's flowing from the bus into the ground).
+            far = np.abs(i_f + sim['i_rl'][:, k])
+            far_open = float(np.interp(t_open, t, far)) if t_open <= t_end else float('nan')
+            row.update({'i_open_far_side_ka': _round(far_open * 1e-3), 'ip_far_side_ka': _round(float(np.max(far)) * 1e-3),
+                        'exceeds_far_side': bool(cap > 0 and np.isfinite(far_open) and far_open > cap)})
+        out['breakers'].append(row)
     # Each diode's forward current: conducting before the fault, blocking backfeed into it,
     # or starting to conduct as its shelf's other supply fails.
     for rec, k in builder.diodes:
@@ -851,6 +863,17 @@ def dc_fault_study(net, params, in_data=None):
             warnings_out.append(f"DC breaker {brk['label']}: a fault on {brk['fault_bus']} drives "
                                 f"{brk['i_open_ka']:.3g} kA through it at its opening time, above its "
                                 f"{brk['breaking_capacity_ka']:g} kA breaking capacity.")
+    far = {}
+    for fault in faults:
+        for brk in fault['breakers']:
+            if brk.get('i_open_far_side_ka') is not None and (
+                    brk['name'] not in far or brk['i_open_far_side_ka'] > far[brk['name']]['i_open_far_side_ka']):
+                far[brk['name']] = {**brk, 'fault_bus': fault['label']}
+    for brk in far.values():
+        if brk['exceeds_far_side']:
+            warnings_out.append(f"DC breaker {brk['label']}: a fault between it and what it switches, beside "
+                                f"{brk['fault_bus']}, drives {brk['i_open_far_side_ka']:.3g} kA through it at its "
+                                f"opening time, above its {brk['breaking_capacity_ka']:g} kA breaking capacity.")
     return json.dumps({
         'dcfault': {
             'method': METHOD,

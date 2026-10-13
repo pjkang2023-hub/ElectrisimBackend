@@ -216,7 +216,10 @@ and inverter's, as a VSC's), and its stages' capacitors' ESR and ESL (0: none):
 capacitors' ESR and ESL, 0: none, in the EMT and DC fault studies).
 
 **dc_breakers** - `id`, **`bus`** (DC), **`element`** (the DC bus, line, diode,
-load, source, VSC or DC/DC converter it switches), `closed`, `breaker_type`,
+load, source, VSC or DC/DC converter it switches, or a battery, supercapacitor,
+flywheel, SOFC system or PV array directly on `bus` - its own breaker, which
+the DC fault study also checks for a fault between the two: the bus's current
+less that element's), `closed`, `breaker_type`,
 `rated_voltage_kv`, `rated_current_ka`, `breaking_capacity_ka`,
 `trip_current_ka`, `opening_time_ms`, `limiting_inductance_mh`,
 `arrester_clamp_kv`, `arrester_energy_kj`.

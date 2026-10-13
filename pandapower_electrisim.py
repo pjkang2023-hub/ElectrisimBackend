@@ -2647,7 +2647,7 @@ def _electrisim_finish_dc_dc(net):
     if removed:
         _electrisim_drop_uncoupled_dc(net)
         for b in getattr(net, 'electrisim_dc_breakers', None) or []:
-            if b['target'] is not None and b['target'][1] not in net[b['target'][0]].index:
+            if _electrisim_dc_breaker_target_gone(net, b):
                 b['target'] = None
 
 
@@ -2713,7 +2713,7 @@ def _electrisim_freeze_dc_dc(net):
                               f"({', '.join(buses)}) are left out.")
         _electrisim_drop_uncoupled_dc(net, quiet=True)
         for b in getattr(net, 'electrisim_dc_breakers', None) or []:
-            if b['target'] is not None and b['target'][1] not in net[b['target'][0]].index:
+            if _electrisim_dc_breaker_target_gone(net, b):
                 b['target'] = None
     # The sources and stores: behind their converters, left out with the networks those held; a battery
     # directly on a bus, the power it delivered in the load flow.
@@ -4380,14 +4380,54 @@ def _electrisim_apply_dc_breakers(net):
                         if d.get('line') == idx:
                             d['in_service'] = False
             rec['target'] = (et, idx)
+        elif et in der_electrisim.KINDS:
+            # A battery's or other store's own breaker, between it and its bus (the payload names its shape).
+            der = next((d for d in getattr(net, 'electrisim_ders', None) or [] if d['name'] == element), None)
+            if der is None:
+                _electrisim_warn(net, f"DC Breaker '{label}': the {et.lower()} it switches was not built, so it is left out.")
+                continue
+            if der['bus'] != int(bus) or der['coupling'] == 'converter':
+                _electrisim_warn(net, f"DC Breaker '{label}' is left out: it goes between {der['label']} and the DC "
+                                      "bus it is directly on.")
+                continue
+            if not closed:
+                _electrisim_set_der_in_service(net, der, False)
+            rec['target'] = ('der', der['name'])
         else:
             _electrisim_warn(net, f"DC Breaker '{label}' is left out: it goes between a DC bus and a DC cable, "
-                                  "a VSC, a DC load or source, or a second DC bus.")
+                                  "a VSC, a DC load or source, a battery or other store, or a second DC bus.")
             continue
         net.electrisim_dc_breakers.append(rec)
         if not hasattr(net, 'user_friendly_names'):
             net.user_friendly_names = {}
         net.user_friendly_names[el.get('name')] = label
+
+
+def _electrisim_der_by_name(net, name):
+    return next((d for d in getattr(net, 'electrisim_ders', None) or [] if d['name'] == name), None)
+
+
+def _electrisim_dc_breaker_target_gone(net, rec):
+    """Whether what a DC breaker switched has been taken out of the network (a study left it out)."""
+    if rec['target'] is None:
+        return False
+    table, idx = rec['target']
+    if table == 'der':
+        return _electrisim_der_by_name(net, idx) is None
+    return idx not in net[table].index
+
+
+def _electrisim_set_der_in_service(net, rec, on):
+    """A source or store directly on its bus, in or out of the network with all its parts."""
+    rec['obj'].in_service = on
+    for key, table in (('inner', 'bus_dc'), ('aux_bus', 'bus'), ('line', 'line_dc'), ('load', 'load_dc'),
+                       ('cells', 'vsc'), ('vsc', 'vsc'), ('aux_grid', 'ext_grid')):
+        idx = rec['parts'].get(key)
+        if idx is not None and table in net and idx in net[table].index:
+            net[table].at[idx, 'in_service'] = on
+    for cap in getattr(net, 'electrisim_dc_capacitors', None) or []:
+        if cap.get('electrisim_der') and cap['name'] == rec['name']:
+            cap['in_service'] = on
 
 
 def _electrisim_dc_breaker_current_ka(net, rec):
@@ -4399,6 +4439,12 @@ def _electrisim_dc_breaker_current_ka(net, rec):
     res_bus = getattr(net, 'res_bus_dc', None)
     vm = float(res_bus.at[bus, 'vm_pu']) if res_bus is not None and bus in res_bus.index else np.nan
     v_kv = vm * float(net.bus_dc.at[bus, 'vn_kv'])
+    if table == 'der':
+        der = _electrisim_der_by_name(net, idx)
+        if der is None or not np.isfinite(vm):
+            return np.nan
+        v, p = _electrisim_der_power(net, der)
+        return abs(p) / max(v, 1e-6) / 1e3
     if table == 'line_dc':
         res = net.res_line_dc
         if idx not in res.index:
@@ -4684,7 +4730,7 @@ def _electrisim_drop_uncoupled_dc(net, quiet=False):
         # A breaker stays while its own bus does; what it switched may be gone.
         net.electrisim_dc_breakers = [b for b in net.electrisim_dc_breakers if b['bus_dc'] not in drop]
         for b in net.electrisim_dc_breakers:
-            if b['target'] is not None and b['target'][1] not in net[b['target'][0]].index:
+            if _electrisim_dc_breaker_target_gone(net, b):
                 b['target'] = None
     if quiet or not labels:
         return
@@ -18678,6 +18724,75 @@ def _prot_switch_current_ka(net_sc, sw_idx, fault_bus_idx=None):
     return None
 
 
+def _prot_num(value, default=0.0):
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return default
+    return x if np.isfinite(x) else default
+
+
+def _prot_diff_zone_currents(net_sc, sw_idx, fault_bus_idx=None):
+    """
+    A differential relay's protected element - its switch's line (both halves
+    of a line split at the fault) or transformer - and the fault currents
+    into it at each of its terminals, referred to the switch's voltage: the
+    operating current is their phasor sum, the restraint half their
+    magnitudes' sum. An earth fault's branch results have no angles: then
+    the magnitudes, added for a fault inside the element and differenced
+    for one beyond it. None for any other switch.
+    """
+    try:
+        sw = net_sc.switch.loc[int(sw_idx)]
+        et, element = str(sw['et']), int(sw['element'])
+    except (KeyError, TypeError, ValueError):
+        return None
+    terminals = []   # (bus, magnitude kA, angle deg or NaN, scale to the switch's side)
+    inside = False
+    if et == 'l':
+        split = net_sc.get('_electrisim_sc_split') if hasattr(net_sc, 'get') else None
+        parts = [element]
+        if split and element in [split['line']] + split['new']:
+            parts = [split['line']] + split['new']
+            inside = True
+        res = getattr(net_sc, 'res_line_sc', None)
+        if res is None:
+            return None
+        for li in parts:
+            if li not in net_sc.line.index or li not in res.index:
+                continue
+            for end in ('from', 'to'):
+                bus = int(net_sc.line.at[li, f'{end}_bus'])
+                if inside and bus == split['bus']:
+                    continue
+                terminals.append((bus, _prot_num(res.at[li, f'ikss_{end}_ka']), _prot_num(res.at[li, f'ikss_{end}_degree'], np.nan), 1.0))
+    elif et == 't':
+        res = getattr(net_sc, 'res_trafo_sc', None)
+        if res is None or element not in res.index:
+            return None
+        hv, lv = float(net_sc.trafo.at[element, 'vn_hv_kv']), float(net_sc.trafo.at[element, 'vn_lv_kv'])
+        own_lv = int(sw['bus']) == int(net_sc.trafo.at[element, 'lv_bus'])
+        # pandapower's short-circuit branch angles leave out the vector group's shift.
+        for side, ratio in (('hv', hv / lv if own_lv else 1.0), ('lv', 1.0 if own_lv else lv / hv)):
+            terminals.append((int(net_sc.trafo.at[element, f'{side}_bus']), _prot_num(res.at[element, f'ikss_{side}_ka']),
+                              _prot_num(res.at[element, f'ikss_{side}_degree'], np.nan), ratio))
+    else:
+        return None
+    if not terminals:
+        return None
+    mags = [abs(m) * s * 1e3 if np.isfinite(m) else 0.0 for _, m, _, s in terminals]
+    phasors = all(np.isfinite(a) for _, m, a, _ in terminals if np.isfinite(m) and abs(m) > 0)
+    if phasors:
+        operate = abs(sum(mag * np.exp(1j * np.radians(a)) for mag, (_, m, a, _) in zip(mags, terminals)
+                          if mag > 0))
+    elif inside:
+        operate = sum(mags)
+    else:
+        operate = abs(2.0 * max(mags) - sum(mags))
+    return {'operate_a': float(operate), 'restraint_a': float(sum(mags) / 2.0), 'phasors': bool(phasors),
+            'terminals_a': [round(float(m), 3) for m in mags]}
+
+
 def _prot_custom_trip_rows(net_sc, attach_summaries, fault_type, fault_bus_idx=None):
     """Evaluate IEEE, earth-fault, directional, 87 and 21 devices from SC results."""
     rows = []
@@ -18721,14 +18836,20 @@ def _prot_custom_trip_rows(net_sc, attach_summaries, fault_type, fault_bus_idx=N
         elif evaluator == _PROTECTION_KIND_DIFF:
             pickup = spec.get('I_diff_a') or 1.0
             slope = spec.get('diff_slope') or 0.0
-            # A switch defines the protected boundary. Branch fault current is the
-            # operating current; half is a conservative restraint-current proxy.
-            operate = current_a or 0.0
-            restraint = operate / 2.0
+            # The protected element is the switch's: the currents into it at each of its
+            # terminals, their sum the operating current and half their magnitudes' the
+            # restraint. The branch current alone tripped it for every fault beyond.
+            zone = _prot_diff_zone_currents(net_sc, summary.get('sw_idx'), fault_bus_idx)
+            if zone is None:
+                operate = current_a or 0.0
+                restraint = operate / 2.0
+            else:
+                operate, restraint = zone['operate_a'], zone['restraint_a']
             tripped = operate >= pickup + slope * restraint
-            t_trip = spec.get('t_g', 0.03) if tripped else None
+            t_trip = (spec.get('t_g') if spec.get('t_g') is not None else 0.03) if tripped else None
             detail = {'i_operate_a': operate, 'i_restraint_a': restraint,
-                      'pickup_a': pickup, 'slope': slope}
+                      'pickup_a': pickup, 'slope': slope,
+                      **({'terminals_a': zone['terminals_a'], 'phasors': zone['phasors']} if zone else {})}
         elif evaluator == _PROTECTION_KIND_DIST:
             z_base = None
             try:
@@ -18865,6 +18986,9 @@ def _prot_split_line(net, line, fraction):
     before = set(net.line.index)
     source = net.line.loc[line].copy()
     net = create_sc_bus(net, sc_line_id=line, sc_fraction=fraction)
+    # The two halves and the fault bus between them: a differential relay's zone is both.
+    net['_electrisim_sc_split'] = {'line': int(line), 'new': sorted(int(i) for i in set(net.line.index) - before),
+                                   'bus': int(max(net.bus.index))}
     for i in set(net.line.index) - before:
         for col in ('r0_ohm_per_km', 'x0_ohm_per_km', 'c0_nf_per_km', 'g0_us_per_km', 'endtemp_degree'):
             if col in net.line.columns and col in source.index and pd.isna(net.line.at[i, col]):
@@ -19103,7 +19227,23 @@ def _prot_check_miscoordination(net, scenarios, t_diff):
         for _, row in data.iterrows():
             if bool(row.get('in_service', True)):
                 sources.add(('bus', int(row['bus'])))
+    # A grid-forming PCS holds its island's voltage and feeds its faults at its current limit:
+    # where the PCS are an island's only sources, its relays' primaries lead to them. As one
+    # PCS (the island's reference) alone, the other blocks' breakers were never primaries.
+    # (On a grid a PCS stays an inverter-based source, named apart below.)
+    islands = [r for r in getattr(net, 'electrisim_pcs', None) or [] if r.get('as_source') is not None]
+    held = set()
+    if islands:
+        graph = top.create_nxgraph(net, respect_switches=True)
+        for r in islands:
+            held |= set(int(b) for b in top.connected_component(graph, r['bus']))
+    forming = [r for r in getattr(net, 'electrisim_pcs', None) or []
+               if r.get('in_service') and r.get('control') == 'grid_forming' and int(r['bus']) in held]
+    for rec in forming:
+        sources.add(('bus', int(rec['bus'])))
     source_names = {}
+    for rec in forming:
+        source_names.setdefault(('bus', int(rec['bus'])), []).append(rec.get('label') or rec.get('name'))
     for table in ('gen', 'ext_grid'):
         data = getattr(net, table, None)
         if data is not None and not data.empty:
@@ -19122,7 +19262,7 @@ def _prot_check_miscoordination(net, scenarios, t_diff):
         if data is None or data.empty:
             continue
         for idx, row in data.iterrows():
-            if bool(row.get('in_service', True)):
+            if bool(row.get('in_service', True)) and int(row['bus']) not in {int(r['bus']) for r in forming}:
                 inverter_names.setdefault(('bus', int(row['bus'])), []).append(
                     _contingency_friendly_name(net, row.get('name') if pd.notna(row.get('name')) else f'{table} {idx}'))
 

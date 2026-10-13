@@ -52,6 +52,21 @@
    "id": "B3_L",
    "vn_kv": 0.505,
    "name": "Block 3 505 V load side"
+  },
+  {
+   "id": "H1",
+   "vn_kv": 34.5,
+   "name": "Hall 1 34.5 kV"
+  },
+  {
+   "id": "H2",
+   "vn_kv": 34.5,
+   "name": "Hall 2 34.5 kV"
+  },
+  {
+   "id": "H3",
+   "vn_kv": 34.5,
+   "name": "Hall 3 34.5 kV"
   }
  ],
  "external_grids": [
@@ -181,6 +196,48 @@
    "x0_ohm_per_km": 0.33,
    "c0_nf_per_km": 300,
    "name": "Backbone cable BB3-BB1"
+  },
+  {
+   "id": "F1",
+   "from_bus": "BB1",
+   "to_bus": "H1",
+   "length_km": 0.05,
+   "r_ohm_per_km": 0.16,
+   "x_ohm_per_km": 0.13,
+   "c_nf_per_km": 200,
+   "max_i_ka": 0.2,
+   "r0_ohm_per_km": 0.64,
+   "x0_ohm_per_km": 0.4,
+   "c0_nf_per_km": 200,
+   "name": "Hall 1 feeder"
+  },
+  {
+   "id": "F2",
+   "from_bus": "BB2",
+   "to_bus": "H2",
+   "length_km": 0.05,
+   "r_ohm_per_km": 0.16,
+   "x_ohm_per_km": 0.13,
+   "c_nf_per_km": 200,
+   "max_i_ka": 0.2,
+   "r0_ohm_per_km": 0.64,
+   "x0_ohm_per_km": 0.4,
+   "c0_nf_per_km": 200,
+   "name": "Hall 2 feeder"
+  },
+  {
+   "id": "F3",
+   "from_bus": "BB3",
+   "to_bus": "H3",
+   "length_km": 0.05,
+   "r_ohm_per_km": 0.16,
+   "x_ohm_per_km": 0.13,
+   "c_nf_per_km": 200,
+   "max_i_ka": 0.2,
+   "r0_ohm_per_km": 0.64,
+   "x0_ohm_per_km": 0.4,
+   "c0_nf_per_km": 200,
+   "name": "Hall 3 feeder"
   }
  ],
  "loads": [],
@@ -1110,7 +1167,7 @@
  "ssts": [
   {
    "id": "SST1",
-   "bus_mv": "BB1",
+   "bus_mv": "H1",
    "bus_lv_dc": "R1",
    "vn_mv_kv": 34.5,
    "vn_lv_dc_kv": 0.8,
@@ -1129,7 +1186,7 @@
   },
   {
    "id": "SST2",
-   "bus_mv": "BB2",
+   "bus_mv": "H2",
    "bus_lv_dc": "R2",
    "vn_mv_kv": 34.5,
    "vn_lv_dc_kv": 0.8,
@@ -1148,7 +1205,7 @@
   },
   {
    "id": "SST3",
-   "bus_mv": "BB3",
+   "bus_mv": "H3",
    "bus_lv_dc": "R3",
    "vn_mv_kv": 34.5,
    "vn_lv_dc_kv": 0.8,
@@ -1196,6 +1253,476 @@
    "filter_r_mohm": 1,
    "load_profile_id": "dgx_h100",
    "name": "Hall 3: 90 DGX H100 racks"
+  }
+ ],
+ "switches": [
+  {
+   "id": "ZZ1_CB",
+   "bus": "BB1",
+   "element": "ZZ1",
+   "et": "grounding_transformer",
+   "name": "Zigzag breaker"
+  },
+  {
+   "id": "C_BB1_BB2_BB1",
+   "bus": "BB1",
+   "element": "C_BB1_BB2",
+   "et": "line",
+   "name": "Cable BB1-BB2 breaker at BB1"
+  },
+  {
+   "id": "C_BB1_BB2_BB2",
+   "bus": "BB2",
+   "element": "C_BB1_BB2",
+   "et": "line",
+   "name": "Cable BB1-BB2 breaker at BB2"
+  },
+  {
+   "id": "C_BB2_BB3_BB2",
+   "bus": "BB2",
+   "element": "C_BB2_BB3",
+   "et": "line",
+   "name": "Cable BB2-BB3 breaker at BB2"
+  },
+  {
+   "id": "C_BB2_BB3_BB3",
+   "bus": "BB3",
+   "element": "C_BB2_BB3",
+   "et": "line",
+   "name": "Cable BB2-BB3 breaker at BB3"
+  },
+  {
+   "id": "C_BB3_BB1_BB3",
+   "bus": "BB3",
+   "element": "C_BB3_BB1",
+   "et": "line",
+   "name": "Cable BB3-BB1 breaker at BB3"
+  },
+  {
+   "id": "C_BB3_BB1_BB1",
+   "bus": "BB1",
+   "element": "C_BB3_BB1",
+   "et": "line",
+   "name": "Cable BB3-BB1 breaker at BB1"
+  },
+  {
+   "id": "B1_T1_HV",
+   "bus": "POI",
+   "element": "B1_T1",
+   "et": "transformer",
+   "name": "Block 1 T1 HV breaker"
+  },
+  {
+   "id": "B1_T1_LV",
+   "bus": "B1_G",
+   "element": "B1_T1",
+   "et": "transformer",
+   "name": "Block 1 T1 LV breaker"
+  },
+  {
+   "id": "B1_T2_HV",
+   "bus": "BB1",
+   "element": "B1_T2",
+   "et": "transformer",
+   "name": "Block 1 T2 HV breaker"
+  },
+  {
+   "id": "B1_T2_LV",
+   "bus": "B1_L",
+   "element": "B1_T2",
+   "et": "transformer",
+   "name": "Block 1 T2 LV breaker"
+  },
+  {
+   "id": "B2_T1_HV",
+   "bus": "POI",
+   "element": "B2_T1",
+   "et": "transformer",
+   "name": "Block 2 T1 HV breaker"
+  },
+  {
+   "id": "B2_T1_LV",
+   "bus": "B2_G",
+   "element": "B2_T1",
+   "et": "transformer",
+   "name": "Block 2 T1 LV breaker"
+  },
+  {
+   "id": "B2_T2_HV",
+   "bus": "BB2",
+   "element": "B2_T2",
+   "et": "transformer",
+   "name": "Block 2 T2 HV breaker"
+  },
+  {
+   "id": "B2_T2_LV",
+   "bus": "B2_L",
+   "element": "B2_T2",
+   "et": "transformer",
+   "name": "Block 2 T2 LV breaker"
+  },
+  {
+   "id": "B3_T1_HV",
+   "bus": "POI",
+   "element": "B3_T1",
+   "et": "transformer",
+   "name": "Block 3 T1 HV breaker"
+  },
+  {
+   "id": "B3_T1_LV",
+   "bus": "B3_G",
+   "element": "B3_T1",
+   "et": "transformer",
+   "name": "Block 3 T1 LV breaker"
+  },
+  {
+   "id": "B3_T2_HV",
+   "bus": "BB3",
+   "element": "B3_T2",
+   "et": "transformer",
+   "name": "Block 3 T2 HV breaker"
+  },
+  {
+   "id": "B3_T2_LV",
+   "bus": "B3_L",
+   "element": "B3_T2",
+   "et": "transformer",
+   "name": "Block 3 T2 LV breaker"
+  },
+  {
+   "id": "F1_CB",
+   "bus": "BB1",
+   "element": "F1",
+   "et": "line",
+   "name": "Hall 1 feeder breaker"
+  },
+  {
+   "id": "F2_CB",
+   "bus": "BB2",
+   "element": "F2",
+   "et": "line",
+   "name": "Hall 2 feeder breaker"
+  },
+  {
+   "id": "F3_CB",
+   "bus": "BB3",
+   "element": "F3",
+   "et": "line",
+   "name": "Hall 3 feeder breaker"
+  }
+ ],
+ "dc_breakers": [
+  {
+   "id": "B1_GS1a_CB",
+   "bus": "B1_DC1",
+   "element": "B1_GS1a",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 1 DC1 GS1.1 A breaker"
+  },
+  {
+   "id": "B1_GS1b_CB",
+   "bus": "B1_DC1",
+   "element": "B1_GS1b",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 1 DC1 GS1.1 B breaker"
+  },
+  {
+   "id": "B1_GS2a_CB",
+   "bus": "B1_DC2",
+   "element": "B1_GS2a",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 1 DC2 GS1.1 A breaker"
+  },
+  {
+   "id": "B1_GS2b_CB",
+   "bus": "B1_DC2",
+   "element": "B1_GS2b",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 1 DC2 GS1.1 B breaker"
+  },
+  {
+   "id": "B1_GS3a_CB",
+   "bus": "B1_DC3",
+   "element": "B1_GS3a",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 1 DC3 GS1.1 A breaker"
+  },
+  {
+   "id": "B1_GS3b_CB",
+   "bus": "B1_DC3",
+   "element": "B1_GS3b",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 1 DC3 GS1.1 B breaker"
+  },
+  {
+   "id": "B1_GS4a_CB",
+   "bus": "B1_DC4",
+   "element": "B1_GS4a",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 1 DC4 GS1.1 A breaker"
+  },
+  {
+   "id": "B1_GS4b_CB",
+   "bus": "B1_DC4",
+   "element": "B1_GS4b",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 1 DC4 GS1.1 B breaker"
+  },
+  {
+   "id": "B2_GS1a_CB",
+   "bus": "B2_DC1",
+   "element": "B2_GS1a",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 2 DC1 GS1.1 A breaker"
+  },
+  {
+   "id": "B2_GS1b_CB",
+   "bus": "B2_DC1",
+   "element": "B2_GS1b",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 2 DC1 GS1.1 B breaker"
+  },
+  {
+   "id": "B2_GS2a_CB",
+   "bus": "B2_DC2",
+   "element": "B2_GS2a",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 2 DC2 GS1.1 A breaker"
+  },
+  {
+   "id": "B2_GS2b_CB",
+   "bus": "B2_DC2",
+   "element": "B2_GS2b",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 2 DC2 GS1.1 B breaker"
+  },
+  {
+   "id": "B2_GS3a_CB",
+   "bus": "B2_DC3",
+   "element": "B2_GS3a",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 2 DC3 GS1.1 A breaker"
+  },
+  {
+   "id": "B2_GS3b_CB",
+   "bus": "B2_DC3",
+   "element": "B2_GS3b",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 2 DC3 GS1.1 B breaker"
+  },
+  {
+   "id": "B2_GS4a_CB",
+   "bus": "B2_DC4",
+   "element": "B2_GS4a",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 2 DC4 GS1.1 A breaker"
+  },
+  {
+   "id": "B2_GS4b_CB",
+   "bus": "B2_DC4",
+   "element": "B2_GS4b",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 2 DC4 GS1.1 B breaker"
+  },
+  {
+   "id": "B3_GS1a_CB",
+   "bus": "B3_DC1",
+   "element": "B3_GS1a",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 3 DC1 GS1.1 A breaker"
+  },
+  {
+   "id": "B3_GS1b_CB",
+   "bus": "B3_DC1",
+   "element": "B3_GS1b",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 3 DC1 GS1.1 B breaker"
+  },
+  {
+   "id": "B3_GS2a_CB",
+   "bus": "B3_DC2",
+   "element": "B3_GS2a",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 3 DC2 GS1.1 A breaker"
+  },
+  {
+   "id": "B3_GS2b_CB",
+   "bus": "B3_DC2",
+   "element": "B3_GS2b",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 3 DC2 GS1.1 B breaker"
+  },
+  {
+   "id": "B3_GS3a_CB",
+   "bus": "B3_DC3",
+   "element": "B3_GS3a",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 3 DC3 GS1.1 A breaker"
+  },
+  {
+   "id": "B3_GS3b_CB",
+   "bus": "B3_DC3",
+   "element": "B3_GS3b",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 3 DC3 GS1.1 B breaker"
+  },
+  {
+   "id": "B3_GS4a_CB",
+   "bus": "B3_DC4",
+   "element": "B3_GS4a",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 3 DC4 GS1.1 A breaker"
+  },
+  {
+   "id": "B3_GS4b_CB",
+   "bus": "B3_DC4",
+   "element": "B3_GS4b",
+   "breaker_type": "mechanical",
+   "rated_voltage_kv": 1.5,
+   "rated_current_ka": 2,
+   "breaking_capacity_ka": 50,
+   "trip_current_ka": 6,
+   "opening_time_ms": 20,
+   "limiting_inductance_mh": 0,
+   "name": "Block 3 DC4 GS1.1 B breaker"
   }
  ],
  "grounding_transformers": [

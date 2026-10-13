@@ -21,6 +21,10 @@ Sizing (load flow):
   at 0.95 the rectifiers are current-limited and the batteries make up 0.36 MW;
 - the GS1.1 full (1,490 V) or at the 815 V floor: the same load flow.
 
+Protection (Phase 27): the breakers on the drawn diagram - each transformer's,
+each backbone cable's two ends, each hall feeder's, a DC breaker per GS1.1 -
+with a relay scheme set per study.
+
 And the drawn diagram: tests/reference/reference_pcs3750_mv.diagram_payload.json
 is the request the page built (prepareNetworkData) from the spec drawn through
 /build-model - the spec's answers.
@@ -639,3 +643,177 @@ def test_rack_buffers_take_the_swing_from_the_gs11(client, quiet):
     for s in sm:
         assert s['limited_steps'] == 0 and s['store_peak_mw'] < 3.6
         assert s['feed_ramp_mw_s'] < 0.1 * s['rack_ramp_mw_s']
+
+
+# --- Protection (Phase 27) ---------------------------------------------------------------------
+# The drawn diagram's breakers: each transformer's both sides, each backbone cable's two ends, each
+# hall feeder at the backbone, the zigzag's; a DC breaker in front of each GS1.1. A relay scheme per
+# study, as a protection engineer sets one: the relays on the switches, by name.
+
+def _protection(client, quiet, scheme, fault='3ph', mode='line', bus=None, k_pcs=None):
+    with open(os.path.join(HERE, 'reference', 'reference_radial.diagram_protection_payload.json'),
+              encoding='utf-8') as fh:
+        params = json.load(fh)['0']
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    cells = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
+    for v in p.values():
+        if isinstance(v, dict) and str(v.get('typ', '')).startswith('Switch') and scheme(v['userFriendlyName']):
+            v.update(scheme(v['userFriendlyName']))
+        if isinstance(v, dict) and k_pcs and str(v.get('typ', '')).startswith('PCS'):
+            v['current_limit_pu'] = str(k_pcs)
+    p['0'] = {**params, 'fault_type': fault, 'fault_location_mode': mode, 'sc_line_id': 'all',
+              'fault_bus_id': cells.get(bus), 'user_email': 't@t'}
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    assert not out.get('error'), out.get('message')
+    return out
+
+
+OCR_AUTO = {'protection_type': 'ocr', 'curve_type': 'standard_inverse', 'tms': '1.0', 't_grade': '0.3',
+            't_gg': '0.1', 't_g': '0.5', 't_diff': '0.3', 'pickup_mode': 'auto'}
+D87L = {'protection_type': 'differential', 'I_diff_a': '60', 'diff_slope': '0.3', 't_g': '0.05'}
+D87T = {'protection_type': 'differential', 'I_diff_a': '20', 'diff_slope': '0.3', 't_g': '0.05'}
+# A hall feeder: definite time above 1.5 x its SST's 67 A.
+FEEDER = {'protection_type': 'ocr', 'oc_relay_type': 'DTOC', 'pickup_mode': 'manual', 'I_s_a': '100',
+          'I_g_a': '100', 't_g': '0.1', 'I_gg_a': '2000', 't_gg': '0.05'}
+
+
+def _scheme(name):
+    """87L on the backbone cables, 87T on T2, the feeders' overcurrent, the rest as set automatically."""
+    if name.startswith('Cable'):
+        return D87L
+    if 'feeder' in name:
+        return FEEDER
+    if 'T2 HV' in name:
+        return D87T
+    return None if 'Zigzag' in name else OCR_AUTO
+
+
+def _trips(scenario):
+    return {t['user_friendly_name']: t for t in scenario['trip']}
+
+
+def test_overcurrent_cannot_see_a_backbone_fault(client, quiet):
+    """
+    Overcurrent on every breaker, set automatically (rated current x 1.2 x
+    1.25): a fault on any backbone cable, 238 A from the twelve PCS at their
+    limit, trips nothing - each T2 brings 79 A against its 75 A pickup, so
+    nearly at its rating, and the cables 119 A against 720 A. Nothing clears
+    it; nor any hall feeder's.
+    """
+    out = _protection(client, quiet, lambda n: None if 'Zigzag' in n else OCR_AUTO)
+    assert out['summary']['n_scenarios'] == 6 and out['summary']['n_tripped'] == 0
+    for sc in out['scenarios']:
+        assert sc['short_circuit']['ikss_ka'] == pytest.approx(0.238, abs=0.002)
+        assert sc['clearing_time_s'] is None
+        t = _trips(sc)
+        for b in (1, 2, 3):
+            hv = t[f'Block {b} T2 HV breaker']
+            assert 1.0 < hv['ikss_ka'] * 1e3 / hv['evaluation']['pickup_a'] < 1.1
+
+
+@pytest.mark.parametrize('fault, k, ik_a', [('3ph', 1.2, 238), ('3ph', 1.5, 298), ('1ph', 1.2, 248)])
+def test_line_differential_clears_each_backbone_cable(client, quiet, fault, k, ik_a):
+    """
+    87L at each end of each backbone cable (60 A, 30 % slope, 50 ms with its
+    signalling): a fault on a cable, fed from both ends, puts its whole
+    current in the zone - both ends trip; the other cables and each T2's 87T
+    carry it through and restrain. A fault on a hall feeder: its breaker's
+    overcurrent, 0.1 s. Nothing miscoordinates or trips needlessly. The earth
+    faults, the zigzag's zero sequence, likewise (pandapower gives their branch
+    currents no angles: magnitudes, added inside the zone). At 1.5 pu the
+    T2s' 505 V overcurrent picks up too (6.8 kA against 5.1 kA): a backup at
+    0.5-0.8 s that takes the whole island off; at 1.2 pu there is none.
+    """
+    out = _protection(client, quiet, _scheme, fault=fault, k_pcs=k)
+    s = out['summary']
+    assert s['n_scenarios'] == 6 and s['n_miscoordination'] == 0 and s['n_unwanted_trips'] == 0
+    for sc in out['scenarios']:
+        assert sc['short_circuit']['ikss_ka'] * 1e3 == pytest.approx(ik_a, abs=2)
+        t = _trips(sc)
+        tripped = {n for n, r in t.items() if r['tripped'] and r['t_trip_s'] < 0.3}
+        backup = {n for n, r in t.items() if r['tripped'] and r['t_trip_s'] >= 0.3}
+        assert backup == ({f'Block {b} T2 LV breaker' for b in (1, 2, 3)} if k == 1.5 else set())
+        assert all(t[n]['t_trip_s'] >= 0.5 for n in backup)
+        line = sc['fault_label'].split(',')[0]
+        if line.startswith('Backbone cable'):
+            a, b = line.split()[-1].split('-')
+            assert tripped == {f'Cable {a}-{b} breaker at {a}', f'Cable {a}-{b} breaker at {b}'}
+            assert sc['clearing_time_s'] == 0.05
+            for n in tripped:
+                assert t[n]['evaluation']['i_operate_a'] == pytest.approx(ik_a, abs=2)
+                assert t[n]['evaluation']['phasors'] == (fault == '3ph')
+        else:
+            assert tripped == {f'{line} breaker'} and sc['clearing_time_s'] == 0.1
+        for n, r in t.items():
+            if n not in tripped and (r.get('evaluation') or {}).get('i_operate_a') is not None:
+                assert r['evaluation']['i_operate_a'] < 1.0, n
+
+
+def test_definite_time_earth_fault_cannot_tell_the_ring_cables_apart(client, quiet):
+    """
+    51N alone: 40 A, the feeders at 0.1 s and the ring at 0.4 s. A feeder's
+    earth fault is cleared and graded; but a fault on a backbone cable sends
+    the zigzag's current round both sides of the ring - over 40 A in the
+    healthy cables too - and their relays trip with the faulted cable's.
+    """
+    def scheme(name):
+        if 'feeder' in name:
+            return {'protection_type': 'earth_fault', 'I_e_a': '40', 't_e': '0.1'}
+        if name.startswith('Cable'):
+            return {'protection_type': 'earth_fault', 'I_e_a': '40', 't_e': '0.4'}
+        return None
+    out = _protection(client, quiet, scheme, fault='1ph')
+    unwanted = {(u['fault_label'].split(',')[0], u['user_friendly_name']) for u in out['unwanted_trips']}
+    assert out['summary']['n_unwanted_trips'] == 8
+    assert all(f.startswith('Backbone cable') for f, _ in unwanted)
+    for sc in out['scenarios']:
+        if 'feeder' in sc['fault_label']:
+            assert sc['clearing_time_s'] == 0.1
+
+
+def test_utility_side_overcurrent_grades(client, quiet):
+    """
+    A fault on Block 1's 505 V grid side, 68.6 kA from the utility through T1:
+    the LV breaker's overcurrent clears it at 0.5 s and the HV breaker's backs
+    it up at 0.8 s, the 0.3 s margin; the other blocks' T1s see nothing (their
+    rectifiers do not feed an AC fault). 0.5 s at 68.6 kA is the arc-flash
+    case: an instantaneous element would shorten it.
+    """
+    out = _protection(client, quiet, lambda n: OCR_AUTO if ' T1 ' in n else None, mode='bus',
+                      bus='Block 1 505 V grid side')
+    (sc,) = out['scenarios']
+    assert sc['short_circuit']['ikss_ka'] == pytest.approx(68.56, abs=0.1)
+    t = _trips(sc)
+    assert sc['primary_switches'] == ['Block 1 T1 LV breaker']
+    assert t['Block 1 T1 LV breaker']['t_trip_s'] == pytest.approx(0.5)
+    assert t['Block 1 T1 HV breaker']['t_trip_s'] == pytest.approx(0.8)
+    assert out['summary']['n_miscoordination'] == 0
+    assert not any(r['tripped'] for n, r in t.items() if not n.startswith('Block 1'))
+
+
+def test_gs11_breakers_against_a_quadrant_bus_fault(client, quiet):
+    """
+    The DC fault on Block 1's DC1 with each GS1.1 behind its own breaker
+    (mechanical, 50 kA, opening in 20 ms - assumed). Each breaks its own unit's
+    25.7 kA. A fault between a breaker and its unit is fed by everything else
+    on the bus: 40.6 kA at its opening, inside 50 kA - but the quadrant's DC
+    links discharge through it first, some 830 kA peak behind their 0.05 uH:
+    the battery cable's own inductance, or a reactor, must hold that down.
+    """
+    from test_dc_fault import STUDY
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
+        cells = {v.get('userFriendlyName'): v['name'] for v in json.load(fh).values() if isinstance(v, dict) and 'name' in v}
+    out, _, _ = _drawn_study(client, quiet, {**STUDY, 'fault_bus': cells['Block 1 DC1'], 'duration_ms': '50',
+                                             'frequency': '60'})
+    (f,) = out['dcfault']['faults']
+    assert f['ik_ka'] == pytest.approx(67.3, abs=0.3)
+    brk = {b['label']: b for b in f['breakers']}
+    for u in 'AB':
+        b = brk[f'Block 1 DC1 GS1.1 {u} breaker']
+        assert b['i_open_ka'] == pytest.approx(25.70, abs=0.05) and not b['exceeds']
+        assert b['i_open_far_side_ka'] == pytest.approx(40.6, abs=0.3) and not b['exceeds_far_side']
+        assert 700 < b['ip_far_side_ka'] < 950
+    # The other quadrants' breakers carry nothing of it: each quadrant's DC bus is its own.
+    assert all(b['ip_ka'] < 2.0 for n, b in brk.items() if not n.startswith('Block 1 DC1'))

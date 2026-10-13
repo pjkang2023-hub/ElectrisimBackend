@@ -357,7 +357,9 @@ class _EmtBuilder:
             if not rec['obj'].in_service or bus not in self.bus_node:
                 continue
             v, p = pe._electrisim_der_power(net, rec)
-            model = emt_der.build(self.ckt, rec['obj'], rec['label'], self.bus_node[bus], v, p / max(v, 1e-6))
+            # Through its own breaker, when it has one: the bus's current into the store is -p / v.
+            node = self._terminal('der', rec['name'], bus, -p / max(v, 1e-6))
+            model = emt_der.build(self.ckt, rec['obj'], rec['label'], node, v, p / max(v, 1e-6))
             model.id = rec['id']
             self.ders.append((rec, model))
 

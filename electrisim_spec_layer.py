@@ -305,7 +305,9 @@ TOP_LEVEL = tuple(LISTS) + ('load_profiles',)
 SOURCES = ('Battery', 'Supercapacitor', 'Flywheel', 'SOFC', 'PV Array')
 # What a DC breaker switches, by the kind of element beyond it (dcPayload.js DC_BREAKER_TARGETS).
 DC_BREAKER_TARGETS = {'DC Bus': 'bus_dc', 'DC Line': 'line_dc', 'VSC': 'vsc', 'Load DC': 'load_dc',
-                      'Source DC': 'source_dc', 'DC/DC Converter': 'dc_dc_converter', 'DC Diode': 'line_dc'}
+                      'Source DC': 'source_dc', 'DC/DC Converter': 'dc_dc_converter', 'DC Diode': 'line_dc',
+                      # A store's own breaker: the payload names its shape (dcPayload.js falls back to it).
+                      **{kind: kind for kind in SOURCES}}
 # Row keys where the payload names a connection differently from the spec.
 ROW_KEY = {('DC Line', 'from_bus'): 'busFrom', ('DC Line', 'to_bus'): 'busTo', ('PCS', 'source'): 'der',
            ('DC Diode', 'from_bus'): 'busFrom', ('DC Diode', 'to_bus'): 'busTo'}
@@ -423,7 +425,7 @@ def check(spec, ac_buses, used_ids, problems, num):
                     what = 'a battery, supercapacitor, flywheel, SOFC or PV array id'
                 else:   # dc_element
                     good = kinds.get(target) in DC_BREAKER_TARGETS
-                    what = 'a DC bus, line, load, source, VSC or DC/DC converter id'
+                    what = 'a DC bus, line, load, source, battery or other store, VSC or DC/DC converter id'
                 if not good:
                     problems.append(f'{where}: {field}={target!r} must be {what}')
                     ok = False
