@@ -347,6 +347,52 @@ def test_dynamics_problems_are_named(fields, problem):
     assert any(problem in p for p in problems_of(spec)), problems_of(spec)
 
 
+def test_a_switchs_protection_reaches_the_drawing(client):
+    """
+    A switch's Protection tab, given in the spec by its own field names, is
+    kept on its row and handed to the canvas: a protection study's relays were
+    otherwise set by hand on the drawing. The switch rows the importer reads
+    by position are unchanged.
+    """
+    spec = substation()
+    relay = {'protection_type': 'OCR', 'oc_relay_type': 'dtoc', 'pickup_mode': 'manual', 'I_g_a': 400,
+             't_g': 0.3, 'I_gg_a': 3000, 't_gg': 0.05}
+    spec['switches'] = [{'bus': 'MV', 'element': 'L1', 'et': 'line', 'name': 'Feeder 1 breaker', **relay},
+                        {'bus': 'MV', 'element': 'L2', 'et': 'line', 'name': 'Feeder 2 breaker'}]
+    want = {**relay, 'protection_type': 'ocr', 'oc_relay_type': 'DTOC'}
+    net, _ = sld.build_network(spec)
+    assert {k: net.switch.at[0, k] for k in relay} == want
+    assert all(pd_isna_or_none(net.switch.at[1, k]) for k in relay)
+    body = client.post('/build-model', json={'spec': spec}).get_json()
+    sidecar = json.loads(json.loads(body['model'])['_object']['electrisim_import_sidecar']['_object'])
+    assert sidecar['switch']['Feeder 1 breaker']['protection'] == want
+    assert sidecar['switch']['Feeder 2 breaker']['protection'] == {}
+    rows = json.loads(json.loads(body['model'])['_object']['switch']['_object'])['data']
+    assert [len(r) for r in rows] == [8, 8]
+
+
+@pytest.mark.parametrize('fields, problem', [
+    ({'protection_type': 'relay'}, "protection_type='relay' must be one of none, ocr, fuse"),
+    ({'protection_type': 'ocr', 'curve_type': 'inverse'}, "curve_type='inverse' must be one of standard_inverse"),
+    ({'protection_type': 'differential', 'I_dif_a': 60}, "unknown field 'I_dif_a'"),
+    ({'protection_type': 'differential', 'I_diff_a': -5}, 'I_diff_a must not be negative'),
+    ({'I_diff_a': 60}, 'protection settings without protection_type'),
+])
+def test_protection_problems_are_named(fields, problem):
+    spec = substation()
+    spec['switches'][0].update(fields)
+    assert any(problem in p for p in problems_of(spec)), problems_of(spec)
+
+
+def test_a_grounding_transformers_breaker_takes_no_relay():
+    """The protection study cannot evaluate a relay there: refused rather than drawn and ignored."""
+    spec = substation()
+    spec['grounding_transformers'] = [{'id': 'ZZ', 'bus': 'MV', 'vn_kv': 20}]
+    spec['switches'].append({'id': 'ZZ_CB', 'bus': 'MV', 'element': 'ZZ', 'et': 'grounding_transformer',
+                             'protection_type': 'earth_fault', 'I_e_a': 40})
+    assert any("grounding transformer's breaker takes no protection" in p for p in problems_of(spec))
+
+
 @pytest.mark.parametrize('fields, problem', [
     ({'tap_pos': 3}, 'tap_pos=3 is outside tap_min..tap_max (-2..2)'),
     ({'tap_side': 'mv', 'tap_pos': 0}, "tap_side='mv' must be 'hv' or 'lv'"),

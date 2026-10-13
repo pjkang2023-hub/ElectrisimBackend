@@ -199,6 +199,65 @@ def _gen_dynamics(net, idx, row, where, problems):
         net.gen.at[idx, key] = value
 
 
+#: A switch's protection as its Protection tab names it: the device, the choices and the numbers.
+SWITCH_PROTECTION_CHOICES = {
+    'protection_type': ('none', 'ocr', 'fuse', 'earth_fault', 'directional', 'differential', 'distance'),
+    'oc_relay_type': ('DTOC', 'IDMT', 'IDTOC'),
+    'curve_type': ('standard_inverse', 'very_inverse', 'extremely_inverse', 'long_inverse',
+                   'ieee_moderately_inverse', 'ieee_very_inverse', 'ieee_extremely_inverse'),
+    'pickup_mode': ('auto', 'manual'),
+    'fuse_mode': ('library', 'custom'),
+    'directional_mode': ('forward', 'reverse'),
+}
+SWITCH_PROTECTION_NUMBERS = (
+    'tms', 't_grade', 't_gg', 't_g', 't_diff', 'I_s_a', 'I_g_a', 'I_gg_a', 'overload_factor',
+    'ct_current_factor', 'safety_factor', 'rated_i_a', 'I_e_a', 't_e', 'I_diff_a', 'diff_slope',
+    'z1_r_ohm', 'z1_x_ohm', 't_z1', 'z2_r_ohm', 'z2_x_ohm', 't_z2', 'z3_r_ohm', 'z3_x_ohm', 't_z3',
+)
+SWITCH_PROTECTION_TEXT = ('fuse_type', 'fuse_custom_name', 'fuse_custom_std_json')
+SWITCH_PROTECTION_FIELDS = tuple(SWITCH_PROTECTION_CHOICES) + SWITCH_PROTECTION_NUMBERS + SWITCH_PROTECTION_TEXT
+SWITCH_FIELDS = ('id', 'bus', 'element', 'et', 'element_type', 'closed', 'name')
+
+
+def _switch_protection(row, where, problems):
+    """
+    A switch's relay or fuse, given in the spec as the Protection tab's own
+    fields - protection_type, curve_type, I_diff_a, t_g... - for the drawing to
+    carry. Without them a protection study's relays were set on the diagram by
+    hand, or in a test by switch name.
+    """
+    out = {}
+    for key in row:
+        if key in SWITCH_FIELDS:
+            continue
+        if key not in SWITCH_PROTECTION_FIELDS:
+            problems.append(f'{where}: unknown field {key!r}; a switch takes '
+                            + ', '.join(SWITCH_FIELDS[1:]) + ' and its protection: '
+                            + ', '.join(SWITCH_PROTECTION_FIELDS))
+            continue
+        value = row[key]
+        if key in SWITCH_PROTECTION_CHOICES:
+            choices = SWITCH_PROTECTION_CHOICES[key]
+            value = next((c for c in choices if c.lower() == str(value).strip().lower()), None)
+            if value is None:
+                problems.append(f'{where}: {key}={row[key]!r} must be one of ' + ', '.join(choices))
+                continue
+        elif key in SWITCH_PROTECTION_NUMBERS:
+            value = _num(value, key, where, problems)
+            if value is None:
+                continue
+            if value < 0:
+                problems.append(f'{where}: {key} must not be negative, got {value:g}')
+                continue
+        else:
+            value = str(value)
+        out[key] = value
+    if out and out.get('protection_type', 'none') == 'none' and len(out) > ('protection_type' in out):
+        problems.append(f'{where}: protection settings without protection_type (one of '
+                        + ', '.join(SWITCH_PROTECTION_CHOICES['protection_type'][1:]) + ')')
+    return out
+
+
 def _num(value, field, where, problems, default=None, positive=False):
     """Read a numeric field, recording a problem rather than raising."""
     if value is None:
@@ -760,10 +819,15 @@ def build_network(spec):
             # A grounding transformer is the DC and microgrid layer's, not pandapower's.
             if isinstance(row, dict) and row.get('id'):
                 used_ids.add(str(row['id']).strip())
+            if isinstance(row, dict) and any(k in SWITCH_PROTECTION_FIELDS for k in row):
+                problems.append(f"switches[{i}] ({row.get('id')}): a grounding transformer's breaker takes no "
+                                "protection: the protection study cannot evaluate a relay on it")
+                continue
             grounding_switches.append((i, row))
             continue
         ident = _ident(row, i, 'Sw', problems, used_ids)
         where = f'switches[{i}] ({ident})'
+        protection = _switch_protection(row, where, problems) if isinstance(row, dict) else {}
         bus = bus_of(row, 'bus', where)
         et = {'line': 'l', 'l': 'l', 'trafo': 't', 'transformer': 't', 't': 't',
               'three_winding_transformer': 't3', 'trafo3w': 't3', 't3': 't3',
@@ -805,6 +869,10 @@ def build_network(spec):
         idx = pp.create_switch(net, bus=bus_index[bus], element=target, et=et,
                                closed=bool(row.get('closed', True)),
                                name=str(row.get('name') or ident))
+        for key, value in protection.items():
+            if key not in net.switch.columns:
+                net.switch[key] = pd.Series([None] * len(net.switch), index=net.switch.index, dtype=object)
+            net.switch.at[idx, key] = value
         record('switch', idx, ident)
 
     # --- the DC and microgrid layer ----------------------------------------

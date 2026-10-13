@@ -1268,147 +1268,279 @@
    "bus": "BB1",
    "element": "C_BB1_BB2",
    "et": "line",
-   "name": "Cable BB1-BB2 breaker at BB1"
+   "name": "Cable BB1-BB2 breaker at BB1",
+   "protection_type": "differential",
+   "I_diff_a": 60,
+   "diff_slope": 0.3,
+   "t_g": 0.05
   },
   {
    "id": "C_BB1_BB2_BB2",
    "bus": "BB2",
    "element": "C_BB1_BB2",
    "et": "line",
-   "name": "Cable BB1-BB2 breaker at BB2"
+   "name": "Cable BB1-BB2 breaker at BB2",
+   "protection_type": "differential",
+   "I_diff_a": 60,
+   "diff_slope": 0.3,
+   "t_g": 0.05
   },
   {
    "id": "C_BB2_BB3_BB2",
    "bus": "BB2",
    "element": "C_BB2_BB3",
    "et": "line",
-   "name": "Cable BB2-BB3 breaker at BB2"
+   "name": "Cable BB2-BB3 breaker at BB2",
+   "protection_type": "differential",
+   "I_diff_a": 60,
+   "diff_slope": 0.3,
+   "t_g": 0.05
   },
   {
    "id": "C_BB2_BB3_BB3",
    "bus": "BB3",
    "element": "C_BB2_BB3",
    "et": "line",
-   "name": "Cable BB2-BB3 breaker at BB3"
+   "name": "Cable BB2-BB3 breaker at BB3",
+   "protection_type": "differential",
+   "I_diff_a": 60,
+   "diff_slope": 0.3,
+   "t_g": 0.05
   },
   {
    "id": "C_BB3_BB1_BB3",
    "bus": "BB3",
    "element": "C_BB3_BB1",
    "et": "line",
-   "name": "Cable BB3-BB1 breaker at BB3"
+   "name": "Cable BB3-BB1 breaker at BB3",
+   "protection_type": "differential",
+   "I_diff_a": 60,
+   "diff_slope": 0.3,
+   "t_g": 0.05
   },
   {
    "id": "C_BB3_BB1_BB1",
    "bus": "BB1",
    "element": "C_BB3_BB1",
    "et": "line",
-   "name": "Cable BB3-BB1 breaker at BB1"
+   "name": "Cable BB3-BB1 breaker at BB1",
+   "protection_type": "differential",
+   "I_diff_a": 60,
+   "diff_slope": 0.3,
+   "t_g": 0.05
   },
   {
    "id": "B1_T1_HV",
    "bus": "POI",
    "element": "B1_T1",
    "et": "transformer",
-   "name": "Block 1 T1 HV breaker"
+   "name": "Block 1 T1 HV breaker",
+   "protection_type": "ocr",
+   "curve_type": "standard_inverse",
+   "tms": 1.0,
+   "t_grade": 0.3,
+   "t_gg": 0.1,
+   "t_g": 0.5,
+   "t_diff": 0.3,
+   "pickup_mode": "auto"
   },
   {
    "id": "B1_T1_LV",
    "bus": "B1_G",
    "element": "B1_T1",
    "et": "transformer",
-   "name": "Block 1 T1 LV breaker"
+   "name": "Block 1 T1 LV breaker",
+   "protection_type": "ocr",
+   "curve_type": "standard_inverse",
+   "tms": 1.0,
+   "t_grade": 0.3,
+   "t_gg": 0.1,
+   "t_g": 0.5,
+   "t_diff": 0.3,
+   "pickup_mode": "auto"
   },
   {
    "id": "B1_T2_HV",
    "bus": "BB1",
    "element": "B1_T2",
    "et": "transformer",
-   "name": "Block 1 T2 HV breaker"
+   "name": "Block 1 T2 HV breaker",
+   "protection_type": "differential",
+   "I_diff_a": 20,
+   "diff_slope": 0.3,
+   "t_g": 0.05
   },
   {
    "id": "B1_T2_LV",
    "bus": "B1_L",
    "element": "B1_T2",
    "et": "transformer",
-   "name": "Block 1 T2 LV breaker"
+   "name": "Block 1 T2 LV breaker",
+   "protection_type": "ocr",
+   "curve_type": "standard_inverse",
+   "tms": 1.0,
+   "t_grade": 0.3,
+   "t_gg": 0.1,
+   "t_g": 0.5,
+   "t_diff": 0.3,
+   "pickup_mode": "auto"
   },
   {
    "id": "B2_T1_HV",
    "bus": "POI",
    "element": "B2_T1",
    "et": "transformer",
-   "name": "Block 2 T1 HV breaker"
+   "name": "Block 2 T1 HV breaker",
+   "protection_type": "ocr",
+   "curve_type": "standard_inverse",
+   "tms": 1.0,
+   "t_grade": 0.3,
+   "t_gg": 0.1,
+   "t_g": 0.5,
+   "t_diff": 0.3,
+   "pickup_mode": "auto"
   },
   {
    "id": "B2_T1_LV",
    "bus": "B2_G",
    "element": "B2_T1",
    "et": "transformer",
-   "name": "Block 2 T1 LV breaker"
+   "name": "Block 2 T1 LV breaker",
+   "protection_type": "ocr",
+   "curve_type": "standard_inverse",
+   "tms": 1.0,
+   "t_grade": 0.3,
+   "t_gg": 0.1,
+   "t_g": 0.5,
+   "t_diff": 0.3,
+   "pickup_mode": "auto"
   },
   {
    "id": "B2_T2_HV",
    "bus": "BB2",
    "element": "B2_T2",
    "et": "transformer",
-   "name": "Block 2 T2 HV breaker"
+   "name": "Block 2 T2 HV breaker",
+   "protection_type": "differential",
+   "I_diff_a": 20,
+   "diff_slope": 0.3,
+   "t_g": 0.05
   },
   {
    "id": "B2_T2_LV",
    "bus": "B2_L",
    "element": "B2_T2",
    "et": "transformer",
-   "name": "Block 2 T2 LV breaker"
+   "name": "Block 2 T2 LV breaker",
+   "protection_type": "ocr",
+   "curve_type": "standard_inverse",
+   "tms": 1.0,
+   "t_grade": 0.3,
+   "t_gg": 0.1,
+   "t_g": 0.5,
+   "t_diff": 0.3,
+   "pickup_mode": "auto"
   },
   {
    "id": "B3_T1_HV",
    "bus": "POI",
    "element": "B3_T1",
    "et": "transformer",
-   "name": "Block 3 T1 HV breaker"
+   "name": "Block 3 T1 HV breaker",
+   "protection_type": "ocr",
+   "curve_type": "standard_inverse",
+   "tms": 1.0,
+   "t_grade": 0.3,
+   "t_gg": 0.1,
+   "t_g": 0.5,
+   "t_diff": 0.3,
+   "pickup_mode": "auto"
   },
   {
    "id": "B3_T1_LV",
    "bus": "B3_G",
    "element": "B3_T1",
    "et": "transformer",
-   "name": "Block 3 T1 LV breaker"
+   "name": "Block 3 T1 LV breaker",
+   "protection_type": "ocr",
+   "curve_type": "standard_inverse",
+   "tms": 1.0,
+   "t_grade": 0.3,
+   "t_gg": 0.1,
+   "t_g": 0.5,
+   "t_diff": 0.3,
+   "pickup_mode": "auto"
   },
   {
    "id": "B3_T2_HV",
    "bus": "BB3",
    "element": "B3_T2",
    "et": "transformer",
-   "name": "Block 3 T2 HV breaker"
+   "name": "Block 3 T2 HV breaker",
+   "protection_type": "differential",
+   "I_diff_a": 20,
+   "diff_slope": 0.3,
+   "t_g": 0.05
   },
   {
    "id": "B3_T2_LV",
    "bus": "B3_L",
    "element": "B3_T2",
    "et": "transformer",
-   "name": "Block 3 T2 LV breaker"
+   "name": "Block 3 T2 LV breaker",
+   "protection_type": "ocr",
+   "curve_type": "standard_inverse",
+   "tms": 1.0,
+   "t_grade": 0.3,
+   "t_gg": 0.1,
+   "t_g": 0.5,
+   "t_diff": 0.3,
+   "pickup_mode": "auto"
   },
   {
    "id": "F1_CB",
    "bus": "BB1",
    "element": "F1",
    "et": "line",
-   "name": "Hall 1 feeder breaker"
+   "name": "Hall 1 feeder breaker",
+   "protection_type": "ocr",
+   "oc_relay_type": "DTOC",
+   "pickup_mode": "manual",
+   "I_s_a": 100,
+   "I_g_a": 100,
+   "t_g": 0.1,
+   "I_gg_a": 2000,
+   "t_gg": 0.05
   },
   {
    "id": "F2_CB",
    "bus": "BB2",
    "element": "F2",
    "et": "line",
-   "name": "Hall 2 feeder breaker"
+   "name": "Hall 2 feeder breaker",
+   "protection_type": "ocr",
+   "oc_relay_type": "DTOC",
+   "pickup_mode": "manual",
+   "I_s_a": 100,
+   "I_g_a": 100,
+   "t_g": 0.1,
+   "I_gg_a": 2000,
+   "t_gg": 0.05
   },
   {
    "id": "F3_CB",
    "bus": "BB3",
    "element": "F3",
    "et": "line",
-   "name": "Hall 3 feeder breaker"
+   "name": "Hall 3 feeder breaker",
+   "protection_type": "ocr",
+   "oc_relay_type": "DTOC",
+   "pickup_mode": "manual",
+   "I_s_a": 100,
+   "I_g_a": 100,
+   "t_g": 0.1,
+   "I_gg_a": 2000,
+   "t_gg": 0.05
   }
  ],
  "dc_breakers": [

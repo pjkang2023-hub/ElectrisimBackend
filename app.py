@@ -1719,6 +1719,9 @@ def pandapower_net_to_json(net):
                     'in_ka': _scalar(r.get('in_ka')),
                     'type': _scalar(r.get('type')),
                     'ansi_device_class': _scalar(r.get('ansi_device_class')),
+                    # Its Protection tab, as a spec gives it (electrisim_sld): the drawing kept the defaults.
+                    'protection': {c: _scalar(r.get(c)) for c in electrisim_sld.SWITCH_PROTECTION_FIELDS
+                                   if c in net.switch.columns and _scalar(r.get(c)) is not None},
                 }
         if hasattr(net, 'gen') and not net.gen.empty:
             for idx, r in net.gen.iterrows():

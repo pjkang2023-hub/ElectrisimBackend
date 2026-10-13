@@ -647,23 +647,23 @@ def test_rack_buffers_take_the_swing_from_the_gs11(client, quiet):
 
 # --- Protection (Phase 27) ---------------------------------------------------------------------
 # The drawn diagram's breakers: each transformer's both sides, each backbone cable's two ends, each
-# hall feeder at the backbone, the zigzag's; a DC breaker in front of each GS1.1. A relay scheme per
-# study, as a protection engineer sets one: the relays on the switches, by name.
+# hall feeder at the backbone, the zigzag's; a DC breaker in front of each GS1.1. The spec carries the
+# relays (87L on the backbone cables, 87T on T2, definite time on the hall feeders, overcurrent set
+# automatically on the rest), and the page's protection study request
+# (reference_pcs3750_mv.diagram_protection_payload.json) is the drawing's, with them. Other schemes
+# replace them, as a protection engineer would on the diagram.
 
-def _protection(client, quiet, scheme, fault='3ph', mode='line', bus=None, k_pcs=None):
-    with open(os.path.join(HERE, 'reference', 'reference_radial.diagram_protection_payload.json'),
-              encoding='utf-8') as fh:
-        params = json.load(fh)['0']
-    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
+def _protection(client, quiet, scheme=None, fault='3ph', mode='line', bus=None, k_pcs=None):
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_protection_payload.json'), encoding='utf-8') as fh:
         p = json.load(fh)
     cells = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
     for v in p.values():
-        if isinstance(v, dict) and str(v.get('typ', '')).startswith('Switch') and scheme(v['userFriendlyName']):
-            v.update(scheme(v['userFriendlyName']))
+        if isinstance(v, dict) and scheme and str(v.get('typ', '')).startswith('Switch'):
+            v.update(scheme(v['userFriendlyName']) or {'protection_type': 'none'})
         if isinstance(v, dict) and k_pcs and str(v.get('typ', '')).startswith('PCS'):
             v['current_limit_pu'] = str(k_pcs)
-    p['0'] = {**params, 'fault_type': fault, 'fault_location_mode': mode, 'sc_line_id': 'all',
-              'fault_bus_id': cells.get(bus), 'user_email': 't@t'}
+    p['0'] = {**p['0'], 'fault_type': fault, 'fault_location_mode': mode, 'sc_line_id': 'all',
+              'fault_bus_id': cells.get(bus, ''), 'user_email': 't@t'}
     with quiet():
         out = json.loads(client.post('/', json=p).get_data(as_text=True))
     assert not out.get('error'), out.get('message')
@@ -672,22 +672,22 @@ def _protection(client, quiet, scheme, fault='3ph', mode='line', bus=None, k_pcs
 
 OCR_AUTO = {'protection_type': 'ocr', 'curve_type': 'standard_inverse', 'tms': '1.0', 't_grade': '0.3',
             't_gg': '0.1', 't_g': '0.5', 't_diff': '0.3', 'pickup_mode': 'auto'}
-D87L = {'protection_type': 'differential', 'I_diff_a': '60', 'diff_slope': '0.3', 't_g': '0.05'}
-D87T = {'protection_type': 'differential', 'I_diff_a': '20', 'diff_slope': '0.3', 't_g': '0.05'}
-# A hall feeder: definite time above 1.5 x its SST's 67 A.
-FEEDER = {'protection_type': 'ocr', 'oc_relay_type': 'DTOC', 'pickup_mode': 'manual', 'I_s_a': '100',
-          'I_g_a': '100', 't_g': '0.1', 'I_gg_a': '2000', 't_gg': '0.05'}
 
 
-def _scheme(name):
-    """87L on the backbone cables, 87T on T2, the feeders' overcurrent, the rest as set automatically."""
-    if name.startswith('Cable'):
-        return D87L
-    if 'feeder' in name:
-        return FEEDER
-    if 'T2 HV' in name:
-        return D87T
-    return None if 'Zigzag' in name else OCR_AUTO
+def test_the_drawing_carries_the_specs_relays(spec):
+    """Each switch's protection in the spec is on the drawn diagram's switch, as its Protection tab holds it."""
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_protection_payload.json'), encoding='utf-8') as fh:
+        drawn = {v['userFriendlyName']: v for v in json.load(fh).values()
+                 if isinstance(v, dict) and str(v.get('typ', '')).startswith('Switch')}
+    assert len(drawn) == len(spec['switches']) == 22
+    for row in spec['switches']:
+        sw = drawn[row['name']]
+        assert sw['protection_type'] == row.get('protection_type', 'none'), row['name']
+        for key, value in row.items():
+            if key not in ('id', 'bus', 'element', 'et', 'name'):
+                assert sw[key] == value or float(sw[key]) == pytest.approx(value), (row['name'], key)
+    assert drawn['Cable BB1-BB2 breaker at BB1']['I_diff_a'] == '60'
+    assert drawn['Hall 2 feeder breaker']['pickup_mode'] == 'manual'
 
 
 def _trips(scenario):
@@ -716,8 +716,8 @@ def test_overcurrent_cannot_see_a_backbone_fault(client, quiet):
 @pytest.mark.parametrize('fault, k, ik_a', [('3ph', 1.2, 238), ('3ph', 1.5, 298), ('1ph', 1.2, 248)])
 def test_line_differential_clears_each_backbone_cable(client, quiet, fault, k, ik_a):
     """
-    87L at each end of each backbone cable (60 A, 30 % slope, 50 ms with its
-    signalling): a fault on a cable, fed from both ends, puts its whole
+    The spec's scheme. 87L at each end of each backbone cable (60 A, 30 %
+    slope, 50 ms with its signalling): a fault on a cable, fed from both ends, puts its whole
     current in the zone - both ends trip; the other cables and each T2's 87T
     carry it through and restrain. A fault on a hall feeder: its breaker's
     overcurrent, 0.1 s. Nothing miscoordinates or trips needlessly. The earth
@@ -726,7 +726,7 @@ def test_line_differential_clears_each_backbone_cable(client, quiet, fault, k, i
     T2s' 505 V overcurrent picks up too (6.8 kA against 5.1 kA): a backup at
     0.5-0.8 s that takes the whole island off; at 1.2 pu there is none.
     """
-    out = _protection(client, quiet, _scheme, fault=fault, k_pcs=k)
+    out = _protection(client, quiet, fault=fault, k_pcs=k)
     s = out['summary']
     assert s['n_scenarios'] == 6 and s['n_miscoordination'] == 0 and s['n_unwanted_trips'] == 0
     for sc in out['scenarios']:

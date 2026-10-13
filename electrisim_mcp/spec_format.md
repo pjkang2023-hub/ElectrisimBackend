@@ -145,7 +145,26 @@ locked-rotor contribution, and motor starting starts it.
   element's id, and `bus` must be one of its terminals.
 - `et: bus`: a bus coupler; `element` is the other bus's id.
 - `et: grounding_transformer`: the breaker of a grounding transformer;
-  `element` is its id, `bus` its bus.
+  `element` is its id, `bus` its bus. It takes no protection fields.
+
+A switch's relay or fuse: its Protection tab's fields, drawn on the switch for
+the protection coordination study. `protection_type` (`none` default, `ocr`,
+`fuse`, `earth_fault`, `directional`, `differential`, `distance`), then the
+type's own:
+- `ocr`: `oc_relay_type` (`DTOC`, `IDMT`, `IDTOC`), `curve_type`
+  (`standard_inverse`, `very_inverse`, `extremely_inverse`, `long_inverse`,
+  `ieee_moderately_inverse`, `ieee_very_inverse`, `ieee_extremely_inverse`),
+  `tms`, `t_grade`, `t_g`, `t_gg`, `t_diff` (s), `pickup_mode` (`auto`: the
+  rated current x `ct_current_factor` x `overload_factor`; `manual`: `I_s_a`,
+  `I_g_a`, `I_gg_a`), `overload_factor`, `ct_current_factor`, `safety_factor`;
+- `fuse`: `fuse_type`, `fuse_mode` (`library`, `custom`), `fuse_custom_name`,
+  `fuse_custom_std_json`, `rated_i_a`;
+- `earth_fault`: `I_e_a`, `t_e`;
+- `directional`: `directional_mode` (`forward`, `reverse`), `I_g_a`, `I_s_a`, `t_g`;
+- `differential`: `I_diff_a`, `diff_slope`, `t_g` - the currents into the
+  switch's line or transformer at each of its terminals compared;
+- `distance`: `z1_r_ohm`, `z1_x_ohm`, `t_z1`, and the same for zones 2 and 3.
+Any other field on a switch is refused.
 
 ## DC and microgrid elements
 
