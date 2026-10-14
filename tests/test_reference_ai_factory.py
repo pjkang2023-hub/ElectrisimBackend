@@ -436,14 +436,17 @@ def test_ground_faults_by_design(factory):
     """
     A 34.5 kV earth fault is held by its transformer's 400 A resistor: c x
     400 A through the neutral (0.438 kA by hand, the transformer's own
-    impedance aside), the PCS on its bus adding about their current limit
-    (within 3 %). A 245 kV earth fault is the grid's alone, near its three-phase.
+    impedance aside). The PCS on its bus add little: IEC 60909's share of a
+    current source in an earth fault, 3 Z(1) / (2 Z(1) + Z(0)), is small
+    against the resistor's Z(0) - some 15 A of their 0.2 kA limit. (pandapower
+    added their whole limit, 0.67 kA in all.) A 245 kV earth fault is the
+    grid's alone, near its three-phase.
     """
     spec, net, _ = factory
     one, three = _study_sc(net, '1ph', 'max'), _study_sc(net, '3ph', 'max')
     for bus, pcs_bus in (('BUS1', 'BESS_LV'), ('BUS2', 'EST_LV')):
         pcs_ka = sum(p['s_rated_mva'] * 1.2 for p in spec['pcs'] if p['bus'] == pcs_bus) / (math.sqrt(3) * 34.5)
-        assert one[bus]['ikss_ka'] == pytest.approx(1.1 * 0.4 + pcs_ka, rel=0.03), bus
+        assert 1.1 * 0.4 < one[bus]['ikss_ka'] < 1.1 * 0.4 + 0.1 * pcs_ka, bus
         assert one[bus]['ikss_ka'] < 0.15 * three[bus]['ikss_ka']                # some 6 kA
     assert 0.8 * three['GRID']['ikss_ka'] < one['GRID']['ikss_ka'] < 1.2 * three['GRID']['ikss_ka']
     # The grid's 5 GVA its fault level (c in it), the site's machines and PCS a few percent more.

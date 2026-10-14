@@ -67,7 +67,14 @@ def test_differential_operates_for_a_fault_on_its_cable(fault):
         assert len(zone['terminals_a']) == 2 and min(zone['terminals_a']) > 0
     through = pe._prot_diff_zone_currents(net, 2, bus)
     assert through['operate_a'] < 1e-6 * through['restraint_a']
-    assert through['restraint_a'] == pytest.approx(5 * 1.2 / (3 ** 0.5 * 20) * 1e3, rel=0.02)
+    # The inverter's current: k x its rating - in an earth fault, IEC 60909's share of it,
+    # 3 |Z(1)| / |2 Z(1) + Z(0)| at the fault (sc_current_sources).
+    share = 1.0
+    if fault == '1ph':
+        r = net.res_bus_sc.loc[bus]
+        z1, z0 = complex(r['rk_ohm'], r['xk_ohm']), complex(r['rk0_ohm'], r['xk0_ohm'])
+        share = 3 * abs(z1) / abs(2 * z1 + z0)
+    assert through['restraint_a'] == pytest.approx(share * 5 * 1.2 / (3 ** 0.5 * 20) * 1e3, rel=0.02)
 
 
 @pytest.mark.parametrize('fault', ['3ph', '1ph'])

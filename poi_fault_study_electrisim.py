@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import pandapower as pp
 from pandapower import shortcircuit as sc
 
+import sc_current_sources
+sc_current_sources.install()     # IEC 60909's single-phase share of a current source
 import ansi_shortcircuit_electrisim as ansi_sc
 
 

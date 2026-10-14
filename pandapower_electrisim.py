@@ -4,6 +4,8 @@ import contextlib
 import pandapower as pp
 import pandapower.contingency as contingency
 import pandapower.shortcircuit as sc
+import sc_current_sources
+sc_current_sources.install()     # IEC 60909's single-phase current-source share
 import pandapower.plotting as plt
 from pandapower.diagnostic import diagnostic
 import pandapower.topology as top
@@ -3836,6 +3838,14 @@ def _electrisim_pcs_sc_islands(net):
     A short-circuit study needs a voltage source in each island: one no grid or
     machine feeds gets its largest grid-forming PCS as an external grid that
     gives k x I_rated at its bus - a converter at its current limit.
+
+    For a single-phase fault, each of its grid-forming PCS is: IEC 60909's
+    single-phase share of a current source, 3 Z(1) / (2 Z(1) + Z(0)) of its
+    current, takes Z(1) as the network's, here the one source's - its eleven
+    mates' current through that impedance a voltage several times nominal.
+    An ungrounded backbone's earth fault came to 114 A (EMT: 6.5 A, its
+    cables' capacitance); each a voltage source behind its limit's impedance,
+    8 A, and with its zigzags within some 20 % of EMT's.
     """
     pcs = [r for r in net.electrisim_pcs if r['in_service']]
     if not pcs:
@@ -3856,18 +3866,25 @@ def _electrisim_pcs_sc_islands(net):
         mates = [r for r in pcs if r['bus'] in comp]
         forming = [r for r in mates if r['control'] == 'grid_forming'] or mates
         ref = max(forming, key=lambda r: r['k'] * r['s_rated'])
-        s_sc = ref['k'] * ref['s_rated']
-        # No zero sequence: a converter is three-wire. As a grounded source (X0 = X1) it gave an earth
-        # fault behind an ungrounded transformer winding - a UPS's 505 V load bus - 16 kA.
-        g = pp.create_ext_grid(net, ref['bus'], vm_pu=1.0, name=f"{ref['name']} (as a source)", s_sc_max_mva=s_sc,
-                               s_sc_min_mva=s_sc, rx_max=0.1, rx_min=0.1, x0x_max=1e6, r0x0_max=0.1,
-                               x0x_min=1e6, r0x0_min=0.1)
-        net.ext_grid.at[g, 'id'] = ref['id']
-        net.sgen.at[ref['index'], 'in_service'] = False
-        ref['as_source'] = int(g)
-        _electrisim_warn(net, f"PCS '{ref['label']}' forms an island no grid or machine feeds: in the short-circuit "
-                              f"study it is a source giving its current limit ({ref['k']:g} x its rated current) at its "
-                              "own bus, the other PCS current sources at theirs.")
+        one_phase = bool(getattr(net, '_electrisim_sc_1ph', False))
+        for rec_src in (forming if one_phase else [ref]):
+            s_sc = rec_src['k'] * rec_src['s_rated']
+            # No zero sequence: a converter is three-wire. As a grounded source (X0 = X1) it gave an earth
+            # fault behind an ungrounded transformer winding - a UPS's 505 V load bus - 16 kA.
+            g = pp.create_ext_grid(net, rec_src['bus'], vm_pu=1.0, name=f"{rec_src['name']} (as a source)",
+                                   s_sc_max_mva=s_sc, s_sc_min_mva=s_sc, rx_max=0.1, rx_min=0.1, x0x_max=1e6,
+                                   r0x0_max=0.1, x0x_min=1e6, r0x0_min=0.1)
+            net.ext_grid.at[g, 'id'] = rec_src['id']
+            net.sgen.at[rec_src['index'], 'in_service'] = False
+            rec_src['as_source'] = int(g)
+        if one_phase:
+            _electrisim_warn(net, f"{len(forming)} grid-forming PCS form an island no grid or machine feeds: in the "
+                                  "single-phase short circuit each is a source giving its current limit (k x its rated "
+                                  "current) at its own bus, with no zero sequence of its own.")
+        else:
+            _electrisim_warn(net, f"PCS '{ref['label']}' forms an island no grid or machine feeds: in the short-circuit "
+                                  f"study it is a source giving its current limit ({ref['k']:g} x its rated current) at "
+                                  "its own bus, the other PCS current sources at theirs.")
 
 
 def _electrisim_pcs_to_settle(net):
@@ -6217,6 +6234,8 @@ def _electrisim_attach_line_flow_shunt_controllers(net):
 def create_other_elements(in_data,net,x, Busbars):
     # The study's own parameters (x is reused below for each element).
     study = str(in_data[x].get('typ', '')) if isinstance(in_data.get(x), dict) else ''
+    # A single-phase short circuit: an island's grid-forming PCS are built as its sources for it.
+    net._electrisim_sc_1ph = isinstance(in_data.get(x), dict) and str(in_data[x].get('fault_type', '')) == '1ph'
 
     #tworzymy zmienne ktorych nazwa odpowiada modelowi z js - np.Hwap0ntfbV98zYtkLMVm-8
 
@@ -11297,7 +11316,10 @@ def _electrisim_sc_no_earth_path(net, sc_kwargs):
     delta read 11.3 kA, the eSTATCOM's 15.3 kA, exactly their current limits,
     where ANSI reads none. Run again with the current sources out: a bus with
     no fault current then has no earth path, and its earth-fault current is
-    0, said so.
+    0, said so. (IEC 60909's own share of the current sources, which
+    sc_current_sources now applies, already leaves such a bus next to 0 - the
+    BESS's 2e-20 kA, the turbine's 0.1 A: each is named, not only one that
+    read over 1 A.)
     """
     sources = [t for t in ('sgen', 'storage') if len(net[t]) and net[t]['in_service'].any()]
     if not sources or not len(getattr(net, 'res_bus_sc', [])):
@@ -11314,17 +11336,14 @@ def _electrisim_sc_no_earth_path(net, sc_kwargs):
            and not (np.isfinite(bare.at[b, 'ikss_ka']) and bare.at[b, 'ikss_ka'] > _SC_EARTH_PATH_KA)]
     if not cut:
         return
-    named = [b for b in cut if res.at[b, 'ikss_ka'] > _SC_EARTH_PATH_KA]     # a residue under 1 A goes silently
+    named = cut
     for col in ('ikss_ka', 'ip_ka', 'ith_ka'):
         if col in res.columns:
             res.loc[cut, col] = 0.0
-    if not named:
-        return
     names = getattr(net, 'user_friendly_names', {}) or {}
     labels = [str(names.get(net.bus.at[b, 'name'], net.bus.at[b, 'name'])) for b in named]
     _electrisim_warn(net, f"No earth return path at {', '.join(labels)}: an earth fault there draws next to "
-                          "nothing, so its single-phase fault current is 0 (the converters' current sources alone "
-                          "had given one).")
+                          "nothing, so its single-phase fault current is 0.")
 
 
 def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=None):

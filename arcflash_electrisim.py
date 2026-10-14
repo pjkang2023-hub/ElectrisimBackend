@@ -16,6 +16,8 @@ import numpy as np
 import pandapower as pp
 import pandapower.shortcircuit as sc
 
+import sc_current_sources
+sc_current_sources.install()     # IEC 60909's single-phase share of a current source
 try:
     from arcflash.ieee_1584.cubicle import Cubicle
     from arcflash.ieee_1584.calculation import Calculation

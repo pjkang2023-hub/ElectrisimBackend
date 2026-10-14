@@ -270,24 +270,40 @@ def test_three_phase_faults(client, quiet, k, backbone_a):
     assert 1.25 < ka['Load backbone 1'] / I_LOAD_KA < 1.65
 
 
-@pytest.mark.parametrize('k, backbone_a', [(1.2, 249), (1.5, 311)])
+@pytest.mark.parametrize('k, backbone_a', [(1.2, 312), (1.5, 369), (None, 7.6)])
 def test_earth_faults(client, quiet, k, backbone_a):
     """
-    The backbone's earth faults by IEC 60909, 249-311 A. Not the zigzags'
-    current (Phase 30): pandapower adds the inverters' current-source share to a
-    single-phase fault whatever the zero sequence - with no zigzag at all it
-    gives 228 A. EMT, which builds the zigzags as windings, gives the earth
-    fault's current (test_emt_backbone_earth_fault_needs_a_zigzag). The 505 V
+    The backbone's earth faults by IEC 60909: 312 A at the inverters' 1.2 pu,
+    369 A at 1.5 pu - the two zigzags' (EMT, which builds their windings:
+    427 A at 1.2 pu). With both zigzags out, 7.6 A: the cables' capacitance
+    alone (EMT: 6.5 A). Before Phase 31 IEC read 249-311 A with them and 228 A
+    without: pandapower added the inverters' current-source share whatever the
+    zero sequence, and the island's eleven other PCS as current sources
+    through the twelfth's impedance. Now each grid-forming PCS is a source
+    behind its limit's impedance for an earth fault, and a current source's
+    share is IEC's 3 Z(1) / (2 Z(1) + Z(0)) (sc_current_sources). The 505 V
     buses none: the grid side a delta, the load side T2's star left floating,
     as the spec asks (solidly grounded it gave 17 kA). The POI: the utility's own.
     """
-    out, label, _ = _drawn_study(client, quiet, {**IEC, 'fault_type': '1ph'}, k_pcs=k)
+    if k is None:
+        with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
+            p = json.load(fh)
+        for v in p.values():
+            if isinstance(v, dict) and v.get('userFriendlyName') in ('Zigzag breaker', 'Zigzag 2 breaker'):
+                v['closed'] = 'false'
+        label = {v['name']: v.get('userFriendlyName') for v in p.values() if isinstance(v, dict) and 'name' in v}
+        p['0'] = {**IEC, 'fault_type': '1ph'}
+        with quiet():
+            out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    else:
+        out, label, _ = _drawn_study(client, quiet, {**IEC, 'fault_type': '1ph'}, k_pcs=k)
     ka = _bus_ka(out, label)
     for b in (1, 2, 3):
-        assert ka[f'Load backbone {b}'] * 1e3 == pytest.approx(backbone_a, abs=3)
+        assert ka[f'Load backbone {b}'] * 1e3 == pytest.approx(backbone_a, rel=0.02)
         assert ka[f'Load backbone {b}'] < 0.4
         assert ka[f'Block {b} 505 V grid side'] == pytest.approx(0, abs=1e-6)
-        assert ka[f'Block {b} 505 V load side'] == pytest.approx(0, abs=1e-6)
+        # Its PCS's own source's zero sequence, 1e6 times its X(1): a trace, some 0.02 A.
+        assert ka[f'Block {b} 505 V load side'] == pytest.approx(0, abs=1e-4)
     assert ka['Utility 34.5 kV POI'] == pytest.approx(8.40, abs=0.02)
 
 
@@ -715,7 +731,7 @@ def test_overcurrent_cannot_see_a_backbone_fault(client, quiet):
             assert 1.0 < hv['ikss_ka'] * 1e3 / hv['evaluation']['pickup_a'] < 1.1
 
 
-@pytest.mark.parametrize('fault, k, ik_a', [('3ph', 1.2, 238), ('3ph', 1.5, 298), ('1ph', 1.2, 248)])
+@pytest.mark.parametrize('fault, k, ik_a', [('3ph', 1.2, 238), ('3ph', 1.5, 298), ('1ph', 1.2, 300)])
 def test_line_differential_clears_each_backbone_cable(client, quiet, fault, k, ik_a):
     """
     The spec's scheme. 87L at each end of each backbone cable (60 A, 30 %
@@ -771,7 +787,7 @@ def test_definite_time_earth_fault_cannot_tell_the_ring_cables_apart(client, qui
         return None
     out = _protection(client, quiet, scheme, fault='1ph')
     unwanted = {(u['fault_label'].split(',')[0], u['user_friendly_name']) for u in out['unwanted_trips']}
-    assert out['summary']['n_unwanted_trips'] == 8
+    assert out['summary']['n_unwanted_trips'] == 12
     assert all(f.startswith('Backbone cable') for f, _ in unwanted)
     for sc in out['scenarios']:
         if 'feeder' in sc['fault_label']:

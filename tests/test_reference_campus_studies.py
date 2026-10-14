@@ -327,7 +327,13 @@ def test_islanded_earth_faults_held_by_the_zigzags(client):
     Islanded - both feeders open - a 35 kV earth fault has the zigzags for its
     only zero-sequence path: each in service adds its c x 400 A or so; the
     turbines and the PCS feed the rest. It was refused: the study took every
-    bus for isolated with no grid, the turbines not counted as sources.
+    bus for isolated with no grid, the turbines not counted as sources. The
+    second zigzag adds a little more than its own 442 A - 0.50 kA: with the
+    zero sequence's impedance lower, the PCS's IEC share of an earth fault,
+    3 Z(1) / (2 Z(1) + Z(0)) of their current (sc_current_sources), grows too.
+    A 13.8 kV earth fault is its transformer's 400 A resistor's, c x 400 A,
+    and a little of the PCS's: 0.50 kA (pandapower added the PCS's whole
+    limit, over 1 kA).
     """
     base = _payload('sc1ph_')
     island = _variant(base, {'Feeder 1 breaker': {'closed': 'false'}, 'Feeder 2 breaker': {'closed': 'false'}})
@@ -335,9 +341,9 @@ def test_islanded_earth_faults_held_by_the_zigzags(client):
     one = _variant(island, {'Zigzag B breaker': {'closed': 'false'}})
     one = _by_label(one, _post(client, one)['busbars'])
     gain = both['35 kV Bus A']['ikss_ka'] - one['35 kV Bus A']['ikss_ka']
-    assert gain == pytest.approx(_zigzag_neutral_ka(1.1), rel=0.05)
+    assert _zigzag_neutral_ka(1.1) < gain < 1.2 * _zigzag_neutral_ka(1.1)
     assert both['35 kV Bus A']['ikss_ka'] < 0.2 * _golden()['bus_sc_1ph_max']['BUS_A']['ikss_ka']
-    assert both['Campus A 13.8 kV']['ikss_ka'] > 1.0
+    assert 1.1 * 0.4 < both['Campus A 13.8 kV']['ikss_ka'] < 1.1 * 0.4 * 1.25
 
 
 def test_motor_starting_one_chiller(client):

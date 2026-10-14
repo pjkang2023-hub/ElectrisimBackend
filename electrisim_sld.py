@@ -37,6 +37,10 @@ import pandapower as pp
 import pandas as pd
 
 import electrisim_spec_layer
+import sc_current_sources
+
+# IEC 60909's single-phase share of a current source, whichever module runs a short circuit first.
+sc_current_sources.install()
 
 
 # --- defaults ------------------------------------------------------------

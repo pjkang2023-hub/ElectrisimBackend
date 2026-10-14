@@ -1221,8 +1221,11 @@ def test_iec_earth_faults_where_there_is_no_earth_path(client):
     return path - ANSI gives them none. pandapower still added the PCS
     current sources' contribution: 11.3 kA at the BESS bus and 15.3 kA at the
     eSTATCOM's, exactly 1.2 x their ratings, 0.46 kA at the turbine's. They
-    read 0 now, said so; every earthed bus is as it was - the lineups' 153 kA,
-    34.5 kV through its resistors and the PCS, the grid's 12 kA.
+    read 0 now, said so: IEC 60909's share of a current source in an earth
+    fault, 3 Z(1) / (2 Z(1) + Z(0)) (sc_current_sources), is nothing with no
+    zero sequence. The earthed buses: the lineups' 153.4 kA (that share a
+    little over 1 on a solidly earthed bus), 34.5 kV through its resistors,
+    the grid's 12 kA.
     """
     p = _payload('sc1ph_')
     out = _post(client, p)
@@ -1231,7 +1234,7 @@ def test_iec_earth_faults_where_there_is_no_earth_path(client):
         assert buses[b]['ikss_ka'] == 0.0 and buses[b]['ip_ka'] == 0.0 and buses[b]['ith_ka'] == 0.0, b
     assert any(w.startswith('No earth return path at Substation BESS 0.69 kV, eSTATCOM 0.69 kV, Gas turbine 13.8 kV')
                for w in out['warnings'])
-    assert buses['Lineup B 0.48 kV']['ikss_ka'] == pytest.approx(153.05, abs=0.01)
+    assert buses['Lineup B 0.48 kV']['ikss_ka'] == pytest.approx(153.42, abs=0.01)
     assert buses['Grid 245 kV']['ikss_ka'] == pytest.approx(12.04, abs=0.01)
     for b in ('34.5 kV Bus 1', '34.5 kV Bus 2'):
         assert buses[b]['ikss_ka'] > 0.43 and buses[b]['ip_ka'] > buses[b]['ikss_ka'], b    # the 400 A resistor and more
