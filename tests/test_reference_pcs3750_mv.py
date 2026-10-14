@@ -794,6 +794,81 @@ def test_definite_time_earth_fault_cannot_tell_the_ring_cables_apart(client, qui
             assert sc['clearing_time_s'] == 0.1
 
 
+def test_t1_lv_instantaneous_grades(client, quiet):
+    """
+    The spec's T1 LV breaker (the arc-flash item): I>> 20 kA at 0.05 s takes
+    the 505 V grid side's 68.6 kA fault at once; the HV breaker's backup
+    stays at 0.8 s, graded.
+    """
+    out = _protection(client, quiet, mode='bus', bus='Block 1 505 V grid side')
+    (sc,) = out['scenarios']
+    t = _trips(sc)
+    assert sc['primary_switches'] == ['Block 1 T1 LV breaker'] and sc['clearing_time_s'] == pytest.approx(0.05)
+    assert t['Block 1 T1 LV breaker']['t_trip_s'] == pytest.approx(0.05)
+    assert t['Block 1 T1 HV breaker']['t_trip_s'] == pytest.approx(0.8)
+    assert out['summary']['n_miscoordination'] == 0
+
+
+def _arc_by_relays(client, quiet, scheme=None):
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_protection_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    for v in p.values():
+        if isinstance(v, dict) and scheme and str(v.get('typ', '')).startswith('Switch'):
+            v.update(scheme(v['userFriendlyName']) or {})
+    p['0'] = {'typ': 'ArcFlashPandaPower Parameters', 'electrode_config': 'VCB', 'equipment_mode': 'by_voltage',
+              'clearing_time_mode': 'relays', 'frequency': '60', 'user_email': 't@t'}
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    assert not out.get('error'), out.get('message')
+    return {r['name']: r for r in out['arc_flash']}, out.get('warnings') or []
+
+
+def test_arc_flash_cleared_by_the_relays(client, quiet):
+    """
+    Each bus's arc cleared by the spec's relays at its arcing current, plus
+    the breaker's 0.05 s. The 505 V grid side: T1 LV's I>> sees the arc's
+    31 kA (27 kA reduced) and takes it in 0.1 s - 6.4 cal/cm2, PPE 2. A
+    backbone arc: the inverters' 27s on every T2 LV breaker part it from
+    them at 0.55 s (Ralph Lee, 2.8 cal/cm2); a hall's, its feeder breaker at
+    0.15 s. The 505 V load side: its own grid-forming inverters feed it and
+    no relay parts them from the bus - IEEE 1584's 2 s, PPE 4, until their
+    own controls stop them (a vendor question). Nor is the utility's breaker
+    at the POI on the diagram.
+    """
+    rows, warnings = _arc_by_relays(client, quiet)
+    for b in (1, 2, 3):
+        g = rows[f'Block {b} 505 V grid side']
+        assert g['clearing_relays'] == [f'Block {b} T1 LV breaker']
+        assert g['relay_time_s'] == pytest.approx(0.05) and g['relay_time_min_s'] == pytest.approx(0.05)
+        assert g['clearing_time_used_s'] == pytest.approx(0.1)
+        assert g['incident_energy_cal_cm2'] == pytest.approx(6.4, abs=0.1) and str(g['ppe_category']) == '2'
+        assert 20 < g['relay_fault_min_ka'] < g['relay_fault_ka'] < g['ikss_ka']
+        bb = rows[f'Load backbone {b}']
+        assert sorted(bb['clearing_relays']) == [f'Block {k} T2 LV breaker' for k in (1, 2, 3)]
+        assert bb['clearing_time_used_s'] == pytest.approx(0.55)
+        assert bb['incident_energy_cal_cm2'] == pytest.approx(2.8, abs=0.1)
+        h = rows[f'Hall {b} 34.5 kV']
+        assert h['clearing_relays'] == [f'Hall {b} feeder breaker'] and h['clearing_time_used_s'] == pytest.approx(0.15)
+        ld = rows[f'Block {b} 505 V load side']
+        assert ld['grid_on_bus'] and ld['relay_time_s'] is None and ld['clearing_time_used_s'] == 2.0
+        assert len(ld['inverter_sources']) == 4 and str(ld['ppe_category']) == '4'
+    assert rows['Utility 34.5 kV POI']['grid_on_bus'] and rows['Utility 34.5 kV POI']['clearing_time_used_s'] == 2.0
+    assert sum('feeds its arc, no relay parting it' in w for w in warnings) == 4
+
+
+def test_without_the_instantaneous_the_grid_side_arc_lasts_half_a_second(client, quiet):
+    """
+    T1 LV's overcurrent without I>>: the grid side's arc lasts the I> stage's
+    0.5 s plus the breaker's - 35 cal/cm2, PPE 4. The 0.2 s the voltage-class
+    study assumed (12.8 cal/cm2) was not the relays'.
+    """
+    rows, _ = _arc_by_relays(client, quiet, lambda n: {'I_gg_a': '0'} if ' T1 LV ' in n else None)
+    for b in (1, 2, 3):
+        g = rows[f'Block {b} 505 V grid side']
+        assert g['relay_time_s'] == pytest.approx(0.5) and g['clearing_time_used_s'] == pytest.approx(0.55)
+        assert g['incident_energy_cal_cm2'] == pytest.approx(35.2, abs=0.2) and str(g['ppe_category']) == '4'
+
+
 def test_utility_side_overcurrent_grades(client, quiet):
     """
     A fault on Block 1's 505 V grid side, 68.6 kA from the utility through T1:

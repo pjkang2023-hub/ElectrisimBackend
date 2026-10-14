@@ -19086,14 +19086,15 @@ def _prot_earth_fault_net(net_sc, fault_type):
     _electrisim_fold_neutral_impedance(net_sc, 10)
 
 
-def _prot_run_bus_scenario(base_net, fault_bus_idx, fault_type, case, attach_summaries):
-    """Short-circuit and protection times for a fault placed directly on a bus."""
+def _prot_run_bus_scenario(base_net, fault_bus_idx, fault_type, case, attach_summaries, r_fault_ohm=0.0):
+    """Short-circuit and protection times for a fault placed directly on a bus (through r_fault_ohm: an arc)."""
     summary_by_sw_idx = {int(s['sw_idx']): s for s in attach_summaries if s.get('sw_idx') is not None}
     net_sc = deepcopy(base_net)
     try:
         ensure_ext_grid_zero_sequence_min(net_sc)
         _prot_earth_fault_net(net_sc, fault_type)
-        sc.calc_sc(net_sc, bus=int(fault_bus_idx), branch_results=True, fault=fault_type, case=case)
+        sc.calc_sc(net_sc, bus=int(fault_bus_idx), branch_results=True, fault=fault_type, case=case,
+                   **({'r_fault_ohm': float(r_fault_ohm)} if r_fault_ohm else {}))
     except Exception as e:
         return {
             'fault_location_mode': 'bus',
@@ -19676,3 +19677,110 @@ def protection_coordination(net, prot_params, in_data):
             'devices': [],
             'summary': {'converged': False},
         }, separators=(',', ':'))
+
+
+def protection_arc_clearing_times(net, in_data, prot_params, faults):
+    """
+    The relays' clearing time for each arcing fault: [(bus_idx, ratio)], ratio
+    the arcing current over the bolted (IEEE 1584's; None: bolted) ->
+    [{'t_relay_s', 'clearing_switches', 'ikss_ka', ...}] in the same order.
+
+    Each fault is a three-phase bus fault through the arc's resistance, so the
+    relays see what the arc draws and the voltage it holds. The resistance is
+    the one holding the bus at the arc's voltage, sqrt(1 - ratio^2) of the
+    source's: behind the grid that draws IEEE 1584's arcing current; fed by
+    inverters at their current limit the current stays, and only the voltage
+    - what an undervoltage relay reads - is the arc's. (Solving for the
+    current instead ran the inverter-fed buses' resistance up until their
+    voltage passed 1 pu.)
+    """
+    specs = _prot_collect_switch_protection_specs(in_data)
+    if not specs or net.switch.empty:
+        return [{'error': 'no relays on the diagram'} for _ in faults]
+    _prot_merge_study_defaults(specs, prot_params)
+    net = deepcopy(net)
+    _prot_ensure_bus_geodata(net)
+    grading_mode = str(prot_params.get('grading_mode', 'auto') or 'auto').lower()
+    attach_summaries = _attach_protection_devices(net, specs, grading_mode)
+    bolted = {}
+    scenarios = []
+    for bus_idx, ratio in faults:
+        if bus_idx not in bolted:
+            bolted[bus_idx] = _prot_run_bus_scenario(net, bus_idx, '3ph', 'max', attach_summaries)
+        scenario, r_f = bolted[bus_idx], 0.0
+        i_f = (scenario.get('short_circuit') or {}).get('ikss_ka')
+        if ratio and 0 < ratio < 1 and i_f:
+            # The arc's phase voltage (kV) at c max 1.1, and the resistance holding it at the fault's current.
+            v_arc = math.sqrt(1.0 - ratio ** 2) * 1.1 * float(net.bus.at[bus_idx, 'vn_kv']) / math.sqrt(3.0)
+            r_f = v_arc / (ratio * i_f)
+            for _ in range(5):
+                scenario = _prot_run_bus_scenario(net, bus_idx, '3ph', 'max', attach_summaries, r_fault_ohm=r_f)
+                got = (scenario.get('short_circuit') or {}).get('ikss_ka')
+                if not got:
+                    break
+                r_next = v_arc / got
+                if abs(r_next - r_f) <= 0.01 * r_f:
+                    break
+                r_f = r_next
+        scenarios.append({**scenario, 'r_fault_ohm': r_f})
+    for scenario in scenarios:
+        scenario['fault_label'] = _prot_fault_label(net, scenario)
+    _prot_check_miscoordination(net, scenarios, float(prot_params.get('t_diff', 0.3) or 0.3))
+    # The arc burns until the last voltage source feeding it is cut off, by whichever relays trip:
+    # the grading's primaries and their backups miss a backbone arc the inverters' 27s de-energize.
+    # Voltage sources: the grid, machines and grid-forming inverters. Grid-following inverters
+    # (static generators, storage) feed it their limited current until their own controls stop
+    # them: counted, a rooftop PV behind a feeder left every feeder's arc uncleared.
+    adjacency, element_node = _prot_element_graph(net)
+    grid_sources = set()
+    for table in ('ext_grid', 'gen'):
+        data = getattr(net, table, None)
+        if data is not None and not data.empty:
+            grid_sources |= {('bus', int(r['bus'])) for _, r in data.iterrows() if bool(r.get('in_service', True))}
+    grid_sources |= {('bus', int(r['bus'])) for r in getattr(net, 'electrisim_pcs', None) or []
+                     if r.get('in_service') and r.get('control') == 'grid_forming'}
+    out = []
+    for scenario in scenarios:
+        if scenario.get('error'):
+            out.append({'error': scenario['error']})
+            continue
+        fault = ('bus', int(scenario['fault_bus_idx']))
+        feeding = grid_sources - {fault}
+        cut = {k: set(v) for k, v in adjacency.items()}
+        opened, t_off = [], None
+        trips = sorted(((float(r['t_trip_s']), r) for r in scenario.get('trip', [])
+                        if r.get('tripped') and r.get('t_trip_s') is not None), key=lambda x: x[0])
+        # The grid, a machine or a grid-forming inverter on the faulted bus feeds it whatever the
+        # relays do: its own breaker is not on the diagram, or none parts an inverter from its bus.
+        grid_on_bus = fault in grid_sources
+        if not grid_on_bus and not _prot_reaches_source(cut, fault, feeding, ()):
+            t_off = 0.0
+        for t, r in trips:
+            if t_off is not None or grid_on_bus:
+                break
+            sw = net.switch.loc[int(r['switch_idx'])]
+            a, b = ('bus', int(sw['bus'])), element_node(sw['et'], sw['element'])
+            cut.get(a, set()).discard(b)
+            cut.get(b, set()).discard(a)
+            opened.append(r.get('user_friendly_name') or str(r['switch_idx']))
+            if not _prot_reaches_source(cut, fault, feeding, ()):
+                t_off = t
+        out.append({
+            't_relay_s': t_off,
+            'clearing_switches': opened if t_off is not None else [],
+            'primary_switches': scenario.get('primary_switches') or [],
+            'tripped': sorted(r.get('user_friendly_name') or str(r.get('switch_idx'))
+                              for r in scenario.get('trip', []) if r.get('tripped')),
+            'unprotected_sources': scenario.get('unprotected_sources') or [],
+            # Inverters on the faulted bus itself: no relay parts them from the arc.
+            'grid_on_bus': grid_on_bus,
+            'inverters_on_bus': sorted(set(
+                [str(r.get('label') or r.get('name')) for r in getattr(net, 'electrisim_pcs', None) or []
+                 if r.get('in_service') and int(r['bus']) == fault[1]]
+                + [_contingency_friendly_name(net, row.get('name') if pd.notna(row.get('name')) else f'{table} {idx}')
+                   for table in ('sgen', 'storage') for idx, row in (getattr(net, table, None) if getattr(net, table, None) is not None else pd.DataFrame()).iterrows()
+                   if bool(row.get('in_service', True)) and int(row['bus']) == fault[1]])),
+            'ikss_ka': (scenario.get('short_circuit') or {}).get('ikss_ka'),
+            'r_fault_ohm': scenario['r_fault_ohm'],
+        })
+    return out

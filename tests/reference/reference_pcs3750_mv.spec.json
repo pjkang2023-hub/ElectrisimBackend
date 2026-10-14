@@ -1364,13 +1364,12 @@
    "et": "transformer",
    "name": "Block 1 T1 LV breaker",
    "protection_type": "ocr",
-   "curve_type": "standard_inverse",
-   "tms": 1.0,
-   "t_grade": 0.3,
-   "t_gg": 0.1,
+   "oc_relay_type": "DTOC",
+   "pickup_mode": "manual",
+   "I_g_a": 6430,
    "t_g": 0.5,
-   "t_diff": 0.3,
-   "pickup_mode": "auto"
+   "I_gg_a": 20000,
+   "t_gg": 0.05
   },
   {
    "id": "B1_T2_HV",
@@ -1416,13 +1415,12 @@
    "et": "transformer",
    "name": "Block 2 T1 LV breaker",
    "protection_type": "ocr",
-   "curve_type": "standard_inverse",
-   "tms": 1.0,
-   "t_grade": 0.3,
-   "t_gg": 0.1,
+   "oc_relay_type": "DTOC",
+   "pickup_mode": "manual",
+   "I_g_a": 6430,
    "t_g": 0.5,
-   "t_diff": 0.3,
-   "pickup_mode": "auto"
+   "I_gg_a": 20000,
+   "t_gg": 0.05
   },
   {
    "id": "B2_T2_HV",
@@ -1468,13 +1466,12 @@
    "et": "transformer",
    "name": "Block 3 T1 LV breaker",
    "protection_type": "ocr",
-   "curve_type": "standard_inverse",
-   "tms": 1.0,
-   "t_grade": 0.3,
-   "t_gg": 0.1,
+   "oc_relay_type": "DTOC",
+   "pickup_mode": "manual",
+   "I_g_a": 6430,
    "t_g": 0.5,
-   "t_diff": 0.3,
-   "pickup_mode": "auto"
+   "I_gg_a": 20000,
+   "t_gg": 0.05
   },
   {
    "id": "B3_T2_HV",

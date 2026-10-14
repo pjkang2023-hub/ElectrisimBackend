@@ -3192,6 +3192,40 @@ def test_arc_flash_uniform_equipment(client, quiet, grid):
         assert rows['20 kV busbar 1']['incident_energy_cal_cm2'] == pytest.approx(130.9, abs=0.1)
 
 
+def test_arc_flash_cleared_by_the_relays(client, quiet):
+    """
+    Clearing by the drawn relays (definite time, automatic pickups): a feeder
+    bus's arc lasts until its feeder breaker parts it from every voltage source,
+    0.5 s plus the breaker's 0.05 s - the rooftop PV behind it, an inverter,
+    does not hold it. The machine on B2 feeds the substation's and B1's arcs
+    whatever the relays do, and the LV network has no relay: IEEE 1584's 2 s.
+    The entered time is left alone by default.
+    """
+    with open(os.path.join(REFERENCE_DIR, 'reference_radial.diagram_protection_payload.json'),
+              encoding='utf-8') as handle:
+        request = json.load(handle)
+    request['0'] = {'typ': 'ArcFlashPandaPower Parameters', 'electrode_config': 'VCB', 'equipment_mode': 'by_voltage',
+                    'clearing_time_s': '0.2', 'clearing_time_mode': 'relays', 'frequency': '50'}
+    result = _post_study(client, quiet, request)
+    rows = {row['name']: row for row in result['arc_flash']}
+    assert result['parameters']['clearing_time_mode'] == 'relays'
+    for bus, breaker in (('A1', 'CB_A'), ('A2', 'CB_A'), ('Wind connection', 'Wind feeder breaker')):
+        assert rows[bus]['clearing_relays'] == [breaker], bus
+        assert rows[bus]['relay_time_s'] == pytest.approx(0.5), bus
+        assert rows[bus]['clearing_time_used_s'] == pytest.approx(0.55), bus
+        energy, _ = _lee(rows[bus], rows[bus]['working_distance_mm'], 0.55)
+        assert rows[bus]['incident_energy_cal_cm2'] == pytest.approx(energy, rel=1e-6), bus
+    assert 'Rooftop PV' not in str(rows['A2'].get('inverter_sources'))
+    for bus in ('20 kV substation', 'B1', 'LV network A'):
+        assert rows[bus]['relay_time_s'] is None and rows[bus]['clearing_time_used_s'] == 2.0, bus
+    assert rows['B2']['grid_on_bus'] and rows['B2']['clearing_time_used_s'] == 2.0
+    assert any(w.startswith('Bus LV network A: no relay clears its arc') for w in result['warnings'])
+    request['0']['clearing_time_mode'] = 'fixed'
+    rows = {row['name']: row for row in _post_study(client, quiet, request)['arc_flash']}
+    assert all(row['clearing_time_used_s'] == 0.2 for row in rows.values())
+    assert 'clearing_relays' not in rows['A1']
+
+
 # --- economic analysis -------------------------------------------------------------
 
 def _economic(client, quiet, grid='reference_transmission', **params):
