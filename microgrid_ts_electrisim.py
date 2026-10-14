@@ -312,9 +312,12 @@ class MicrogridTs:
             for i in vsc.index:
                 tau = vsc.at[i, 'electrisim_follow_tau_s']
                 if bool(vsc.at[i, 'in_service']) and pd.notna(tau) and float(tau) > 0:
+                    gain = vsc.at[i, 'electrisim_soc_balance_gain'] if 'electrisim_soc_balance_gain' in vsc.columns else 0.0
                     self.rectifiers.append({'vi': int(i), 'tau': float(tau), 'bus': int(vsc.at[i, 'bus_dc']),
                                             'charge': float(vsc.at[i, 'electrisim_follow_charge_mw']), 'y': None,
-                                            'rows': []})
+                                            'rows': [], 'gain': float(gain) if pd.notna(gain) else 0.0,
+                                            'rated': float(vsc.at[i, 'rated_mva']) if 'rated_mva' in vsc.columns
+                                            and pd.notna(vsc.at[i, 'rated_mva']) else 0.0, 'balance': 0.0})
         self.demand_lpf = None
         self.rows, self.pcs_rows, self.balance = [], [], []
         self.unserved_j = self.curtailed_j = 0.0
@@ -504,15 +507,41 @@ class MicrogridTs:
                 if cells is not None and cells in net.vsc.index:
                     net.vsc.at[cells, 'control_value_dc'] = obj.ocv() / rec['vn']
 
+    def _bus_soc(self):
+        """Each DC bus's directly connected batteries' state of charge (%), by their energy."""
+        e, cap = {}, {}
+        for it in self.items:
+            rec, obj = it['rec'], it['obj']
+            if it['via'] == 'dc' and obj.kind == 'Battery' and rec.get('coupling') == 'direct' and obj.in_service:
+                w = max(float(getattr(obj, 'ah', 0.0) or 0.0) * float(getattr(obj, 'vn', 0.0) or 0.0), 1.0)
+                e[rec['bus']] = e.get(rec['bus'], 0.0) + w * soc_percent(obj)
+                cap[rec['bus']] = cap.get(rec['bus'], 0.0) + w
+        return {b: e[b] / cap[b] for b in e}
+
     def _apply_rectifier_filters(self):
-        """Each filtered rectifier at its filter's value (plus its charge), its batteries taking the rest."""
+        """
+        Each filtered rectifier at its filter's value (plus its charge), its
+        batteries taking the rest. Balancing: plus gain x its rating per unit
+        of its bus's batteries' charge below the balancing rectifiers' buses'
+        average - a quadrant behind on charge is fed more, one ahead less, the
+        grid's draw unchanged - within its rating.
+        """
         vsc = self.net.vsc
+        socs = self._bus_soc()
+        balancing = [r for r in self.rectifiers if r['gain'] > 0 and r['bus'] in socs]
+        mean = sum(socs[r['bus']] for r in balancing) / len(balancing) if balancing else None
         for r in self.rectifiers:
             if r['y'] is None:
                 continue                      # the first step: it follows at once, as in the load flow
+            r['balance'] = 0.0
+            if mean is not None and r in balancing:
+                r['balance'] = r['gain'] * r['rated'] * (mean - socs[r['bus']]) / 100.0
+            p = r['y'] + r['charge'] + r['balance']
+            if r['rated'] > 0:
+                p = min(max(p, -r['rated']), r['rated'])
             vsc.at[r['vi'], 'electrisim_follow_charge_mw'] = np.nan
             vsc.at[r['vi'], 'control_mode_dc'] = 'p_mw'
-            vsc.at[r['vi'], 'control_value_dc'] = -(r['y'] + r['charge'])
+            vsc.at[r['vi'], 'control_value_dc'] = -p
 
     def _filter_rectifiers(self, t):
         """After a step: each filtered rectifier's bus's demand - what it and the bus's batteries delivered - into its filter."""
@@ -535,7 +564,8 @@ class MicrogridTs:
             a = 1.0 - math.exp(-self.dt / r['tau'])
             r['y'] = demand if r['y'] is None else r['y'] + (demand - r['y']) * a
             r['rows'].append({'time_step': t, 'demand_mw': demand, 'rectifier_mw': fed,
-                              'batteries_mw': bat.get(r['bus'], 0.0)})
+                              'batteries_mw': bat.get(r['bus'], 0.0), 'balance_mw': r.get('balance', 0.0),
+                              'soc_percent': self._bus_soc().get(r['bus'])})
 
     def _apply_smoothing(self, t):
         net, pe = self.net, self.pe
@@ -909,7 +939,13 @@ class MicrogridTs:
                                'rectifier_max_mw': float(f.max()) if len(f) else None,
                                'batteries_min_mw': float(b.min()) if len(b) else None,
                                'batteries_max_mw': float(b.max()) if len(b) else None,
-                               'demand_ramp_mw_s': ramp(d), 'rectifier_ramp_mw_s': ramp(f), 'series': rows})
+                               'demand_ramp_mw_s': ramp(d), 'rectifier_ramp_mw_s': ramp(f),
+                               # Balancing: its gain, the most it added or took, its bus's charge first and last.
+                               'soc_balance_gain': r['gain'],
+                               'balance_max_mw': max((abs(x['balance_mw']) for x in rows), default=0.0),
+                               'soc_start_percent': rows[0]['soc_percent'] if rows else None,
+                               'soc_end_percent': rows[-1]['soc_percent'] if rows else None,
+                               'series': rows})
         return {'dispatch': self.dispatch, 'time_step_s': dt, 'ders': self.rows, 'pcs': self.pcs_rows,
                 'stores': stores, 'smoothing': smoothing, 'rectifiers': rectifiers, 'steps': self.balance,
                 'unserved_mwh': self.unserved_j / 3.6e9, 'curtailed_mwh': self.curtailed_j / 3.6e9,

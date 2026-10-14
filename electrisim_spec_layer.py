@@ -70,7 +70,7 @@ DC_FIELDS = {
     'VSC': ('r_ohm', 'x_ohm', 'r_dc_ohm', 'control_mode_ac', 'control_value_ac', 'control_mode_dc',
             'control_value_dc', 'rated_mva', 'dc_link_mf', 'dc_link_esr_mohm', 'dc_link_esl_uh', 'current_limit_pu',
             'emt_model', 'spectrum', 'switching_khz', 'current_loop_hz', 'inlet_c', 'altitude_m', 'derate_temp_curve',
-            'derate_altitude_curve', 'overload_curve', 'follow_tau_s'),
+            'derate_altitude_curve', 'overload_curve', 'follow_tau_s', 'soc_balance_gain'),
 }
 FIELDS = {**DER_FIELDS, **DC_FIELDS}
 # Each dialog's defaults (configureAttributes.js, derParameters.js): a field the spec leaves out
@@ -279,7 +279,8 @@ DEFAULTS = {'Battery': {'vn_v': '800',
          'derate_temp_curve': '',
          'derate_altitude_curve': '',
          'overload_curve': '',
-         'follow_tau_s': '0'},
+         'follow_tau_s': '0',
+         'soc_balance_gain': '0'},
  'DC Line': {'length_km': '0.1', 'r_ohm_per_km': '0.1', 'max_i_ka': '1', 'l_mh_per_km': '0.3', 'c_uf_per_km': '0.2'},
  'DC Diode': {'v_f_v': '1.6', 'r_on_mohm': '0.1', 'rated_current_ka': '1.5'}}
 

@@ -7710,7 +7710,12 @@ def create_other_elements(in_data,net,x, Busbars):
                                # time constant (0: at once) - a UPS rectifier ramp-limited to the load's
                                # average, its batteries taking the swing.
                                ('electrisim_follow_tau_s', max(safe_float(in_data[x].get('follow_tau_s'), 0.0), 0.0)
-                                if follow else np.nan)):
+                                if follow else np.nan),
+                               # The time series': its set point biased by its bus's batteries' charge against
+                               # the other balancing rectifiers' buses - this share of its rating per unit of
+                               # charge below their average (0: none).
+                               ('electrisim_soc_balance_gain',
+                                max(safe_float(in_data[x].get('soc_balance_gain'), 0.0), 0.0) if follow else np.nan)):
                 if col not in net.vsc.columns:
                     net.vsc[col] = np.nan if col != 'overload_curve' else ''
                 net.vsc.at[vsc_idx, col] = value

@@ -1002,3 +1002,84 @@ def test_emt_backbone_earth_fault_needs_a_zigzag(client, quiet, zigzags, i_a):
         assert backbone['v_rms_final_pu'] < 1.05
     else:
         assert backbone['v_rms_final_pu'] > 1.4
+
+
+# --- Charge balancing across quadrants (Phase 32) ----------------------------------------------------
+
+def _ts_quadrants(client, quiet, gain, low=80, afe_out=None, steps=20):
+    """30 min steps, the racks at their cycle's average; Block 1 DC1's GS1.1 at ``low`` %, the rest at 80 %."""
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    with open(SPEC_PATH, encoding='utf-8') as fh:
+        lp = {x['id']: {'name': x['name'], 'kind': x['kind'], 'dt': x['dt_s'], 't0': 0, 'p': x['values']}
+              for x in json.load(fh)['load_profiles']}
+    for v in p.values():
+        if not isinstance(v, dict):
+            continue
+        name = str(v.get('userFriendlyName', ''))
+        if str(v.get('typ', '')).startswith('VSC') and 'AFE' in name:
+            v['soc_balance_gain'] = str(gain)
+            if afe_out and name.startswith(afe_out):
+                v['in_service'] = 'false'
+        if str(v.get('typ', '')).startswith('Battery') and name.startswith('Block 1 DC1'):
+            v['soc_percent'] = str(low)
+    p['0'] = {'typ': 'TimeSeriesSimulationPandaPower Parameters', 'time_steps': str(steps), 'time_step_s': '1800',
+              'load_profiles': lp, 'load_profile': 'constant', 'generation_profile': 'constant',
+              'profile_mode': 'custom', 'element_profiles': {}, 'frequency': '60', 'algorithm': 'nr',
+              'calculate_voltage_angles': 'auto', 'init': 'auto', 'microgrid_dispatch': 'True', 'user_email': 't@t'}
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    assert not out.get('error'), out.get('message')
+    mg = out['microgrid']
+    soc = {}
+    for r in mg['ders']:
+        if r['kind'] == 'Battery' and r['label'].endswith(' A'):
+            soc.setdefault(r['label'][:-len(' GS1.1 A')], []).append(r['soc_percent_end'])
+    return mg, soc
+
+
+@pytest.mark.parametrize('gain', [0, 2])
+def test_charge_balancing_evens_the_quadrants(client, quiet, gain):
+    """
+    Block 1 DC1's GS1.1 at 60 %, the other eleven quadrants' at 80 %, for
+    10 h. Each rectifier following its bus's load leaves each quadrant where
+    it started. Balancing (soc_balance_gain 2: 2 x its rating per unit of its
+    quadrant's charge below the quadrants' average) feeds DC1 up to 0.37 MW
+    more and the others some 33 kW less each - the grid's draw unchanged -
+    and the twelve meet near their 78.3 % average within the 10 h.
+    """
+    mg, soc = _ts_quadrants(client, quiet, gain, low=60)
+    assert len(soc) == 12 and mg['unserved_mwh'] == 0
+    low, others = soc['Block 1 DC1'], [v for k, v in soc.items() if k != 'Block 1 DC1']
+    if gain == 0:
+        assert low[-1] == pytest.approx(60.0, abs=0.2)
+        assert all(v[-1] == pytest.approx(80.0, abs=0.2) for v in others)
+        return
+    rect = {r['label']: r for r in mg['rectifiers']}
+    assert rect['Block 1 AFE 1 (6 x PCS157SE)']['balance_max_mw'] == pytest.approx(0.36, abs=0.03)
+    assert all(r['balance_max_mw'] < 0.04 for n, r in rect.items() if not n.startswith('Block 1 AFE 1'))
+    assert 75 < low[-1] < 78.5
+    assert all(78 < v[-1] < 79 for v in others)
+    assert max(v[-1] for v in others) - low[-1] < 2.0
+    assert low[9] > 72                                  # most of the way in 5 h
+
+
+def test_a_lost_rectifier_drains_its_quadrant(client, quiet):
+    """
+    Block 1's AFE 1 out, every GS1.1 at 80 %, for 12 h. Its quadrant's
+    inverter goes on taking its share from DC1's batteries alone, which empty
+    in 7.5-8 h; the other eleven inverters then take its share, their
+    rectifiers up to 0.71 MW - nothing unserved. Balancing through the
+    rectifiers cannot keep DC1's charge (it has none) - only the inverters'
+    sharing could, and DC1 is left with no reserve for a utility outage.
+    """
+    mg, soc = _ts_quadrants(client, quiet, 2, low=80, afe_out='Block 1 AFE 1', steps=24)
+    assert mg['unserved_mwh'] == 0
+    dc1 = soc['Block 1 DC1']
+    empty = next(k for k, v in enumerate(dc1) if v < 1.0)
+    assert 14 <= empty <= 16                          # 7-8 h at 30 min a step
+    assert all(v[-1] > 79 for k, v in soc.items() if k != 'Block 1 DC1')
+    rect = {r['label']: r for r in mg['rectifiers']}
+    assert 'Block 1 AFE 1 (6 x PCS157SE)' not in rect
+    assert max(r['rectifier_max_mw'] for r in rect.values()) == pytest.approx(0.71, abs=0.02)
+

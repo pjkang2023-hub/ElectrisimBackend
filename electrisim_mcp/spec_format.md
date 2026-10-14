@@ -206,7 +206,10 @@ power), `load_profile_id` (a power profile).
 double-conversion UPS's rectifier: it delivers what its DC bus's loads draw
 plus `control_value_dc` MW to charge the batteries on that bus, which hold its
 voltage and carry what is beyond its rating; `follow_tau_s`, its low-pass in
-the time series, 0: at once) with `control_value_dc`,
+the time series, 0: at once; `soc_balance_gain`, in the time series its set
+point raised by this times its rating per unit of its bus's batteries' charge
+below the other balancing rectifiers' buses' average, lowered above it, 0:
+none) with `control_value_dc`,
 `rated_mva`, its rating where it runs (`inlet_c`, `altitude_m`,
 `derate_temp_curve`, `derate_altitude_curve` - "x:multiplier" pairs, the lowest
 factor that derates - and `overload_curve`, e.g. "1:1.5, 10:1.2"; blank: its
