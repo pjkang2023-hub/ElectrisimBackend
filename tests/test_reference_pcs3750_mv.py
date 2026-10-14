@@ -1006,8 +1006,12 @@ def test_emt_backbone_earth_fault_needs_a_zigzag(client, quiet, zigzags, i_a):
 
 # --- Charge balancing across quadrants (Phase 32) ----------------------------------------------------
 
-def _ts_quadrants(client, quiet, gain, low=80, afe_out=None, steps=20):
-    """30 min steps, the racks at their cycle's average; Block 1 DC1's GS1.1 at ``low`` %, the rest at 80 %."""
+def _ts_quadrants(client, quiet, gain, low=80, afe_out=None, steps=20, share=0, outage=False):
+    """
+    30 min steps, the racks at their cycle's average; Block 1 DC1's GS1.1 at
+    ``low`` %, the rest at 80 %; the rectifiers' soc_balance_gain ``gain``,
+    the inverters' soc_share_gain ``share``; the utility out if ``outage``.
+    """
     with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
         p = json.load(fh)
     with open(SPEC_PATH, encoding='utf-8') as fh:
@@ -1023,6 +1027,10 @@ def _ts_quadrants(client, quiet, gain, low=80, afe_out=None, steps=20):
                 v['in_service'] = 'false'
         if str(v.get('typ', '')).startswith('Battery') and name.startswith('Block 1 DC1'):
             v['soc_percent'] = str(low)
+        if str(v.get('typ', '')).startswith('PCS'):
+            v['soc_share_gain'] = str(share)
+        if outage and str(v.get('typ', '')).startswith('External Grid'):
+            v['in_service'] = 'false'
     p['0'] = {'typ': 'TimeSeriesSimulationPandaPower Parameters', 'time_steps': str(steps), 'time_step_s': '1800',
               'load_profiles': lp, 'load_profile': 'constant', 'generation_profile': 'constant',
               'profile_mode': 'custom', 'element_profiles': {}, 'frequency': '60', 'algorithm': 'nr',
@@ -1083,3 +1091,44 @@ def test_a_lost_rectifier_drains_its_quadrant(client, quiet):
     assert 'Block 1 AFE 1 (6 x PCS157SE)' not in rect
     assert max(r['rectifier_max_mw'] for r in rect.values()) == pytest.approx(0.71, abs=0.02)
 
+
+# --- Inverters sharing by charge (Phase 33) ----------------------------------------------------------
+
+def test_inverters_share_by_charge_after_a_lost_rectifier(client, quiet):
+    """
+    Block 1's AFE 1 out again, now with the inverters sharing by charge
+    (soc_share_gain 5: half an inverter's rating for 10 points of its
+    quadrant's charge off the sharing inverters' average). As DC1 drains its
+    inverter hands its share to the other eleven - some 58 kW more each - and
+    DC1 settles near 66 %, its inverter at next to nothing, instead of running
+    to empty. Nothing unserved.
+    """
+    mg, soc = _ts_quadrants(client, quiet, 2, low=80, afe_out='Block 1 AFE 1', steps=24, share=5)
+    assert mg['unserved_mwh'] == 0
+    dc1 = soc['Block 1 DC1']
+    assert 64 < dc1[-1] < 68 and abs(dc1[-1] - dc1[-5]) < 0.5
+    pcs = {}
+    for r in mg['pcs']:
+        pcs.setdefault(r['label'], []).append(r)
+    assert abs(pcs['Block 1 GFM 1 (6 x PCS157SE)'][-1]['p_mw']) < 0.05
+    for name, rows in pcs.items():
+        if not name.startswith('Block 1 GFM 1'):
+            assert rows[-1]['soc_share_mw'] == pytest.approx(0.058, abs=0.01), name
+
+
+@pytest.mark.parametrize('dc1, short_step, unserved', [(65.6, 14, 19.2), (0.0, 13, 22.9)])
+def test_a_utility_outage_after_the_lost_rectifier(client, quiet, dc1, short_step, unserved):
+    """
+    The utility then out, all twelve inverters sharing by charge: from DC1 at
+    the 65.6 % sharing kept, the island carries its racks 7 h; from DC1 empty,
+    as it was without sharing, 6.5 h, and 3.7 MWh more goes unserved over the
+    10 h (every quadrant at 80 %: 7.5 h). An empty quadrant's inverter gives
+    nothing and takes nothing: it is not charged from the others, which only
+    shuffled energy at a loss.
+    """
+    mg, soc = _ts_quadrants(client, quiet, 0, low=dc1, steps=20, share=5, outage=True)
+    first = next(x['time_step'] for x in mg['steps'] if x['unserved_mw'] > 0.5)
+    assert first == short_step
+    assert mg['unserved_mwh'] == pytest.approx(unserved, abs=0.2)
+    if dc1 == 0.0:
+        assert max(soc['Block 1 DC1']) < 0.5

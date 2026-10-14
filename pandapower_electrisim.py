@@ -3618,6 +3618,8 @@ def _electrisim_build_pcs(net, Busbars, study):
             # The EMT study's: grid-forming, its bus's negative-sequence voltage held at zero.
             'unbalance_control': _electrisim_boolish(el.get('unbalance_control'), False),
             'i2_limit_pu': safe_float(el.get('i2_limit_pu'), 0.3),
+            # The time series': grid-forming on a DC network, its share biased by its bus's charge.
+            'soc_share_gain': max(safe_float(el.get('soc_share_gain'), 0.0), 0.0),
             # On a DC network, its DC-link capacitor (0: 4 ms of its rating), its ESR and ESL: EMT and DC fault.
             'dc_link_mf': max(safe_float(el.get('dc_link_mf'), 0.0), 0.0),
             'dc_link_esr_mohm': max(safe_float(el.get('dc_link_esr_mohm'), 0.0), 0.0),

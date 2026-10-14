@@ -373,9 +373,36 @@ class MicrogridTs:
         self._apply_smoothing(t)
         self._apply_rectifier_filters()
         self._hold_pcs_supercapacitors()
+        self._pcs_soc_share()
         self._pcs_step_windows()
         for b in self.batteries:
             self._set_battery(b, b['set_mw'])
+
+    def _pcs_soc_share(self):
+        """
+        Grid-forming PCS on DC networks sharing by charge: each one's droop set
+        point its own plus gain x its rating per unit of its bus's batteries'
+        charge above the sharing PCS's buses' average (below: less) - the
+        offsets cancel, so the island's load only moves between them. A
+        quadrant that lost its rectifier hands its load over as it drains,
+        rather than carry its share to empty. Its output does not go below zero
+        (_pcs_step_windows): its quadrant is not charged from the island
+        through it.
+        """
+        sharing = [r for r in self.pcs if r.get('soc_share_gain', 0.0) > 0 and r.get('dc_bus') is not None
+                   and r['table'] == 'gen' and r['in_service']]
+        if not sharing:
+            return
+        socs = self._bus_soc()
+        sharing = [r for r in sharing if r['dc_bus'] in socs]
+        if not sharing:
+            return
+        mean = sum(socs[r['dc_bus']] for r in sharing) / len(sharing)
+        for r in sharing:
+            base = r.setdefault('p_set_base', r['p_set_ac'])
+            r['soc_share_mw'] = r['soc_share_gain'] * r['s_rated'] * (socs[r['dc_bus']] - mean) / 100.0
+            r['p_set_ac'] = base + r['soc_share_mw']
+            r['soc_sharing'] = True
 
     def _pcs_step_windows(self):
         """
@@ -420,6 +447,10 @@ class MicrogridTs:
             lo = pe._electrisim_stage_output(-take / max(mates, 1), rec['eta'], rec['p_nl_mw'])
             rec['p_max_step'] = min(max(hi, 0.0), rec['p_max_mw'])
             rec['p_min_step'] = max(min(lo, 0.0), rec['p_min_mw'])
+            if rec.get('soc_sharing'):
+                # Sharing by charge, it gives at least nothing: an empty quadrant's offset under the
+                # island's droop had it charging from the others - energy shuffled at a loss.
+                rec['p_min_step'] = 0.0
 
     def _hold_pcs_supercapacitors(self):
         """
@@ -821,6 +852,16 @@ class MicrogridTs:
         pv_now = sum(self._pv_output_mw())
         curtailed = pv_now / self.curtail - pv_now if 0 < self.curtail < 1 else 0.0
         self.curtailed_j += curtailed * 1e6 * dt
+        # PCS on a DC network (a UPS's inverters): their power and, sharing by charge, their offset.
+        for rec in self.pcs:
+            if rec.get('dc_bus') is None or rec['table'] != 'gen' or not rec['in_service'] \
+                    or rec['index'] not in net.res_gen.index:
+                continue
+            self.pcs_rows.append({'time_step': t, 'name': rec['name'], 'id': rec['id'], 'label': rec['label'],
+                                  'p_mw': float(net.res_gen.at[rec['index'], 'p_mw']),
+                                  'q_mvar': float(net.res_gen.at[rec['index'], 'q_mvar']),
+                                  'frequency_hz': float(getattr(net, 'f_hz', 50.0) or 50.0) * (1.0 + rec['df_pu']),
+                                  'soc_share_mw': rec.get('soc_share_mw', 0.0)})
         demand = 0.0
         for it in self.items:
             obj, rec = it['obj'], it['rec']
