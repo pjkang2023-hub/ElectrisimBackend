@@ -1264,6 +1264,13 @@
    "name": "Zigzag breaker"
   },
   {
+   "id": "ZZ2_CB",
+   "bus": "BB3",
+   "element": "ZZ2",
+   "et": "grounding_transformer",
+   "name": "Zigzag 2 breaker"
+  },
+  {
    "id": "C_BB1_BB2_BB1",
    "bus": "BB1",
    "element": "C_BB1_BB2",
@@ -1862,6 +1869,14 @@
    "i_rated_a": 400,
    "t_rated_s": 10,
    "name": "Backbone zigzag (400 A, 10 s - to size in Phase 24)"
+  },
+  {
+   "id": "ZZ2",
+   "bus": "BB3",
+   "vn_kv": 34.5,
+   "i_rated_a": 400,
+   "t_rated_s": 10,
+   "name": "Backbone zigzag 2 (400 A, 10 s)"
   }
  ],
  "load_profiles": [

@@ -273,11 +273,13 @@ def test_three_phase_faults(client, quiet, k, backbone_a):
 @pytest.mark.parametrize('k, backbone_a', [(1.2, 249), (1.5, 311)])
 def test_earth_faults(client, quiet, k, backbone_a):
     """
-    The backbone's earth faults: the zigzag's zero sequence with the PCS's limited
-    positive and negative sequences, 249-311 A - inside its 400 A rating, and a
-    residual (51N) relay sees it plainly. The 505 V buses none: the grid side a
-    delta, the load side T2's star left floating, as the spec asks (solidly
-    grounded it gave 17 kA). The POI: the utility's own.
+    The backbone's earth faults by IEC 60909, 249-311 A. Not the zigzags'
+    current (Phase 30): pandapower adds the inverters' current-source share to a
+    single-phase fault whatever the zero sequence - with no zigzag at all it
+    gives 228 A. EMT, which builds the zigzags as windings, gives the earth
+    fault's current (test_emt_backbone_earth_fault_needs_a_zigzag). The 505 V
+    buses none: the grid side a delta, the load side T2's star left floating,
+    as the spec asks (solidly grounded it gave 17 kA). The POI: the utility's own.
     """
     out, label, _ = _drawn_study(client, quiet, {**IEC, 'fault_type': '1ph'}, k_pcs=k)
     ka = _bus_ka(out, label)
@@ -679,7 +681,7 @@ def test_the_drawing_carries_the_specs_relays(spec):
     with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_protection_payload.json'), encoding='utf-8') as fh:
         drawn = {v['userFriendlyName']: v for v in json.load(fh).values()
                  if isinstance(v, dict) and str(v.get('typ', '')).startswith('Switch')}
-    assert len(drawn) == len(spec['switches']) == 22
+    assert len(drawn) == len(spec['switches']) == 23
     for row in spec['switches']:
         sw = drawn[row['name']]
         assert sw['protection_type'] == row.get('protection_type', 'none'), row['name']
@@ -849,7 +851,7 @@ def test_a_failed_backbone_breaker(client, quiet, fault, by_relays):
             # Every other breaker at its switchboard: the block's, the hall's, the cables'.
             at_bus = {f'Block {n} T2 HV breaker', f'Hall {n} feeder breaker'} | {
                 f'Cable {a}-{b} breaker at {bus}' for a, b in (('BB1', 'BB2'), ('BB2', 'BB3'), ('BB3', 'BB1'))
-                if bus in (a, b)} | ({'Zigzag breaker'} if bus == 'BB1' else set())
+                if bus in (a, b)} | {'BB1': {'Zigzag breaker'}, 'BB3': {'Zigzag 2 breaker'}}.get(bus, set())
             assert set(r['opened_by_50bf']) == at_bus - {name}
 
     bare = _protection(client, quiet, fault=fault, scheme=lambda name: {'bf_time_s': '0'})
@@ -950,3 +952,37 @@ def test_emt_backbone_cable_fault_ridden_through(client, quiet, ride_through, ho
             assert conv[f'Hall {h} SST DC/DC']['p_end_mw'] == pytest.approx(3.6, rel=0.03)
     if ride_through and hold_up:
         assert conv['Block 1 GFM 1 (6 x PCS157SE)']['p_end_mw'] == pytest.approx(0.95, abs=0.03)
+
+
+# --- A second earthing source (Phase 30) -----------------------------------------------------------
+
+@pytest.mark.parametrize('zigzags, i_a', [(('Zigzag breaker', 'Zigzag 2 breaker'), 427), (('Zigzag 2 breaker',), 367),
+                                          ((), 6.5)])
+def test_emt_backbone_earth_fault_needs_a_zigzag(client, quiet, zigzags, i_a):
+    """
+    Phase a to ground on backbone 2 for 100 ms, in EMT. Both zigzags: 427 A,
+    shared. ZZ2 alone - after a failed breaker at BB1 has opened ZZ1's with the
+    rest of its switchboard - 367 A, inside its 400 A rating: a second
+    earthing source keeps the backbone grounded, and its relays seeing its
+    earth faults. Neither: 6.5 A, the cables' capacitance, which nothing
+    detects, and the backbone left displaced after the fault clears.
+    """
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    cell = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
+    for v in p.values():
+        if isinstance(v, dict) and v.get('userFriendlyName') in ('Zigzag breaker', 'Zigzag 2 breaker'):
+            v['closed'] = 'true' if v['userFriendlyName'] in zigzags else 'false'
+    p['0'] = {'typ': 'EmtStudy Parameters', 'frequency': '60', 'time_step_us': '20', 'user_email': 't@t',
+              'duration_ms': '150', 'ac_fault_bus': cell['Load backbone 2'], 'ac_fault_type': 'ag',
+              'ac_fault_resistance_ohm': '0.001', 'ac_fault_time_ms': '20', 'ac_fault_duration_ms': '100'}
+    with quiet():
+        emt = json.loads(client.post('/', json=p).get_data(as_text=True))['emt']
+    (phase_a,) = emt['ac']['fault']['phases']
+    assert phase_a['i_sym_ka'] * 1e3 == pytest.approx(i_a, rel=0.03)
+    backbone = next(b for b in emt['ac']['buses'] if b['label'] == 'Load backbone 2')
+    if zigzags:
+        assert phase_a['i_sym_ka'] / len(zigzags) < 0.4             # within each zigzag's 400 A (they share it)
+        assert backbone['v_rms_final_pu'] < 1.05
+    else:
+        assert backbone['v_rms_final_pu'] > 1.4
