@@ -857,11 +857,16 @@ def test_a_failed_backbone_breaker(client, quiet, fault, by_relays):
     assert left == (0 if fault == '3ph' else 9)
 
 
-def _emt_line_fault(client, quiet, buffers=False, **params):
+def _emt_line_fault(client, quiet, buffers=False, ride_through=None, hold_up=None, **params):
     with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
         p = json.load(fh)
     if buffers:
         _rack_buffers(p)
+    for v in p.values():
+        if isinstance(v, dict) and ride_through and str(v.get('typ', '')).startswith('Solid-State Transformer'):
+            v['ride_through_pu'] = str(ride_through)
+        if isinstance(v, dict) and hold_up and str(v.get('typ', '')).startswith('DC/DC Converter'):
+            v['hold_up_pu'] = str(hold_up)
     line = next(v['id'] for v in p.values() if isinstance(v, dict) and v.get('userFriendlyName') == 'Backbone cable BB1-BB2')
     p['0'] = {'typ': 'EmtStudy Parameters', 'frequency': '60', 'time_step_us': '20', 'user_email': 't@t',
               'duration_ms': '300', 'ac_fault_line': line, 'ac_fault_fraction': '0.5', 'ac_fault_type': 'abc',
@@ -903,3 +908,45 @@ def test_emt_backbone_cable_fault_cleared_by_its_87l(client, quiet):
     held = {b['label']: b['t_ms'] for b in buffered['converters_blocked']}
     for h in (1, 2, 3):
         assert 22 < held[f'Hall {h} buffer converter'] < 30         # not at its first step (its store at 79 %)
+
+
+# --- Ride-through (Phase 29) ---------------------------------------------------------------------
+
+@pytest.mark.parametrize('ride_through, hold_up', [(0.9, None), (None, 0.95), (0.9, 0.95)])
+def test_emt_backbone_cable_fault_ridden_through(client, quiet, ride_through, hold_up):
+    """
+    The BB1-BB2 cable fault cleared by its 87L at 70 ms again, the SSTs and
+    the racks' buffers given what the vendors would have to give:
+    - the SSTs riding through (their DC/DC stages pausing below 0.9 pu of
+      their links, not blocking) alone: nothing holds the racks' 800 V bus,
+      and the racks are lost at 24 ms;
+    - the racks' buffers holding their bus (at 0.95 pu, to 1.2 times their
+      3.6 MW) alone: the racks ride through at 0.92 pu, but the SSTs block
+      and stay out - the buffers carry the halls until they empty;
+    - both: the SSTs pause from 21 to 74 ms, resume as their links recharge
+      and ramp back over 0.2 s; the buffers hold the racks meanwhile and hand
+      back; the inverters come off their limit and every hall settles.
+    """
+    emt = _emt_line_fault(client, quiet, buffers=hold_up is not None, ride_through=ride_through, hold_up=hold_up,
+                          duration_ms='300')
+    loads = {ld['label']: ld for ld in emt['loads']}
+    conv = {c['label']: c for c in emt['converters']}
+    blocked = {b['label'] for b in emt['converters_blocked']}
+    for h in (1, 2, 3):
+        racks = loads[f'Hall {h}: 90 DGX H100 racks']
+        if hold_up is None:
+            assert racks['t_lost_ms'] == pytest.approx(24.4, abs=0.5)
+            continue
+        assert racks['t_lost_ms'] is None and racks['v_min_pu'] > 0.9
+        buffer = conv[f'Hall {h} buffer converter']['smoothing']
+        assert buffer['held_up_ms'] > 150 and buffer['store_peak_mw'] < 1.2 * 3.6
+        if ride_through is None:
+            assert f'Hall {h} SST rectifier' in blocked
+        else:
+            assert not any(n.startswith(f'Hall {h}') for n in blocked)
+            ((start, end),) = conv[f'Hall {h} SST DC/DC']['paused_ms']
+            assert 20 < start < 23 and 70 < end < 80
+            assert racks['verdict'] == 'settles'
+            assert conv[f'Hall {h} SST DC/DC']['p_end_mw'] == pytest.approx(3.6, rel=0.03)
+    if ride_through and hold_up:
+        assert conv['Block 1 GFM 1 (6 x PCS157SE)']['p_end_mw'] == pytest.approx(0.95, abs=0.03)

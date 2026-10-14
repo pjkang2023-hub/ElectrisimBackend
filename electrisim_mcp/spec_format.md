@@ -230,7 +230,11 @@ and inverter's, as a VSC's), and its stages' capacitors' ESR and ESL (0: none):
 `rect_dc_link_esr_mohm`, `rect_dc_link_esl_uh`, `dcdc_c_in_esr_mohm`,
 `dcdc_c_in_esl_uh` (on its internal DC link, the EMT study's),
 `dcdc_c_out_esr_mohm`, `dcdc_c_out_esl_uh`, `inv_dc_link_esr_mohm`,
-`inv_dc_link_esl_uh` (on its LV DC port, the EMT and DC fault studies').
+`inv_dc_link_esl_uh` (on its LV DC port, the EMT and DC fault studies'),
+`ride_through_pu` (EMT: with its internal link below this, its DC/DC stage
+passes no power rather than block, keeping the link charged through an MV
+fault, and its power ramps back over 0.2 s once the link is 5 % above it;
+its stages block only below 30 %; 0, the default: none - they block at 80 %).
 
 **dc_dc_converters** - `id`, **`bus_in`**, **`bus_out`** (DC), `control_mode`
 (`voltage`, `power`, `droop`, `dispatch`, `mppt`, `follower` or `smoothing`),
@@ -239,7 +243,10 @@ and inverter's, as a VSC's), and its stages' capacitors' ESR and ESL (0: none):
 `smoothing_tau_s`, `soc_ref_percent`, `soc_gain`, `emt_model`,
 `switching_khz`, `current_limit_pu`, `c_out_mf`, `c_out_esr_mohm`,
 `c_out_esl_uh`, `c_in_esr_mohm`, `c_in_esl_uh` (its output and input
-capacitors' ESR and ESL, 0: none, in the EMT and DC fault studies).
+capacitors' ESR and ESL, 0: none, in the EMT and DC fault studies),
+`hold_up_pu` (smoothing, EMT: with its output bus below this, its store
+supplies what holds the bus there, to 1.2 times its rating - racks' own
+storage when their supply fails; 0, the default: it only smooths).
 
 **dc_breakers** - `id`, **`bus`** (DC), **`element`** (the DC bus, line, diode,
 load, source, VSC or DC/DC converter it switches, or a battery, supercapacitor,

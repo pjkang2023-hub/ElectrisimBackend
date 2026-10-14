@@ -519,7 +519,8 @@ class _EmtBuilder:
                 mates = [r for r in self.dcdc_plan if r.get('control') == 'smoothing' and r['bus_out'] == b_out]
                 total = sum(max(r['rated_mw'], 1e-9) for r in mates)
                 smoother = emt_der.Smoothing(store, loads, max(sm['tau_s'], 1e-6), sm['soc_ref_percent'], sm['soc_gain'],
-                                             conv.rated, max(rec['rated_mw'], 1e-9) / total)
+                                             conv.rated, max(rec['rated_mw'], 1e-9) / total,
+                                             hold_up_v=e.get('hold_up_pu', 0.0) * self.vn[b_out])
                 conv.p_ref = lambda t, state, f=smoother: f(t, state)
                 self.smoothers.append((conv, smoother))
             self._add_dcdc(conv, rec['id'])
@@ -565,11 +566,18 @@ class _EmtBuilder:
             eta, p_nl = stage_loss(rect['input'])
             r_ohm, x_ohm = reactor(rec['bus_mv'], rect['rated_mw'])
             label = f"{rec['label']} rectifier"
-            conv = Vsc(self, label, rec['bus_mv'], link, self.bus_node[link], 1e-6, block, p=p, q=q, p_dc=p_dc,
+            ride = e.get('ride_through_pu', 0.0)
+            # Riding through, its rectifier holds on to a sagging link, to 30 %, as its DC/DC stage does.
+            conv = Vsc(self, label, rec['bus_mv'], link, self.bus_node[link], 1e-6, min(block, 0.3) if ride > 0 else block,
+                       p=p, q=q, p_dc=p_dc,
                        rated_mva=rect['rated_mw'], limit_pu=limit, r_ohm=r_ohm, x_ohm=x_ohm, mode_dc='vm_pu',
                        mode_ac='q_mvar', model=model, switching_khz=e.get('switching_khz', 5.0),
                        eta=eta, p_nl_mw=p_nl, input_side='ac', current_loop_hz=e.get('current_loop_hz', 500.0),
                        c_link_esr_mohm=e.get('rect_dc_link_esr_mohm', 0.0), c_link_esl_uh=e.get('rect_dc_link_esl_uh', 0.0))
+            if ride > 0:
+                # Riding through, it takes the inrush of the backbone's return - its current to between 2.5
+                # and 3.75 times its limit as the reference's voltage came back - blocking at 4 times it.
+                conv.block_i = 4.0 * conv.i_max
             self._add_vsc(conv, rec['id'])
 
             # Its DC/DC stage.
@@ -585,7 +593,8 @@ class _EmtBuilder:
                         p_nl_mw=p_nl, bidirectional=True, limit_pu=limit, model=model,
                         switching_khz=e.get('dcdc_switching_khz', 20.0), block_pu=block,
                         c_in_esr_mohm=e.get('dcdc_c_in_esr_mohm', 0.0), c_in_esl_uh=e.get('dcdc_c_in_esl_uh', 0.0),
-                        c_out_esr_mohm=e.get('dcdc_c_out_esr_mohm', 0.0), c_out_esl_uh=e.get('dcdc_c_out_esl_uh', 0.0))
+                        c_out_esr_mohm=e.get('dcdc_c_out_esr_mohm', 0.0), c_out_esl_uh=e.get('dcdc_c_out_esl_uh', 0.0),
+                        ride_through_pu=ride)
             self._add_dcdc(conv, rec['id'])
 
             # Its grid-following inverter.
@@ -1010,7 +1019,8 @@ def emt_study(net, params, in_data=None):
                                 'rack_ramp_mw_s': _round(float(np.max(np.abs(np.diff(tr[:, 1])) / dt)) / 1e6),
                                 'feed_ramp_mw_s': _round(float(np.max(np.abs(np.diff(feed)) / dt)) / 1e6),
                                 'store_peak_mw': _round(float(np.max(np.abs(tr[:, 2]))) / 1e6),
-                                'limited_ms': _round(sm.limited_time * 1e3)}
+                                'limited_ms': _round(sm.limited_time * 1e3),
+                                'held_up_ms': _round(sm.held_time * 1e3)}
     # A VSC's DC voltage loop, some 30 Hz, swings slower than the network: two of its periods to tell.
     min_span = VSC_VERDICT_SPAN if b.vscs else 1e-3
     # Loads following a profile keep the voltages moving: whether a swing settles cannot be told from them.
@@ -1271,6 +1281,9 @@ def _dcdc_result(conv, t_event):
            'current_limit_ka': _round(conv.i_max / 1e3),
            'blocked_ms': _round(conv.blocked_at * 1e3) if conv.blocked_at is not None else None,
            'limited_ms': _round(conv.limited_time * 1e3)}
+    if getattr(conv, 'rt_pause', None) is not None:
+        # Its fault ride-through: each pause, [start, end] (ms; end None: still paused at the end of the run).
+        out['paused_ms'] = [[_round(a * 1e3), _round(b * 1e3) if b is not None else None] for a, b in conv.pauses]
     if len(tr):
         cycle = 0.02
         first = tr[:, 0] <= max(min(tr[0, 0] + cycle, t_event), tr[0, 0])

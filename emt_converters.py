@@ -121,6 +121,8 @@ def dcdc_capacitors(c_out_mf, rated, vn_in, vn_out):
 
 # A DC/DC converter's sense of its output capacitor's ESR drop (Hz): a decade below its voltage loop's 300 Hz.
 SENSE_HZ = 30.0
+# A DC/DC stage riding through a fault: the time its power takes to come back, from none to its limit.
+RT_RAMP_S = 0.2
 
 # A VSC's current loop bandwidth (Hz) unless it gives its own. At a few kHz of switching, against a
 # weak network - an island no grid holds - a loop this fast meets the network's own resonance; f_sw / 20
@@ -716,7 +718,7 @@ class DcDc:
                  vm_out_pu=1.0, p_set_mw=0.0, rated_mw=0.0, eta=1.0, p_nl_mw=0.0, bidirectional=False,
                  limit_pu=1.2, model='average', switching_khz=20.0, c_out_mf=0.0, c_out_esr_mohm=0.0,
                  c_out_esl_uh=0.0, c_in_esr_mohm=0.0, c_in_esl_uh=0.0, block_pu=0.8, r_in=0.0, r_out=0.0,
-                 every_step=False, droop_pu=0.0, p_ref=None, p_in_ref=None):
+                 every_step=False, droop_pu=0.0, p_ref=None, p_in_ref=None, ride_through_pu=0.0):
         """
         ``c_out_esr_mohm``, ``c_out_esl_uh``, ``c_in_esr_mohm``,
         ``c_in_esl_uh``: its output and input capacitors' series resistance
@@ -728,6 +730,11 @@ class DcDc:
         this at its rated power. ``p_ref(t, state)``: in power mode, its
         output power at each sample; ``p_in_ref(t, v_in, v_out, i_in)``: the
         power its input is to draw (MPPT), its output that less its losses.
+        ``ride_through_pu``: with its input below this (pu), it pauses - passes
+        no power, its output left to what else holds it - and resumes once its
+        input is back above it plus 5 %, rather than block; it blocks only below
+        30 % (0: none - it blocks at ``block_pu``). An SST's DC/DC stage, its MV
+        side in a fault: it keeps its link's charge for when the fault clears.
         """
         ckt = builder.ckt
         self.label = label
@@ -749,6 +756,13 @@ class DcDc:
         self.p_set = p_set_mw * 1e6
         self.droop, self.p_ref, self.p_in_ref = droop_pu, p_ref, p_in_ref
         self.block_in, self.block_out = block_pu * vn_in, block_pu * vn_out
+        self.rt_pause = ride_through_pu * vn_in if ride_through_pu > 0 else None
+        self.rt_resume = min(ride_through_pu + 0.05, 1.0) * vn_in if ride_through_pu > 0 else None
+        if self.rt_pause is not None:
+            self.block_in, self.block_out = 0.3 * vn_in, 0.3 * vn_out
+        self.paused = False
+        self.pauses = []                                     # [start, end or None] of each pause
+        self.t_resumed = None                                # its power ramps back from here, over RT_RAMP_S
         c_in, c_out = dcdc_capacitors(c_out_mf, rated, vn_in, vn_out)
         self.c_out, self.c_in = c_out, c_in
         w_v = 2 * math.pi * 300.0                            # its output voltage loop
@@ -898,9 +912,19 @@ class DcDc:
             return False
         v_in, v_out = float(state.v[self.in_node]), float(state.v[self.out_node])
         i_out = float(state.i_rl[self.k_out])
-        if v_in < self.block_in or v_out < self.block_out:
+        if v_in < self.block_in or (v_out < self.block_out and not self.paused):
             self._block(t, state)
             return True
+        if self.rt_pause is not None:
+            # Ride-through: paused below its threshold, resuming once its input is back.
+            if not self.paused and v_in < self.rt_pause:
+                self.paused = True
+                self.pauses.append([t, None])
+                self.int_v = 0.0
+            elif self.paused and v_in > self.rt_resume:
+                self.paused = False
+                self.pauses[-1][1] = t
+                self.t_resumed = t
         self.i_in_now = float(state.i_rl[self.k_in])
         changed = self._sample(t, state, v_in, v_out, i_out)
         changed = 'soft' if changed else False
@@ -953,14 +977,21 @@ class DcDc:
             elif self.p_ref is not None:
                 self.p_set = self.p_ref(t_s, state)
             i_ref = self.p_set / max(v_out_m, 0.05 * self.vn_out)
-        lo = -self.i_max if self.bidirectional else 0.0
-        limited = not lo <= i_ref <= self.i_max
-        i_ref = min(max(i_ref, lo), self.i_max)
+        if self.paused:
+            i_ref, err = 0.0, 0.0
+        i_max = self.i_max
+        if self.t_resumed is not None and t_s - self.t_resumed < RT_RAMP_S:
+            # Resumed: its power back in a ramp, not at once - every SST on a recovering backbone at
+            # its limit together held the inverters at theirs, the backbone down and the SSTs paused.
+            i_max *= max(t_s - self.t_resumed, 0.0) / RT_RAMP_S
+        lo = -i_max if self.bidirectional else 0.0
+        limited = not lo <= i_ref <= i_max
+        i_ref = min(max(i_ref, lo), i_max)
         self.phi, saturated = self._phi(i_ref, v_in_m)
         limited = limited or saturated
         if limited:
             self.limited_time += dt
-        elif self.mode == 'voltage':
+        elif self.mode == 'voltage' and not self.paused:
             self.int_v += self.ki_v * err * dt
         changed = False
         if self.model == 'switching':

@@ -341,3 +341,96 @@ def test_emt_study_with_every_source_and_store(client, quiet):
     assert sm['rack_ramp_mw_s'] > 100 * sm['feed_ramp_mw_s']           # both stores took the step
     assert sm['store_peak_mw'] == pytest.approx(0.0025, rel=0.05)       # half of the 5 kW step each
     assert conv['KPV']['control'] == 'mppt'
+
+
+# --- Ride-through: a rack buffer holding its bus, an SST's DC/DC stage pausing (Phase 29) ---------
+
+def _rack_bus(hold_up_pu=0.0, t_cut=0.01, t_end=0.06):
+    """
+    An 800 V rack bus, fed through 5 mOhm and a breaker that opens at t_cut,
+    1 MW of constant-power racks (18.75 mF input filter), and a smoothing
+    store (a 3.1 MJ supercapacitor at 79 %) behind a 1.2 MW converter.
+    """
+    obj = der.build({'typ': 'Supercapacitor0', 'name': 'sc', 'sizing': 'modules', 'modules_series': 15,
+                     'strings_parallel': 4, 'module_c_f': 130, 'module_v': 54, 'module_esr_mohm': 4,
+                     'v0_percent': 79, 'r_leak_ohm': 1e4})
+    ckt = Circuit()
+    v_feed, r_feed, p = 800.0, 0.005, 1e6
+    v_rack0 = (v_feed + math.sqrt(v_feed ** 2 - 4 * r_feed * p)) / 2
+    rack, mid, port = ckt.node('rack', v_rack0), ckt.node('feed', v_rack0), ckt.node('port', obj.v0)
+    ckt.add_rl(0, mid, r_feed, 0.0, i0=p / v_rack0, e0=v_feed)
+    k_cut = ckt.add_switch(mid, rack, closed=True)
+    ckt.at(t_cut, lambda st: st.set_switch(k_cut, False))
+    func = dc_load_current([1.0], 0.8, 1.0, 0.0, 0.0, 0.0)
+    ckt.add_nonlinear(rack, 0, func)
+    ckt.add_c(0, rack, 18.75e-3, w0=-v_rack0)
+    store = emt_der.SupercapacitorEmt(ckt, obj, 'SC', port, obj.v0, 0.0)
+    builder = types.SimpleNamespace(ckt=ckt, vn={'p': 810.0, 'r': 800.0}, v_bus={'p': obj.v0, 'r': v_rack0})
+    conv = DcDc(builder, 'K', 'p', 'r', port, rack, p_in_mw=0.0, p_out_mw=0.0, mode='power', rated_mw=1.2,
+                eta=0.98, bidirectional=True, every_step=True, block_pu=0.4)
+    smoother = emt_der.Smoothing(store, [(rack, func)], 10.0, 50.0, 0.0, 1.2e6, hold_up_v=hold_up_pu * 800.0)
+    conv.p_ref = lambda t, st: smoother(t, st)
+    ckt.add_controller(lambda t, st: (store.control(t, st), conv.control(t, st))[1])
+    sim = ckt.simulate(t_end, 5e-6)
+    return sim, rack, smoother
+
+
+def test_a_rack_buffer_holds_its_bus_when_its_supply_fails():
+    """
+    The feed opened at 10 ms. Smoothing alone, the store takes the racks'
+    swing about the feed, not the feed's loss: the bus collapses within a few
+    milliseconds. With a hold-up of 0.95 pu the store supplies what holds the
+    bus there - its full rating 3 % below: the racks' 1 MW at some 0.93 pu.
+    """
+    sim, rack, sm = _rack_bus(0.0)
+    assert sim['v'][-1, rack] < 0.5 * 800
+    sim, rack, sm = _rack_bus(0.95)
+    after = sim['t'] > 0.02
+    v = sim['v'][after, rack]
+    assert 0.9 * 800 < v.min() and v.max() < 0.95 * 800
+    assert sm.held_time == pytest.approx(0.05, abs=0.002)
+
+
+def _dcdc_link_dip(ride_through_pu, t_end=0.3):
+    """
+    A DC/DC stage holding an 800 V bus (1 MW, 0.64 Ohm) from a 1 kV link fed
+    through 20 mOhm and a breaker open from 10 to 40 ms; the bus also fed,
+    weakly, from 800 V through 0.3 Ohm.
+    """
+    ckt = Circuit()
+    e_in, r_in, r_load = 1000.0, 0.02, 0.64
+    i_in0 = 1e6 / 0.98 / e_in
+    v_in0 = e_in - r_in * i_in0
+    src, link, out = ckt.node('src', v_in0), ckt.node('link', v_in0), ckt.node('bus', 800.0)
+    ckt.add_rl(0, src, r_in, 0.0, i0=i_in0, e0=e_in)
+    k = ckt.add_switch(src, link, closed=True)
+    ckt.at(0.01, lambda st: st.set_switch(k, False))
+    ckt.at(0.04, lambda st: st.set_switch(k, True))
+    ckt.add_r(out, 0, r_load)
+    ckt.add_rl(0, out, 0.3, 0.0, i0=0.0, e0=800.0)
+    builder = types.SimpleNamespace(ckt=ckt, vn={'i': e_in, 'o': 800.0}, v_bus={'i': v_in0, 'o': 800.0})
+    conv = DcDc(builder, 'D', 'i', 'o', link, out, p_in_mw=1.0 / 0.98, p_out_mw=1.0, mode='voltage', rated_mw=1.2,
+                eta=0.98, every_step=True, ride_through_pu=ride_through_pu)
+    ckt.add_controller(lambda t, st: conv.control(t, st))
+    sim = ckt.simulate(t_end, 5e-6)
+    return sim, conv, out
+
+
+def test_a_dc_dc_stage_rides_through_its_input_dipping():
+    """
+    Its input cut from 10 to 40 ms. Without ride-through it blocks as its
+    input capacitor drains past 80 %. Riding through at 0.9 pu it pauses
+    instead - passing nothing, its input keeping its charge - and resumes
+    once its input is back above 0.95 pu, its power returning over 0.2 s
+    rather than at once: its bus, weakly held meanwhile, comes back to 800 V.
+    """
+    _, conv, _ = _dcdc_link_dip(0.0, t_end=0.06)
+    assert conv.blocked_at is not None and 0.01 < conv.blocked_at < 0.02
+    sim, conv, out = _dcdc_link_dip(0.9)
+    assert conv.blocked_at is None
+    (pause,) = conv.pauses
+    assert 0.01 < pause[0] < 0.012 and 0.04 < pause[1] < 0.042
+    t = sim['t']
+    early = (t > pause[1] + 0.02) & (t < pause[1] + 0.04)
+    assert sim['v'][early, out].max() < 0.97 * 800                  # still ramping back
+    assert sim['v'][-1, out] == pytest.approx(800.0, rel=0.01)

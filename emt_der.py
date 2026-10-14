@@ -363,9 +363,13 @@ class Smoothing:
     to the store's and the converter's limits.
     """
 
-    def __init__(self, store, loads, tau, soc_ref, gain, rated_w, share=1.0):
+    def __init__(self, store, loads, tau, soc_ref, gain, rated_w, share=1.0, hold_up_v=0.0):
         self.store, self.loads = store, loads          # loads: [(node, func)]
         self.tau, self.soc_ref, self.k, self.rated, self.share = tau, soc_ref, gain, rated_w, share
+        # Hold-up: its bus below hold_up_v (V), its store supplies what holds it there, its full share
+        # 3 % below - the racks' own storage when their supply fails. 0: none.
+        self.hold_up_v = hold_up_v
+        self.held_time = 0.0
         self.y = None
         self.t_last = 0.0
         self.trace = []           # (t, P_rack, P_store)
@@ -381,7 +385,16 @@ class Smoothing:
         self.y = p_rack if self.y is None else self.y + (p_rack - self.y) * (1.0 - math.exp(-max(dt, 0.0) / self.tau))
         soc = self.store.soc_percent() or 0.0
         p = self.share * (p_rack - self.y) + self.k * (soc - self.soc_ref) / 100.0 * self.rated
+        holding = False
+        if self.hold_up_v > 0 and self.loads:
+            v = min(float(state.v[n]) for n, _ in self.loads)
+            holding = v < self.hold_up_v
+            if holding:
+                p += self.share * self.rated * (self.hold_up_v - v) / (0.03 * self.hold_up_v)
+                self.held_time += dt
         lim = self.rated
+        if holding and p > lim:
+            lim = 1.2 * self.rated          # holding its bus up: to its converter's current limit
         dis, ch = _limits(self.store)
         hi, lo = min(lim, dis), -min(lim, ch)
         if not lo <= p <= hi:

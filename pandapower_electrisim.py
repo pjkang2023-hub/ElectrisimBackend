@@ -2558,6 +2558,8 @@ def _electrisim_build_dc_dc_converters(net):
                     'switching_khz': safe_float(el.get('switching_khz'), 20.0),
                     'current_limit_pu': safe_float(el.get('current_limit_pu'), 1.2),
                     'c_out_mf': safe_float(el.get('c_out_mf'), 0.0),
+                    # smoothing: its output bus below this (pu), its store holds it (0: none)
+                    'hold_up_pu': min(max(safe_float(el.get('hold_up_pu'), 0.0), 0.0), 1.0),
                     **{k: max(safe_float(el.get(k), 0.0), 0.0)
                        for k in ('c_out_esr_mohm', 'c_out_esl_uh', 'c_in_esr_mohm', 'c_in_esl_uh')}},
         }
@@ -4172,6 +4174,8 @@ def _electrisim_build_ssts(net, Busbars):
                        'current_loop_hz': safe_float(el.get('current_loop_hz'), 500.0),
                        'dcdc_switching_khz': safe_float(el.get('dcdc_switching_khz'), 20.0),
                        'current_limit_pu': safe_float(el.get('current_limit_pu'), 1.2),
+                       # its link below this (pu), its DC/DC stage pauses rather than block (0: none)
+                       'ride_through_pu': min(max(safe_float(el.get('ride_through_pu'), 0.0), 0.0), 1.0),
                        # its stages' capacitors' ESR and ESL (0: none), for it and the DC fault study
                        **{k: max(safe_float(el.get(k), 0.0), 0.0) for k in (
                            'rect_dc_link_esr_mohm', 'rect_dc_link_esl_uh', 'dcdc_c_in_esr_mohm', 'dcdc_c_in_esl_uh',
