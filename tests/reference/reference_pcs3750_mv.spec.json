@@ -1268,7 +1268,9 @@
    "intertrip_bus": "true",
    "bdiff_i_a": 60,
    "bdiff_slope": 0.3,
-   "bdiff_t_s": 0.05
+   "bdiff_t_s": 0.05,
+   "alarm_ie_a": 20,
+   "alarm_t_s": 10
   },
   {
    "id": "ZZ2_CB",
@@ -1282,7 +1284,9 @@
    "intertrip_bus": "true",
    "bdiff_i_a": 60,
    "bdiff_slope": 0.3,
-   "bdiff_t_s": 0.05
+   "bdiff_t_s": 0.05,
+   "alarm_ie_a": 20,
+   "alarm_t_s": 10
   },
   {
    "id": "C_BB1_BB2_BB1",

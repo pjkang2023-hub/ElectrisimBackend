@@ -181,7 +181,10 @@ zone's CTs, their currents at the bus summed against `bdiff_i_a` plus
 `bdiff_t_s` (0.05 s). And `intertrip_bus` (`false`, `true`): when its relay
 trips, every other breaker at its bus trips too. A grounding transformer's
 breaker takes a relay as well: an `earth_fault` relay there reads the
-transformer's neutral current (3 I0).
+transformer's neutral current (3 I0). And `alarm_ie_a` (0: none),
+`alarm_t_s` (10 s): an earth-fault alarm stage - its residual current (a
+grounding transformer's neutral current) over `alarm_ie_a` for `alarm_t_s`
+raises an alarm, which the protection study lists, and trips nothing.
 Any other field on a switch is refused.
 
 ## DC and microgrid elements

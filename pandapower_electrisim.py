@@ -17813,6 +17813,10 @@ def _prot_collect_switch_protection_specs(in_data):
             'bdiff_t_s': _prot_safe_float(row.get('bdiff_t_s')),
             # Intertrip: when its relay trips, every other breaker at its bus trips too.
             'intertrip_bus': str(row.get('intertrip_bus', 'false') or 'false').strip().lower() == 'true',
+            # An earth-fault alarm (a sensitive 51N's alarm stage): its residual current - a grounding
+            # transformer's neutral current - over alarm_ie_a for alarm_t_s raises an alarm, and trips nothing.
+            'alarm_ie_a': _prot_safe_float(row.get('alarm_ie_a')),
+            'alarm_t_s': _prot_safe_float(row.get('alarm_t_s')),
             'z1_r_ohm': _prot_safe_float(row.get('z1_r_ohm')),
             'z1_x_ohm': _prot_safe_float(row.get('z1_x_ohm')),
             'z2_r_ohm': _prot_safe_float(row.get('z2_r_ohm')),
@@ -18934,6 +18938,22 @@ def _prot_diff_zone_currents(net_sc, sw_idx, fault_bus_idx=None):
             'terminals_a': [round(float(m), 3) for m in mags]}
 
 
+def _prot_residual_a(net_sc, sw_idx, fault_type, fault_bus_idx, current_a):
+    """
+    A switch's residual current in a fault: for a 1ph SC its Ikss, the fault-loop
+    current, is the available estimate; a grounding transformer's breaker its
+    neutral current, 3 I0. Other fault types have none.
+    """
+    if fault_type != '1ph':
+        return 0.0
+    residual_a = current_a
+    sw_row = net_sc.switch.loc[int(sw_idx)] if sw_idx is not None else None
+    if sw_row is not None and sw_row['et'] == 't' and _electrisim_is_grounding(net_sc.trafo, int(sw_row['element'])):
+        neutral_ka = _prot_grounding_neutral_ka(net_sc, int(sw_row['element']), fault_bus_idx)
+        residual_a = neutral_ka * 1000.0 if neutral_ka is not None else residual_a
+    return residual_a
+
+
 def _prot_custom_trip_rows(net_sc, attach_summaries, fault_type, fault_bus_idx=None):
     """Evaluate IEEE, earth-fault, directional, 87 and 21 devices from SC results."""
     rows = []
@@ -18957,15 +18977,7 @@ def _prot_custom_trip_rows(net_sc, attach_summaries, fault_type, fault_bus_idx=N
                     detail['multiple'] = current_a / pickup
         elif evaluator == _PROTECTION_KIND_EARTH_FAULT:
             pickup = spec.get('I_e_a') or 1.0
-            # For a 1ph SC, Ikss is the fault-loop current and is the available
-            # residual-current estimate. Other fault types have no residual trip.
-            # A grounding transformer's breaker: its neutral current, 3 I0.
-            residual_a = current_a if fault_type == '1ph' else 0.0
-            sw_row = net_sc.switch.loc[int(summary['sw_idx'])] if summary.get('sw_idx') is not None else None
-            if (fault_type == '1ph' and sw_row is not None and sw_row['et'] == 't'
-                    and _electrisim_is_grounding(net_sc.trafo, int(sw_row['element']))):
-                neutral_ka = _prot_grounding_neutral_ka(net_sc, int(sw_row['element']), fault_bus_idx)
-                residual_a = neutral_ka * 1000.0 if neutral_ka is not None else residual_a
+            residual_a = _prot_residual_a(net_sc, summary.get('sw_idx'), fault_type, fault_bus_idx, current_a)
             tripped = residual_a >= pickup
             t_trip = spec.get('t_e', 0.2) if tripped else None
             detail = {'residual_current_a': residual_a, 'pickup_a': pickup}
@@ -19134,7 +19146,24 @@ def _prot_native_and_custom_trips(net_sc, attach_summaries, summary_by_sw_idx, f
     _prot_apply_bus_differential(net_sc, trip, fault_bus_idx)
     _prot_apply_arc_detection(net_sc, trip, fault_bus_idx)
     _prot_apply_intertrip(net_sc, trip)
+    _prot_apply_alarms(net_sc, trip, fault_type, fault_bus_idx)
     return trip, warning
+
+
+def _prot_apply_alarms(net_sc, trip, fault_type, fault_bus_idx):
+    """Each alarm stage's pick-up in the fault; whether it is raised - the fault still on at its delay - is graded later."""
+    settings = net_sc.get('_electrisim_alarms') if hasattr(net_sc, 'get') else None
+    if not settings:
+        return
+    for row in trip:
+        cfg = settings.get(row.get('switch_idx'))
+        if cfg is None:
+            continue
+        ka = _prot_switch_current_ka(net_sc, row['switch_idx'], fault_bus_idx)
+        residual = _prot_residual_a(net_sc, row['switch_idx'], fault_type, fault_bus_idx,
+                                    float(ka) * 1000.0 if ka is not None else 0.0) or 0.0
+        row['alarm_stage'] = {'current_a': float(residual), 'pickup_a': cfg['i_a'], 't_s': cfg['t_s'],
+                              'picked_up': residual >= cfg['i_a']}
 
 
 def _prot_bus_terminal_current(net_sc, sw_idx):
@@ -19280,7 +19309,7 @@ def _prot_grounding_duty(net, scenario, rows, trip_time):
             return 100.0 * (g['neutral_a'] / g['i_rated_a']) ** 2 * t / g['t_rated_s']
 
         t1, t2 = flowing(t_clear), flowing(t_backup)
-        out.append({'label': g['label'], 'neutral_a': g['neutral_a'], 'i_rated_a': g['i_rated_a'],
+        out.append({'label': g['label'], 'trafo_idx': g['trafo_idx'], 'neutral_a': g['neutral_a'], 'i_rated_a': g['i_rated_a'],
                     't_rated_s': g['t_rated_s'], 't_flowing_s': t1, 't_flowing_backup_s': t2,
                     'duty_percent': duty(t1), 'duty_backup_percent': duty(t2),
                     'continuous': t1 is None, 'continuous_backup': t2 is None})
@@ -19333,7 +19362,7 @@ def _prot_arc_detection_settings(net, specs):
     the network for every scenario - with those of its bus differential (87B)
     and intertrip add-ons.
     """
-    out, bus_diff, intertrip = {}, {}, set()
+    out, bus_diff, intertrip, alarms = {}, {}, set(), {}
     for sw_id, spec in specs.items():
         sw_idx = _prot_resolve_sw_idx_for_id(net, sw_id)
         if sw_idx is None:
@@ -19348,9 +19377,13 @@ def _prot_arc_detection_settings(net, specs):
                                      't_s': float(spec.get('bdiff_t_s') if spec.get('bdiff_t_s') is not None else 0.05)}
         if spec.get('intertrip_bus'):
             intertrip.add(int(sw_idx))
+        if spec.get('alarm_ie_a') and spec['alarm_ie_a'] > 0:
+            alarms[int(sw_idx)] = {'i_a': float(spec['alarm_ie_a']),
+                                   't_s': float(spec.get('alarm_t_s') if spec.get('alarm_t_s') is not None else 10.0)}
     net['_electrisim_arc_detection'] = out
     net['_electrisim_bus_diff'] = bus_diff
     net['_electrisim_intertrip'] = intertrip
+    net['_electrisim_alarms'] = alarms
     return out
 
 
@@ -19781,7 +19814,20 @@ def _prot_check_miscoordination(net, scenarios, t_diff, bf_times=None):
         scenario['clearing_time_s'] = t_clear
         scenario['breaker_failure'] = _prot_breaker_failure(
             net, adjacency, element_node, fault_node, sources, rows, primaries, trip_time, label, bf_times or {})
+        raised = {}
+        for key, row in rows.items():
+            stage = row.get('alarm_stage')
+            if not stage:
+                continue
+            ends = [t for t in (scenario.get('clearing_time_s'), trip_time(key)) if t is not None]
+            stage['raised'] = bool(stage['picked_up'] and (not ends or min(ends) >= stage['t_s'] - 1e-9))
+            if stage['raised']:
+                raised[key] = label(key)
+        scenario['alarms'] = sorted(raised.values())
         scenario['grounding_duty'] = _prot_grounding_duty(net, scenario, rows, trip_time)
+        for d in scenario['grounding_duty']:
+            d['alarmed'] = any(net.switch.at[k, 'et'] == 't' and int(net.switch.at[k, 'element']) == d['trafo_idx']
+                               for k in raised)
 
         common = {
             'sc_line_id': scenario.get('sc_line_id'),
@@ -20001,6 +20047,10 @@ def protection_coordination(net, prot_params, in_data):
                                                           if d.get('duty_backup_percent') is not None], default=None),
                 'n_grounding_continuous': sum(1 for sc in scenarios for d in sc.get('grounding_duty') or []
                                               if d.get('continuous')),
+                # ...and of those, the ones no alarm stage flags; and every alarm raised.
+                'n_grounding_continuous_unalarmed': sum(1 for sc in scenarios for d in sc.get('grounding_duty') or []
+                                                        if d.get('continuous') and not d.get('alarmed')),
+                'n_alarms': sum(len(sc.get('alarms') or []) for sc in scenarios),
                 'grading_mode': grading_mode,
                 'fault_location_mode': fault_location_mode,
                 't_diff_s': t_diff,

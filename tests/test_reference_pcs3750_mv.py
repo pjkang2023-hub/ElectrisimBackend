@@ -1431,3 +1431,33 @@ def test_a_high_resistance_earth_fault(client, quiet, r_fault, cleared, backed_u
     assert out['summary']['n_grounding_continuous'] == (0 if cleared else 2)
     if not cleared:
         assert all(30 < d['neutral_a'] < 40 for d in duty.values())
+
+
+# --- Phase 39: an alarm on the zigzags' neutrals ----------------------------------------------------
+
+@pytest.mark.parametrize('r_fault, alone, alarmed', [(0, False, False), (300, False, True), (500, False, True),
+                                                     (700, False, False), (1000, True, True), (1500, True, False)])
+def test_the_zigzags_neutral_alarm(client, quiet, r_fault, alone, alarmed):
+    """
+    Each zigzag's neutral has an alarm stage, 20 A for 10 s, which trips
+    nothing. A bolted fault 87B clears in 0.05 s: no alarm. Under the relays'
+    ~71 A nothing trips, and the alarm flags it down to 20 A a zigzag - a BB2
+    earth fault through 500 ohm with both in (21 A each), through 1000 ohm with
+    one alone (21 A). What it does not flag is at most its 20 A: 5 % of the
+    400 A, within a zigzag's common continuous rating.
+    """
+    scheme = (lambda n: {'closed': 'false'} if n == 'Zigzag breaker' else None) if alone else None
+    out, sc, duty = _earth_fault_on_bb2(client, quiet, r_fault, scheme)
+    s = out['summary']
+    assert len(duty) == (1 if alone else 2)
+    for d in duty.values():
+        assert d['alarmed'] == alarmed
+        if d['continuous'] and not alarmed:
+            assert d['neutral_a'] < 20
+    if r_fault == 0:
+        assert sc['alarms'] == [] and s['n_grounding_continuous'] == 0
+    else:
+        assert s['n_grounding_continuous'] == len(duty)
+        assert s['n_grounding_continuous_unalarmed'] == (0 if alarmed else len(duty))
+        zigzags = {'Zigzag 2 breaker'} if alone else {'Zigzag breaker', 'Zigzag 2 breaker'}
+        assert set(sc['alarms']) == (zigzags if alarmed else set())
