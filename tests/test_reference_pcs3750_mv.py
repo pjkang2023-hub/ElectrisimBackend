@@ -830,10 +830,11 @@ def test_arc_flash_cleared_by_the_relays(client, quiet):
     31 kA (27 kA reduced) and takes it in 0.1 s - 6.4 cal/cm2, PPE 2. A
     backbone arc: the inverters' 27s on every T2 LV breaker part it from
     them at 0.55 s (Ralph Lee, 2.8 cal/cm2); a hall's, its feeder breaker at
-    0.15 s. The 505 V load side: its own grid-forming inverters feed it and
-    no relay parts them from the bus - IEEE 1584's 2 s, PPE 4, until their
-    own controls stop them (a vendor question). Nor is the utility's breaker
-    at the POI on the diagram.
+    0.15 s. The 505 V load side: its own grid-forming inverters feed it, and
+    no breaker parts them from the bus; the T2 LV breaker's arc-flash
+    detection (Phase 35) sees the arc's light and the backbone's 10.9 kA,
+    trips in 0.01 s and blocks them - 0.06 s, 1.2 cal/cm2, PPE 0. The
+    utility's breaker at the POI is not on the diagram.
     """
     rows, warnings = _arc_by_relays(client, quiet)
     for b in (1, 2, 3):
@@ -850,10 +851,55 @@ def test_arc_flash_cleared_by_the_relays(client, quiet):
         h = rows[f'Hall {b} 34.5 kV']
         assert h['clearing_relays'] == [f'Hall {b} feeder breaker'] and h['clearing_time_used_s'] == pytest.approx(0.15)
         ld = rows[f'Block {b} 505 V load side']
-        assert ld['grid_on_bus'] and ld['relay_time_s'] is None and ld['clearing_time_used_s'] == 2.0
-        assert len(ld['inverter_sources']) == 4 and str(ld['ppe_category']) == '4'
+        assert ld['clearing_relays'] == [f'Block {b} T2 LV breaker'] and ld['inverters_blocked']
+        assert ld['relay_time_s'] == pytest.approx(0.01) and ld['relay_time_min_s'] == pytest.approx(0.01)
+        assert ld['clearing_time_used_s'] == pytest.approx(0.06)
+        assert ld['incident_energy_cal_cm2'] == pytest.approx(1.2, abs=0.05) and str(ld['ppe_category']) == '0'
     assert rows['Utility 34.5 kV POI']['grid_on_bus'] and rows['Utility 34.5 kV POI']['clearing_time_used_s'] == 2.0
+    assert [w for w in warnings if 'feeds its arc' in w] == [
+        'Bus Utility 34.5 kV POI: a grid, machine or grid-forming inverter on the bus feeds its arc, no relay '
+        'parting it from the bus; 2 s used.']
+
+
+def test_without_arc_detection_the_load_sides_arc_burns_on(client, quiet):
+    """
+    The T2 LV breakers without their arc-flash detection: the load side's own
+    inverters feed its arc and no relay parts them from the bus - IEEE 1584's
+    2 s, 39 cal/cm2, PPE 4. Their 27 does not see it either: the arc holds the
+    bus near 0.7 pu.
+    """
+    rows, warnings = _arc_by_relays(client, quiet, lambda n: {'arc_t_s': '0'} if ' T2 LV ' in n else None)
+    for b in (1, 2, 3):
+        ld = rows[f'Block {b} 505 V load side']
+        assert ld['grid_on_bus'] and ld['relay_time_s'] is None and ld['clearing_time_used_s'] == 2.0
+        assert len(ld['inverter_sources']) == 4 and not ld['inverters_blocked']
+        assert 38.5 < ld['incident_energy_cal_cm2'] < 40 and str(ld['ppe_category']) == '4'
     assert sum('feeds its arc, no relay parting it' in w for w in warnings) == 4
+
+
+def test_arc_detection_sees_only_its_own_switchboard(client, quiet):
+    """
+    A bolted fault on Block 1's 505 V load side: the T2 LV breaker's arc-flash
+    detection sees its light and the backbone's 10.9 kA, over its 6.43 kA,
+    and trips in 0.01 s, before its 27; the other blocks' T2 LV breakers are
+    dark and their 27s take 0.5 s. A backbone fault is dark to all of them.
+    """
+    out = _protection(client, quiet, mode='bus', bus='Block 1 505 V load side')
+    (sc,) = out['scenarios']
+    t = _trips(sc)
+    own = t['Block 1 T2 LV breaker']
+    assert own['t_trip_s'] == pytest.approx(0.01) and own['arc_detection']['tripped_first']
+    assert own['arc_detection']['light'] and own['arc_detection']['current_a'] == pytest.approx(10913, abs=20)
+    assert sc['clearing_time_s'] == pytest.approx(0.01)
+    for k in (2, 3):
+        other = t[f'Block {k} T2 LV breaker']
+        assert not other['arc_detection']['light'] and other['t_trip_s'] == pytest.approx(0.5)
+    assert out['summary']['n_miscoordination'] == 0 and out['summary']['n_unwanted_trips'] == 0
+    out = _protection(client, quiet, mode='bus', bus='Load backbone 1')
+    (sc,) = out['scenarios']
+    for k in (1, 2, 3):
+        row = _trips(sc)[f'Block {k} T2 LV breaker']
+        assert not row['arc_detection']['tripped'] and row['t_trip_s'] == pytest.approx(0.5)
 
 
 def test_without_the_instantaneous_the_grid_side_arc_lasts_half_a_second(client, quiet):

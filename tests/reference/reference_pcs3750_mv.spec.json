@@ -1391,7 +1391,10 @@
    "name": "Block 1 T2 LV breaker",
    "protection_type": "undervoltage",
    "U_pu": 0.5,
-   "t_u": 0.5
+   "t_u": 0.5,
+   "arc_t_s": 0.01,
+   "arc_i_a": 6430,
+   "arc_block_pcs": "true"
   },
   {
    "id": "B2_T1_HV",
@@ -1442,7 +1445,10 @@
    "name": "Block 2 T2 LV breaker",
    "protection_type": "undervoltage",
    "U_pu": 0.5,
-   "t_u": 0.5
+   "t_u": 0.5,
+   "arc_t_s": 0.01,
+   "arc_i_a": 6430,
+   "arc_block_pcs": "true"
   },
   {
    "id": "B3_T1_HV",
@@ -1493,7 +1499,10 @@
    "name": "Block 3 T2 LV breaker",
    "protection_type": "undervoltage",
    "U_pu": 0.5,
-   "t_u": 0.5
+   "t_u": 0.5,
+   "arc_t_s": 0.01,
+   "arc_i_a": 6430,
+   "arc_block_pcs": "true"
   },
   {
    "id": "F1_CB",

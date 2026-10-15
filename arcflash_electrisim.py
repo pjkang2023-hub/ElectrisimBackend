@@ -234,6 +234,7 @@ def _relay_clearing_times(net, buses, in_data, in_data_full, opening_s, max_s):
             "relay_fault_min_ka": red.get("ikss_ka"),
             "inverter_sources": full.get("inverters_on_bus") or [],
             "grid_on_bus": bool(full.get("grid_on_bus")),
+            "inverters_blocked": bool(full.get("inverters_blocked")),
             "error": full.get("error") or red.get("error"),
         })
     return out
@@ -419,7 +420,7 @@ def arcflash(net, in_data, in_data_full=None):
                                 f"no relay parting it from the bus; {max_clearing_s:g} s used.")
             elif relays.get("relay_time_s") is None or relays.get("relay_time_min_s") is None:
                 warnings.append(f"Bus {name}: no relay clears its arc; {max_clearing_s:g} s used.")
-            if relays.get("inverter_sources"):
+            if relays.get("inverter_sources") and not relays.get("inverters_blocked"):
                 warnings.append(f"Bus {name}: inverters on the bus feed its arc until their own controls stop them "
                                 f"- the relays' time does not cover them.")
 

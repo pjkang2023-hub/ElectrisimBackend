@@ -17731,6 +17731,12 @@ def _prot_collect_switch_protection_specs(in_data):
             't_u': _prot_safe_float(row.get('t_u')),
             # Breaker failure (50BF): its breaker's own setting, whatever relay trips it.
             'bf_time_s': _prot_safe_float(row.get('bf_time_s')),
+            # Arc-flash detection (50ARC), beside whatever relay the breaker has: light in its
+            # switchboard (the switch's bus) and current through it, tripping in arc_t_s; it can
+            # also block the grid-forming inverters on that bus.
+            'arc_t_s': _prot_safe_float(row.get('arc_t_s')),
+            'arc_i_a': _prot_safe_float(row.get('arc_i_a')),
+            'arc_block_pcs': str(row.get('arc_block_pcs', 'false') or 'false').strip().lower() == 'true',
             'z1_r_ohm': _prot_safe_float(row.get('z1_r_ohm')),
             'z1_x_ohm': _prot_safe_float(row.get('z1_x_ohm')),
             'z2_r_ohm': _prot_safe_float(row.get('z2_r_ohm')),
@@ -19043,7 +19049,46 @@ def _prot_native_and_custom_trips(net_sc, attach_summaries, summary_by_sw_idx, f
             continue
         trip.append(row)
         reported.add(row.get('switch_idx'))
+    _prot_apply_arc_detection(net_sc, trip, fault_bus_idx)
     return trip, warning
+
+
+def _prot_arc_detection_settings(net, specs):
+    """{switch index: settings} of the breakers with arc-flash detection, kept on the network for every scenario."""
+    out = {}
+    for sw_id, spec in specs.items():
+        t = spec.get('arc_t_s')
+        sw_idx = _prot_resolve_sw_idx_for_id(net, sw_id) if t and t > 0 else None
+        if sw_idx is not None:
+            out[int(sw_idx)] = {'t_s': float(t), 'i_a': float(spec.get('arc_i_a') or 0.0),
+                                'block_pcs': bool(spec.get('arc_block_pcs'))}
+    net['_electrisim_arc_detection'] = out
+    return out
+
+
+def _prot_apply_arc_detection(net_sc, trip, fault_bus_idx):
+    """
+    A breaker's arc-flash detection: an arc in its switchboard - a fault on its
+    switch's bus - lights its sensors, and with the current through it at its
+    pickup (0: light alone) it trips in its own time, whatever its other relay
+    does. A fault anywhere else is dark to it.
+    """
+    settings = net_sc.get('_electrisim_arc_detection') if hasattr(net_sc, 'get') else None
+    if not settings or fault_bus_idx is None:
+        return
+    for row in trip:
+        arc = settings.get(row.get('switch_idx'))
+        if arc is None:
+            continue
+        sw_bus = int(net_sc.switch.at[int(row['switch_idx']), 'bus'])
+        current_ka = _prot_switch_current_ka(net_sc, row['switch_idx'], fault_bus_idx)
+        current_a = float(current_ka) * 1000.0 if current_ka is not None else 0.0
+        seen = sw_bus == int(fault_bus_idx) and current_a >= arc['i_a']
+        row['arc_detection'] = {'light': sw_bus == int(fault_bus_idx), 'current_a': current_a,
+                                'pickup_a': arc['i_a'], 'tripped': seen, 'blocks_inverters': arc['block_pcs']}
+        if seen and (not row.get('tripped') or row.get('t_trip_s') is None or row['t_trip_s'] > arc['t_s']):
+            row['tripped'], row['t_trip_s'] = True, arc['t_s']
+            row['arc_detection']['tripped_first'] = True
 
 
 def _prot_split_line(net, line, fraction):
@@ -19556,6 +19601,7 @@ def protection_coordination(net, prot_params, in_data):
         _prot_ensure_bus_geodata(net)
 
         attach_summaries = _attach_protection_devices(net, specs, grading_mode)
+        _prot_arc_detection_settings(net, specs)
         attached_count = sum(1 for s in attach_summaries if s.get('attached'))
         not_computed_count = sum(1 for s in attach_summaries if s.get('not_computed'))
 
@@ -19702,6 +19748,7 @@ def protection_arc_clearing_times(net, in_data, prot_params, faults):
     _prot_ensure_bus_geodata(net)
     grading_mode = str(prot_params.get('grading_mode', 'auto') or 'auto').lower()
     attach_summaries = _attach_protection_devices(net, specs, grading_mode)
+    arc_detection = _prot_arc_detection_settings(net, specs)
     bolted = {}
     scenarios = []
     for bus_idx, ratio in faults:
@@ -19732,38 +19779,55 @@ def protection_arc_clearing_times(net, in_data, prot_params, faults):
     # (static generators, storage) feed it their limited current until their own controls stop
     # them: counted, a rooftop PV behind a feeder left every feeder's arc uncleared.
     adjacency, element_node = _prot_element_graph(net)
-    grid_sources = set()
+    # An arc-flash relay that blocks its bus's grid-forming inverters stops them when it trips.
+    # (An island's PCS standing in as its short-circuit source, an External Grid, is the inverter.)
+    as_source = {int(r['as_source']) for r in getattr(net, 'electrisim_pcs', None) or [] if r.get('as_source') is not None}
+    fixed_sources = set()
     for table in ('ext_grid', 'gen'):
         data = getattr(net, table, None)
         if data is not None and not data.empty:
-            grid_sources |= {('bus', int(r['bus'])) for _, r in data.iterrows() if bool(r.get('in_service', True))}
-    grid_sources |= {('bus', int(r['bus'])) for r in getattr(net, 'electrisim_pcs', None) or []
-                     if r.get('in_service') and r.get('control') == 'grid_forming'}
+            fixed_sources |= {('bus', int(r['bus'])) for i, r in data.iterrows() if bool(r.get('in_service', True))
+                              and not (table == 'ext_grid' and int(i) in as_source)
+                              and r.get('electrisim_pcs') is not True}
+    pcs_sources = {('bus', int(r['bus'])) for r in getattr(net, 'electrisim_pcs', None) or []
+                   if r.get('in_service') and r.get('control') == 'grid_forming'}
+    grid_sources = fixed_sources | pcs_sources
     out = []
     for scenario in scenarios:
         if scenario.get('error'):
             out.append({'error': scenario['error']})
             continue
         fault = ('bus', int(scenario['fault_bus_idx']))
-        feeding = grid_sources - {fault}
+        blocked = set()
+
+        def live():
+            return (fixed_sources | (pcs_sources - blocked)) - {fault}
+
+        def fed_on_bus():
+            return fault in fixed_sources or (fault in pcs_sources and fault not in blocked)
+
         cut = {k: set(v) for k, v in adjacency.items()}
         opened, t_off = [], None
         trips = sorted(((float(r['t_trip_s']), r) for r in scenario.get('trip', [])
                         if r.get('tripped') and r.get('t_trip_s') is not None), key=lambda x: x[0])
         # The grid, a machine or a grid-forming inverter on the faulted bus feeds it whatever the
-        # relays do: its own breaker is not on the diagram, or none parts an inverter from its bus.
-        grid_on_bus = fault in grid_sources
-        if not grid_on_bus and not _prot_reaches_source(cut, fault, feeding, ()):
+        # relays do: its own breaker is not on the diagram, or none parts an inverter from its bus -
+        # unless an arc-flash relay there blocks the inverters.
+        grid_on_bus = fed_on_bus()
+        if not fed_on_bus() and not _prot_reaches_source(cut, fault, live(), ()):
             t_off = 0.0
         for t, r in trips:
-            if t_off is not None or grid_on_bus:
+            if t_off is not None:
                 break
             sw = net.switch.loc[int(r['switch_idx'])]
             a, b = ('bus', int(sw['bus'])), element_node(sw['et'], sw['element'])
             cut.get(a, set()).discard(b)
             cut.get(b, set()).discard(a)
             opened.append(r.get('user_friendly_name') or str(r['switch_idx']))
-            if not _prot_reaches_source(cut, fault, feeding, ()):
+            arc = arc_detection.get(int(r['switch_idx']))
+            if arc and arc['block_pcs'] and (r.get('arc_detection') or {}).get('tripped'):
+                blocked.add(a)
+            if not fed_on_bus() and not _prot_reaches_source(cut, fault, live(), ()):
                 t_off = t
         out.append({
             't_relay_s': t_off,
@@ -19773,7 +19837,8 @@ def protection_arc_clearing_times(net, in_data, prot_params, faults):
                               for r in scenario.get('trip', []) if r.get('tripped')),
             'unprotected_sources': scenario.get('unprotected_sources') or [],
             # Inverters on the faulted bus itself: no relay parts them from the arc.
-            'grid_on_bus': grid_on_bus,
+            'grid_on_bus': grid_on_bus and t_off is None,
+            'inverters_blocked': bool(blocked & {fault}),
             'inverters_on_bus': sorted(set(
                 [str(r.get('label') or r.get('name')) for r in getattr(net, 'electrisim_pcs', None) or []
                  if r.get('in_service') and int(r['bus']) == fault[1]]

@@ -170,7 +170,11 @@ the protection coordination study. `protection_type` (`none` default, `ocr`,
 And with any of them, `bf_time_s`: breaker-failure protection (50BF) - if the
 breaker fails to open, every other breaker at its bus trips this long after
 its relay did; the study reports what clears each fault with each primary
-breaker failed.
+breaker failed. And `arc_t_s` (0: none): arc-flash detection (50ARC) - an arc
+in the switch's switchboard (a fault on its bus) with the current through it
+at `arc_i_a` or more (0: light alone) trips it in `arc_t_s`; `arc_block_pcs`
+(`false`, `true`) also blocks the grid-forming inverters on that bus, which
+the arc flash study's clearing by the relays counts.
 Any other field on a switch is refused.
 
 ## DC and microgrid elements

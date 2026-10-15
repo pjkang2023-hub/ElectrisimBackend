@@ -213,12 +213,13 @@ SWITCH_PROTECTION_CHOICES = {
     'pickup_mode': ('auto', 'manual'),
     'fuse_mode': ('library', 'custom'),
     'directional_mode': ('forward', 'reverse'),
+    'arc_block_pcs': ('false', 'true'),
 }
 SWITCH_PROTECTION_NUMBERS = (
     'tms', 't_grade', 't_gg', 't_g', 't_diff', 'I_s_a', 'I_g_a', 'I_gg_a', 'overload_factor',
     'ct_current_factor', 'safety_factor', 'rated_i_a', 'I_e_a', 't_e', 'I_diff_a', 'diff_slope',
     'z1_r_ohm', 'z1_x_ohm', 't_z1', 'z2_r_ohm', 'z2_x_ohm', 't_z2', 'z3_r_ohm', 'z3_x_ohm', 't_z3',
-    'U_pu', 't_u', 'bf_time_s',
+    'U_pu', 't_u', 'bf_time_s', 'arc_t_s', 'arc_i_a',
 )
 SWITCH_PROTECTION_TEXT = ('fuse_type', 'fuse_custom_name', 'fuse_custom_std_json')
 SWITCH_PROTECTION_FIELDS = tuple(SWITCH_PROTECTION_CHOICES) + SWITCH_PROTECTION_NUMBERS + SWITCH_PROTECTION_TEXT
