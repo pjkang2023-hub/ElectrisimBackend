@@ -214,12 +214,13 @@ SWITCH_PROTECTION_CHOICES = {
     'fuse_mode': ('library', 'custom'),
     'directional_mode': ('forward', 'reverse'),
     'arc_block_pcs': ('false', 'true'),
+    'intertrip_bus': ('false', 'true'),
 }
 SWITCH_PROTECTION_NUMBERS = (
     'tms', 't_grade', 't_gg', 't_g', 't_diff', 'I_s_a', 'I_g_a', 'I_gg_a', 'overload_factor',
     'ct_current_factor', 'safety_factor', 'rated_i_a', 'I_e_a', 't_e', 'I_diff_a', 'diff_slope',
     'z1_r_ohm', 'z1_x_ohm', 't_z1', 'z2_r_ohm', 'z2_x_ohm', 't_z2', 'z3_r_ohm', 'z3_x_ohm', 't_z3',
-    'U_pu', 't_u', 'bf_time_s', 'arc_t_s', 'arc_i_a',
+    'U_pu', 't_u', 'bf_time_s', 'arc_t_s', 'arc_i_a', 'bdiff_i_a', 'bdiff_slope', 'bdiff_t_s',
 )
 SWITCH_PROTECTION_TEXT = ('fuse_type', 'fuse_custom_name', 'fuse_custom_std_json')
 SWITCH_PROTECTION_FIELDS = tuple(SWITCH_PROTECTION_CHOICES) + SWITCH_PROTECTION_NUMBERS + SWITCH_PROTECTION_TEXT
@@ -826,10 +827,9 @@ def build_network(spec):
             # A grounding transformer is the DC and microgrid layer's, not pandapower's.
             if isinstance(row, dict) and row.get('id'):
                 used_ids.add(str(row['id']).strip())
-            if isinstance(row, dict) and any(k in SWITCH_PROTECTION_FIELDS for k in row):
-                problems.append(f"switches[{i}] ({row.get('id')}): a grounding transformer's breaker takes no "
-                                "protection: the protection study cannot evaluate a relay on it")
-                continue
+            # Its relay - a neutral overcurrent (51N) reading the grounding transformer's 3 I0 - as any switch's.
+            if isinstance(row, dict):
+                row = {**row, '_protection': _switch_protection(row, f"switches[{i}] ({row.get('id')})", problems)}
             grounding_switches.append((i, row))
             continue
         ident = _ident(row, i, 'Sw', problems, used_ids)

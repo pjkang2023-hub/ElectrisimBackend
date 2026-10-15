@@ -17737,6 +17737,13 @@ def _prot_collect_switch_protection_specs(in_data):
             'arc_t_s': _prot_safe_float(row.get('arc_t_s')),
             'arc_i_a': _prot_safe_float(row.get('arc_i_a')),
             'arc_block_pcs': str(row.get('arc_block_pcs', 'false') or 'false').strip().lower() == 'true',
+            # Bus differential (87B): the breakers at a switchboard with bdiff_i_a set are its zone's
+            # CTs, their currents summed, and trip together in bdiff_t_s.
+            'bdiff_i_a': _prot_safe_float(row.get('bdiff_i_a')),
+            'bdiff_slope': _prot_safe_float(row.get('bdiff_slope')),
+            'bdiff_t_s': _prot_safe_float(row.get('bdiff_t_s')),
+            # Intertrip: when its relay trips, every other breaker at its bus trips too.
+            'intertrip_bus': str(row.get('intertrip_bus', 'false') or 'false').strip().lower() == 'true',
             'z1_r_ohm': _prot_safe_float(row.get('z1_r_ohm')),
             'z1_x_ohm': _prot_safe_float(row.get('z1_x_ohm')),
             'z2_r_ohm': _prot_safe_float(row.get('z2_r_ohm')),
@@ -18883,7 +18890,13 @@ def _prot_custom_trip_rows(net_sc, attach_summaries, fault_type, fault_bus_idx=N
             pickup = spec.get('I_e_a') or 1.0
             # For a 1ph SC, Ikss is the fault-loop current and is the available
             # residual-current estimate. Other fault types have no residual trip.
+            # A grounding transformer's breaker: its neutral current, 3 I0.
             residual_a = current_a if fault_type == '1ph' else 0.0
+            sw_row = net_sc.switch.loc[int(summary['sw_idx'])] if summary.get('sw_idx') is not None else None
+            if (fault_type == '1ph' and sw_row is not None and sw_row['et'] == 't'
+                    and _electrisim_is_grounding(net_sc.trafo, int(sw_row['element']))):
+                neutral_ka = _prot_grounding_neutral_ka(net_sc, int(sw_row['element']), fault_bus_idx)
+                residual_a = neutral_ka * 1000.0 if neutral_ka is not None else residual_a
             tripped = residual_a >= pickup
             t_trip = spec.get('t_e', 0.2) if tripped else None
             detail = {'residual_current_a': residual_a, 'pickup_a': pickup}
@@ -19049,20 +19062,168 @@ def _prot_native_and_custom_trips(net_sc, attach_summaries, summary_by_sw_idx, f
             continue
         trip.append(row)
         reported.add(row.get('switch_idx'))
+    _prot_apply_bus_differential(net_sc, trip, fault_bus_idx)
     _prot_apply_arc_detection(net_sc, trip, fault_bus_idx)
+    _prot_apply_intertrip(net_sc, trip)
     return trip, warning
 
 
+def _prot_bus_terminal_current(net_sc, sw_idx):
+    """(kA, angle deg or NaN): a breaker's current at its own bus, from its line's or transformer's branch result."""
+    sw = net_sc.switch.loc[int(sw_idx)]
+    et, element, bus = str(sw['et']), int(sw['element']), int(sw['bus'])
+    sides = {'l': ('line', 'res_line_sc', (('from_bus', 'from'), ('to_bus', 'to'))),
+             't': ('trafo', 'res_trafo_sc', (('hv_bus', 'hv'), ('lv_bus', 'lv')))}.get(et)
+    if sides is None:
+        return None
+    table, res_name, cols = sides
+    res = getattr(net_sc, res_name, None)
+    if res is None or element not in res.index or element not in net_sc[table].index:
+        return None
+    for bus_col, side in cols:
+        if int(net_sc[table].at[element, bus_col]) == bus:
+            return _prot_num(res.at[element, f'ikss_{side}_ka']), _prot_num(res.at[element, f'ikss_{side}_degree'], np.nan)
+    return None
+
+
+def _prot_apply_bus_differential(net_sc, trip, fault_bus_idx):
+    """
+    Bus differential (87B): each switchboard whose breakers carry it sums their
+    currents at the bus - the fault's current for a fault on it, nothing
+    (what goes in comes out) for one beyond - against its pickup plus slope x
+    the restraint, half their magnitudes' sum, and trips them all. An earth
+    fault's branch results have no angles: then their magnitudes, added for a
+    fault on the bus and differenced for one beyond, as the 87L and 87T do.
+    """
+    settings = net_sc.get('_electrisim_bus_diff') if hasattr(net_sc, 'get') else None
+    if not settings:
+        return
+    rows = {row.get('switch_idx'): row for row in trip}
+    zones = {}
+    for sw_idx, cfg in settings.items():
+        if sw_idx in net_sc.switch.index and bool(net_sc.switch.at[sw_idx, 'closed']):
+            zones.setdefault(int(net_sc.switch.at[sw_idx, 'bus']), []).append(sw_idx)
+    for bus, members in zones.items():
+        currents = [(i, _prot_bus_terminal_current(net_sc, i)) for i in members]
+        mags = [abs(c[0]) * 1e3 if c else 0.0 for _, c in currents]
+        phasors = all(np.isfinite(c[1]) for _, c in currents if c and abs(c[0]) > 0)
+        inside = fault_bus_idx is not None and int(fault_bus_idx) == bus
+        if phasors:
+            operate = abs(sum(m * np.exp(1j * np.radians(c[1])) for m, (_, c) in zip(mags, currents) if m > 0))
+        elif inside:
+            operate = sum(mags)
+        else:
+            operate = abs(2.0 * max(mags) - sum(mags)) if mags else 0.0
+        restraint = sum(mags) / 2.0
+        for i in members:
+            cfg = settings[i]
+            pickup, slope = cfg['i_a'], cfg['slope']
+            seen = operate >= pickup + slope * restraint
+            row = rows.get(i)
+            if row is None:
+                continue
+            row['bus_differential'] = {'bus_idx': bus, 'i_operate_a': float(operate), 'i_restraint_a': float(restraint),
+                                       'pickup_a': pickup, 'slope': slope, 'phasors': bool(phasors), 'tripped': bool(seen),
+                                       'terminals_a': [round(float(m), 3) for m in mags]}
+            if seen and (not row.get('tripped') or row.get('t_trip_s') is None or row['t_trip_s'] > cfg['t_s']):
+                row['tripped'], row['t_trip_s'] = True, cfg['t_s']
+                row['bus_differential']['tripped_first'] = True
+
+
+def _prot_apply_intertrip(net_sc, trip):
+    """A breaker with intertrip: when it trips, so does every other breaker at its bus - a row added for one with no relay."""
+    flagged = net_sc.get('_electrisim_intertrip') if hasattr(net_sc, 'get') else None
+    if not flagged:
+        return
+    rows = {row.get('switch_idx'): row for row in trip}
+    for sw_idx in sorted(flagged):
+        row = rows.get(sw_idx)
+        if not row or not row.get('tripped') or row.get('t_trip_s') is None:
+            continue
+        t, bus = float(row['t_trip_s']), int(net_sc.switch.at[sw_idx, 'bus'])
+        source = row.get('user_friendly_name') or str(sw_idx)
+        for other in net_sc.switch.index[(net_sc.switch['bus'] == bus) & (net_sc.switch['closed'] == True)]:
+            other = int(other)
+            if other == sw_idx:
+                continue
+            target = rows.get(other)
+            if target is None:
+                name = net_sc.switch.at[other, 'name']
+                target = {'switch_idx': other, 'switch_id': None, 'switch_name': name,
+                          'user_friendly_name': (getattr(net_sc, 'user_friendly_names', None) or {}).get(name, name),
+                          'device': 'Intertrip', 'device_kind': 'Intertrip', 'is_fuse': False,
+                          'tripped': False, 't_trip_s': None, 'evaluation': {}}
+                trip.append(target)
+                rows[other] = target
+            if not target.get('tripped') or target.get('t_trip_s') is None or target['t_trip_s'] > t:
+                target['tripped'], target['t_trip_s'] = True, t
+                target['intertrip_from'] = source
+
+
+def _prot_grounding_neutral_ka(net_sc, trafo_idx, fault_bus_idx):
+    """
+    A grounding transformer's neutral current (3 I0) in an earth fault: the
+    fault's current shared by the grounding transformers it reaches through
+    lines, by their zero-sequence admittance. pandapower's single-phase branch
+    results carry no zero sequence - a zigzag read 0 A - and the cables' z0 is
+    small beside a resistance-limited zigzag's (0.1 against some 50 ohm), so
+    the zero-sequence voltage is about the same at each.
+    """
+    if fault_bus_idx is None or 'electrisim_grounding' not in net_sc.trafo.columns:
+        return None
+    i_f = _prot_extract_short_circuit_at_bus(net_sc, fault_bus_idx).get('ikss_ka')
+    if not i_f:
+        return None
+    import networkx as nx
+    graph = nx.Graph()
+    graph.add_nodes_from(int(b) for b in net_sc.bus.index)
+    for i, line in net_sc.line.iterrows():
+        if bool(line['in_service']):
+            graph.add_edge(int(line['from_bus']), int(line['to_bus']))
+    for _, sw in net_sc.switch.iterrows():
+        if sw['et'] == 'b' and bool(sw['closed']):
+            graph.add_edge(int(sw['bus']), int(sw['element']))
+    for _, sw in net_sc.switch.iterrows():
+        if sw['et'] == 'l' and not bool(sw['closed']) and graph.has_edge(*(int(net_sc.line.at[int(sw['element']), c]) for c in ('from_bus', 'to_bus'))):
+            graph.remove_edge(*(int(net_sc.line.at[int(sw['element']), c]) for c in ('from_bus', 'to_bus')))
+    reach = nx.node_connected_component(graph, int(fault_bus_idx))
+    admittance = {}
+    for i in net_sc.trafo.index[net_sc.trafo['electrisim_grounding'] == True]:
+        if not bool(net_sc.trafo.at[i, 'in_service']) or int(net_sc.trafo.at[i, 'hv_bus']) not in reach:
+            continue
+        r = _prot_num(net_sc.trafo.at[i, 'electrisim_gt_r0']) + 3.0 * _prot_num(net_sc.trafo.at[i, 'electrisim_gt_r_n'])
+        x = _prot_num(net_sc.trafo.at[i, 'electrisim_gt_x0']) + 3.0 * _prot_num(net_sc.trafo.at[i, 'electrisim_gt_x_n'])
+        admittance[int(i)] = 1.0 / complex(r, x) if abs(complex(r, x)) > 0 else 0.0
+    total = sum(admittance.values())
+    if int(trafo_idx) not in admittance or abs(total) == 0:
+        return 0.0
+    return float(i_f) * abs(admittance[int(trafo_idx)] / total)
+
+
 def _prot_arc_detection_settings(net, specs):
-    """{switch index: settings} of the breakers with arc-flash detection, kept on the network for every scenario."""
-    out = {}
+    """
+    {switch index: settings} of the breakers with arc-flash detection, kept on
+    the network for every scenario - with those of its bus differential (87B)
+    and intertrip add-ons.
+    """
+    out, bus_diff, intertrip = {}, {}, set()
     for sw_id, spec in specs.items():
+        sw_idx = _prot_resolve_sw_idx_for_id(net, sw_id)
+        if sw_idx is None:
+            continue
         t = spec.get('arc_t_s')
-        sw_idx = _prot_resolve_sw_idx_for_id(net, sw_id) if t and t > 0 else None
-        if sw_idx is not None:
+        if t and t > 0:
             out[int(sw_idx)] = {'t_s': float(t), 'i_a': float(spec.get('arc_i_a') or 0.0),
                                 'block_pcs': bool(spec.get('arc_block_pcs'))}
+        if spec.get('bdiff_i_a') and spec['bdiff_i_a'] > 0:
+            bus_diff[int(sw_idx)] = {'i_a': float(spec['bdiff_i_a']),
+                                     'slope': float(spec.get('bdiff_slope') if spec.get('bdiff_slope') is not None else 0.3),
+                                     't_s': float(spec.get('bdiff_t_s') if spec.get('bdiff_t_s') is not None else 0.05)}
+        if spec.get('intertrip_bus'):
+            intertrip.add(int(sw_idx))
     net['_electrisim_arc_detection'] = out
+    net['_electrisim_bus_diff'] = bus_diff
+    net['_electrisim_intertrip'] = intertrip
     return out
 
 
@@ -19518,10 +19679,13 @@ def _prot_check_miscoordination(net, scenarios, t_diff, bf_times=None):
                     'topology_path': True,
                 })
         graded = set(primaries) | {b for bs in backups.values() for b in bs}
+        # A breaker on a bus inside the fault's zone only parts an element from the faulted bus, which its
+        # primaries leave dead anyway: a bus differential (87B) opening its feeder and zigzag is not unwanted.
+        on_faulted_bus = {k for k in rows if ('bus', int(net.switch.at[k, 'bus'])) in zone}
         if t_clear is not None:
             for key in rows:
                 t = trip_time(key)
-                if key in graded or t is None or t >= t_clear + t_diff - 1e-9:
+                if key in graded or key in on_faulted_bus or t is None or t >= t_clear + t_diff - 1e-9:
                     continue
                 unwanted.append({
                     **common,

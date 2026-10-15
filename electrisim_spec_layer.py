@@ -502,11 +502,12 @@ def grounding_switch_rows(switches, ac_buses, layer, problems):
             problems.append(f'{where}: bus={bus!r} is not a bus id')
             continue
         ident = str(row.get('id') or f'Sw_gt{n}')
+        protection = {k: _text(v) for k, v in (row.get('_protection') or {}).items()}
         layer['rows'].append({'typ': f'Switch{n}', 'name': ident, 'id': ident,
                               'userFriendlyName': str(row.get('name') or ident), 'bus': bus, 'element': element,
-                              'et': 't', 'closed': _text(bool(row.get('closed', True))), 'type': 'CB'})
+                              'et': 't', 'closed': _text(bool(row.get('closed', True))), 'type': 'CB', **protection})
         layer['elements'].append({'kind': 'Switch', 'id': ident, 'name': str(row.get('name') or ident),
-                                  'attributes': {'closed': _text(bool(row.get('closed', True)))},
+                                  'attributes': {'closed': _text(bool(row.get('closed', True))), **protection},
                                   'connections': {'bus': {'id': bus, 'ac_bus_name': ac_buses[bus][0]},
                                                   'element': {'id': element}}})
         n += 1

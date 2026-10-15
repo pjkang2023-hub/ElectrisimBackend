@@ -744,7 +744,9 @@ def test_line_differential_clears_each_backbone_cable(client, quiet, fault, k, i
     own undervoltage trip on each T2's 505 V breaker (Phase 28: 0.5 pu for
     0.5 s) sees its bus at 0.08 pu in a three-phase fault, at either limit: the
     backup, which takes the whole island off. An earth fault it does not see
-    (nor can the study: pandapower gives no phase voltages for one).
+    (nor can the study: pandapower gives no phase voltages for one); its
+    backup is the zigzags' neutral overcurrent (Phase 36), 2 s, tripping their
+    switchboards.
     """
     out = _protection(client, quiet, fault=fault, k_pcs=k)
     s = out['summary']
@@ -754,9 +756,14 @@ def test_line_differential_clears_each_backbone_cable(client, quiet, fault, k, i
         t = _trips(sc)
         tripped = {n for n, r in t.items() if r['tripped'] and r['t_trip_s'] < 0.3}
         backup = {n for n, r in t.items() if r['tripped'] and r['t_trip_s'] >= 0.3}
-        assert backup == ({f'Block {b} T2 LV breaker' for b in (1, 2, 3)} if fault == '3ph' else set())
-        for n in backup:
-            assert t[n]['t_trip_s'] == 0.5 and t[n]['evaluation']['vm_pu'] < 0.1
+        if fault == '3ph':
+            assert backup == {f'Block {b} T2 LV breaker' for b in (1, 2, 3)}
+            for n in backup:
+                assert t[n]['t_trip_s'] == 0.5 and t[n]['evaluation']['vm_pu'] < 0.1
+        else:
+            assert {'Zigzag breaker', 'Zigzag 2 breaker'} <= backup
+            for n in backup:
+                assert t[n]['t_trip_s'] == 2.0 and (n.startswith('Zigzag') or t[n].get('intertrip_from', '').startswith('Zigzag'))
         line = sc['fault_label'].split(',')[0]
         if line.startswith('Backbone cable'):
             a, b = line.split()[-1].split('-')
@@ -780,11 +787,12 @@ def test_definite_time_earth_fault_cannot_tell_the_ring_cables_apart(client, qui
     healthy cables too - and their relays trip with the faulted cable's.
     """
     def scheme(name):
+        off = {'bdiff_i_a': '0', 'intertrip_bus': 'false'}
         if 'feeder' in name:
-            return {'protection_type': 'earth_fault', 'I_e_a': '40', 't_e': '0.1'}
+            return {'protection_type': 'earth_fault', 'I_e_a': '40', 't_e': '0.1', **off}
         if name.startswith('Cable'):
-            return {'protection_type': 'earth_fault', 'I_e_a': '40', 't_e': '0.4'}
-        return None
+            return {'protection_type': 'earth_fault', 'I_e_a': '40', 't_e': '0.4', **off}
+        return {'protection_type': 'none', **off}
     out = _protection(client, quiet, scheme, fault='1ph')
     unwanted = {(u['fault_label'].split(',')[0], u['user_friendly_name']) for u in out['unwanted_trips']}
     assert out['summary']['n_unwanted_trips'] == 12
@@ -830,7 +838,8 @@ def test_arc_flash_cleared_by_the_relays(client, quiet):
     31 kA (27 kA reduced) and takes it in 0.1 s - 6.4 cal/cm2, PPE 2. A
     backbone arc: the inverters' 27s on every T2 LV breaker part it from
     them at 0.55 s (Ralph Lee, 2.8 cal/cm2); a hall's, its feeder breaker at
-    0.15 s. The 505 V load side: its own grid-forming inverters feed it, and
+    0.15 s - and since Phase 36 the backbone's arcs are its switchboards'
+    bus differential's, 0.05 s. The 505 V load side: its own grid-forming inverters feed it, and
     no breaker parts them from the bus; the T2 LV breaker's arc-flash
     detection (Phase 35) sees the arc's light and the backbone's 10.9 kA,
     trips in 0.01 s and blocks them - 0.06 s, 1.2 cal/cm2, PPE 0. The
@@ -845,9 +854,9 @@ def test_arc_flash_cleared_by_the_relays(client, quiet):
         assert g['incident_energy_cal_cm2'] == pytest.approx(6.4, abs=0.1) and str(g['ppe_category']) == '2'
         assert 20 < g['relay_fault_min_ka'] < g['relay_fault_ka'] < g['ikss_ka']
         bb = rows[f'Load backbone {b}']
-        assert sorted(bb['clearing_relays']) == [f'Block {k} T2 LV breaker' for k in (1, 2, 3)]
-        assert bb['clearing_time_used_s'] == pytest.approx(0.55)
-        assert bb['incident_energy_cal_cm2'] == pytest.approx(2.8, abs=0.1)
+        assert f'Block {b} T2 HV breaker' in bb['clearing_relays'] and bb['relay_time_s'] == pytest.approx(0.05)
+        assert bb['clearing_time_used_s'] == pytest.approx(0.1)
+        assert bb['incident_energy_cal_cm2'] == pytest.approx(2.8 * 0.1 / 0.55, abs=0.05)
         h = rows[f'Hall {b} 34.5 kV']
         assert h['clearing_relays'] == [f'Hall {b} feeder breaker'] and h['clearing_time_used_s'] == pytest.approx(0.15)
         ld = rows[f'Block {b} 505 V load side']
@@ -963,7 +972,7 @@ def test_gs11_breakers_against_a_quadrant_bus_fault(client, quiet):
 
 # --- Backup protection (Phase 28) ---------------------------------------------------------------
 
-@pytest.mark.parametrize('fault, by_relays', [('3ph', 0.5), ('1ph', None)])
+@pytest.mark.parametrize('fault, by_relays', [('3ph', 0.5), ('1ph', {'BB1': 2.0, 'BB3': 2.0, 'BB2': None})])
 def test_a_failed_backbone_breaker(client, quiet, fault, by_relays):
     """
     Each primary breaker failing to open in turn. Breaker-failure protection
@@ -972,7 +981,9 @@ def test_a_failed_backbone_breaker(client, quiet, fault, by_relays):
     switchboard's block, hall and other cable with it - at BB1 the zigzag's
     breaker too, which leaves the backbone ungrounded. Without it, the backup
     is the inverters' undervoltage trip at 0.5 s for a three-phase fault, which
-    takes the whole island off - and nothing for an earth fault.
+    takes the whole island off; for an earth fault, at the zigzags'
+    switchboards, their neutral overcurrent (Phase 36) tripping the
+    switchboard at 2 s - at BB2, with no zigzag, nothing.
     """
     out = _protection(client, quiet, fault=fault)
     assert out['summary']['n_breaker_failure_uncleared'] == 0
@@ -982,8 +993,9 @@ def test_a_failed_backbone_breaker(client, quiet, fault, by_relays):
         assert len(rows) == (2 if line.startswith('Backbone cable') else 1)
         for name, r in rows.items():
             assert r['t_clear_50bf_s'] == pytest.approx(r['t_primary_s'] + 0.15)
-            assert r['t_clear_s'] == r['t_clear_50bf_s'] and r['t_clear_relays_s'] == by_relays
             bus = 'BB' + name[-1] if name.startswith('Cable') else f'BB{name.split()[1]}'
+            want = by_relays[bus] if isinstance(by_relays, dict) else by_relays
+            assert r['t_clear_s'] == r['t_clear_50bf_s'] and r['t_clear_relays_s'] == want
             n = bus[-1]
             # Every other breaker at its switchboard: the block's, the hall's, the cables'.
             at_bus = {f'Block {n} T2 HV breaker', f'Hall {n} feeder breaker'} | {
@@ -993,7 +1005,7 @@ def test_a_failed_backbone_breaker(client, quiet, fault, by_relays):
 
     bare = _protection(client, quiet, fault=fault, scheme=lambda name: {'bf_time_s': '0'})
     left = bare['summary']['n_breaker_failure_uncleared']
-    assert left == (0 if fault == '3ph' else 9)
+    assert left == (0 if fault == '3ph' else 3)
 
 
 def _emt_line_fault(client, quiet, buffers=False, ride_through=None, hold_up=None, **params):
@@ -1253,3 +1265,77 @@ def test_a_utility_outage_after_the_lost_rectifier(client, quiet, dc1, short_ste
     assert mg['unserved_mwh'] == pytest.approx(unserved, abs=0.2)
     if dc1 == 0.0:
         assert max(soc['Block 1 DC1']) < 0.5
+
+
+# --- Phase 36: bus differential on the backbone's switchboards; the zigzags' neutral overcurrent ---------
+
+@pytest.mark.parametrize('fault', ['1ph', '3ph'])
+@pytest.mark.parametrize('n', [1, 2, 3])
+def test_bus_differential_clears_a_switchboard_fault(client, quiet, fault, n):
+    """
+    A fault on a backbone switchboard itself: the 87L and 87T see their own
+    cables and transformers, the feeders theirs, the 27s three-phase faults
+    only - an earth fault there stood, the zigzags carrying it inside their
+    10 s. The switchboard's bus differential (87B: every breaker at it a CT,
+    60 A, 30 %) sees the fault's whole current and opens them all in 0.05 s;
+    the other switchboards' sum nothing. No miscoordination, no needless trip.
+    """
+    out = _protection(client, quiet, mode='bus', bus=f'Load backbone {n}', fault=fault)
+    (sc,) = out['scenarios']
+    t = _trips(sc)
+    bus = f'BB{n}'
+    at_bus = {f'Block {n} T2 HV breaker', f'Hall {n} feeder breaker'} | {
+        f'Cable {a}-{b} breaker at {bus}' for a, b in (('BB1', 'BB2'), ('BB2', 'BB3'), ('BB3', 'BB1'))
+        if bus in (a, b)} | {'BB1': {'Zigzag breaker'}, 'BB3': {'Zigzag 2 breaker'}}.get(bus, set())
+    fast = {k for k, r in t.items() if r['tripped'] and r['t_trip_s'] < 0.3}
+    assert fast == at_bus and sc['clearing_time_s'] == pytest.approx(0.05)
+    ik_a = sc['short_circuit']['ikss_ka'] * 1e3
+    for k in at_bus:
+        assert t[k]['bus_differential']['tripped'] and t[k]['bus_differential']['i_operate_a'] > 0.9 * ik_a
+    for k, r in t.items():
+        if r.get('bus_differential') and k not in at_bus:
+            assert r['bus_differential']['i_operate_a'] < 1.0 and not r['bus_differential']['tripped']
+    assert out['summary']['n_miscoordination'] == 0 and out['summary']['n_unwanted_trips'] == 0
+
+
+def test_the_zigzags_neutral_overcurrent_is_the_backup(client, quiet):
+    """
+    The zigzags' neutral current: the fault's 3 I0 shared by their zero-sequence
+    admittance - 150 A each for a backbone earth fault, 300 A in one with the
+    other's breaker open (pandapower's single-phase branch results carry no
+    zero sequence: a zigzag read 0 A). Their 51N, 100 A at 2 s, trips its
+    switchboard. Without 87B a fault on BB1 is cleared that way at 2 s - BB3's
+    switchboard opened needlessly with it - and a fault on BB2, with no zigzag,
+    is not: opening BB1 and BB3 leaves it on Block 2, ungrounded. 87B is the
+    switchboards' protection; the 51N keeps the zigzags inside their rating.
+    """
+    off = lambda name: {'bdiff_i_a': '0'}
+    out = _protection(client, quiet, off, mode='bus', bus='Load backbone 2', fault='1ph')
+    (sc,) = out['scenarios']
+    t = _trips(sc)
+    for z in ('Zigzag breaker', 'Zigzag 2 breaker'):
+        assert t[z]['evaluation']['residual_current_a'] == pytest.approx(150, abs=1) and t[z]['t_trip_s'] == 2.0
+    assert sc['clearing_time_s'] is None
+    out = _protection(client, quiet, off, mode='bus', bus='Load backbone 1', fault='1ph')
+    (sc,) = out['scenarios']
+    t = _trips(sc)
+    assert sc['clearing_time_s'] == 2.0
+    assert t['Block 1 T2 HV breaker']['intertrip_from'] == 'Zigzag breaker'
+    assert {u['user_friendly_name'] for u in out['unwanted_trips']} == {
+        'Zigzag 2 breaker', 'Cable BB2-BB3 breaker at BB3', 'Block 3 T2 HV breaker', 'Hall 3 feeder breaker'}
+    # One zigzag alone carries it all.
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_protection_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    cells = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
+    for v in p.values():
+        if isinstance(v, dict) and v.get('userFriendlyName') == 'Zigzag breaker':
+            v['closed'] = 'false'
+    p['0'] = {**p['0'], 'fault_type': '1ph', 'fault_location_mode': 'bus', 'fault_bus_id': cells['Load backbone 2'],
+              'user_email': 't@t'}
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    (sc,) = out['scenarios']
+    t = _trips(sc)
+    assert t['Zigzag 2 breaker']['evaluation']['residual_current_a'] == pytest.approx(
+        sc['short_circuit']['ikss_ka'] * 1e3, rel=1e-6)
+    assert sc['clearing_time_s'] == pytest.approx(0.05)

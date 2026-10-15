@@ -1261,14 +1261,28 @@
    "bus": "BB1",
    "element": "ZZ1",
    "et": "grounding_transformer",
-   "name": "Zigzag breaker"
+   "name": "Zigzag breaker",
+   "protection_type": "earth_fault",
+   "I_e_a": 100,
+   "t_e": 2.0,
+   "intertrip_bus": "true",
+   "bdiff_i_a": 60,
+   "bdiff_slope": 0.3,
+   "bdiff_t_s": 0.05
   },
   {
    "id": "ZZ2_CB",
    "bus": "BB3",
    "element": "ZZ2",
    "et": "grounding_transformer",
-   "name": "Zigzag 2 breaker"
+   "name": "Zigzag 2 breaker",
+   "protection_type": "earth_fault",
+   "I_e_a": 100,
+   "t_e": 2.0,
+   "intertrip_bus": "true",
+   "bdiff_i_a": 60,
+   "bdiff_slope": 0.3,
+   "bdiff_t_s": 0.05
   },
   {
    "id": "C_BB1_BB2_BB1",
@@ -1280,7 +1294,10 @@
    "I_diff_a": 60,
    "diff_slope": 0.3,
    "t_g": 0.05,
-   "bf_time_s": 0.15
+   "bf_time_s": 0.15,
+   "bdiff_i_a": 60,
+   "bdiff_slope": 0.3,
+   "bdiff_t_s": 0.05
   },
   {
    "id": "C_BB1_BB2_BB2",
@@ -1292,7 +1309,10 @@
    "I_diff_a": 60,
    "diff_slope": 0.3,
    "t_g": 0.05,
-   "bf_time_s": 0.15
+   "bf_time_s": 0.15,
+   "bdiff_i_a": 60,
+   "bdiff_slope": 0.3,
+   "bdiff_t_s": 0.05
   },
   {
    "id": "C_BB2_BB3_BB2",
@@ -1304,7 +1324,10 @@
    "I_diff_a": 60,
    "diff_slope": 0.3,
    "t_g": 0.05,
-   "bf_time_s": 0.15
+   "bf_time_s": 0.15,
+   "bdiff_i_a": 60,
+   "bdiff_slope": 0.3,
+   "bdiff_t_s": 0.05
   },
   {
    "id": "C_BB2_BB3_BB3",
@@ -1316,7 +1339,10 @@
    "I_diff_a": 60,
    "diff_slope": 0.3,
    "t_g": 0.05,
-   "bf_time_s": 0.15
+   "bf_time_s": 0.15,
+   "bdiff_i_a": 60,
+   "bdiff_slope": 0.3,
+   "bdiff_t_s": 0.05
   },
   {
    "id": "C_BB3_BB1_BB3",
@@ -1328,7 +1354,10 @@
    "I_diff_a": 60,
    "diff_slope": 0.3,
    "t_g": 0.05,
-   "bf_time_s": 0.15
+   "bf_time_s": 0.15,
+   "bdiff_i_a": 60,
+   "bdiff_slope": 0.3,
+   "bdiff_t_s": 0.05
   },
   {
    "id": "C_BB3_BB1_BB1",
@@ -1340,7 +1369,10 @@
    "I_diff_a": 60,
    "diff_slope": 0.3,
    "t_g": 0.05,
-   "bf_time_s": 0.15
+   "bf_time_s": 0.15,
+   "bdiff_i_a": 60,
+   "bdiff_slope": 0.3,
+   "bdiff_t_s": 0.05
   },
   {
    "id": "B1_T1_HV",
@@ -1381,7 +1413,10 @@
    "I_diff_a": 20,
    "diff_slope": 0.3,
    "t_g": 0.05,
-   "bf_time_s": 0.15
+   "bf_time_s": 0.15,
+   "bdiff_i_a": 60,
+   "bdiff_slope": 0.3,
+   "bdiff_t_s": 0.05
   },
   {
    "id": "B1_T2_LV",
@@ -1435,7 +1470,10 @@
    "I_diff_a": 20,
    "diff_slope": 0.3,
    "t_g": 0.05,
-   "bf_time_s": 0.15
+   "bf_time_s": 0.15,
+   "bdiff_i_a": 60,
+   "bdiff_slope": 0.3,
+   "bdiff_t_s": 0.05
   },
   {
    "id": "B2_T2_LV",
@@ -1489,7 +1527,10 @@
    "I_diff_a": 20,
    "diff_slope": 0.3,
    "t_g": 0.05,
-   "bf_time_s": 0.15
+   "bf_time_s": 0.15,
+   "bdiff_i_a": 60,
+   "bdiff_slope": 0.3,
+   "bdiff_t_s": 0.05
   },
   {
    "id": "B3_T2_LV",
@@ -1518,7 +1559,10 @@
    "t_g": 0.1,
    "I_gg_a": 2000,
    "t_gg": 0.05,
-   "bf_time_s": 0.15
+   "bf_time_s": 0.15,
+   "bdiff_i_a": 60,
+   "bdiff_slope": 0.3,
+   "bdiff_t_s": 0.05
   },
   {
    "id": "F2_CB",
@@ -1534,7 +1578,10 @@
    "t_g": 0.1,
    "I_gg_a": 2000,
    "t_gg": 0.05,
-   "bf_time_s": 0.15
+   "bf_time_s": 0.15,
+   "bdiff_i_a": 60,
+   "bdiff_slope": 0.3,
+   "bdiff_t_s": 0.05
   },
   {
    "id": "F3_CB",
@@ -1550,7 +1597,10 @@
    "t_g": 0.1,
    "I_gg_a": 2000,
    "t_gg": 0.05,
-   "bf_time_s": 0.15
+   "bf_time_s": 0.15,
+   "bdiff_i_a": 60,
+   "bdiff_slope": 0.3,
+   "bdiff_t_s": 0.05
   }
  ],
  "dc_breakers": [

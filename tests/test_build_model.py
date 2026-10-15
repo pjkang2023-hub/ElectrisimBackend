@@ -384,13 +384,19 @@ def test_protection_problems_are_named(fields, problem):
     assert any(problem in p for p in problems_of(spec)), problems_of(spec)
 
 
-def test_a_grounding_transformers_breaker_takes_no_relay():
-    """The protection study cannot evaluate a relay there: refused rather than drawn and ignored."""
+def test_a_grounding_transformers_breaker_takes_a_relay():
+    """
+    Its neutral overcurrent (51N), which the protection study reads as the
+    transformer's 3 I0 (Phase 36): drawn on the breaker, its fields checked
+    as any switch's. It was refused while the study could not evaluate it.
+    """
     spec = substation()
     spec['grounding_transformers'] = [{'id': 'ZZ', 'bus': 'MV', 'vn_kv': 20}]
     spec['switches'].append({'id': 'ZZ_CB', 'bus': 'MV', 'element': 'ZZ', 'et': 'grounding_transformer',
-                             'protection_type': 'earth_fault', 'I_e_a': 40})
-    assert any("grounding transformer's breaker takes no protection" in p for p in problems_of(spec))
+                             'protection_type': 'earth_fault', 'I_e_a': 40, 'intertrip_bus': 'true'})
+    sld.build_network(spec)
+    spec['switches'][-1]['I_e_a'] = -1
+    assert any('ZZ_CB' in p and 'I_e_a must not be negative' in p for p in problems_of(spec))
 
 
 @pytest.mark.parametrize('fields, problem', [

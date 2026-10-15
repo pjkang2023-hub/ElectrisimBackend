@@ -174,7 +174,14 @@ breaker failed. And `arc_t_s` (0: none): arc-flash detection (50ARC) - an arc
 in the switch's switchboard (a fault on its bus) with the current through it
 at `arc_i_a` or more (0: light alone) trips it in `arc_t_s`; `arc_block_pcs`
 (`false`, `true`) also blocks the grid-forming inverters on that bus, which
-the arc flash study's clearing by the relays counts.
+the arc flash study's clearing by the relays counts. And `bdiff_i_a` (0:
+none): bus differential (87B) - the breakers at a bus with it set are its
+zone's CTs, their currents at the bus summed against `bdiff_i_a` plus
+`bdiff_slope` (0.3) x half their magnitudes' sum, all tripping in
+`bdiff_t_s` (0.05 s). And `intertrip_bus` (`false`, `true`): when its relay
+trips, every other breaker at its bus trips too. A grounding transformer's
+breaker takes a relay as well: an `earth_fault` relay there reads the
+transformer's neutral current (3 I0).
 Any other field on a switch is refused.
 
 ## DC and microgrid elements
