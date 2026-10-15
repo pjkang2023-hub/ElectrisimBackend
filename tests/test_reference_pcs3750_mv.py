@@ -276,8 +276,8 @@ def test_earth_faults(client, quiet, k, backbone_a):
     """
     The backbone's earth faults by IEC 60909, with both zigzags: 415 A at the
     inverters' 1.2 pu, 519 A at 1.5 pu - where their worst phase reaches its
-    limit (EMT, which builds their windings and controls: 427 A at 1.2 pu,
-    the limiter on). An earth fault draws I1 = I2 = I0; through T2's delta
+    limit (EMT, which builds their windings and controls: 367 A at 1.2 pu,
+    the SSTs drawing their load through it - Phase 41). An earth fault draws I1 = I2 = I0; through T2's delta
     each inverter's worst phase carries sqrt(3) of it, so the fault is
     3 x 1.2 x 190 A / sqrt(3). The zigzags alone would pass 750 A. With both
     out, 7.6 A: the cables' capacitance alone (EMT: 6.5 A). Before Phase 37
@@ -1111,13 +1111,15 @@ def test_emt_backbone_cable_fault_ridden_through(client, quiet, ride_through, ho
 
 # --- A second earthing source (Phase 30) -----------------------------------------------------------
 
-@pytest.mark.parametrize('zigzags, i_a', [(('Zigzag breaker', 'Zigzag 2 breaker'), 427), (('Zigzag 2 breaker',), 367),
+@pytest.mark.parametrize('zigzags, i_a', [(('Zigzag breaker', 'Zigzag 2 breaker'), 367), (('Zigzag 2 breaker',), 367),
                                           ((), 6.5)])
 def test_emt_backbone_earth_fault_needs_a_zigzag(client, quiet, zigzags, i_a):
     """
-    Phase a to ground on backbone 2 for 100 ms, in EMT. Both zigzags: 427 A,
-    shared. ZZ2 alone - after a failed breaker at BB1 has opened ZZ1's with the
-    rest of its switchboard - 367 A, inside its 400 A rating: a second
+    Phase a to ground on backbone 2 for 100 ms, in EMT. Both zigzags: 367 A,
+    shared - the inverters' worst phase at its limit, the SSTs drawing their
+    load through them all along (427 A before Phase 41, the positive sequence
+    alone limited). ZZ2 alone - after a failed breaker at BB1 has opened ZZ1's
+    with the rest of its switchboard - 367 A too, inside its 400 A rating: a second
     earthing source keeps the backbone grounded, and its relays seeing its
     earth faults. Neither: 6.5 A, the cables' capacitance, which nothing
     detects, and the backbone left displaced after the fault clears.
@@ -1480,13 +1482,14 @@ def _emt_bb2_fault(client, quiet, kind, k=None):
         return json.loads(client.post('/', json=p).get_data(as_text=True))['emt']
 
 
-@pytest.mark.parametrize('k, iec_a, emt_a', [(1.2, 239, 241), (1.5, 299, 301)])
+@pytest.mark.parametrize('k, iec_a, emt_a', [(1.2, 239, 239), (1.5, 299, 299)])
 def test_three_phase_backbone_fault_iec_against_emt(client, quiet, k, iec_a, emt_a):
     """
     A bolted three-phase fault on BB2 (Phase 40). Every inverter at its
-    current limit - EMT: each block's T2 81 A, 1.28 pu of its 63 A - with next
-    to no negative sequence: IEC's current sources at k I_rated are right, 1 %
-    under EMT. The relays' settings rest on it.
+    current limit - each block's T2 1.26 pu of its 63 A - with next to no
+    negative sequence: IEC's current sources at k I_rated are right, EMT within
+    1 % (241 A and 301 A before Phase 41 held each phase at its limit). The
+    relays' settings rest on it.
     """
     out, label, _ = _drawn_study(client, quiet, {**IEC, 'fault_type': '3ph'}, k_pcs=k)
     iec = _bus_ka(out, label)['Load backbone 2'] * 1e3
@@ -1497,24 +1500,23 @@ def test_three_phase_backbone_fault_iec_against_emt(client, quiet, k, iec_a, emt
         assert ph['i_sym_ka'] * 1e3 == pytest.approx(iec, rel=0.02)
 
 
-def test_line_to_line_backbone_fault_is_bracketed(client, quiet):
+def test_line_to_line_backbone_fault_at_the_phase_limit(client, quiet):
     """
-    A bolted line-to-line fault on BB2 draws I1 = -I2. EMT gives 262 A: its
-    grid-forming inverters limit their positive sequence, and the negative
-    sequence flows through their reactors unlimited - through T2's delta the
-    worst inverter phase reaches some 1.6 pu (2.35 kA peak against its limit's
-    1.93 kA). An inverter limiting each phase would hold its worst at k I_r:
-    sqrt(3) x 239.5 A / 2 = 207 A. IEC, 236 A, lies between. All three are some
-    3.5 times and more the 87L and 87B's 60 A: the settings stand; the
-    inverters' unbalanced current limiting is the vendor's (Section 8).
+    A bolted line-to-line fault on BB2 draws I1 = -I2; through T2's delta an
+    inverter's worst phase carries twice either. Held at k I_r there (Phase
+    41), IEC caps the fault at sqrt(3) x 239.5 A / 2 = 207.5 A - it read 236 A
+    with the positive sequence alone limited. EMT, each phase now held at its
+    limit too (its scaling down to 0.7), gives 185 A: the SSTs, their voltage
+    only halved, keep drawing their load through the inverters, which IEC
+    leaves out. Before, EMT's 262 A took the worst phase to some 1.6 pu. All
+    are over three times the 87L and 87B's 60 A: the settings stand.
     """
     out, label, _ = _drawn_study(client, quiet, {**IEC, 'fault_type': '2ph'}, k_pcs=1.2)
     iec = _bus_ka(out, label)['Load backbone 2'] * 1e3
     emt = _emt_bb2_fault(client, quiet, 'bc')
     i_emt = max(ph['i_sym_ka'] for ph in emt['ac']['fault']['phases']) * 1e3
-    per_phase_limit = math.sqrt(3) * 239.5 / 2
-    assert iec == pytest.approx(236, abs=2) and i_emt == pytest.approx(262, rel=0.01)
-    assert per_phase_limit < iec < i_emt
+    assert iec == pytest.approx(math.sqrt(3) * 239.5 / 2, rel=0.005)
+    assert i_emt == pytest.approx(185, rel=0.02) and i_emt < iec
     gfm = [c for c in emt['converters'] if 'GFM' in c['label']]
-    assert all(c['i_peak_ka'] > math.sqrt(2) * c['current_limit_ka'] for c in gfm)
-    assert per_phase_limit > 3.4 * 60
+    assert all(c['phase_limit_min'] < 0.8 and c['phase_limited_ms'] > 50 for c in gfm)
+    assert i_emt > 3 * 60

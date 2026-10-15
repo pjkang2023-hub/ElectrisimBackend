@@ -1177,6 +1177,10 @@ def _converter_result(conv, t_event):
            'rated_mva': _round(conv.s_rated / 1e6), 'current_limit_ka': _round(conv.i_max / SQ2 / 1e3),
            'blocked_ms': _round(conv.blocked_at * 1e3) if conv.blocked_at is not None else None,
            'limited_ms': _round(conv.limited_time * 1e3)}
+    if hasattr(conv, 'k_ph'):
+        # A grid-forming VSC's phases held at its limit (an unbalanced fault's negative sequence): how long, how far.
+        out['phase_limited_ms'] = _round(conv.phase_limited_time * 1e3)
+        out['phase_limit_min'] = _round(conv.k_ph_min)
     if len(tr):
         # P and Q over its first and its last cycle: a switching model's samples carry its ripple.
         cycle = 2 * math.pi / conv.w0

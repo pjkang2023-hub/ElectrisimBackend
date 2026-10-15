@@ -519,6 +519,15 @@ class GridFormingVsc(Vsc):
     integrator held), and its positive-sequence limit lowered by what it
     carries. Its DC side then carries the 2f power ripple the two sequences
     make together (P2 ~ 1.5 |V1| |I2|).
+
+    Each phase is held at its limit too, as its hardware would: in an
+    unbalanced fault the negative sequence its reactor carries is not the
+    positive sequence's limit's to see. Its worst phase's peak over the last
+    half cycle above its limit scales the voltage across its reactor back
+    further, an integrator over about a cycle; under it, the scaling comes
+    back. Its positive sequence alone limited, a backbone line-to-line fault
+    behind a delta-star took its worst phase to some 1.6 pu (262 A; 207 A at
+    the limit).
     """
 
     def __init__(self, builder, label, ac_bus, bus_dc, term, r_dc, block_pu, *, droop_pf=0.02, droop_qv=0.05,
@@ -542,6 +551,10 @@ class GridFormingVsc(Vsc):
         self.acc_2 = np.zeros(6)                  # their running integrals, and their history over a half cycle
         self.hist_2 = collections.deque([(0.0, np.zeros(6))])
         self.e2 = np.zeros(2)                     # the negative-sequence voltage it adds
+        self.k_ph = 1.0                           # its per-phase limit's scaling of the voltage across its reactor
+        self.k_ph_min = 1.0
+        self.phase_limited_time = 0.0
+        self.ph_hist = collections.deque()        # (t, |i_a|, |i_b|, |i_c|) over the last half cycle
         self.neg_trace = []                       # (t, |V2| / |V1|, |I2|)
         e_ph, v_ph, i_ph = self.e_ph0, self.v_ph0, self.i_ph0
         self.th_e = float(np.angle(e_ph))
@@ -620,6 +633,29 @@ class GridFormingVsc(Vsc):
         e = inverse_park(e_d, e_q, theta + 0.5 * self.w_gf * hold)
         if self.unbalance_control:
             e = e + inverse_park(self.e2[0], self.e2[1], -(theta + 0.5 * self.w_gf * hold))
+        # Each phase at its limit: its worst phase's amplitude, half its peak-to-peak over the last cycle
+        # (a fault's DC offset taken out: its peak alone, 1.4 times the limit at the fault's start, wound
+        # the scaling down to a third of the fault's current). The scaling moves to the limit over that
+        # amplitude, filtered over two cycles - the measurement a cycle behind.
+        self.ph_hist.append((t_s, np.array(i, dtype=float)))
+        cycle = 2.0 * math.pi / self.w0
+        while len(self.ph_hist) > 2 and self.ph_hist[0][0] < t_s - cycle:
+            self.ph_hist.popleft()
+        if self.ph_hist[-1][0] - self.ph_hist[0][0] >= 0.95 * cycle:
+            xs = np.array([x for _, x in self.ph_hist])
+            amp = float(np.max(xs.max(axis=0) - xs.min(axis=0))) / 2.0
+            target = min(self.k_ph * self.i_max / amp, 1.0) if amp > 0 else 1.0
+            if amp > self.i_max or self.k_ph < 1.0:
+                # Down over two cycles, back up over half of one: once the fault clears it returns at once.
+                tau_k = 2.0 * cycle if target < self.k_ph else 0.5 * cycle
+                self.k_ph += (max(target, 0.05) - self.k_ph) * min(dt / tau_k, 1.0)
+                if target >= 1.0 and self.k_ph > 0.995:
+                    self.k_ph = 1.0                   # back under its limit: done, not approaching 1 forever
+        if self.k_ph < 1.0:
+            e = v + (e - v) * self.k_ph
+            self.k_ph_min = min(self.k_ph_min, self.k_ph)
+            if self.k_ph < 0.99:
+                self.phase_limited_time += dt
         self.th_e = theta
         changed = False
         if self.model == 'switching':

@@ -36,18 +36,19 @@ def current_source_factor(ppci, ppci_0, buses):
     return np.where(np.isfinite(f), np.clip(f, 0.0, 1.5), 0.0)
 
 
-def _cap_at_converter_limits(net, ppci, ppci_0, buses):
+def _cap_at_converter_limits(net, ppci, ppci_0, buses, fault='1ph'):
     """
     An island of grid-forming PCS: each faulted bus's current no more than its
     inverters' current limit allows (pandapower_electrisim's
     _electrisim_pcs_1ph_limits, by bus) - the voltage sources' and the
     current sources' scaled alike, and the zero sequence's with them.
     """
-    if not len(buses) or not (hasattr(net, 'get') and net.get('_electrisim_pcs_1ph_islands')):
+    key = '_electrisim_pcs_1ph_islands' if fault == '1ph' else '_electrisim_pcs_islands'
+    if not len(buses) or not (hasattr(net, 'get') and net.get(key)):
         return
     from pandapower_electrisim import electrisim_pcs_1ph_limits
     cap = {}
-    for b, lim in electrisim_pcs_1ph_limits(net).items():
+    for b, lim in electrisim_pcs_1ph_limits(net, fault).items():
         try:
             (i,) = np.atleast_1d(_calc_sc._get_is_ppci_bus(net, np.array([int(b)], dtype=np.int64)))
         except Exception:
@@ -62,7 +63,8 @@ def _cap_at_converter_limits(net, ppci, ppci_0, buses):
             f = lim / total
             ppci['bus'][i, IKSS1] *= f
             ppci['bus'][i, IKSS2] *= f
-            ppci_0['bus'][i, IKSS1] *= f
+            if ppci_0 is not None:
+                ppci_0['bus'][i, IKSS1] *= f
 
 
 def install():
@@ -84,3 +86,13 @@ def install():
 
     _calc_ikss_1ph._electrisim_iec_current_sources = True
     _calc_sc._calc_ikss_1ph = _calc_ikss_1ph
+
+    # A line-to-line fault on a PCS island: capped where its inverters' worst phase reaches their limit.
+    original_ikss = _calc_sc._calc_ikss
+
+    def _calc_ikss(net, ppci, bus_idx):
+        original_ikss(net, ppci, bus_idx)
+        if net._options.get('fault') == '2ph':
+            _cap_at_converter_limits(net, ppci, None, np.atleast_1d(bus_idx), '2ph')
+
+    _calc_sc._calc_ikss = _calc_ikss

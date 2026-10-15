@@ -3839,15 +3839,20 @@ def _electrisim_pcs_islands(net):
 PCS_SC_REACTOR_PU = 0.15
 
 
-def electrisim_pcs_1ph_limits(net):
-    """{bus: kA} for every bus of each PCS island the network holds, from its topology as it stands - a line split at its fault."""
+def electrisim_pcs_1ph_limits(net, fault='1ph'):
+    """
+    {bus: kA} for every bus of each PCS island the network holds, from its
+    topology as it stands - a line split at its fault: an earth fault's
+    ('1ph') or a line-to-line fault's ('2ph') most.
+    """
     out = {}
-    for forming in net.get('_electrisim_pcs_1ph_islands') or []:
-        out.update(_electrisim_pcs_1ph_limits(net, None, forming))
+    key = '_electrisim_pcs_1ph_islands' if fault == '1ph' else '_electrisim_pcs_islands'
+    for forming in net.get(key) or []:
+        out.update(_electrisim_pcs_1ph_limits(net, None, forming, fault))
     return out
 
 
-def _electrisim_pcs_1ph_limits(net, comp, forming):
+def _electrisim_pcs_1ph_limits(net, comp, forming, fault='1ph'):
     """
     {bus: kA}: the most a single-phase fault at each bus of a PCS island can
     draw before its inverters reach their current limit. An earth fault draws
@@ -3857,6 +3862,12 @@ def _electrisim_pcs_1ph_limits(net, comp, forming):
     with none. Each converter then gives at most k I_rated over that, and the
     fault three times their sum. (EMT: a backbone with both zigzags, 427 A, at
     this limit; IEC behind 1/k pu in each sequence gave 312 A.)
+
+    A line-to-line fault ('2ph') draws I1 = -I2: a converter's worst phase
+    carries 2 max|sin(theta + n 120 deg)| of either - 2 through a delta-star,
+    sqrt(3) with none - and the faulted phases sqrt(3) times their sum. As the
+    positive sequence alone was limited, an island's 2ph fault through T2's
+    delta read 236 A, its inverters' worst phase some 1.6 pu (EMT, 262 A).
     """
     angle, queue = {}, []
     start = int(forming[0]['bus'])
@@ -3891,9 +3902,10 @@ def _electrisim_pcs_1ph_limits(net, comp, forming):
             if int(r['bus']) not in angle:
                 continue
             theta = math.radians(angle[b] - angle[int(r['bus'])])
-            m = 2.0 * max(abs(math.cos(theta + n * 2.0 * math.pi / 3.0)) for n in range(3))
+            wave = math.sin if fault == '2ph' else math.cos
+            m = 2.0 * max(abs(wave(theta + n * 2.0 * math.pi / 3.0)) for n in range(3))
             total += r['k'] * r['s_rated'] / (math.sqrt(3.0) * vn) / m
-        out[int(b)] = 3.0 * total
+        out[int(b)] = (math.sqrt(3.0) if fault == '2ph' else 3.0) * total
     return out
 
 
@@ -3945,9 +3957,10 @@ def _electrisim_pcs_sc_islands(net):
             net.ext_grid.at[g, 'id'] = rec_src['id']
             net.sgen.at[rec_src['index'], 'in_service'] = False
             rec_src['as_source'] = int(g)
+        island = [{'bus': int(r['bus']), 'k': r['k'], 's_rated': r['s_rated']} for r in forming]
+        net['_electrisim_pcs_islands'] = (net.get('_electrisim_pcs_islands') or []) + [island]
         if one_phase:
-            net['_electrisim_pcs_1ph_islands'] = (net.get('_electrisim_pcs_1ph_islands') or []) + [
-                [{'bus': int(r['bus']), 'k': r['k'], 's_rated': r['s_rated']} for r in forming]]
+            net['_electrisim_pcs_1ph_islands'] = (net.get('_electrisim_pcs_1ph_islands') or []) + [island]
             _electrisim_warn(net, f"{len(forming)} grid-forming PCS form an island no grid or machine feeds: in the "
                                   f"single-phase short circuit each is a source behind its reactor "
                                   f"({PCS_SC_REACTOR_PU:g} pu), with no zero sequence of its own, and an earth fault "
