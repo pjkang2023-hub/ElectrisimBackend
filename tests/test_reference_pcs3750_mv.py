@@ -33,6 +33,7 @@ import contextlib
 import copy
 import io
 import json
+import math
 import os
 
 import pytest
@@ -1461,3 +1462,59 @@ def test_the_zigzags_neutral_alarm(client, quiet, r_fault, alone, alarmed):
         assert s['n_grounding_continuous_unalarmed'] == (0 if alarmed else len(duty))
         zigzags = {'Zigzag 2 breaker'} if alone else {'Zigzag breaker', 'Zigzag 2 breaker'}
         assert set(sc['alarms']) == (zigzags if alarmed else set())
+
+
+# --- Phase 40: the backbone's phase faults, IEC against EMT ------------------------------------------
+
+def _emt_bb2_fault(client, quiet, kind, k=None):
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    for v in p.values():
+        if k and isinstance(v, dict) and str(v.get('typ', '')).startswith('PCS'):
+            v['current_limit_pu'] = str(k)
+    cell = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
+    p['0'] = {'typ': 'EmtStudy Parameters', 'frequency': '60', 'time_step_us': '20', 'user_email': 't@t',
+              'duration_ms': '150', 'ac_fault_bus': cell['Load backbone 2'], 'ac_fault_type': kind,
+              'ac_fault_resistance_ohm': '0.001', 'ac_fault_time_ms': '20', 'ac_fault_duration_ms': '100'}
+    with quiet():
+        return json.loads(client.post('/', json=p).get_data(as_text=True))['emt']
+
+
+@pytest.mark.parametrize('k, iec_a, emt_a', [(1.2, 239, 241), (1.5, 299, 301)])
+def test_three_phase_backbone_fault_iec_against_emt(client, quiet, k, iec_a, emt_a):
+    """
+    A bolted three-phase fault on BB2 (Phase 40). Every inverter at its
+    current limit - EMT: each block's T2 81 A, 1.28 pu of its 63 A - with next
+    to no negative sequence: IEC's current sources at k I_rated are right, 1 %
+    under EMT. The relays' settings rest on it.
+    """
+    out, label, _ = _drawn_study(client, quiet, {**IEC, 'fault_type': '3ph'}, k_pcs=k)
+    iec = _bus_ka(out, label)['Load backbone 2'] * 1e3
+    emt = _emt_bb2_fault(client, quiet, 'abc', k)
+    assert iec == pytest.approx(iec_a, abs=2)
+    for ph in emt['ac']['fault']['phases']:
+        assert ph['i_sym_ka'] * 1e3 == pytest.approx(emt_a, rel=0.01)
+        assert ph['i_sym_ka'] * 1e3 == pytest.approx(iec, rel=0.02)
+
+
+def test_line_to_line_backbone_fault_is_bracketed(client, quiet):
+    """
+    A bolted line-to-line fault on BB2 draws I1 = -I2. EMT gives 262 A: its
+    grid-forming inverters limit their positive sequence, and the negative
+    sequence flows through their reactors unlimited - through T2's delta the
+    worst inverter phase reaches some 1.6 pu (2.35 kA peak against its limit's
+    1.93 kA). An inverter limiting each phase would hold its worst at k I_r:
+    sqrt(3) x 239.5 A / 2 = 207 A. IEC, 236 A, lies between. All three are some
+    3.5 times and more the 87L and 87B's 60 A: the settings stand; the
+    inverters' unbalanced current limiting is the vendor's (Section 8).
+    """
+    out, label, _ = _drawn_study(client, quiet, {**IEC, 'fault_type': '2ph'}, k_pcs=1.2)
+    iec = _bus_ka(out, label)['Load backbone 2'] * 1e3
+    emt = _emt_bb2_fault(client, quiet, 'bc')
+    i_emt = max(ph['i_sym_ka'] for ph in emt['ac']['fault']['phases']) * 1e3
+    per_phase_limit = math.sqrt(3) * 239.5 / 2
+    assert iec == pytest.approx(236, abs=2) and i_emt == pytest.approx(262, rel=0.01)
+    assert per_phase_limit < iec < i_emt
+    gfm = [c for c in emt['converters'] if 'GFM' in c['label']]
+    assert all(c['i_peak_ka'] > math.sqrt(2) * c['current_limit_ka'] for c in gfm)
+    assert per_phase_limit > 3.4 * 60
