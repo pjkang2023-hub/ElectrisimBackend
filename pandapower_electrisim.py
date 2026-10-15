@@ -19229,6 +19229,64 @@ def _prot_apply_intertrip(net_sc, trip):
                 target['intertrip_from'] = source
 
 
+def _prot_grounding_neutrals(net_sc, fault_type, fault_bus_idx):
+    """An earth fault's grounding transformers: [{trafo index, label, neutral A, rating}] - their duty is graded later."""
+    if fault_type != '1ph' or 'electrisim_grounding' not in net_sc.trafo.columns:
+        return []
+    out = []
+    names = getattr(net_sc, 'user_friendly_names', None) or {}
+    for i in net_sc.trafo.index[net_sc.trafo['electrisim_grounding'] == True]:
+        if not bool(net_sc.trafo.at[i, 'in_service']):
+            continue
+        ka = _prot_grounding_neutral_ka(net_sc, int(i), fault_bus_idx)
+        name = net_sc.trafo.at[i, 'name']
+        out.append({'trafo_idx': int(i), 'name': name, 'label': names.get(name, name),
+                    'neutral_a': float(ka) * 1000.0 if ka is not None else None,
+                    'i_rated_a': float(net_sc.trafo.at[i, 'electrisim_gt_i_rated_a']),
+                    't_rated_s': float(net_sc.trafo.at[i, 'electrisim_gt_t_rated_s'])})
+    return out
+
+
+def _prot_grounding_duty(net, scenario, rows, trip_time):
+    """
+    Each grounding transformer's thermal duty in an earth fault: its neutral
+    current for as long as it flows - until the fault is cleared, or its own
+    breaker opens first - against its short-time rating, I^2 t over
+    I_rated^2 t_rated. With the primaries, and with a primary breaker failed
+    (the slowest of the breaker-failure cases); neither clearing it - a fault
+    under every relay's pickup - is a continuous duty, which its short-time
+    rating does not cover.
+    """
+    out = []
+    t_clear = scenario.get('clearing_time_s')
+    failures = scenario.get('breaker_failure') or []
+    t_backup = None
+    if failures:
+        times = [r.get('t_clear_s') for r in failures]
+        t_backup = None if any(t is None for t in times) else max(times)
+    elif t_clear is not None:
+        t_backup = t_clear
+    for g in scenario.get('grounding_neutral') or []:
+        own = [k for k in rows if net.switch.at[k, 'et'] == 't' and int(net.switch.at[k, 'element']) == g['trafo_idx']]
+        t_own = min([trip_time(k) for k in own if trip_time(k) is not None], default=None)
+
+        def flowing(t):
+            ends = [x for x in (t, t_own) if x is not None]
+            return min(ends) if ends else None
+
+        def duty(t):
+            if t is None or g['neutral_a'] is None or not g['i_rated_a'] or not g['t_rated_s']:
+                return None
+            return 100.0 * (g['neutral_a'] / g['i_rated_a']) ** 2 * t / g['t_rated_s']
+
+        t1, t2 = flowing(t_clear), flowing(t_backup)
+        out.append({'label': g['label'], 'neutral_a': g['neutral_a'], 'i_rated_a': g['i_rated_a'],
+                    't_rated_s': g['t_rated_s'], 't_flowing_s': t1, 't_flowing_backup_s': t2,
+                    'duty_percent': duty(t1), 'duty_backup_percent': duty(t2),
+                    'continuous': t1 is None, 'continuous_backup': t2 is None})
+    return out
+
+
 def _prot_grounding_neutral_ka(net_sc, trafo_idx, fault_bus_idx):
     """
     A grounding transformer's neutral current (3 I0) in an earth fault: the
@@ -19394,13 +19452,14 @@ def _prot_run_bus_scenario(base_net, fault_bus_idx, fault_type, case, attach_sum
         'case': case,
         'short_circuit': sc_info,
         'trip': trip,
+        'grounding_neutral': _prot_grounding_neutrals(net_sc, fault_type, fault_bus_idx),
     }
     if prot_warning:
         out['warning'] = prot_warning
     return out
 
 
-def _prot_run_scenario(base_net, sc_line_id, sc_fraction, fault_type, case, attach_summaries):
+def _prot_run_scenario(base_net, sc_line_id, sc_fraction, fault_type, case, attach_summaries, r_fault_ohm=0.0):
     """
     Run a single fault scenario on a copy of the network and return:
     - per-device trip rows (switch_id, tripped, t_trip_s, ikss_ka)
@@ -19442,7 +19501,8 @@ def _prot_run_scenario(base_net, sc_line_id, sc_fraction, fault_type, case, atta
         fault_bus = int(max(net_sc.bus.index))
         ensure_ext_grid_zero_sequence_min(net_sc)
         _prot_earth_fault_net(net_sc, fault_type)
-        sc.calc_sc(net_sc, bus=fault_bus, branch_results=True, fault=fault_type, case=case)
+        sc.calc_sc(net_sc, bus=fault_bus, branch_results=True, fault=fault_type, case=case,
+                   **({'r_fault_ohm': float(r_fault_ohm)} if r_fault_ohm else {}))
     except Exception as e:
         return {
             'sc_line_id': int(sc_line_id),
@@ -19466,6 +19526,7 @@ def _prot_run_scenario(base_net, sc_line_id, sc_fraction, fault_type, case, atta
         'case': case,
         'short_circuit': _prot_extract_short_circuit_at_bus(net_sc, fault_bus),
         'trip': trip,
+        'grounding_neutral': _prot_grounding_neutrals(net_sc, fault_type, fault_bus),
     }
     if prot_warning:
         out['warning'] = prot_warning
@@ -19720,6 +19781,7 @@ def _prot_check_miscoordination(net, scenarios, t_diff, bf_times=None):
         scenario['clearing_time_s'] = t_clear
         scenario['breaker_failure'] = _prot_breaker_failure(
             net, adjacency, element_node, fault_node, sources, rows, primaries, trip_time, label, bf_times or {})
+        scenario['grounding_duty'] = _prot_grounding_duty(net, scenario, rows, trip_time)
 
         common = {
             'sc_line_id': scenario.get('sc_line_id'),
@@ -19789,6 +19851,8 @@ def protection_coordination(net, prot_params, in_data):
         if not (0.0 < sc_fraction < 1.0):
             sc_fraction = 0.5
         t_diff = float(prot_params.get('t_diff', 0.3))
+        # A fault through a resistance (ohm): a high-resistance earth fault, and what still sees it.
+        r_fault_ohm = max(_prot_safe_float(prot_params.get('r_fault_ohm'), 0.0) or 0.0, 0.0)
         grading_mode = str(prot_params.get('grading_mode', 'auto') or 'auto').lower()
         if grading_mode not in ('auto', 'manual'):
             grading_mode = 'auto'
@@ -19869,7 +19933,8 @@ def protection_coordination(net, prot_params, in_data):
                     'devices': [],
                     'summary': {'converged': False},
                 }, separators=(',', ':'))
-            scenarios.append(_prot_run_bus_scenario(net, fault_bus_idx, fault_type, case, attach_summaries))
+            scenarios.append(_prot_run_bus_scenario(net, fault_bus_idx, fault_type, case, attach_summaries,
+                                                    r_fault_ohm=r_fault_ohm))
         else:
             if sc_line_id_raw in (None, '', 'all'):
                 line_ids = [int(idx) for idx in net.line.index if net.line.at[idx, 'in_service']]
@@ -19879,7 +19944,8 @@ def protection_coordination(net, prot_params, in_data):
                 except (TypeError, ValueError):
                     line_ids = [int(idx) for idx in net.line.index if net.line.at[idx, 'in_service']]
             for line_id in line_ids:
-                scenarios.append(_prot_run_scenario(net, line_id, sc_fraction, fault_type, case, attach_summaries))
+                scenarios.append(_prot_run_scenario(net, line_id, sc_fraction, fault_type, case, attach_summaries,
+                                                    r_fault_ohm=r_fault_ohm))
 
         scenario_warning = None
         if not scenarios:
@@ -19926,6 +19992,15 @@ def protection_coordination(net, prot_params, in_data):
                                                    if r['t_clear_s'] is None),
                 'fault_type': fault_type,
                 'case': case,
+                'r_fault_ohm': r_fault_ohm,
+                # Grounding transformers: their worst short-time duty, and the earth faults nothing clears.
+                'max_grounding_duty_percent': max([d['duty_percent'] for sc in scenarios for d in sc.get('grounding_duty') or []
+                                                   if d.get('duty_percent') is not None], default=None),
+                'max_grounding_duty_backup_percent': max([d['duty_backup_percent'] for sc in scenarios
+                                                          for d in sc.get('grounding_duty') or []
+                                                          if d.get('duty_backup_percent') is not None], default=None),
+                'n_grounding_continuous': sum(1 for sc in scenarios for d in sc.get('grounding_duty') or []
+                                              if d.get('continuous')),
                 'grading_mode': grading_mode,
                 'fault_location_mode': fault_location_mode,
                 't_diff_s': t_diff,

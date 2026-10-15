@@ -1369,3 +1369,65 @@ def test_the_zigzags_neutral_overcurrent_is_the_backup(client, quiet):
     assert t['Zigzag 2 breaker']['evaluation']['residual_current_a'] == pytest.approx(
         sc['short_circuit']['ikss_ka'] * 1e3, rel=1e-6)
     assert sc['clearing_time_s'] == pytest.approx(0.05)
+
+
+# --- Phase 38: the zigzags' duty --------------------------------------------------------------------
+
+def _earth_fault_on_bb2(client, quiet, r_fault=0, scheme=None):
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_protection_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    cells = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
+    for v in p.values():
+        if scheme and isinstance(v, dict) and str(v.get('typ', '')).startswith('Switch'):
+            v.update(scheme(v['userFriendlyName']) or {})
+    p['0'] = {**p['0'], 'fault_type': '1ph', 'fault_location_mode': 'bus', 'fault_bus_id': cells['Load backbone 2'],
+              'r_fault_ohm': r_fault, 'user_email': 't@t'}
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    assert not out.get('error'), out.get('message')
+    (sc,) = out['scenarios']
+    return out, sc, {d['label']: d for d in sc['grounding_duty']}
+
+
+def test_the_zigzags_short_time_duty(client, quiet):
+    """
+    A zigzag's duty: its neutral current for as long as it flows - until the
+    fault is cleared, or its own breaker opens - against its 400 A, 10 s
+    rating, I^2 t. A bolted earth fault on BB2: 208 A each, 87B clearing it in
+    0.05 s, 0.13 %; with a primary breaker stuck, until their 51N opens them at
+    2 s, 5.4 %. One zigzag alone, the other's breaker open: 404 A, 20 % behind
+    the 51N - the worst short-time duty, a fifth of the rating.
+    """
+    out, sc, duty = _earth_fault_on_bb2(client, quiet)
+    assert len(duty) == 2
+    for d in duty.values():
+        assert d['neutral_a'] == pytest.approx(207.5, abs=1) and d['t_flowing_s'] == pytest.approx(0.05)
+        assert d['duty_percent'] == pytest.approx(100 * (207.5 / 400) ** 2 * 0.05 / 10, rel=0.01)
+        assert d['t_flowing_backup_s'] == pytest.approx(2.0) and d['duty_backup_percent'] == pytest.approx(5.38, abs=0.05)
+    assert out['summary']['n_grounding_continuous'] == 0
+    out, sc, duty = _earth_fault_on_bb2(client, quiet, scheme=lambda n: {'closed': 'false'} if n == 'Zigzag breaker' else None)
+    (d,) = duty.values()
+    assert d['neutral_a'] == pytest.approx(sc['short_circuit']['ikss_ka'] * 1e3, rel=1e-6)
+    assert 400 < d['neutral_a'] < 410 and d['duty_backup_percent'] == pytest.approx(20.4, abs=0.3)
+
+
+@pytest.mark.parametrize('r_fault, cleared, backed_up', [(150, True, False), (300, False, False)])
+def test_a_high_resistance_earth_fault(client, quiet, r_fault, cleared, backed_up):
+    """
+    Through 150 ohm a BB2 earth fault draws 124 A: 87B, at 60 A plus 30 % of
+    its restraint, still sees it; the zigzags' 51N (100 A each, 62 A here)
+    does not, so a stuck breaker leaves it on. Through 300 ohm, 67 A - under
+    87B's threshold, about 71 A: nothing trips, and each zigzag carries 34 A
+    indefinitely (one alone, up to some 70 A). That is a continuous duty, which
+    their short-time rating does not cover: a zigzag's continuous rating, or a
+    sensitive alarm on its neutral, is the designer's.
+    """
+    out, sc, duty = _earth_fault_on_bb2(client, quiet, r_fault)
+    assert out['summary']['r_fault_ohm'] == r_fault
+    assert (sc['clearing_time_s'] == pytest.approx(0.05)) if cleared else sc['clearing_time_s'] is None
+    for d in duty.values():
+        assert d['neutral_a'] == pytest.approx(sc['short_circuit']['ikss_ka'] * 500, rel=1e-6)
+        assert d['continuous'] == (not cleared) and d['continuous_backup'] == (not backed_up)
+    assert out['summary']['n_grounding_continuous'] == (0 if cleared else 2)
+    if not cleared:
+        assert all(30 < d['neutral_a'] < 40 for d in duty.values())

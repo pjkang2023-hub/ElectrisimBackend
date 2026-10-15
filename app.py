@@ -1272,6 +1272,7 @@ def simulation():
                     't_gg': in_data[x].get('t_gg', 0.07),
                     'tms': in_data[x].get('tms', 1.0),
                     't_grade': in_data[x].get('t_grade', 0.5),
+                    'r_fault_ohm': in_data[x].get('r_fault_ohm', 0),
                     'export_results': in_data[x].get('export_results', False),
                 }
 
