@@ -270,20 +270,24 @@ def test_three_phase_faults(client, quiet, k, backbone_a):
     assert 1.25 < ka['Load backbone 1'] / I_LOAD_KA < 1.65
 
 
-@pytest.mark.parametrize('k, backbone_a', [(1.2, 312), (1.5, 369), (None, 7.6)])
+@pytest.mark.parametrize('k, backbone_a', [(1.2, 415), (1.5, 519), (None, 7.6)])
 def test_earth_faults(client, quiet, k, backbone_a):
     """
-    The backbone's earth faults by IEC 60909: 312 A at the inverters' 1.2 pu,
-    369 A at 1.5 pu - the two zigzags' (EMT, which builds their windings:
-    427 A at 1.2 pu). With both zigzags out, 7.6 A: the cables' capacitance
-    alone (EMT: 6.5 A). Before Phase 31 IEC read 249-311 A with them and 228 A
-    without: pandapower added the inverters' current-source share whatever the
-    zero sequence, and the island's eleven other PCS as current sources
-    through the twelfth's impedance. Now each grid-forming PCS is a source
-    behind its limit's impedance for an earth fault, and a current source's
-    share is IEC's 3 Z(1) / (2 Z(1) + Z(0)) (sc_current_sources). The 505 V
-    buses none: the grid side a delta, the load side T2's star left floating,
-    as the spec asks (solidly grounded it gave 17 kA). The POI: the utility's own.
+    The backbone's earth faults by IEC 60909, with both zigzags: 415 A at the
+    inverters' 1.2 pu, 519 A at 1.5 pu - where their worst phase reaches its
+    limit (EMT, which builds their windings and controls: 427 A at 1.2 pu,
+    the limiter on). An earth fault draws I1 = I2 = I0; through T2's delta
+    each inverter's worst phase carries sqrt(3) of it, so the fault is
+    3 x 1.2 x 190 A / sqrt(3). The zigzags alone would pass 750 A. With both
+    out, 7.6 A: the cables' capacitance alone (EMT: 6.5 A). Before Phase 37
+    each grid-forming PCS stood behind its limit's impedance, 1/k pu, in both
+    sequences - 312 A and 369 A, far below the limit yet held by it twice;
+    before Phase 31, 249-311 A and 228 A without a zigzag. Each is now a
+    source behind its own reactor (0.15 pu, EMT's), the fault capped at the
+    limit (sc_current_sources), and a current source's share IEC's
+    3 Z(1) / (2 Z(1) + Z(0)). The 505 V buses none: the grid side a delta,
+    the load side T2's star left floating, as the spec asks (solidly grounded
+    it gave 17 kA). The POI: the utility's own.
     """
     if k is None:
         with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
@@ -300,7 +304,7 @@ def test_earth_faults(client, quiet, k, backbone_a):
     ka = _bus_ka(out, label)
     for b in (1, 2, 3):
         assert ka[f'Load backbone {b}'] * 1e3 == pytest.approx(backbone_a, rel=0.02)
-        assert ka[f'Load backbone {b}'] < 0.4
+        assert ka[f'Load backbone {b}'] / (2 if k else 1) < 0.4          # within each zigzag's 400 A
         assert ka[f'Block {b} 505 V grid side'] == pytest.approx(0, abs=1e-6)
         # Its PCS's own source's zero sequence, 1e6 times its X(1): a trace, some 0.02 A.
         assert ka[f'Block {b} 505 V load side'] == pytest.approx(0, abs=1e-4)
@@ -308,10 +312,11 @@ def test_earth_faults(client, quiet, k, backbone_a):
 
 
 def test_ansi_earth_fault_on_the_backbone(client, quiet):
+    """ANSI C37 as IEC (Phase 37): the inverters' current limit holds the earth fault, 415 A, the two zigzags sharing it."""
     from test_reference_grids import ANSI_PARAMS
     out, label, _ = _drawn_study(client, quiet, {**ANSI_PARAMS, 'fault_type': '1ph', 'frequency_hz': 60, 'user_email': 't@t'})
     ka = _bus_ka(out, label)
-    assert 0.2 < ka['Load backbone 2'] < 0.4
+    assert ka['Load backbone 2'] == pytest.approx(0.415, rel=0.01)
     assert ka['Block 1 505 V load side'] == pytest.approx(0, abs=1e-4)
 
 
@@ -731,7 +736,7 @@ def test_overcurrent_cannot_see_a_backbone_fault(client, quiet):
             assert 1.0 < hv['ikss_ka'] * 1e3 / hv['evaluation']['pickup_a'] < 1.1
 
 
-@pytest.mark.parametrize('fault, k, ik_a', [('3ph', 1.2, 238), ('3ph', 1.5, 298), ('1ph', 1.2, 300)])
+@pytest.mark.parametrize('fault, k, ik_a', [('3ph', 1.2, 238), ('3ph', 1.5, 298), ('1ph', 1.2, 415)])
 def test_line_differential_clears_each_backbone_cable(client, quiet, fault, k, ik_a):
     """
     The spec's scheme. 87L at each end of each backbone cable (60 A, 30 %
@@ -1137,6 +1142,30 @@ def test_emt_backbone_earth_fault_needs_a_zigzag(client, quiet, zigzags, i_a):
         assert backbone['v_rms_final_pu'] > 1.4
 
 
+@pytest.mark.parametrize('case, backbone_a', [('max', 406), ('min', 372)])
+def test_iec_earth_fault_with_one_zigzag_against_emt(client, quiet, case, backbone_a):
+    """
+    ZZ2 alone, by IEC 60909 (Phase 37): 406 A at c = 1.1, 372 A at c = 1.0,
+    under the inverters' limit (415 A) - the zigzag's impedance and the
+    inverters' reactors hold it. EMT, its sources at 1.0 pu: 367 A, within
+    1.5 % of the minimum case.
+    """
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    for v in p.values():
+        if isinstance(v, dict) and v.get('userFriendlyName') == 'Zigzag breaker':
+            v['closed'] = 'false'
+    label = {v['name']: v.get('userFriendlyName') for v in p.values() if isinstance(v, dict) and 'name' in v}
+    p['0'] = {**IEC, 'fault_type': '1ph', 'fault_location': case}
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    ka = _bus_ka(out, label)
+    for b in (1, 2, 3):
+        assert ka[f'Load backbone {b}'] * 1e3 == pytest.approx(backbone_a, rel=0.01)
+    if case == 'min':
+        assert ka['Load backbone 2'] * 1e3 == pytest.approx(367, rel=0.015)
+
+
 # --- Charge balancing across quadrants (Phase 32) ----------------------------------------------------
 
 def _ts_quadrants(client, quiet, gain, low=80, afe_out=None, steps=20, share=0, outage=False):
@@ -1301,8 +1330,8 @@ def test_bus_differential_clears_a_switchboard_fault(client, quiet, fault, n):
 def test_the_zigzags_neutral_overcurrent_is_the_backup(client, quiet):
     """
     The zigzags' neutral current: the fault's 3 I0 shared by their zero-sequence
-    admittance - 150 A each for a backbone earth fault, 300 A in one with the
-    other's breaker open (pandapower's single-phase branch results carry no
+    admittance - 208 A each for a backbone earth fault (415 A), 406 A in one with
+    the other's breaker open (pandapower's single-phase branch results carry no
     zero sequence: a zigzag read 0 A). Their 51N, 100 A at 2 s, trips its
     switchboard. Without 87B a fault on BB1 is cleared that way at 2 s - BB3's
     switchboard opened needlessly with it - and a fault on BB2, with no zigzag,
@@ -1314,7 +1343,8 @@ def test_the_zigzags_neutral_overcurrent_is_the_backup(client, quiet):
     (sc,) = out['scenarios']
     t = _trips(sc)
     for z in ('Zigzag breaker', 'Zigzag 2 breaker'):
-        assert t[z]['evaluation']['residual_current_a'] == pytest.approx(150, abs=1) and t[z]['t_trip_s'] == 2.0
+        assert t[z]['evaluation']['residual_current_a'] == pytest.approx(sc['short_circuit']['ikss_ka'] * 500, rel=1e-6)
+        assert t[z]['evaluation']['residual_current_a'] == pytest.approx(208, abs=2) and t[z]['t_trip_s'] == 2.0
     assert sc['clearing_time_s'] is None
     out = _protection(client, quiet, off, mode='bus', bus='Load backbone 1', fault='1ph')
     (sc,) = out['scenarios']

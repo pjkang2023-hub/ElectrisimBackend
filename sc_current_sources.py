@@ -21,7 +21,7 @@ import importlib
 
 import numpy as np
 
-from pandapower.pypower.idx_bus_sc import IKCV, IKSS2, R_EQUIV, X_EQUIV
+from pandapower.pypower.idx_bus_sc import IKCV, IKSS1, IKSS2, R_EQUIV, X_EQUIV
 
 # The module, not the function the package exports under its name.
 _calc_sc = importlib.import_module('pandapower.shortcircuit.calc_sc')
@@ -36,6 +36,35 @@ def current_source_factor(ppci, ppci_0, buses):
     return np.where(np.isfinite(f), np.clip(f, 0.0, 1.5), 0.0)
 
 
+def _cap_at_converter_limits(net, ppci, ppci_0, buses):
+    """
+    An island of grid-forming PCS: each faulted bus's current no more than its
+    inverters' current limit allows (pandapower_electrisim's
+    _electrisim_pcs_1ph_limits, by bus) - the voltage sources' and the
+    current sources' scaled alike, and the zero sequence's with them.
+    """
+    if not len(buses) or not (hasattr(net, 'get') and net.get('_electrisim_pcs_1ph_islands')):
+        return
+    from pandapower_electrisim import electrisim_pcs_1ph_limits
+    cap = {}
+    for b, lim in electrisim_pcs_1ph_limits(net).items():
+        try:
+            (i,) = np.atleast_1d(_calc_sc._get_is_ppci_bus(net, np.array([int(b)], dtype=np.int64)))
+        except Exception:
+            continue                                    # out of service, or not in this calculation
+        cap[int(i)] = min(lim, cap.get(int(i), lim))
+    for i in buses:
+        lim = cap.get(int(i))
+        if lim is None:
+            continue
+        total = np.nan_to_num(ppci['bus'][i, IKSS1]) + np.nan_to_num(ppci['bus'][i, IKSS2])
+        if total > lim > 0:
+            f = lim / total
+            ppci['bus'][i, IKSS1] *= f
+            ppci['bus'][i, IKSS2] *= f
+            ppci_0['bus'][i, IKSS1] *= f
+
+
 def install():
     original = _calc_sc._calc_ikss_1ph
     if getattr(original, '_electrisim_iec_current_sources', False):
@@ -44,6 +73,7 @@ def install():
     def _calc_ikss_1ph(net, ppci, ppci_0, bus_idx):
         original(net, ppci, ppci_0, bus_idx)
         buses = np.atleast_1d(bus_idx)
+        _cap_at_converter_limits(net, ppci, ppci_0, buses)
         if not len(buses) or not np.any(np.nan_to_num(ppci['bus'][:, IKCV])):
             return
         f = current_source_factor(ppci, ppci_0, buses)

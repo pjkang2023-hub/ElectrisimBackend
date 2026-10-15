@@ -3835,6 +3835,68 @@ def _electrisim_pcs_islands(net):
         net.gen.at[ref['index'], 'slack_weight'] = 1.0
 
 
+# A PCS's reactor (pu of its rating): EMT's, which it builds each PCS behind (emt_electrisim._pcs).
+PCS_SC_REACTOR_PU = 0.15
+
+
+def electrisim_pcs_1ph_limits(net):
+    """{bus: kA} for every bus of each PCS island the network holds, from its topology as it stands - a line split at its fault."""
+    out = {}
+    for forming in net.get('_electrisim_pcs_1ph_islands') or []:
+        out.update(_electrisim_pcs_1ph_limits(net, None, forming))
+    return out
+
+
+def _electrisim_pcs_1ph_limits(net, comp, forming):
+    """
+    {bus: kA}: the most a single-phase fault at each bus of a PCS island can
+    draw before its inverters reach their current limit. An earth fault draws
+    I1 = I2 = I0, in phase at the fault; behind a transformer shifting them by
+    theta (each sequence its own way) a converter's worst phase carries
+    2 max|cos(theta + n 120 deg)| of it - sqrt(3) through a delta-star, 2
+    with none. Each converter then gives at most k I_rated over that, and the
+    fault three times their sum. (EMT: a backbone with both zigzags, 427 A, at
+    this limit; IEC behind 1/k pu in each sequence gave 312 A.)
+    """
+    angle, queue = {}, []
+    start = int(forming[0]['bus'])
+    angle[start], queue = 0.0, [start]
+    edges = {}
+    open_lines = {int(sw['element']) for _, sw in net.switch.iterrows() if sw['et'] == 'l' and not bool(sw['closed'])}
+    for i, line in net.line.iterrows():
+        if bool(line['in_service']) and int(i) not in open_lines:
+            a, b = int(line['from_bus']), int(line['to_bus'])
+            edges.setdefault(a, []).append((b, 0.0))
+            edges.setdefault(b, []).append((a, 0.0))
+    for _, sw in net.switch.iterrows():
+        if sw['et'] == 'b' and bool(sw['closed']):
+            a, b = int(sw['bus']), int(sw['element'])
+            edges.setdefault(a, []).append((b, 0.0))
+            edges.setdefault(b, []).append((a, 0.0))
+    for _, tr in net.trafo.iterrows():
+        if bool(tr['in_service']):
+            hv, lv, shift = int(tr['hv_bus']), int(tr['lv_bus']), float(tr.get('shift_degree') or 0.0)
+            edges.setdefault(hv, []).append((lv, -shift))
+            edges.setdefault(lv, []).append((hv, shift))
+    for node in queue:
+        for nxt, d in edges.get(node, ()):
+            if (comp is None or nxt in comp) and nxt not in angle and bool(net.bus.at[nxt, 'in_service']):
+                angle[nxt] = angle[node] + d
+                queue.append(nxt)
+    out = {}
+    for b in angle:
+        vn = float(net.bus.at[b, 'vn_kv'])
+        total = 0.0
+        for r in forming:
+            if int(r['bus']) not in angle:
+                continue
+            theta = math.radians(angle[b] - angle[int(r['bus'])])
+            m = 2.0 * max(abs(math.cos(theta + n * 2.0 * math.pi / 3.0)) for n in range(3))
+            total += r['k'] * r['s_rated'] / (math.sqrt(3.0) * vn) / m
+        out[int(b)] = 3.0 * total
+    return out
+
+
 def _electrisim_pcs_sc_islands(net):
     """
     A short-circuit study needs a voltage source in each island: one no grid or
@@ -3846,8 +3908,12 @@ def _electrisim_pcs_sc_islands(net):
     current, takes Z(1) as the network's, here the one source's - its eleven
     mates' current through that impedance a voltage several times nominal.
     An ungrounded backbone's earth fault came to 114 A (EMT: 6.5 A, its
-    cables' capacitance); each a voltage source behind its limit's impedance,
-    8 A, and with its zigzags within some 20 % of EMT's.
+    cables' capacitance). Each is a voltage source behind its own reactor, as
+    EMT builds it, and the fault capped where the inverters reach their
+    current limit (electrisim_pcs_1ph_limits, at the fault). Behind 1/k pu in each
+    sequence - the limit's impedance - an earth fault far below the limit
+    still met it twice: 312 A on the backbone with both zigzags, where EMT,
+    at the limit, gives 427 A.
     """
     pcs = [r for r in net.electrisim_pcs if r['in_service']]
     if not pcs:
@@ -3870,7 +3936,7 @@ def _electrisim_pcs_sc_islands(net):
         ref = max(forming, key=lambda r: r['k'] * r['s_rated'])
         one_phase = bool(getattr(net, '_electrisim_sc_1ph', False))
         for rec_src in (forming if one_phase else [ref]):
-            s_sc = rec_src['k'] * rec_src['s_rated']
+            s_sc = rec_src['s_rated'] / PCS_SC_REACTOR_PU if one_phase else rec_src['k'] * rec_src['s_rated']
             # No zero sequence: a converter is three-wire. As a grounded source (X0 = X1) it gave an earth
             # fault behind an ungrounded transformer winding - a UPS's 505 V load bus - 16 kA.
             g = pp.create_ext_grid(net, rec_src['bus'], vm_pu=1.0, name=f"{rec_src['name']} (as a source)",
@@ -3880,9 +3946,12 @@ def _electrisim_pcs_sc_islands(net):
             net.sgen.at[rec_src['index'], 'in_service'] = False
             rec_src['as_source'] = int(g)
         if one_phase:
+            net['_electrisim_pcs_1ph_islands'] = (net.get('_electrisim_pcs_1ph_islands') or []) + [
+                [{'bus': int(r['bus']), 'k': r['k'], 's_rated': r['s_rated']} for r in forming]]
             _electrisim_warn(net, f"{len(forming)} grid-forming PCS form an island no grid or machine feeds: in the "
-                                  "single-phase short circuit each is a source giving its current limit (k x its rated "
-                                  "current) at its own bus, with no zero sequence of its own.")
+                                  f"single-phase short circuit each is a source behind its reactor "
+                                  f"({PCS_SC_REACTOR_PU:g} pu), with no zero sequence of its own, and an earth fault "
+                                  "is capped where they reach their current limit (k x their rated current).")
         else:
             _electrisim_warn(net, f"PCS '{ref['label']}' forms an island no grid or machine feeds: in the short-circuit "
                                   f"study it is a source giving its current limit ({ref['k']:g} x its rated current) at "

@@ -1070,12 +1070,20 @@ def _solve_network(
     ppci0 = _build_zero_sequence_y(work, prefault_v) if fault == "1ph" else None
     i_sym, r_eq, x_eq = _fault_currents_ka(ppci, ppci0, fault, prefault_v, r_fault_ohm, x_fault_ohm)
 
+    # An island of grid-forming PCS: an earth fault no more than their current limit allows, as in the IEC study.
+    caps = {}
+    if fault == "1ph" and work.get("_electrisim_pcs_1ph_islands"):
+        from pandapower_electrisim import electrisim_pcs_1ph_limits
+        caps = electrisim_pcs_1ph_limits(work)
     buses: Dict[int, Tuple[float, float, float]] = {}
     for pp_bus in work.bus.index:
         ppc_b = _ppc_bus(work, int(pp_bus))
         if ppc_b is None or ppc_b >= len(i_sym):
             continue
-        buses[int(pp_bus)] = (float(i_sym[ppc_b]), float(r_eq[ppc_b]), float(x_eq[ppc_b]))
+        i_b = float(i_sym[ppc_b])
+        if int(pp_bus) in caps:
+            i_b = min(i_b, caps[int(pp_bus)])
+        buses[int(pp_bus)] = (i_b, float(r_eq[ppc_b]), float(x_eq[ppc_b]))
 
     lines: Dict[int, Tuple[float, float]] = {}
     trafos: Dict[int, Tuple[float, float]] = {}
