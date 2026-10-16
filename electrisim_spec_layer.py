@@ -41,7 +41,8 @@ DER_FIELDS = {
             'q_set_mvar', 'pf', 'qv_droop_percent', 'vm_set_pu', 'droop_pf_percent', 'droop_qv_percent',
             'current_limit_pu', 'current_loop_hz', 'inlet_c', 'altitude_m', 'derate_temp_curve',
             'derate_altitude_curve', 'overload_curve', 'q_max_percent', 'unbalance_control', 'i2_limit_pu',
-            'soc_share_gain', 'dc_link_mf', 'dc_link_esr_mohm', 'dc_link_esl_uh', 'opf_marginal_cost_eur_per_mwh'),
+            'soc_share_gain', 'dc_link_mf', 'dc_link_esr_mohm', 'dc_link_esl_uh', 'opf_marginal_cost_eur_per_mwh',
+            'harmonic_r_pu'),
     'Grounding Transformer': ('vn_kv', 'i_rated_a', 't_rated_s', 'r_n_ohm', 'x_n_ohm', 'x0_ohm', 'r0_ohm'),
 }
 DC_FIELDS = {
@@ -174,7 +175,9 @@ DEFAULTS = {'Battery': {'vn_v': '800',
          # On a DC network: its DC-link capacitor (0: 4 ms of its rating) and its ESR and ESL (EMT, DC fault).
          'dc_link_mf': '0',
          'dc_link_esr_mohm': '0',
-         'dc_link_esl_uh': '0'},
+         'dc_link_esl_uh': '0',
+         # Grid-forming, islanded, harmonic study: its active damping across its terminals (0: none).
+         'harmonic_r_pu': '0'},
  'Grounding Transformer': {'vn_kv': '0',
                            'i_rated_a': '400',
                            't_rated_s': '10',

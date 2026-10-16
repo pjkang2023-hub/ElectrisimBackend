@@ -1671,3 +1671,44 @@ def test_a_damped_filter_holds_the_island_within_ieee_519(client, quiet, tmp_pat
                                     extra={'hf': {**BACKBONE_FILTER, 'filter_order': '17'}})
     assert tuned_high['Load backbone 2']['vthd_percent'] > bare['Load backbone 2']['vthd_percent']
     assert not tuned_high['Load backbone 2']['ieee519']['ok']
+
+
+# --- Phase 44: the inverters' active damping in place of the filter -----------------------------
+
+def test_the_inverters_active_damping_in_place_of_the_filter(client, quiet, tmp_path):
+    """
+    The filter's alternative: the grid-forming PCS damping the island
+    themselves, their control drawing harmonic current in phase with their
+    terminals' harmonic voltage - a virtual resistance across them at the
+    harmonics (harmonic_r_pu), none at the fundamental. Undamped by the SSTs,
+    1 pu on each of the twelve holds the backbone to 3.2 % THD, 1.7 % at any
+    order - each inverter carrying some 2 % of its rating in harmonic
+    current; 2.5 pu still passes (4.8 %), 3 pu does not (5.2 %, THD the
+    limit, any one order within 3 % to some 6 pu). Its series counterpart, a
+    virtual resistance in line with the reactor, does little - 1 pu leaves
+    the 19th at 4.6 %: the island's resonance is the cables against the
+    reactors and the T2s, as the SSTs' bus sees them. The fundamental is
+    untouched.
+    """
+    def damped(r):
+        def v(e):
+            if str(e.get('typ', '')).startswith('PCS'):
+                e['harmonic_r_pu'] = str(r)
+        return v
+
+    bare, _ = _harmonic_study(client, quiet, tmp_path, neglect_load_y=True)
+    one, out = _harmonic_study(client, quiet, tmp_path, neglect_load_y=True, variant=damped(1.0))
+    for n in (1, 2, 3):
+        bb = one[f'Load backbone {n}']
+        assert bb['vthd_percent'] == pytest.approx(3.21, abs=0.2) and bb['ieee519']['ok']
+        assert bb['ieee519']['max_individual_percent'] == pytest.approx(1.74, abs=0.15)
+        assert bb['vm_pu'] == pytest.approx(bare[f'Load backbone {n}']['vm_pu'], abs=1e-3)
+        ld = one[f'Block {n} 505 V load side']
+        assert ld['vthd_percent'] < 2.5 and ld['ieee519']['ok']
+        assert ld['vm_pu'] == pytest.approx(bare[f'Block {n} 505 V load side']['vm_pu'], abs=1e-3)
+    assert one['Utility 34.5 kV POI']['ieee519']['ok']
+    edge, _ = _harmonic_study(client, quiet, tmp_path, neglect_load_y=True, variant=damped(2.5))
+    assert edge['Load backbone 2']['ieee519']['ok'] and edge['Load backbone 2']['vthd_percent'] > 4.5
+    weak, _ = _harmonic_study(client, quiet, tmp_path, neglect_load_y=True, variant=damped(3.0))
+    assert not weak['Load backbone 2']['ieee519']['ok']
+    assert weak['Load backbone 2']['ieee519']['max_individual_percent'] < 3.0

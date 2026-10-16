@@ -369,8 +369,18 @@ def _pcs_voltage_source(row, element, va_degree):
     spectrum) and no zero sequence - a three-wire converter. As a constant
     power source an island of them had no voltage reference: OpenDSS left it
     unsolved, every bus at 0 % THD, and its SSTs' harmonics went nowhere.
+    Its active damping, harmonic_r_pu: its control drawing current in phase
+    with its terminals' harmonic voltage - a virtual resistance across them
+    at the harmonics, none at the fundamental (the harmonic study's alone).
+    In series with its reactor instead it does little: the island's
+    resonance is the cables against the reactors and T2s, as the SSTs' bus
+    sees them.
     """
     x_pu, r_pu = PCS_REACTOR_PU
+    try:
+        damping = max(0.0, float(element.get('harmonic_r_pu') or 0.0))
+    except (TypeError, ValueError):
+        damping = 0.0
     s_rated = float(row['s_rated_mva'])
     v = float(row['vm_pu']) * cmath.exp(1j * math.radians(va_degree))
     s = complex(float(row['p_mw']), float(row['q_mvar'])) / s_rated
@@ -378,7 +388,30 @@ def _pcs_voltage_source(row, element, va_degree):
     return {'kind': 'vsource', 'name': f"{row['name']}_ac", 'bus': element.get('bus'),
             'label': element.get('userFriendlyName') or row['name'], 'p_mw': -float(row['p_mw']),
             'q_mvar': -float(row['q_mvar']), 's_rated_mva': s_rated, 'e_pu': abs(e),
-            'e_angle_degree': math.degrees(cmath.phase(e)), 'r_pu': r_pu, 'x_pu': x_pu}
+            'e_angle_degree': math.degrees(cmath.phase(e)), 'r_pu': r_pu, 'x_pu': x_pu,
+            'harmonic_r_pu': damping}
+
+
+def _opendss_add_harmonic_damping(stand_ins, BusbarsDictVoltage, BusbarsDictConnectionToName,
+                                  execute_dss_command):
+    """
+    In harmonics mode, after the fundamental: each grid-forming PCS's active
+    damping as a resistor across its terminals, star floating (a three-wire
+    converter). Returns how many.
+    """
+    n = 0
+    for st in stand_ins or ():
+        r_pu = st.get('harmonic_r_pu') or 0.0
+        bus_name = BusbarsDictConnectionToName.get(st.get('bus'))
+        kv = BusbarsDictVoltage.get(bus_name) if bus_name else None
+        if st.get('kind') != 'vsource' or r_pu <= 0 or not kv:
+            continue
+        name = _sanitize_opendss_name(st['name'])
+        r_ohm = r_pu * float(kv) ** 2 / st['s_rated_mva']
+        execute_dss_command(f"New Reactor.{name}_damping Bus1={bus_name} Bus2={name}_damping_n.4.4.4 "
+                            f"Phases=3 R={r_ohm:.6f} X=0.000001")
+        n += 1
+    return n
 
 
 def _opendss_create_converter_stand_in(dss, stand_in, BusbarsDictVoltage, BusbarsDictConnectionToName,
@@ -6703,6 +6736,9 @@ def harmonic_analysis(in_data, frequency, mode, algorithm, loadmodel, max_iterat
             return json.dumps({"error": f"OpenDSS could not enter harmonics mode: {e}"})
 
     # ---- Step 5: Apply harmonic-specific modifications and solve harmonics ----
+    if _opendss_add_harmonic_damping(converter_stand_ins, BusbarsDictVoltage, BusbarsDictConnectionToName,
+                                     execute_dss_command):
+        print("[OpenDSS][HARMONICS] Grid-forming PCS active damping added across their terminals")
 
     def _bus_num(s):
         if not s:

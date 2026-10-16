@@ -333,7 +333,10 @@ unit of its DC bus's batteries' charge above the other sharing PCS's average,
 lowered below it; 0: none), on a DC network its DC link (`dc_link_mf`, 0: 4 ms of its
 rating; `dc_link_esr_mohm`, `dc_link_esl_uh`: EMT and DC fault - in a DC bus
 fault it blocks, its link discharging and its diodes feeding from its AC bus),
-`opf_marginal_cost_eur_per_mwh`. Draw its transformer to the network as an
+`opf_marginal_cost_eur_per_mwh`, `harmonic_r_pu` (grid-forming, islanded, in
+the harmonic study: its active damping, a virtual resistance across its
+terminals at the harmonics in per unit of its rating - lower damps more; 0:
+none). Draw its transformer to the network as an
 ordinary transformer between its own LV bus and the network bus.
 
 **grounding_transformers** - a zigzag grounding transformer. `id`, **`bus`**
