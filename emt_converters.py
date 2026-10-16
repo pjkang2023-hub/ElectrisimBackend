@@ -148,12 +148,16 @@ class Vsc:
                    mode_dc=str(net.vsc.at[vi, 'control_mode_dc'] if 'control_mode_dc' in net.vsc.columns else 'vm_pu'),
                    mode_ac=str(net.vsc.at[vi, 'control_mode_ac'] if 'control_mode_ac' in net.vsc.columns else 'q_mvar'),
                    model=str(net.vsc.at[vi, 'emt_model']) if 'emt_model' in net.vsc.columns else 'average',
-                   switching_khz=col('switching_khz', 5.0), current_loop_hz=col('current_loop_hz', CURRENT_LOOP_HZ))
+                   switching_khz=col('switching_khz', 5.0), current_loop_hz=col('current_loop_hz', CURRENT_LOOP_HZ),
+                   ease_f_start_hz=col('ease_f_start_hz', 0.0), ease_f_end_hz=col('ease_f_end_hz', 0.0),
+                   uv_ease_pu=col('uv_ease_pu', 0.0), uv_floor_pu=col('uv_floor_pu', 0.5),
+                   uv_restore_s=col('uv_restore_s', 5.0))
 
     def __init__(self, builder, label, ac_bus, bus_dc, term, r_dc, block_pu, *, p, q, p_dc, rated_mva=0.0,
                  limit_pu=1.2, c_link_mf=0.0, c_link_esr_mohm=0.0, c_link_esl_uh=0.0, r_ohm=0.0, x_ohm=0.0,
                  mode_dc='vm_pu', mode_ac='q_mvar', model='average', switching_khz=5.0, eta=1.0, p_nl_mw=0.0,
-                 input_side='dc', current_loop_hz=CURRENT_LOOP_HZ):
+                 input_side='dc', current_loop_hz=CURRENT_LOOP_HZ, ease_f_start_hz=0.0, ease_f_end_hz=0.0,
+                 uv_ease_pu=0.0, uv_floor_pu=0.5, uv_restore_s=5.0):
         """
         ``p``, ``q``: its load-flow power at its AC bus (the load convention);
         ``p_dc``: at its DC bus (the load convention). ``eta``, ``p_nl_mw``: a
@@ -162,7 +166,16 @@ class Vsc:
         losses its DC side carries. ``c_link_esr_mohm``, ``c_link_esl_uh``: its
         DC-link capacitor's series resistance and inductance (0: none), in
         its DC terminals' branch. ``current_loop_hz``: its current loop's
-        bandwidth.
+        bandwidth. ``ease_f_start_hz`` > ``ease_f_end_hz`` > 0: holding its
+        DC bus, it eases off as its AC side's frequency falls - the power it
+        draws capped at its rating times (f - f_end) / (f_start - f_end), to
+        nothing at f_end - and its DC bus sags into its stores' droop: an
+        island short of power hands its load to them. ``uv_ease_pu`` > 0:
+        the faster signal - its AC voltage below it, the cap falls at once to
+        ``uv_floor_pu`` of its rating, rising back to its rating over
+        ``uv_restore_s`` once its voltage is above it again. An island formed
+        at full load collapses its voltage within some 10 ms, long before its
+        frequency says anything.
         """
         ckt, ac = builder.ckt, builder.ac
         self.label = label
@@ -179,6 +192,9 @@ class Vsc:
         self.r = max(r_ohm, 1e-6)
         self.l = max(x_ohm, 1e-6) / self.w0
         self.mode_dc, self.mode_ac = str(mode_dc), str(mode_ac)
+        self._ease_hz = (float(ease_f_start_hz or 0.0), float(ease_f_end_hz or 0.0))
+        self._uv = (float(uv_ease_pu or 0.0), min(max(float(uv_floor_pu or 0.0), 0.0), 1.0),
+                    max(float(uv_restore_s or 0.0), 1e-3))
         self.block_v = block_pu * self.v_dc_nom
         self.block_i = 2.5 * self.i_max
         self.model = model if model in ('average', 'switching') else 'average'
@@ -334,6 +350,15 @@ class Vsc:
         self.e_held = None                                   # the averaged phases' voltages, held until the next sample
         self.blocked_at = None
         self.limited_time = 0.0
+        # Easing off with its frequency (its PLL's, filtered over 20 ms): how long, how far.
+        f0 = self.w0 / (2 * math.pi)
+        f_start, f_end = getattr(self, '_ease_hz', (0.0, 0.0))
+        self.ease = (f_start, f_end) if 0 < f_end < f_start and self.mode_dc.startswith('vm') else None
+        uv = getattr(self, '_uv', (0.0, 0.5, 5.0))
+        self.uv = uv if uv[0] > 0 and self.mode_dc.startswith('vm') else None
+        self.uv_cap, self.uv_at, self.v_ac_min = 1.0, None, 1.0
+        self.f_f = f0
+        self.eased_time, self.ease_min, self.f_min = 0.0, 1.0, f0
         self.trace = []                                      # (t, P out, Q out, v_dc, |i|) for the results
 
     def _pwm_plan(self, t, e, v_dc):
@@ -425,11 +450,33 @@ class Vsc:
         self.w = self.w0 + self.kp_pll * v_q + self.int_pll
         vd_ = max(v_d, 0.05 * self.v_nom_peak)
         # Outer loops.
+        eased = False
         if self.mode_dc.startswith('vm'):
             if self.v_dc_ref_fn is not None:
                 self.v_dc_ref = self.v_dc_ref_fn(t_s, v_dc, i_load)
             err = self.v_dc_ref - v_dc
             p_in = v_dc * (i_load + self.kp_v * err + self.int_v)
+            k = 1.0
+            if self.ease is not None:
+                self.f_f += (self.w / (2 * math.pi) - self.f_f) * min(dt / 0.02, 1.0)
+                self.f_min = min(self.f_min, self.f_f)
+                f_start, f_end = self.ease
+                k = min(max((self.f_f - f_end) / (f_start - f_end), 0.0), 1.0)
+            if self.uv is not None:
+                v_pu, (v_th, floor, restore) = math.hypot(v_d, v_q) / self.v_nom_peak, self.uv
+                self.v_ac_min = min(self.v_ac_min, v_pu)
+                if v_pu < v_th:
+                    if self.uv_at is None:
+                        self.uv_at = t_s
+                    self.uv_cap = min(self.uv_cap, floor)
+                else:
+                    self.uv_cap = min(1.0, self.uv_cap + (1.0 - floor) * dt / restore)
+                k = min(k, self.uv_cap)
+            if self.ease is not None or self.uv is not None:
+                if k < 1.0 and p_in > k * self.s_rated:
+                    p_in, eased = k * self.s_rated, True
+                    self.eased_time += dt
+                    self.ease_min = min(self.ease_min, k)
         else:
             err = 0.0
             p_in = self.p_ref
@@ -450,7 +497,7 @@ class Vsc:
         if limited:
             self.limited_time += dt
         else:
-            if self.mode_dc.startswith('vm'):
+            if self.mode_dc.startswith('vm') and not eased:
                 self.int_v += self.ki_v * err * dt
             if self.mode_ac.startswith('vm'):
                 self.int_vac += self.ki_vac * e_ac * dt

@@ -1321,3 +1321,79 @@ def test_iec_earth_faults_where_there_is_no_earth_path(client):
     assert buses['Grid 245 kV']['ikss_ka'] == pytest.approx(12.04, abs=0.01)
     for b in ('34.5 kV Bus 1', '34.5 kV Bus 2'):
         assert buses[b]['ikss_ka'] > 0.43 and buses[b]['ip_ka'] > buses[b]['ikss_ka'], b    # the 400 A resistor and more
+
+
+# --- The rectifiers handing over to the stores in an island formed at full load (EMT) -------------
+
+_LINEUP_RECTIFIERS = [f'{g} rectifier {k}' for g in ('Lineup A', 'Lineup B', 'Catcher B') for k in (1, 2, 3, 4)]
+_BUS_STORES = ('Lineup A DC Store', 'Lineup B DC Store', 'Catcher B DC Store', 'Hall B DC Store 1', 'Hall B DC Store 2')
+_UV_EASING = {'uv_ease_pu': '0.85', 'uv_floor_pu': '0.1', 'uv_restore_s': '5'}
+
+
+def _emt_islanded_at_full_load(client, changes):
+    p = _variant(_payload(), {'Gas turbine': {'in_service': 'false'}, **changes})
+    p['0'] = {'typ': 'EmtStudy Parameters', 'user_email': 't@t', 'duration_ms': '300', 'frequency': '60',
+              'time_step_us': '10', 'island_time_ms': '20', 'profile_start_s': '0.15'}
+    emt = _post(client, p)['emt']
+    conv = {c['label']: c for c in emt['converters']}
+    blocked = {b['label']: b['t_ms'] for b in emt['converters_blocked']}
+    lost = [l['label'] for l in emt['loads'] if l.get('t_lost_ms')]
+    low = min(b['v_min_pu'] for b in emt['buses'] if b['label'].endswith('800 V'))
+    return conv, blocked, lost, low
+
+
+def test_emt_islanded_at_full_load_the_stores_cannot_carry_it(client):
+    """
+    The grid lost at 20 ms at full load, the turbine off: the BESS PCS (4 x
+    2.75 MVA) and the eSTATCOM take the island. Their stores' converters,
+    2.5 MW each, cannot carry a lineup's some 6 MW: backed off at once on
+    the AC voltage's dip to 0.1 of their rating, the lineup rectifiers hand
+    over more than their stores can take, and the lineups' 800 V falls
+    until they block at 50 ms - the floor must leave on them what the stores
+    cannot carry. Left at half their rating the island holds near 0.92 pu
+    only while the eSTATCOM's supercapacitors last: drawn at some 14.5 MW,
+    they reach its blocking voltage within 0.1 s, the BESS alone then hold
+    11 MVA against some 20 MW, and the racks are lost - with or without the
+    hand-over. Frequency easing cannot help either: the voltage falls
+    within some 10 ms, the rectifiers' PLLs reading 52-56 Hz from it.
+    """
+    conv, blocked, lost, low = _emt_islanded_at_full_load(client, {r: _UV_EASING for r in _LINEUP_RECTIFIERS})
+    rect = conv['Lineup A rectifier 1']
+    assert 20 < rect['uv_eased_at_ms'] < 25 and rect['ease_min_pu'] == pytest.approx(0.1)
+    assert all(40 < blocked[f'Lineup A rectifier {k}'] < 60 for k in (1, 2, 3, 4)), blocked
+    assert len(lost) > 20 and low < 0.3
+    conv, blocked, lost, low = _emt_islanded_at_full_load(
+        client, {r: {**_UV_EASING, 'uv_floor_pu': '0.5'} for r in _LINEUP_RECTIFIERS})
+    assert 80 < blocked['eSTATCOM'] < 120
+    assert all(blocked[f'Lineup A rectifier {k}'] > blocked['eSTATCOM'] for k in (1, 2, 3, 4)), blocked
+    assert len(lost) > 20
+
+
+def test_emt_variant_bus_stores_carry_the_island_when_the_rectifiers_hand_over(client):
+    """
+    The same island with the 20c variant's bus stores - converters of 7 MW
+    (6 MW in Hall B). Holding their 800 V, the rectifiers keep drawing: the
+    BESS PCS sit at their current limit for some 0.2 s, Hall B's SSTs block
+    at 47 ms and the 800 V buses fall to 0.915 pu - the racks ride through
+    on the stores' droop. Backing off at once on the voltage's dip (0.85 pu,
+    to 0.1 of their rating), the rectifiers hand their lineups to the stores
+    within 3 ms: the BESS are at their limit for 11 ms, the 800 V holds at
+    0.95 pu, and Hall B's SSTs - which do not ease - run on until the
+    eSTATCOM empties at 140 ms, its stores then carrying it. No rack is lost
+    either way. Easing by frequency (59.5 to 59.0 Hz) engages too, later.
+    """
+    big = {f'{s} converter': {'rated_mw': '6' if s.startswith('Hall B') else '7'} for s in _BUS_STORES}
+    conv, blocked, lost, low = _emt_islanded_at_full_load(client, big)
+    assert not lost and 0.9 < low < 0.93
+    assert conv['Substation BESS PCS 1']['limited_ms'] > 150
+    assert blocked['Hall B SST 1 rectifier'] < 60
+    assert 'eased_ms' not in conv['Lineup A rectifier 1']
+    conv, blocked, lost, low = _emt_islanded_at_full_load(client, {**big, **{r: _UV_EASING for r in _LINEUP_RECTIFIERS}})
+    assert not lost and low > 0.95
+    assert conv['Substation BESS PCS 1']['limited_ms'] < 30
+    assert 20 < conv['Lineup A rectifier 1']['uv_eased_at_ms'] < 25
+    assert blocked['Hall B SST 1 rectifier'] > blocked['eSTATCOM'] > 120
+    conv, blocked, lost, low = _emt_islanded_at_full_load(
+        client, {**big, **{r: {'ease_f_start_hz': '59.5', 'ease_f_end_hz': '59.0'} for r in _LINEUP_RECTIFIERS}})
+    rect = conv['Lineup A rectifier 1']
+    assert not lost and rect['eased_ms'] > 0 and rect['pll_f_min_hz'] < 59.5

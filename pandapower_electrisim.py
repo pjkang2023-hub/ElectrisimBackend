@@ -7822,7 +7822,8 @@ def create_other_elements(in_data,net,x, Busbars):
             # current loop's bandwidth; for it and the DC fault study, its DC link's ESR and ESL (0: none)
             for col, default in (('rated_mva', 0.0), ('dc_link_mf', 0.0), ('dc_link_esr_mohm', 0.0),
                                  ('dc_link_esl_uh', 0.0), ('current_limit_pu', 1.2), ('switching_khz', 5.0),
-                                 ('current_loop_hz', 500.0)):
+                                 ('current_loop_hz', 500.0), ('ease_f_start_hz', 0.0), ('ease_f_end_hz', 0.0),
+                                 ('uv_ease_pu', 0.0), ('uv_floor_pu', 0.5), ('uv_restore_s', 5.0)):
                 if col not in net.vsc.columns:
                     net.vsc[col] = default
                 net.vsc.at[vsc_idx, col] = safe_float(in_data[x].get(col, default), default)

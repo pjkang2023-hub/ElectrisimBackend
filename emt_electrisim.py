@@ -1232,6 +1232,13 @@ def _converter_result(conv, t_event):
            'rated_mva': _round(conv.s_rated / 1e6), 'current_limit_ka': _round(conv.i_max / SQ2 / 1e3),
            'blocked_ms': _round(conv.blocked_at * 1e3) if conv.blocked_at is not None else None,
            'limited_ms': _round(conv.limited_time * 1e3)}
+    if getattr(conv, 'ease', None) is not None or getattr(conv, 'uv', None) is not None:
+        # A rectifier easing off as its island's frequency fell or its voltage dipped: how long, how far.
+        out.update(eased_ms=_round(conv.eased_time * 1e3), ease_min_pu=_round(conv.ease_min),
+                   pll_f_min_hz=_round(conv.f_min) if conv.ease is not None else None)
+    if getattr(conv, 'uv', None) is not None:
+        out.update(uv_eased_at_ms=_round(conv.uv_at * 1e3) if conv.uv_at is not None else None,
+                   uv_cap_end_pu=_round(conv.uv_cap), v_ac_min_pu=_round(conv.v_ac_min))
     if hasattr(conv, 'k_ph'):
         # A grid-forming VSC's phases held at its limit (an unbalanced fault's negative sequence): how long, how far.
         out['phase_limited_ms'] = _round(conv.phase_limited_time * 1e3)
