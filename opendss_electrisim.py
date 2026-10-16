@@ -3429,9 +3429,27 @@ def create_capacitor_element(dss, element_data, element_name, element_id, Busbar
             
             
             try:
-                # Use bus name directly - OpenDSS will create bus automatically
-                simple_cmd = f"New Capacitor.{element_name} Bus1={bus_name} kvar={abs(q_kvar)} kV={bus_voltage}"
-                execute_dss_command(simple_cmd)
+                filter_order = float(element_data.get('filter_order') or 0)
+                if filter_order > 1:
+                    # A harmonic filter: the bank in series to its reactor, the reactor's star point
+                    # floating (no zero sequence on an ungrounded or resistance-earthed system); its
+                    # resistor in series (single-tuned) or across the reactor (high-pass).
+                    from pandapower_electrisim import harmonic_filter
+                    hf = harmonic_filter(abs(q_mvar), bus_voltage, filter_order,
+                                         str(element_data.get('filter_type') or 'high_pass'),
+                                         element_data.get('filter_q'))
+                    node = f"{bus_name}_{element_name}_f"
+                    q_c_kvar = 1000.0 * float(bus_voltage) ** 2 / hf['x_c_ohm']
+                    execute_dss_command(f"New Capacitor.{element_name} Bus1={bus_name} Bus2={node} Phases=3 "
+                                        f"kvar={q_c_kvar:.4f} kV={bus_voltage}")
+                    damping = (f"R={hf['r_ohm']:.6f}" if hf['type'] == 'single_tuned'
+                               else f"R=0 Rp={hf['r_ohm']:.6f}")
+                    execute_dss_command(f"New Reactor.{element_name}_l Bus1={node} Bus2={node}_n.4.4.4 Phases=3 "
+                                        f"X={hf['x_l_ohm']:.6f} {damping}")
+                else:
+                    # Use bus name directly - OpenDSS will create bus automatically
+                    simple_cmd = f"New Capacitor.{element_name} Bus1={bus_name} kvar={abs(q_kvar)} kV={bus_voltage}"
+                    execute_dss_command(simple_cmd)
                 # print(f"Command: {simple_cmd}")  # Reduced logging
                 
                 # Handle in_service status AFTER creating the element

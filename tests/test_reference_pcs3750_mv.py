@@ -1527,7 +1527,7 @@ def test_line_to_line_backbone_fault_at_the_phase_limit(client, quiet):
 # --- Phase 42: harmonics on the inverter island -----------------------------------------------------
 
 def _harmonic_study(client, quiet, tmp_path, spectrum=None, neglect_load_y=False, orders='5,7,11,13,17,19,23,25',
-                    variant=None):
+                    variant=None, extra=None):
     import opendssdirect as dss
     with open(os.path.join(HERE, 'reference', 'reference_ai_factory_800vdc.diagram_harmonic_payload.json'),
               encoding='utf-8') as fh:
@@ -1539,6 +1539,10 @@ def _harmonic_study(client, quiet, tmp_path, spectrum=None, neglect_load_y=False
             v['spectrum'] = spectrum
         if variant and isinstance(v, dict):
             variant(v)
+    if extra:
+        cell = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
+        for k, v in extra.items():
+            p[k] = {**v, 'bus': cell[v['bus']]}
     p['0'] = {**params, 'harmonics': orders, 'neglectLoadY': neglect_load_y}
     label = {v['name']: v.get('userFriendlyName') for v in p.values() if isinstance(v, dict) and 'name' in v}
     before = dss.Basic.DataPath()
@@ -1625,3 +1629,45 @@ def test_the_inverter_islands_resonance(client, quiet, tmp_path):
     assert nineteenth == pytest.approx(8.7, abs=0.3) and not bb['ieee519']['ok']
     assert bb['vthd_percent'] == pytest.approx(11.7, abs=0.4)
     assert buses['Utility 34.5 kV POI']['ieee519']['ok']
+
+
+# --- Phase 43: a damped harmonic filter on the backbone ---------------------------------------------
+
+BACKBONE_FILTER = {'typ': 'Capacitor0', 'name': 'HF1', 'id': 'hf1', 'userFriendlyName': 'Backbone harmonic filter',
+                   'bus': 'Load backbone 2', 'q_mvar': '1.0', 'loss_factor': '0', 'vn_kv': '34.5', 'step': '1',
+                   'max_step': '1', 'filter_order': '5', 'filter_type': 'high_pass', 'filter_q': '2'}
+
+
+def test_a_damped_filter_holds_the_island_within_ieee_519(client, quiet, tmp_path):
+    """
+    The backbone island resonates at the 20th; undamped by the SSTs (an active
+    front end is no resistance at a harmonic) their 19th reaches 8.7 % there.
+    A 1 Mvar high-pass filter on BB2 tuned to the 5th, its 496 ohm resistor
+    across its reactor - about the island's characteristic impedance at its
+    resonance - damps it: above the 5th the filter is that resistance. Tuned
+    near the resonance, at the 17th, its capacitance shifts the resonance down
+    onto the SSTs' 11th-13th and makes it worse, 13 %; smaller, 0.5 Mvar, it
+    does not pass. With it,
+    undamped, the backbone is 3.7 % THD, 2.0 % at the most at any order
+    (IEEE 519: 5 % and 3 %), the 505 V load sides 2.6 %; damped by the loads,
+    1.6 %. Its fundamental is the 1 Mvar it supplies, the bus voltages
+    unchanged within 0.01 pu.
+    """
+    extra = {'hf': BACKBONE_FILTER}
+    bare, _ = _harmonic_study(client, quiet, tmp_path, neglect_load_y=True)
+    buses, out = _harmonic_study(client, quiet, tmp_path, neglect_load_y=True, extra=extra)
+    for n in (1, 2, 3):
+        bb = buses[f'Load backbone {n}']
+        assert bb['vthd_percent'] == pytest.approx(3.73, abs=0.2) and bb['ieee519']['ok']
+        assert bb['ieee519']['max_individual_percent'] < 2.5
+        assert bb['vm_pu'] == pytest.approx(bare[f'Load backbone {n}']['vm_pu'], abs=0.01)
+        assert buses[f'Hall {n} 34.5 kV']['ieee519']['ok']
+        ld = buses[f'Block {n} 505 V load side']
+        assert ld['vthd_percent'] < 3.0 and ld['ieee519']['ok']
+    assert buses['Utility 34.5 kV POI']['ieee519']['ok']
+    damped, _ = _harmonic_study(client, quiet, tmp_path, extra=extra)
+    assert damped['Load backbone 2']['vthd_percent'] == pytest.approx(1.58, abs=0.2)
+    tuned_high, _ = _harmonic_study(client, quiet, tmp_path, neglect_load_y=True,
+                                    extra={'hf': {**BACKBONE_FILTER, 'filter_order': '17'}})
+    assert tuned_high['Load backbone 2']['vthd_percent'] > bare['Load backbone 2']['vthd_percent']
+    assert not tuned_high['Load backbone 2']['ieee519']['ok']

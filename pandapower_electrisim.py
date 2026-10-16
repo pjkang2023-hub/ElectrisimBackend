@@ -3390,6 +3390,39 @@ def _electrisim_grounding_params(el, vn_kv):
             't_rated_s': safe_float(el.get('t_rated_s'), 10.0)}
 
 
+HARMONIC_FILTER_TYPES = ('high_pass', 'single_tuned')
+HARMONIC_FILTER_DEFAULT_Q = {'high_pass': 2.0, 'single_tuned': 50.0}
+
+
+def harmonic_filter(q_mvar, vn_kv, order, filter_type='high_pass', quality=None):
+    """
+    A capacitor bank with its tuning reactor: its components (ohm, per phase,
+    star equivalent) and its fundamental draw at vn_kv. q_mvar is its net
+    reactive power at the fundamental, capacitive (> 0); order the harmonic
+    its reactor tunes it to, X_L = X_C / h^2. Single-tuned: R in series,
+    X_n / quality (some 30-100). High-pass (second-order damped): R across the
+    reactor, quality x X_n (some 0.5-5) - above its tuning it is that
+    resistance, which damps a resonance there. X_n = X_C / h.
+    """
+    h, q, v = float(order), float(q_mvar), float(vn_kv)
+    if not (h > 1.0 and q > 0 and v > 0):
+        raise ValueError('a harmonic filter needs q_mvar > 0, vn_kv > 0 and a tuning order above 1')
+    filter_type = filter_type if filter_type in HARMONIC_FILTER_TYPES else 'high_pass'
+    quality = float(quality) if quality and float(quality) > 0 else HARMONIC_FILTER_DEFAULT_Q[filter_type]
+    x_c = v * v / (q * (1.0 - 1.0 / (h * h)))
+    x_l = x_c / (h * h)
+    x_n = x_c / h
+    if filter_type == 'single_tuned':
+        r = x_n / quality
+        z1 = complex(r, x_l - x_c)
+    else:
+        r = quality * x_n
+        z1 = complex(0.0, -x_c) + (1j * x_l * r) / (r + 1j * x_l)
+    s1 = v * v / z1.conjugate()                    # MVA drawn at vn_kv (q < 0: it supplies)
+    return {'type': filter_type, 'order': h, 'quality': quality, 'x_c_ohm': x_c, 'x_l_ohm': x_l, 'r_ohm': r,
+            'p_mw': s1.real, 'q_mvar': s1.imag}
+
+
 def _electrisim_build_grounding_transformer(net, el, Busbars, TrafoDict, in_data):
     name = el.get('name')
     label = el.get('userFriendlyName') or name
@@ -7218,7 +7251,21 @@ def create_other_elements(in_data,net,x, Busbars):
             in_service = True
             if 'in_service' in in_data[x]:
                 in_service = bool(in_data[x]['in_service']) if isinstance(in_data[x]['in_service'], bool) else (in_data[x]['in_service'] == 'true' or in_data[x]['in_service'] == True)
-            pp.create_shunt_as_capacitor(net, typ="capacitor", bus=bus_idx, name=in_data[x]['name'], id=in_data[x]['id'], q_mvar=safe_float(in_data[x]['q_mvar']), loss_factor=safe_float(in_data[x]['loss_factor']), vn_kv=safe_float(in_data[x]['vn_kv']), step=float(safe_float(in_data[x].get('step', 1)) or 1), max_step=float(safe_float(in_data[x].get('max_step', 1)) or 1), in_service=in_service)        
+            filter_order = safe_float(in_data[x].get('filter_order'), 0.0) or 0.0
+            if filter_order > 1:
+                # A harmonic filter: the bank with its tuning reactor and damping resistor, its exact
+                # fundamental draw (the OpenDSS study builds the components themselves).
+                vn = safe_float(in_data[x].get('vn_kv'), 0.0) or float(net.bus.at[bus_idx, 'vn_kv'])
+                hf = harmonic_filter(safe_float(in_data[x]['q_mvar']), vn, filter_order,
+                                     str(in_data[x].get('filter_type') or 'high_pass'), safe_float(in_data[x].get('filter_q'), 0.0))
+                idx = pp.create_shunt(net, bus=bus_idx, q_mvar=hf['q_mvar'], p_mw=hf['p_mw'], vn_kv=vn,
+                                      name=in_data[x]['name'], in_service=in_service)
+                net.shunt.at[idx, 'id'] = in_data[x]['id']
+                net.shunt.at[idx, 'typ'] = 'capacitor'   # the results read a capacitor's rows by it
+                for k in ('type', 'order', 'quality'):
+                    net.shunt.at[idx, f'electrisim_filter_{k}'] = hf[k]
+            else:
+                pp.create_shunt_as_capacitor(net, typ="capacitor", bus=bus_idx, name=in_data[x]['name'], id=in_data[x]['id'], q_mvar=safe_float(in_data[x]['q_mvar']), loss_factor=safe_float(in_data[x]['loss_factor']), vn_kv=safe_float(in_data[x]['vn_kv']), step=float(safe_float(in_data[x].get('step', 1)) or 1), max_step=float(safe_float(in_data[x].get('max_step', 1)) or 1), in_service=in_service)        
         
         if (in_data[x]['typ'].startswith("Load") and not in_data[x]['typ'].startswith("Load DC")):
             bus_idx = Busbars.get(in_data[x]['bus'])

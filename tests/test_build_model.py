@@ -549,3 +549,43 @@ def test_endpoint_returns_every_problem(client):
 def test_endpoint_rejects_a_non_object_body(client):
     resp = client.post('/build-model', data='[1, 2]', content_type='application/json')
     assert resp.status_code == 400
+
+
+def test_a_capacitor_bank_as_a_harmonic_filter(client):
+    """
+    A shunt with filter_order is a capacitor bank with its tuning reactor:
+    X_L = X_C / h^2, so at the fundamental the bank's X_C less X_L gives its
+    rated Mvar, X_C = V^2 / (Q (1 - 1/h^2)). Single-tuned, it is its series
+    resistor alone at its tuning; high-pass, its resistor across the reactor,
+    quality x X_n, costs it a little loss. The net carries its fundamental
+    draw, the import sidecar its rating and tuning for the Capacitor dialog.
+    """
+    import pandapower_electrisim as pe
+    hp = pe.harmonic_filter(1.0, 34.5, 5, 'high_pass', 2)
+    assert hp['x_c_ohm'] == pytest.approx(34.5 ** 2 / (1 - 1 / 25))
+    assert hp['x_l_ohm'] == pytest.approx(hp['x_c_ohm'] / 25)
+    assert hp['r_ohm'] == pytest.approx(2 * hp['x_c_ohm'] / 5)
+    assert hp['q_mvar'] == pytest.approx(-1.0, abs=0.001) and 0 < hp['p_mw'] < 0.005
+    st = pe.harmonic_filter(2.0, 20.0, 4.7, 'single_tuned')
+    assert st['quality'] == 50.0
+    z_h = complex(st['r_ohm'], 4.7 * st['x_l_ohm'] - st['x_c_ohm'] / 4.7)
+    assert z_h == pytest.approx(complex(st['r_ohm'], 0), abs=1e-9)
+    assert st['q_mvar'] == pytest.approx(-2.0, abs=1e-4)
+    assert pe.harmonic_filter(1.0, 34.5, 5)['quality'] == 2.0
+
+    spec = substation()
+    spec['shunts'] = [{'id': 'HF', 'bus': 'F1', 'q_mvar': -1.5, 'filter_order': 4.7,
+                       'filter_type': 'single_tuned', 'filter_q': 40}]
+    net, _ = sld.build_network(spec)
+    sh = net.shunt.iloc[0]
+    want = pe.harmonic_filter(1.5, 20.0, 4.7, 'single_tuned', 40)
+    assert sh['q_mvar'] == pytest.approx(want['q_mvar']) and sh['p_mw'] == pytest.approx(want['p_mw'])
+    assert (sh['electrisim_filter_order'], sh['electrisim_filter_type'], sh['electrisim_filter_rated_q_mvar']) == (4.7, 'single_tuned', 1.5)
+    body = client.post('/build-model', json={'spec': spec}).get_json()
+    sidecar = json.loads(json.loads(body['model'])['_object']['electrisim_import_sidecar']['_object'])
+    assert sidecar['shunt']['HF'] == {'q_mvar': 1.5, 'filter_order': 4.7, 'filter_type': 'single_tuned', 'filter_q': 40.0}
+
+    for bad, says in (({'filter_type': 'band_pass'}, 'filter_type'), ({'q_mvar': 1.0}, 'q_mvar < 0'),
+                      ({'filter_order': 0.5}, 'filter_order > 1')):
+        spec['shunts'] = [{'id': 'HF', 'bus': 'F1', 'q_mvar': -1.5, 'filter_order': 5, **bad}]
+        assert any(says in p for p in problems_of(spec))

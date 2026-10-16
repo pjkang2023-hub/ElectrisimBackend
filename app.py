@@ -1692,7 +1692,20 @@ def pandapower_net_to_json(net):
     def build_electrisim_import_sidecar():
         """Extra SC / breaker fields keyed by element name for frontend import."""
         sidecar = {'switch': {}, 'gen': {}, 'sgen': {}, 'storage': {}, 'trafo': {},
-                   'trafo3w': {}, 'line': {}, 'ext_grid': {}, 'bus': {}}
+                   'trafo3w': {}, 'line': {}, 'ext_grid': {}, 'bus': {}, 'shunt': {}}
+        # A harmonic filter's tuning: its rated Mvar, order, type and quality, on its Capacitor.
+        if hasattr(net, 'shunt') and not net.shunt.empty and 'electrisim_filter_order' in net.shunt.columns:
+            for idx, r in net.shunt.iterrows():
+                if _scalar(r.get('electrisim_filter_order')):
+                    nm = r.get('name', f'Shunt_{idx}')
+                    if _is_blank_name(nm):
+                        nm = f'Shunt_{idx}'
+                    sidecar['shunt'][str(nm)] = {
+                        'q_mvar': _scalar(r.get('electrisim_filter_rated_q_mvar')),
+                        'filter_order': _scalar(r.get('electrisim_filter_order')),
+                        'filter_type': _scalar(r.get('electrisim_filter_type')),
+                        'filter_q': _scalar(r.get('electrisim_filter_quality')),
+                    }
 
         def opf_fields(table, idx, r, columns):
             # What an optimal power flow reads beyond the load-flow rows: the

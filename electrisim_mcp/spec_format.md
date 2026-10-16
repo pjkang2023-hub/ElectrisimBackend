@@ -124,6 +124,13 @@ say so raises a warning rather than renaming it.
 
 **shunts** - `id`, **`bus`**, **`q_mvar`** (positive absorbs - a reactor;
 negative injects - a capacitor bank), `p_mw` (0), `name`, `in_service`.
+A capacitor bank can be a harmonic filter: `filter_order` (the harmonic its
+tuning reactor tunes it to, above 1; X_L = X_C / h^2), `filter_type`
+(`high_pass` - the damping resistor across the reactor, R = filter_q x X_n -
+or `single_tuned` - in series, R = X_n / filter_q; X_n = X_C / h), `filter_q`
+(defaults 2 and 50). Its `q_mvar` is then its net reactive power at the
+fundamental, and `p_mw` is ignored (its resistor's loss is computed); the harmonic study builds the
+capacitor, reactor and resistor themselves. Its reactor's star point floats.
 
 **storage** - `id`, **`bus`**, `p_mw` (0; positive charges, negative discharges),
 `max_e_mwh` (1.0), `soc_percent` (state of charge, 50), `name`, `in_service`.

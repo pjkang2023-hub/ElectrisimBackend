@@ -748,6 +748,27 @@ def build_network(spec):
         if q_mvar is None:
             problems.append(f'{where}: q_mvar is required (negative for a capacitor bank)')
             continue
+        # A harmonic filter: a capacitor bank (q_mvar < 0) with its tuning reactor and damping resistor.
+        order = _num(row.get('filter_order'), 'filter_order', where, problems, default=0.0)
+        if order:
+            import pandapower_electrisim as pe
+            ftype = str(row.get('filter_type') or 'high_pass')
+            if ftype not in pe.HARMONIC_FILTER_TYPES:
+                problems.append(f"{where}: filter_type={ftype!r} must be one of " + ', '.join(pe.HARMONIC_FILTER_TYPES))
+                continue
+            if order <= 1 or q_mvar >= 0:
+                problems.append(f'{where}: a harmonic filter is a capacitor bank (q_mvar < 0) tuned above the '
+                                f'fundamental (filter_order > 1)')
+                continue
+            quality = _num(row.get('filter_q'), 'filter_q', where, problems, default=0.0, positive=False)
+            hf = pe.harmonic_filter(-q_mvar, float(net.bus.at[bus_index[bus], 'vn_kv']), order, ftype, quality)
+            idx = pp.create_shunt(net, bus=bus_index[bus], name=str(row.get('name') or ident),
+                                  q_mvar=hf['q_mvar'], p_mw=hf['p_mw'], in_service=bool(row.get('in_service', True)))
+            net.shunt.at[idx, 'typ'] = 'capacitor'
+            for k, v in (('order', order), ('type', ftype), ('quality', hf['quality']), ('rated_q_mvar', -q_mvar)):
+                net.shunt.at[idx, f'electrisim_filter_{k}'] = v
+            record('shunt', idx, ident)
+            continue
         idx = pp.create_shunt(net, bus=bus_index[bus], name=str(row.get('name') or ident),
                               q_mvar=q_mvar,
                               p_mw=_num(row.get('p_mw'), 'p_mw', where, problems, default=0.0),
