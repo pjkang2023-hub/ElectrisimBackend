@@ -264,3 +264,57 @@ def test_fault_along_a_line_cleared_by_its_breakers(client, quiet):
     assert fault['line'] == 'LA1, 50 %' and len(fault['phases']) == 3
     assert _ac_bus(result, '20 kV substation')['v_rms_final_pu'] > 0.95
     assert abs(_ac_bus(result, 'A2')['v_rms_final_pu'] - 1.0) > 0.1
+
+
+# --- A capacitor bank energised during the run ---------------------------------------
+
+def _bank_on_a_stiff_grid(as_filter, controlled, duration_ms='120'):
+    import emt_electrisim
+    import pandapower_electrisim as pe
+    net = pp.create_empty_network(f_hz=50)
+    b = pp.create_bus(net, 20)
+    pp.create_ext_grid(net, b, s_sc_max_mva=200, rx_max=0.1, x0x_max=1.0, r0x0_max=0.1)
+    if as_filter:
+        hf = pe.harmonic_filter(2.0, 20, 5, 'high_pass', 2)
+        i = pp.create_shunt(net, b, q_mvar=hf['q_mvar'], p_mw=hf['p_mw'], vn_kv=20, name='C1')
+        for k in ('type', 'order', 'quality'):
+            net.shunt.at[i, f'electrisim_filter_{k}'] = hf[k]
+        net.shunt.at[i, 'electrisim_filter_rated_q_mvar'] = 2.0
+    else:
+        pp.create_shunt(net, b, q_mvar=-2.0, p_mw=0.0, vn_kv=20, name='C1')
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        out = json.loads(emt_electrisim.emt_study(net, {
+            'time_step_us': '5', 'duration_ms': duration_ms, 'ac_energise_shunt': 'C1', 'ac_energise_time_ms': '33',
+            'ac_energise_controlled': 'true' if controlled else 'false'}))
+    return out['emt']['energise']
+
+
+def test_energising_a_capacitor_bank():
+    """
+    A 2 Mvar bank on a 20 kV bus of 200 MVA, out of the load flow the run
+    starts from, its breaker's poles closing together: the classic inrush -
+    the first two poles' charge ringing through the grid's inductance,
+    sqrt(4 L / C) some 40 ohm, near 0.8 kA against its 82 A steady peak, at
+    50 x sqrt(200 / 2) = 500 Hz - and the bus overshooting toward 2 pu. As a
+    5th-harmonic filter its reactor holds the inrush to some 0.3 kA and the
+    bus to 1.07 pu. Closed by a synchronous breaker - a and b at a zero of
+    their line voltage, c a quarter cycle later at its own - the plain bank
+    draws a fifth of it. Each settles to its rated 57.7 A.
+    """
+    i_ss = 2e6 / (math.sqrt(3) * 20e3)
+    plain = _bank_on_a_stiff_grid(False, False, duration_ms='400')
+    assert 5 * math.sqrt(2) * i_ss < plain['i_peak_ka'] * 1e3 < 11 * math.sqrt(2) * i_ss
+    assert 1.5 < plain['v_peak_pu'] < 2.0
+    assert plain['closed_ms'] == [33.0, 33.0, 33.0]
+    for ph in plain['phases']:
+        assert ph['i_rms_final_ka'] * 1e3 == pytest.approx(i_ss * 1.01, rel=0.05)
+    sync = _bank_on_a_stiff_grid(False, True)
+    assert sync['i_peak_ka'] < 0.25 * plain['i_peak_ka'] and sync['v_peak_pu'] < 1.15
+    a, b_, c = sync['closed_ms']
+    assert a == b_ and 33.0 <= a < 43.0 and c - a == pytest.approx(5.0, abs=0.05)
+    filt = _bank_on_a_stiff_grid(True, False)
+    assert 0.25 < filt['i_peak_ka'] < 0.4
+    assert filt['v_peak_pu'] < 1.1
+    for ph in filt['phases']:
+        assert ph['i_rms_final_ka'] * 1e3 == pytest.approx(i_ss * 1.01, rel=0.03)

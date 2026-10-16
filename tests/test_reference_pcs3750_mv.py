@@ -1712,3 +1712,57 @@ def test_the_inverters_active_damping_in_place_of_the_filter(client, quiet, tmp_
     weak, _ = _harmonic_study(client, quiet, tmp_path, neglect_load_y=True, variant=damped(3.0))
     assert not weak['Load backbone 2']['ieee519']['ok']
     assert weak['Load backbone 2']['ieee519']['max_individual_percent'] < 3.0
+
+
+# --- Phase 45: energising the backbone filter on the island ---------------------------------------
+
+def _energise_filter(client, quiet, controlled=False, load=1.0):
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    cell = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
+    for v in p.values():
+        if isinstance(v, dict) and str(v.get('typ', '')).startswith('Load DC'):
+            v['p_mw'] = str(float(v['p_mw']) * load)
+    p['hf'] = {**BACKBONE_FILTER, 'bus': cell[BACKBONE_FILTER['bus']]}
+    p['0'] = {'typ': 'EmtStudy Parameters', 'frequency': '60', 'time_step_us': '20', 'user_email': 't@t',
+              'duration_ms': '250', 'ac_energise_shunt': 'HF1', 'ac_energise_time_ms': '40',
+              'ac_energise_controlled': 'true' if controlled else 'false'}
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    assert 'emt' in out, out.get('message') or out.get('error') or str(out)[:500]
+    emt = out['emt']
+    return emt, [c for c in emt['converters'] if c['kind'] == 'PCS']
+
+
+def test_energising_the_filter_on_the_island(client, quiet):
+    """
+    The backbone filter (Section 6w) switched on with the island at full
+    load, its breaker's three poles together. Its inrush, some 72 A, is
+    small - its reactor holds it - but the inverters run at 0.95 of their
+    rating with a 1.2 limit: the inrush and the bus's ringing (near 460 Hz,
+    the filter against the inverters' reactors and T2s) take them to their
+    current limit for 27 ms. Held at it they are current sources, and the
+    SSTs - constant power - pull the backbone down to 0.71 pu: every SST
+    blocks below its 0.8 pu, the racks are lost, the island's frequency
+    rises to 61 Hz. Closed by a synchronous breaker - a and b at a zero of
+    their line voltage, c a quarter cycle later - the inrush halves, the
+    backbone stays within 0.98-1.02 pu and nothing blocks. Or the filter
+    goes in before the load: at 85 % its poles together still ride through
+    (the backbone at 0.93 pu), at 93 % only just (0.83 pu, the inverters
+    limited 44 ms).
+    """
+    emt, pcs = _energise_filter(client, quiet)
+    en = emt['energise']
+    assert en['closed_ms'] == [40.0, 40.0, 40.0] and 0.05 < en['i_peak_ka'] < 0.1
+    assert en['v_rms_min_pu'] < 0.8
+    assert max(c['limited_ms'] for c in pcs) > 20
+    assert {b['label'] for b in emt['converters_blocked']} >= {f'Hall {n} SST rectifier' for n in (1, 2, 3)}
+    assert max(c['f_max_hz'] for c in pcs) > 60.5
+    emt, pcs = _energise_filter(client, quiet, controlled=True)
+    en = emt['energise']
+    assert en['controlled'] and en['i_peak_ka'] < 0.04
+    assert en['v_rms_min_pu'] > 0.97 and en['v_rms_max_pu'] < 1.03
+    assert not emt['converters_blocked'] and max(c['limited_ms'] for c in pcs) < 10
+    assert sum(c['p_end_mw'] for c in pcs) > 11
+    emt, pcs = _energise_filter(client, quiet, load=0.85)
+    assert not emt['converters_blocked'] and emt['energise']['v_rms_min_pu'] > 0.9

@@ -130,6 +130,8 @@ class AcBuilder:
         self.fault_point = None  # its [a, b, c] nodes there
         self.line_trips = []     # {'line', 'label', 'switches', 'opened', 'last'}: each line's breakers, per phase
         self.t_trip = None
+        # A shunt energised during the run (ac_energise_shunt): {'shunt', 't', 'switches', 'label', 'bus'}.
+        self.energise = None
 
     # --- buses and the phase shifts ------------------------------------------------
 
@@ -159,6 +161,7 @@ class AcBuilder:
         self._trafos()
         self._grounding()
         self._loads()
+        self._energised_shunt()
         self._generation()
         for table in ('trafo3w', 'impedance', 'ward', 'xward', 'dcline'):
             if table in net and len(net[table]) and net[table]['in_service'].astype(bool).any():
@@ -548,6 +551,8 @@ class AcBuilder:
                     continue
                 if (table, i) in self.skip:
                     continue
+                if table == 'shunt' and self._filter_shunt(i, b):
+                    continue
                 self._impedance_load(b, _f(net[res].at[i, 'p_mw']), _f(net[res].at[i, 'q_mvar']), _label(net, table, i),
                                      self.profiles.get(i) if table == 'load' else None)
         if 'asymmetric_load' in net and len(net.asymmetric_load):
@@ -556,6 +561,103 @@ class AcBuilder:
                 if not bool(net.asymmetric_load.at[i, 'in_service']) or b not in self.nodes or ('asymmetric_load', i) in self.skip:
                     continue
                 self._asymmetric_load(i, b)
+
+    def _filter_shunt(self, i, b, ends=None):
+        """
+        A harmonic filter (a shunt with electrisim_filter_order) as its parts:
+        each phase its capacitor in series with its reactor - its damping
+        resistor across the reactor (high-pass) or in series (single-tuned) -
+        to a floating star. ``ends``: the nodes it hangs from, its bus's by
+        default. False for a shunt that is no filter.
+        """
+        net = self.net
+        if 'electrisim_filter_order' not in net.shunt.columns:
+            return False
+        order = _f(net.shunt.at[i, 'electrisim_filter_order'], 0.0)
+        rated = _f(net.shunt.at[i, 'electrisim_filter_rated_q_mvar'], 0.0) if 'electrisim_filter_rated_q_mvar' in net.shunt.columns else 0.0
+        if not order > 1 or not rated > 0:
+            return False
+        import pandapower_electrisim as pe
+        vn = _f(net.shunt.at[i, 'vn_kv'], 0.0) or self.vn[b] / 1e3
+        hf = pe.harmonic_filter(rated, vn, order, str(net.shunt.at[i, 'electrisim_filter_type']),
+                                _f(net.shunt.at[i, 'electrisim_filter_quality'], 0.0))
+        ckt, w = self.ckt, self.w
+        label = _label(net, 'shunt', i)
+        star = ckt.node(f'{label} star point')
+        ckt.add_r(star, 0, R_BIAS)
+        for k in range(3):
+            mid = ckt.node(f'{label} {"abc"[k]} reactor')
+            ckt.add_c((ends or self.nodes[b])[k], mid, 1.0 / (w * hf['x_c_ohm']))
+            if hf['type'] == 'single_tuned':
+                ckt.add_rl(mid, star, hf['r_ohm'], hf['x_l_ohm'] / w)
+            else:
+                ckt.add_rl(mid, star, 0.0, hf['x_l_ohm'] / w)
+                ckt.add_r(mid, star, hf['r_ohm'])
+        return True
+
+    def _energised_shunt(self):
+        """
+        The shunt ac_energise_shunt names, out of the load flow the run starts
+        from, behind its breaker's three poles, closed together at
+        ac_energise_time_ms: a capacitor bank's or a harmonic filter's inrush.
+        """
+        net, ckt, p = self.net, self.ckt, self.params
+        i = net.get('_electrisim_energise_shunt') if hasattr(net, 'get') else None
+        if i is None or i not in net.shunt.index:
+            return
+        b = int(net.shunt.at[i, 'bus'])
+        if b not in self.nodes:
+            return
+        label = _label(net, 'shunt', i)
+        ends = [ckt.node(f'{label} breaker {"abc"[k]}') for k in range(3)]
+        switches = [ckt.add_switch(self.nodes[b][k], ends[k], closed=False) for k in range(3)]
+        if not self._filter_shunt(i, b, ends):
+            v = self.vn[b]
+            q = -_f(net.shunt.at[i, 'q_mvar'], 0.0) * 1e6 * (v / (_f(net.shunt.at[i, 'vn_kv'], 0.0) * 1e3 or v)) ** 2
+            p_w = _f(net.shunt.at[i, 'p_mw'], 0.0) * 1e6
+            star = ckt.node(f'{label} star point')
+            ckt.add_r(star, 0, R_BIAS)
+            for k in range(3):
+                if q > 1e-6:
+                    ckt.add_c(ends[k], star, q / (self.w * v * v))
+                elif q < -1e-6:
+                    ckt.add_rl(ends[k], star, 0.0, v * v / -q / self.w)
+                if p_w > 1e-6:
+                    ckt.add_r(ends[k], star, v * v / p_w)
+        t_on = _f(p.get('ac_energise_time_ms'), 20.0) * 1e-3
+        controlled = str(p.get('ac_energise_controlled') or 'false').strip().lower() in ('true', '1', 'yes')
+        self.energise = {'shunt': i, 'bus': b, 't': t_on, 'switches': switches, 'label': label,
+                         'controlled': controlled, 'closed_ms': [None, None, None]}
+        if not controlled:
+            for k in switches:
+                ckt.at(t_on, lambda st, k=k: st.set_switch(k, True))
+            self.energise['closed_ms'] = [t_on * 1e3] * 3
+            return
+        # Controlled closing, as a synchronous breaker does for a bank with a floating star: poles a
+        # and b together at a zero of the line voltage between them, pole c a quarter cycle later at
+        # its own phase voltage's zero - each pole closing on no voltage across its capacitor.
+        nodes, en, last = self.nodes[b], self.energise, {}
+
+        def close(t, state):
+            if t < t_on - 1e-12 or en['closed_ms'][2] is not None:
+                return False
+            v = state.v[nodes]
+            stage = 'ab' if en['closed_ms'][0] is None else 'c'
+            x = float(v[0] - v[1]) if stage == 'ab' else float(v[2])
+            prev, last[stage] = last.get(stage), x
+            if prev is None or (prev > 0) == (x > 0) and x != 0.0:
+                return False
+            if stage == 'ab':
+                state.set_switch(switches[0], True)
+                state.set_switch(switches[1], True)
+                en['closed_ms'][0] = en['closed_ms'][1] = t * 1e3
+            else:
+                state.set_switch(switches[2], True)
+                en['closed_ms'][2] = t * 1e3
+            return True
+        ckt.add_controller(close)
+        self.series.append(('Shunt', str(net.shunt.at[i, 'name']), _row_id(net, 'shunt', i), f'{label} (energised)',
+                            [('i_sw', k, None, 1.0) for k in switches]))
 
     def _asymmetric_load(self, i, b):
         """

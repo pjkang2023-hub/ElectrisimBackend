@@ -789,6 +789,18 @@ def emt_study(net, params, in_data=None):
     params = params or {}
     warnings_out = []
     profiles = _plan_profiles(net, params, in_data, warnings_out)
+    # A shunt energised during the run: out of the load flow it starts from.
+    energise = str(params.get('ac_energise_shunt') or 'none').strip()
+    if energise not in ('none', ''):
+        hit = [i for i in net.shunt.index
+               if energise in (str(net.shunt.at[i, 'name']), str(_row_id(net, 'shunt', i)))] if len(net.shunt) else []
+        if not hit:
+            warnings_out.append(f'No shunt {energise} to energise: the study runs without it.')
+        elif not bool(net.shunt.at[hit[0], 'in_service']):
+            warnings_out.append(f'Shunt {energise} is out of service: the study runs without energising it.')
+        else:
+            net.shunt.at[hit[0], 'in_service'] = False
+            net['_electrisim_energise_shunt'] = hit[0]
     try:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
@@ -893,6 +905,8 @@ def emt_study(net, params, in_data=None):
             event_times.append(t_on + (dur if dur > 0 else 0.0))
     if b.ac.line_trips:
         event_times.append(b.ac.t_trip)
+    if b.ac.energise is not None:
+        event_times.append(b.ac.energise['t'])
 
     # The grid's voltage following a profile (IEEE 2800's ride-through envelope, or a table): its
     # source's electromotive force stepped, a share of its own, behind its short-circuit impedance.
@@ -997,6 +1011,8 @@ def emt_study(net, params, in_data=None):
     if b.ac.machines:
         result['machines'] = [_machine_result(m) for m in b.ac.machines]
     result['ders'] = [_der_result(rec, m) for rec, m in b.ders]
+    if b.ac.energise is not None:
+        result['energise'] = _energise_result(sim, b.ac, net)
     if b.ac.island is not None:
         result['island'] = {'t_ms': _round(b.ac.island['t'] * 1e3),
                             'opened_ms': [_round(x * 1e3) if x is not None else None for x in b.ac.island['opened']]}
@@ -1147,6 +1163,44 @@ def _ac_results(sim, ac, net, t_fine, fault):
                                         'i_sym_ka': _round(i_sym * 1e-3) if i_sym is not None else None,
                                         'waveform': _waveform(t, i, None, t_fine)})
     return {'buses': buses, 'branches': branches, 'fault': fault_out}
+
+
+def _energise_result(sim, ac, net):
+    """
+    A shunt energised during the run: its inrush, phase by phase (its peak,
+    and its rms over the run's last cycle), and its bus's voltage after the
+    closing - its highest instant and its lowest and highest rms over a cycle,
+    per unit of the nominal phase voltage's peak and rms.
+    """
+    en = ac.energise
+    t = sim['t']
+    period = 1.0 / ac.f_hz
+    after = t >= en['t']
+    last = t >= t[-1] - period
+    phases = []
+    for k, sw in zip('abc', en['switches']):
+        i = sim['i_sw'][:, sw]
+        r = _rms(t, i, period)
+        phases.append({'phase': k, 'i_peak_ka': _round(float(np.max(np.abs(i[after]))) * 1e-3) if after.any() else None,
+                       'i_rms_final_ka': _round(float(np.sqrt(np.mean(i[last] ** 2))) * 1e-3) if last.any() else None,
+                       'i_rms_max_ka': _round(float(np.nanmax(np.where(after, r, np.nan))) * 1e-3) if after.any() else None})
+    b = en['bus']
+    v_ph = ac.vn[b] / math.sqrt(3.0)
+    v_peak, rms_min, rms_max = 0.0, np.inf, 0.0
+    for k in range(3):
+        v = sim['v'][:, ac.nodes[b][k]]
+        v_peak = max(v_peak, float(np.max(np.abs(v[after]))) if after.any() else 0.0)
+        r = _rms(t, v, period)
+        sel = after & np.isfinite(r) & (t >= en['t'] + period)
+        if sel.any():
+            rms_min, rms_max = min(rms_min, float(np.min(r[sel]))), max(rms_max, float(np.max(r[sel])))
+    return {'shunt': en['label'], 'id': _row_id(net, 'shunt', en['shunt']), 'bus': _label(net, 'bus', b),
+            't_ms': _round(en['t'] * 1e3), 'controlled': en['controlled'],
+            'closed_ms': [_round(x) if x is not None else None for x in en['closed_ms']], 'phases': phases,
+            'i_peak_ka': max((p['i_peak_ka'] or 0.0) for p in phases),
+            'v_peak_pu': _round(v_peak / (v_ph * math.sqrt(2.0))),
+            'v_rms_min_pu': _round(rms_min / v_ph) if np.isfinite(rms_min) else None,
+            'v_rms_max_pu': _round(rms_max / v_ph) if rms_max > 0 else None}
 
 
 def _machine_result(m):

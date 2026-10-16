@@ -7264,6 +7264,7 @@ def create_other_elements(in_data,net,x, Busbars):
                 net.shunt.at[idx, 'typ'] = 'capacitor'   # the results read a capacitor's rows by it
                 for k in ('type', 'order', 'quality'):
                     net.shunt.at[idx, f'electrisim_filter_{k}'] = hf[k]
+                net.shunt.at[idx, 'electrisim_filter_rated_q_mvar'] = safe_float(in_data[x]['q_mvar'])
             else:
                 pp.create_shunt_as_capacitor(net, typ="capacitor", bus=bus_idx, name=in_data[x]['name'], id=in_data[x]['id'], q_mvar=safe_float(in_data[x]['q_mvar']), loss_factor=safe_float(in_data[x]['loss_factor']), vn_kv=safe_float(in_data[x]['vn_kv']), step=float(safe_float(in_data[x].get('step', 1)) or 1), max_step=float(safe_float(in_data[x].get('max_step', 1)) or 1), in_service=in_service)        
         
