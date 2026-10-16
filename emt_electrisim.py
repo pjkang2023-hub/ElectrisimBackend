@@ -815,6 +815,7 @@ def emt_study(net, params, in_data=None):
     b = builder.build()
     ckt = b.ckt
     if b.ac.nodes:
+        b.ac.ground_floating_buses()
         ckt.start_in_ac_steady_state(b.ac.w)
     dt = max(_f(params.get('time_step_us'), 1.0), 0.01) * 1e-6
     t_end = max(_f(params.get('duration_ms'), 50.0), 0.5) * 1e-3

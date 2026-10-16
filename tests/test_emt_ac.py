@@ -318,3 +318,33 @@ def test_energising_a_capacitor_bank():
     assert filt['v_peak_pu'] < 1.1
     for ph in filt['phases']:
         assert ph['i_rms_final_ka'] * 1e3 == pytest.approx(i_ss * 1.01, rel=0.03)
+
+
+def test_a_bus_floating_behind_a_delta_is_held_to_earth():
+    """
+    A 20 kV bus reached only through a transformer's delta winding - its grid
+    or generator out of service - has no path to earth: the network's matrix
+    was singular and the solver fell back to the whole matrix, densely, at
+    every step (an islanded AI factory took over ten minutes for 20 ms). Each
+    such bus is now held to earth through R_BIAS a phase, as a star point is:
+    the run is quick, the delta's voltage the transformer's.
+    """
+    import time
+    import emt_electrisim
+    net = pp.create_empty_network(f_hz=50)
+    hv, lv = pp.create_bus(net, 20, name='HV'), pp.create_bus(net, 0.4, name='LV')
+    pp.create_ext_grid(net, lv, s_sc_max_mva=50, rx_max=0.1, x0x_max=1.0, r0x0_max=0.1)
+    pp.create_transformer_from_parameters(net, hv, lv, 1.0, 20, 0.4, 1.0, 6.0, 1.0, 0.1,
+                                          vector_group='Dyn11', shift_degree=150)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        t0 = time.time()
+        out = json.loads(emt_electrisim.emt_study(net, {'time_step_us': '20', 'duration_ms': '40'}))
+        took = time.time() - t0
+    buses = {b['name']: b for b in out['emt']['ac']['buses']}
+    assert took < 20
+    assert buses['HV']['v_rms_final_pu'] == pytest.approx(1.0, abs=0.02)
+    ckt = es.Circuit()
+    builder = emt_ac.AcBuilder(ckt, net, {}, [], 50.0)
+    builder.build()
+    assert builder.ground_floating_buses() == ['HV']

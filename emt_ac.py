@@ -562,6 +562,43 @@ class AcBuilder:
                     continue
                 self._asymmetric_load(i, b)
 
+    def ground_floating_buses(self):
+        """
+        Each AC bus no branch joins to earth - behind a delta winding with its
+        grid, generator or converter out of service - held there through
+        R_BIAS a phase, as a star point is. Floating, it left the network's
+        matrix singular: the solver fell back to the whole matrix, densely, at
+        every step, and a run of 20 ms took longer than ten minutes. Run once
+        the circuit is built, converters and all. Returns their labels.
+        """
+        ckt = self.ckt
+        parent = list(range(len(ckt.labels)))
+
+        def root(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def join(a, b):
+            parent[root(int(a))] = root(int(b))
+
+        for br in ckt.rl:
+            join(br[0], br[1])
+        for table in (ckt.c, ckt.r, ckt.sw, ckt.d, ckt.arr):
+            for a, b, *_ in table:
+                join(a, b)
+        for a, b, *_ in ckt.cp:
+            for x, y in zip(a, b):
+                join(x, y)
+        held = []
+        for b, nodes in self.nodes.items():
+            if any(root(k) != root(0) for k in nodes):
+                for k in nodes:
+                    ckt.add_r(k, 0, R_BIAS)
+                held.append(_label(self.net, 'bus', b))
+        return held
+
     def _filter_shunt(self, i, b, ends=None):
         """
         A harmonic filter (a shunt with electrisim_filter_order) as its parts:
