@@ -1479,7 +1479,9 @@ def _emt_bb2_fault(client, quiet, kind, k=None):
               'duration_ms': '150', 'ac_fault_bus': cell['Load backbone 2'], 'ac_fault_type': kind,
               'ac_fault_resistance_ohm': '0.001', 'ac_fault_time_ms': '20', 'ac_fault_duration_ms': '100'}
     with quiet():
-        return json.loads(client.post('/', json=p).get_data(as_text=True))['emt']
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    assert 'emt' in out, out.get('message') or out.get('error') or str(out)[:500]
+    return out['emt']
 
 
 @pytest.mark.parametrize('k, iec_a, emt_a', [(1.2, 239, 239), (1.5, 299, 299)])
@@ -1520,3 +1522,106 @@ def test_line_to_line_backbone_fault_at_the_phase_limit(client, quiet):
     gfm = [c for c in emt['converters'] if 'GFM' in c['label']]
     assert all(c['phase_limit_min'] < 0.8 and c['phase_limited_ms'] > 50 for c in gfm)
     assert i_emt > 3 * 60
+
+
+# --- Phase 42: harmonics on the inverter island -----------------------------------------------------
+
+def _harmonic_study(client, quiet, tmp_path, spectrum=None, neglect_load_y=False, orders='5,7,11,13,17,19,23,25',
+                    variant=None):
+    import opendssdirect as dss
+    with open(os.path.join(HERE, 'reference', 'reference_ai_factory_800vdc.diagram_harmonic_payload.json'),
+              encoding='utf-8') as fh:
+        params = json.load(fh)['0']
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    for v in p.values():
+        if spectrum and isinstance(v, dict) and str(v.get('typ', '')).startswith('Solid-State'):
+            v['spectrum'] = spectrum
+        if variant and isinstance(v, dict):
+            variant(v)
+    p['0'] = {**params, 'harmonics': orders, 'neglectLoadY': neglect_load_y}
+    label = {v['name']: v.get('userFriendlyName') for v in p.values() if isinstance(v, dict) and 'name' in v}
+    before = dss.Basic.DataPath()
+    dss.Basic.DataPath(str(tmp_path))
+    try:
+        with quiet():
+            out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    finally:
+        dss.Basic.DataPath(before)
+    assert out['harmonic_analysis']['executed']
+    return {label.get(b['name'], b['name']): b for b in out['busbars']}, out
+
+
+def test_harmonics_reach_the_inverter_island(client, quiet, tmp_path):
+    """
+    The harmonic study (OpenDSS) on the reference, the SSTs and rectifiers
+    injecting active front ends' spectra. Each grid-forming PCS of the
+    backbone's island is a source behind its 0.15 pu reactor - EMT's - its
+    EMF the load flow's terminal voltage plus its reactor's drop: before, a
+    constant power source, the island had no voltage reference, OpenDSS left
+    it unsolved and its buses read 0 % THD. Its fundamental is Electrisim's
+    own load flow's, and every bus passes IEEE 519: the backbone 2.3 % THD
+    against 5 %, the 505 V load sides 1.6 % against 8 %, the POI 0.4 %. With
+    six-pulse SSTs the weak island fails at once - 17 % on the backbone, 12 %
+    on the load sides - while the utility side, stiff, does not notice.
+    """
+    import opendss_electrisim as od
+    buses, out = _harmonic_study(client, quiet, tmp_path)
+    assert any("holds its island's voltage behind its 0.15 pu reactor" in w for w in out['warnings'])
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    label = {v['name']: v.get('userFriendlyName') for v in p.values() if isinstance(v, dict) and 'name' in v}
+    with quiet():
+        lf = {label.get(b['name']): b['vm_pu'] for b in od._opendss_electrisim_load_flow(p, 60.0)['busbars']}
+    for n in (1, 2, 3):
+        bb = buses[f'Load backbone {n}']
+        assert bb['vm_pu'] == pytest.approx(lf[f'Load backbone {n}'], abs=0.01)
+        assert bb['vthd_percent'] == pytest.approx(2.26, abs=0.1) and bb['ieee519']['ok']
+        ld = buses[f'Block {n} 505 V load side']
+        assert ld['vthd_percent'] == pytest.approx(1.58, abs=0.1) and ld['ieee519']['ok']
+        assert buses[f'Hall {n} 34.5 kV']['vthd_percent'] > 2.0
+    assert buses['Utility 34.5 kV POI']['vthd_percent'] < 0.5
+    six, _ = _harmonic_study(client, quiet, tmp_path, spectrum='six_pulse')
+    for n in (1, 2, 3):
+        assert six[f'Load backbone {n}']['vthd_percent'] > 15 and not six[f'Load backbone {n}']['ieee519']['ok']
+        assert not six[f'Block {n} 505 V load side']['ieee519']['ok']
+    assert six['Utility 34.5 kV POI']['ieee519']['ok']
+
+
+def test_the_inverter_islands_resonance(client, quiet, tmp_path):
+    """
+    A frequency scan: Hall 2's SST injecting 1 % at every order to the 40th,
+    the rest none. Undamped by the loads (neglectLoadY: an active front end, a
+    controlled current source, is no resistance at a harmonic), the backbone's
+    impedance peaks at the 20th, 1.2 kHz - the inverters' reactors and T2s,
+    about 56 mH, against the cables' 0.3 uF - some 100 times its flat value;
+    damped by the SSTs taken as their fundamental resistance, OpenDSS's
+    default, it stays flat. Real damping - the SSTs' input filters, the
+    inverters' own - lies between, and decides it: with the active front
+    ends' own spectra, undamped, the 19th reaches 8.7 % on the backbone
+    (IEEE 519: 3 %), 11.7 % THD.
+    """
+    orders = list(range(2, 41))
+    flat = '\n'.join(f'{n},1.0,0' for n in orders)
+
+    def one_source(v):
+        if str(v.get('typ', '')).startswith('Solid-State'):
+            v['spectrum'] = 'custom' if v.get('userFriendlyName') == 'Hall 2 SST' else 'none'
+            v['spectrum_csv'] = flat
+        if str(v.get('typ', '')).startswith('VSC'):
+            v['spectrum'] = 'none'
+
+    scans = {}
+    for neglect in (False, True):
+        buses, _ = _harmonic_study(client, quiet, tmp_path, neglect_load_y=neglect,
+                                   orders=','.join(str(n) for n in orders), variant=one_source)
+        scans[neglect] = {int(k): float(v) for k, v in buses['Load backbone 2']['harmonic_voltages_kv'].items() if float(v) > 0}
+    peak = max(scans[True], key=scans[True].get)
+    assert peak == 20 and scans[True][20] > 50 * scans[True][5]
+    assert max(scans[False].values()) < 2 * min(v for k, v in scans[False].items() if k >= 5)
+    buses, _ = _harmonic_study(client, quiet, tmp_path, neglect_load_y=True)
+    bb = buses['Load backbone 2']
+    nineteenth = 100 * float(bb['harmonic_voltages_kv']['19']) / bb['fundamental_voltage_kv']
+    assert nineteenth == pytest.approx(8.7, abs=0.3) and not bb['ieee519']['ok']
+    assert bb['vthd_percent'] == pytest.approx(11.7, abs=0.4)
+    assert buses['Utility 34.5 kV POI']['ieee519']['ok']

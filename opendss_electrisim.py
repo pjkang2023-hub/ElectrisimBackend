@@ -1,5 +1,6 @@
 import opendssdirect as dss
 from typing import List, Optional
+import cmath
 import math
 import json
 import random
@@ -333,9 +334,16 @@ def _opendss_converter_stand_ins(in_data, frequency):
                               'spectrum': element.get('spectrum') or ('afe' if side in ('ac', 'mv') else 'none'),
                               'spectrum_csv': element.get('spectrum_csv') or ''})
 
+    angles = {b.get('name'): b.get('va_degree') for b in result.get('busbars') or []}
     for row in result.get('pcs') or []:
-        if finite(row.get('p_mw'), row.get('q_mvar')):
-            add(row, 'ac', 'bus', -row['p_mw'], -row['q_mvar'])        # generator convention
+        if not finite(row.get('p_mw'), row.get('q_mvar')):
+            continue
+        element = converters.get(row.get('name'))
+        if (row.get('control') == 'grid_forming' and row.get('islanded') and element
+                and finite(row.get('vm_pu'), row.get('s_rated_mva'), angles.get(element.get('bus')))):
+            stand_ins.append(_pcs_voltage_source(row, element, float(angles[element.get('bus')])))
+            continue
+        add(row, 'ac', 'bus', -row['p_mw'], -row['q_mvar'])        # generator convention
     for row in result.get('vscs') or []:
         add(row, 'ac', 'bus', row.get('p_mw'), row.get('q_mvar'))       # load convention
     for row in result.get('ssts') or []:
@@ -346,6 +354,31 @@ def _opendss_converter_stand_ins(in_data, frequency):
             add(row, 'lv', 'bus_lv_ac', -row['p_lv_ac_mw'], -(row.get('q_lv_ac_mvar') or 0.0))
     _opendss_warn_dc_left_out(in_data, stand_ins=stand_ins)
     return stand_ins
+
+
+# A grid-forming PCS's reactor (pu of its rating, X then R): EMT's, which it builds each behind.
+PCS_REACTOR_PU = (0.15, 0.01)
+
+
+def _pcs_voltage_source(row, element, va_degree):
+    """
+    An island's grid-forming PCS as what holds its voltage: a source behind
+    its reactor, its EMF its terminal voltage plus the drop its current makes
+    across the reactor, E = V + Z I, so the load flow's fundamental is
+    Electrisim's; no harmonic EMF of its own (OpenDSS's default source
+    spectrum) and no zero sequence - a three-wire converter. As a constant
+    power source an island of them had no voltage reference: OpenDSS left it
+    unsolved, every bus at 0 % THD, and its SSTs' harmonics went nowhere.
+    """
+    x_pu, r_pu = PCS_REACTOR_PU
+    s_rated = float(row['s_rated_mva'])
+    v = float(row['vm_pu']) * cmath.exp(1j * math.radians(va_degree))
+    s = complex(float(row['p_mw']), float(row['q_mvar'])) / s_rated
+    e = v + complex(r_pu, x_pu) * (s / v).conjugate()
+    return {'kind': 'vsource', 'name': f"{row['name']}_ac", 'bus': element.get('bus'),
+            'label': element.get('userFriendlyName') or row['name'], 'p_mw': -float(row['p_mw']),
+            'q_mvar': -float(row['q_mvar']), 's_rated_mva': s_rated, 'e_pu': abs(e),
+            'e_angle_degree': math.degrees(cmath.phase(e)), 'r_pu': r_pu, 'x_pu': x_pu}
 
 
 def _opendss_create_converter_stand_in(dss, stand_in, BusbarsDictVoltage, BusbarsDictConnectionToName,
@@ -363,6 +396,13 @@ def _opendss_create_converter_stand_in(dss, stand_in, BusbarsDictVoltage, Busbar
     if not kv:
         return
     name = _sanitize_opendss_name(stand_in['name'])
+    if stand_in.get('kind') == 'vsource':
+        z_base = float(kv) ** 2 / stand_in['s_rated_mva']
+        r1, x1 = stand_in['r_pu'] * z_base, stand_in['x_pu'] * z_base
+        execute_dss_command(
+            f"New Vsource.{name} Bus1={bus_name} Phases=3 basekV={kv} pu={stand_in['e_pu']:.6f} "
+            f"angle={stand_in['e_angle_degree']:.6f} R1={r1:.6f} X1={x1:.6f} R0={r1:.6f} X0={1e4 * z_base:.3f}")
+        return
     spectrum = _converter_spectrum(dss, stand_in, name, execute_dss_command)
     p_kw, q_kvar = stand_in['p_mw'] * 1000.0, stand_in['q_mvar'] * 1000.0
     if p_kw >= 0:
@@ -441,6 +481,8 @@ def _opendss_warn_dc_left_out(in_data, stand_ins=None, failure=None):
         def describe(s):
             sign = 1.0 if s['p_mw'] >= 0 else -1.0
             verb = 'draws' if sign > 0 else 'supplies'
+            if s.get('kind') == 'vsource':
+                verb = f"holds its island's voltage behind its {s['x_pu']:g} pu reactor and supplies"
             return (f"{s['label']} {verb} {round(sign * s['p_mw'], 3) + 0.0:g} MW, "
                     f"{round(sign * s['q_mvar'], 3) + 0.0:g} Mvar")
         message += (". Each converter is the constant load or source its AC side is in Electrisim's "
