@@ -1150,6 +1150,89 @@ def test_variant_lineup_transformers_at_10_percent_bring_the_lv_into_ieee_1584(c
         assert 60 < buses[b]['ikss_ka'] < 106, b
 
 
+def _split_station(p, bus_label, tx_label, pcs_labels, sn_mva):
+    """
+    Each PCS of a 0.69 kV station on its own bus behind its own transformer
+    of sn_mva at the station's impedance; the first keeps the station's.
+    """
+    p = json.loads(json.dumps(p))
+    by = {v.get('userFriendlyName'): k for k, v in p.items() if isinstance(v, dict)}
+    bus, tx = p[by[bus_label]], p[by[tx_label]]
+    tx['sn_mva'] = str(sn_mva)
+    for k, label in enumerate(pcs_labels[1:], start=2):
+        nb = dict(bus, name=f"{bus['name']}_u{k}", id=f"{bus['id']}_u{k}", typ=f'Bus{900 + len(p)}',
+                  userFriendlyName=bus_label.replace(' 0.69 kV', f' {k} 0.69 kV'))
+        nt = dict(tx, name=f"{tx['name']}_u{k}", id=f"{tx['id']}_u{k}", typ=f'Transformer{900 + len(p)}',
+                  userFriendlyName=f'{tx_label} {k}', lv_bus=nb['name'])
+        p[f"unit_bus_{bus['name']}_{k}"], p[f"unit_tx_{tx['name']}_{k}"] = nb, nt
+        p[by[label]]['bus'] = nb['name']
+    return p
+
+
+def _estatcom_as_four_units(p):
+    """The 15 MVA eSTATCOM as four 3.75 MVA units, each with a quarter of its supercapacitors."""
+    p = json.loads(json.dumps(p))
+    by = {v.get('userFriendlyName'): k for k, v in p.items() if isinstance(v, dict)}
+    pcs, sc = p[by['eSTATCOM']], p[by['eSTATCOM supercapacitors']]
+    pcs['s_rated_mva'] = '3.75'
+    sc.update(c_f=str(float(sc['c_f']) / 4), p_rated_kw=str(float(sc['p_rated_kw']) / 4))
+    for k in (2, 3, 4):
+        nsc = dict(sc, name=f"{sc['name']}_u{k}", id=f"{sc['id']}_u{k}", typ=f'Supercapacitor{900 + k}',
+                   userFriendlyName=f'eSTATCOM supercapacitors {k}')
+        p[f'unit_sc_{k}'] = nsc
+        p[f'unit_pcs_{k}'] = dict(pcs, name=f"{pcs['name']}_u{k}", id=f"{pcs['id']}_u{k}", typ=f'PCS{900 + k}',
+                                  userFriendlyName=f'eSTATCOM {k}', der=nsc['name'])
+    return p
+
+
+def _pcs_stations_split(p):
+    p = _split_station(p, 'Substation BESS 0.69 kV', 'Substation BESS transformer',
+                       [f'Substation BESS PCS {k}' for k in (1, 2, 3, 4)], 3)
+    return _split_station(_estatcom_as_four_units(p), 'eSTATCOM 0.69 kV', 'eSTATCOM transformer',
+                          ['eSTATCOM', 'eSTATCOM 2', 'eSTATCOM 3', 'eSTATCOM 4'], 4)
+
+
+def test_variant_pcs_stations_split_into_units_bring_the_0_69_kv_into_ieee_1584(client):
+    """
+    Found in 20b: the 0.69 kV PCS buses at 112 kA (the substation BESS, four
+    2.75 MVA PCS on one 12 MVA transformer) and 146 kA (the 15 MVA eSTATCOM on
+    one 16 MVA), past IEEE 1584's 65 kA for 601 V-15 kV: studied at that
+    limit, 8.3 cal/cm2 at 0.2 s - the energy at their real current unknown.
+    Raising one transformer's impedance cannot fix it: under 65 kA the 12 MVA
+    unit needs some 19 %. Split into units - each PCS on its own 0.69 kV bus
+    behind its own transformer at the station's impedance (3 MVA at 7 %; the
+    eSTATCOM as four 3.75 MVA units, each a quarter of its supercapacitors,
+    behind 4 MVA at 8 %) - they fall to 38 and 47 kA: inside the standard,
+    5.7 and 6.6 cal/cm2 at 0.2 s, PPE category 2. The load flow does not
+    notice (within 0.0001 pu).
+    """
+    from test_reference_grids import _ieee1584
+    split = _pcs_stations_split(_payload())
+    bess = ['Substation BESS 0.69 kV'] + [f'Substation BESS {k} 0.69 kV' for k in (2, 3, 4)]
+    estatcom = ['eSTATCOM 0.69 kV'] + [f'eSTATCOM {k} 0.69 kV' for k in (2, 3, 4)]
+    base_lf, split_lf = (_by_label(p, _post(client, p)['busbars']) for p in (_payload(), split))
+    for group in (bess, estatcom):
+        for b in group:
+            assert split_lf[b]['vm_pu'] == pytest.approx(base_lf[group[0]]['vm_pu'], abs=1e-3), b
+    p = dict(split)
+    p['0'] = {'typ': 'ArcFlashPandaPower Parameters', 'electrode_config': 'VCB', 'equipment_mode': 'by_voltage',
+              'working_distance_mm': '455', 'conductor_gap_mm': '25', 'enclosure_height_mm': '508',
+              'enclosure_width_mm': '508', 'enclosure_depth_mm': '508', 'clearing_time_s': '0.2',
+              'clearing_time_min_s': '0.2', 'user_email': 't@t'}
+    out = _post(client, p)
+    rows = {r['name']: r for r in out['arc_flash']}
+    for group, ik, energy in ((bess, 38.3, 5.67), (estatcom, 46.7, 6.65)):
+        for b in group:
+            row = rows[b]
+            assert row['ikss_ka'] == pytest.approx(ik, abs=0.5) and row['ikss_ka'] < 65, b
+            assert row['method'] == 'IEEE1584-2018' and row['ppe_category'] == '2'
+            assert row['incident_energy_cal_cm2'] == pytest.approx(energy, abs=0.1)
+            assert row['incident_energy_cal_cm2'] == pytest.approx(
+                _ieee1584(row, row['conductor_gap_mm'], row['working_distance_mm'],
+                          (row['enclosure_height_mm'], row['enclosure_width_mm'], row['enclosure_depth_mm'])), rel=1e-6), b
+    assert not [w for w in out['warnings'] if '0.69 kV' in w and '65 kA' in w]
+
+
 def test_variant_some_24_mw_of_grid_forming_storage_carries_the_backup(client):
     """
     Found in 20a: grid lost and turbine off, the substation storage carried
