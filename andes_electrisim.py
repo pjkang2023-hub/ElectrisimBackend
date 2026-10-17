@@ -2208,8 +2208,147 @@ class _GridFormingLimits:
         return out
 
 
+class _LoadShedding:
+    """
+    A load-shedding scheme on a grid-forming island: when its trigger has been
+    past its pickup for shed_delay_s, it sheds shed_step_percent of the loads
+    it may shed, and again after each further delay while the trigger stays
+    past its pickup, up to shed_max_steps steps.
+
+    shed_trigger 'loading': the most loaded running grid-forming PCS's current,
+    in per unit of its rating at its inlet temperature, above shed_pickup
+    (default 1.0) - the overload state a PCS can signal. 'frequency': the
+    island's frequency, the PCS's mean, below shed_pickup (default 59.5 Hz at
+    60 Hz, 49.5 at 50) - seen at every load, needing no signal, but droop sets
+    it by power, not by rating, so it cannot tell a hot day from a cool one.
+
+    shed_loads: the loads it may shed, by name, comma-separated (a converter
+    on the DC network by its label); by default every load on an island with
+    a grid-forming PCS. Each step takes the percentage of their power at the
+    start of the run, so a step is the same size each time; a load following
+    a profile keeps following it, scaled down.
+    """
+
+    def __init__(self, ss, meta: Dict[str, Any], params: Dict[str, Any],
+                 limits: Optional[_GridFormingLimits], profiled: List[Dict[str, Any]], warnings: List[str]):
+        self.ss, self.meta = ss, meta
+        self.trigger = str(params.get("shed_trigger") or "none").strip().lower()
+        self.active = False
+        self.steps: List[Dict[str, Any]] = []
+        self.hist_t: List[float] = []
+        self.hist_value: List[float] = []
+        self.kept = 1.0
+        self.hist_kept: List[Tuple[float, float]] = [(0.0, 1.0)]
+        if self.trigger not in ("loading", "frequency"):
+            return
+        self.units = [u for u in (limits.units if limits is not None else [])]
+        if not self.units:
+            warnings.append("Load shedding needs a grid-forming PCS to watch: there is none, so none was modelled.")
+            return
+        f_n = float(meta["frequency"])
+        default = 1.0 if self.trigger == "loading" else f_n - 0.5
+        self.pickup = _sf(params.get("shed_pickup"), default)
+        self.delay = max(_sf(params.get("shed_delay_s"), 2.0), 0.0)
+        self.step = min(max(_sf(params.get("shed_step_percent"), 5.0), 0.0), 100.0) / 100.0
+        self.max_steps = max(int(_sf(params.get("shed_max_steps"), 4)), 0)
+        names = [x.strip() for x in str(params.get("shed_loads") or "").split(",") if x.strip()]
+        if names:
+            want = set(names) | {f"{n} (DC network)" for n in names}
+            picked = [i for i, n in enumerate(ss.PQ.name.v) if str(n) in want]
+            missing = [n for n in names if not any(str(ss.PQ.name.v[i]) in (n, f"{n} (DC network)") for i in picked)]
+            if missing:
+                warnings.append("Load shedding: no load " + ", ".join(missing) + " in the study; left out.")
+        else:
+            pcs_buses = {u["g"]["bus"] for u in self.units}
+            island = set().union(*[s for s in _islands(ss) if s & pcs_buses]) if pcs_buses else set()
+            picked = [i for i, b in enumerate(ss.PQ.bus.v) if b in island]
+        if not picked:
+            warnings.append("Load shedding: no load to shed, so none was modelled.")
+            return
+        self.loads = [{"i": i, "name": str(ss.PQ.name.v[i]),
+                       "p0": float(ss.PQ.Ppf.v[i]) if hasattr(ss.PQ, "Ppf") else float(ss.PQ.p0.v[i])}
+                      for i in picked]
+        by_idx = {load["idx"]: load for load in profiled}
+        for load in self.loads:
+            load["profile"] = by_idx.get(ss.PQ.idx.v[load["i"]])
+        self.since: Optional[float] = None
+        self.active = self.step > 0 and self.max_steps > 0
+
+    def _value(self) -> Optional[float]:
+        ss, running = self.ss, [u for u in self.units if u["running"]]
+        if not running:
+            return None
+        if self.trigger == "loading":
+            return max(_GridFormingLimits._current_pu(self, u)[1] for u in running)
+        return float(np.mean([float(ss.GENCLS.omega.v[u["i"]]) for u in running])) * float(self.meta["frequency"])
+
+    def check(self, t: float) -> None:
+        value = self._value()
+        if value is None:
+            return
+        self.hist_t.append(t)
+        self.hist_value.append(value)
+        past = value > self.pickup if self.trigger == "loading" else value < self.pickup
+        if not past:
+            self.since = None
+            return
+        if self.since is None:
+            self.since = t
+        if len(self.steps) < self.max_steps and self.kept > 1e-9 and t - self.since >= self.delay - 1e-9:
+            self._shed(t, value)
+            self.since = t
+
+    def _shed(self, t: float, value: float) -> None:
+        ss, sn = self.ss, self.meta["sn_mva"]
+        kept = max(self.kept - self.step, 0.0)
+        scale = kept / self.kept
+        before = 0.0
+        for load in self.loads:
+            i = load["i"]
+            before += float(ss.PQ.Ppf.v[i])
+            # Its power, and the current and impedance it converts to - each set proportional to it
+            # (as a profile sets them: Ipeq = P / V0, Req = P / V0^2).
+            for key in ("Ppf", "Ipeq", "Req", "Qpf", "Iqeq", "Xeq"):
+                if hasattr(ss.PQ, key):
+                    getattr(ss.PQ, key).v[i] *= scale
+            if load["profile"] is not None:
+                load["profile"]["kept"] = kept
+        self.kept = kept
+        self.hist_kept.append((t, kept))
+        self.steps.append({"t_s": _clean_num(t), "trigger_value": _clean_num(value),
+                           "shed_mw": _clean_num(before * (1.0 - scale) * sn), "kept_percent": _clean_num(100.0 * kept)})
+
+    def kept_at(self, times: np.ndarray) -> np.ndarray:
+        """The share of the sheddable loads kept, at each time."""
+        out = np.ones(len(times))
+        for t, k in self.hist_kept[1:]:
+            out[np.asarray(times) >= t] = k
+        return out
+
+    def result(self, warnings: List[str], times: np.ndarray) -> Dict[str, Any]:
+        if not self.active:
+            return {"enabled": False}
+        unit = "pu of its rating" if self.trigger == "loading" else "Hz"
+        if self.steps:
+            total = sum(s["shed_mw"] or 0.0 for s in self.steps)
+            warnings.append(
+                f"Load shedding ({self.trigger}, pickup {self.pickup:g} {unit}, {self.delay:g} s): "
+                f"{len(self.steps)} step(s) of {100 * self.step:g} %, the first at t = {self.steps[0]['t_s']:.3f} s, "
+                f"{total:.3g} MW shed in all.")
+        values = np.interp(times, self.hist_t, self.hist_value) if self.hist_t else []
+        return {
+            "enabled": True, "trigger": self.trigger, "pickup": self.pickup, "delay_s": self.delay,
+            "step_percent": 100.0 * self.step, "max_steps": self.max_steps,
+            "loads": [load["name"] for load in self.loads],
+            "steps": self.steps,
+            "shed_mw": _clean_num(sum(s["shed_mw"] or 0.0 for s in self.steps)),
+            "trigger_series": [_clean_num(float(x)) for x in values],
+        }
+
+
 def _run_tds_following_profiles(ss, profiled: List[Dict[str, Any]], tf: float, repeat: bool,
-                                warnings: List[str], limits: Optional[_GridFormingLimits] = None) -> bool:
+                                warnings: List[str], limits: Optional[_GridFormingLimits] = None,
+                                shedding: Optional[_LoadShedding] = None) -> bool:
     """
     Run the time-domain simulation in short pieces, setting each profiled
     load's power before each piece.
@@ -2258,10 +2397,10 @@ def _run_tds_following_profiles(ss, profiled: List[Dict[str, Any]], tf: float, r
             f = (_mix_value(load["mix"], t0, t1, repeat) if load.get("mix")
                  else _lp.average_profile(load["t"], load["p"], t0, t1, repeat))
             i, v0 = load["i"], load["v0"]
-            p = load["p_rated"] * f
+            p = load["p_rated"] * f * load.get("kept", 1.0)
             ss.PQ.Ppf.v[i], ss.PQ.Ipeq.v[i], ss.PQ.Req.v[i] = p, p / v0, p / v0 ** 2
             if load["q_mode"] == "pf":
-                q = load["q_rated"] * f
+                q = load["q_rated"] * f * load.get("kept", 1.0)
                 ss.PQ.Qpf.v[i], ss.PQ.Iqeq.v[i], ss.PQ.Xeq.v[i] = q, q / v0, q / v0 ** 2
         ss.TDS.config.tf = t1
         if not ss.TDS.run():
@@ -2269,6 +2408,8 @@ def _run_tds_following_profiles(ss, profiled: List[Dict[str, Any]], tf: float, r
         t0 = t1
         if limits is not None and limits.active:
             limits.check(float(ss.dae.t))
+        if shedding is not None and shedding.active:
+            shedding.check(float(ss.dae.t))
     return True
 
 
@@ -2328,9 +2469,10 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
             check_s = max(_sf(params.get("pcs_check_s"), _PCS_CHECK_S), float(ss.TDS.config.tstep or 0.0))
             limits = _GridFormingLimits(ss, meta, check_s)
         meta["pcs_limits"] = limits
+        shedding = _LoadShedding(ss, meta, params, limits, profiled, meta["warnings"])
         if profiled or (limits is not None and limits.active):
             tds_ok = _run_tds_following_profiles(ss, profiled, tf, meta.get("profile_repeat", True),
-                                                 meta["warnings"], limits)
+                                                 meta["warnings"], limits, shedding)
         else:
             tds_ok = bool(ss.TDS.run())
         if limits is not None:
@@ -2550,9 +2692,11 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
                 "profile": load["profile"],
                 "q_mode": load["q_mode"],
                 # The power it was set to through the run (MW), at the plotted times.
-                "p_mw": [_clean_num(float(load["p_rated"] * meta["sn_mva"] * v)) for v in
-                         _lp_sample(load, t_ds, meta.get("profile_repeat", True))],
+                "p_mw": [_clean_num(float(load["p_rated"] * meta["sn_mva"] * v * k)) for v, k in
+                         zip(_lp_sample(load, t_ds, meta.get("profile_repeat", True)),
+                             shedding.kept_at(t_ds) if "kept" in load else np.ones(len(t_ds)))],
             } for load in (meta.get("profiled_loads") or [])],
+            "load_shedding": shedding.result(meta["warnings"], t_ds),
             "ride_through": {
                 "enabled": bool(ride_pts),
                 "pass": ride_pass,

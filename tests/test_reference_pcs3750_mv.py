@@ -1915,3 +1915,71 @@ def test_emt_nine_blocks_lose_one_at_45c(client, quiet):
     bus = {b['label']: b for b in emt['ac']['buses']}
     for b in range(1, 10):
         assert bus[f'Load backbone {b}']['v_rms_min_pu'] == pytest.approx(0.973, abs=0.002)
+
+
+# --- Phase 47: load shedding after a block's loss (ANDES) ----------------------------------------------
+
+def _andes9_shed(client, quiet, inlet, trigger, profile=False, pickup='', step='5', delay='2', tf='25'):
+    p = _payload9(inlet)
+    lp = {}
+    if profile:
+        with open(os.path.join(HERE, 'reference', f'{GRID}_9blocks.spec.json'), encoding='utf-8') as fh:
+            lp = {x['id']: {'name': x['name'], 'kind': x['kind'], 'dt': x['dt_s'], 't0': 0, 'p': x['values']}
+                  for x in json.load(fh)['load_profiles']}
+    cell = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
+    p['0'] = {'typ': 'TransientStabilityAndes Parameters', 'frequency': '60', 'sn_mva': '100', 'tf': tf,
+              'tstep': '0', 'fault_bus': '', 'fault_enabled': 'false',
+              'toggle_line': cell['Block 9 T2 0.505/34.5 kV Dy1 (505 V star floating)'], 'toggle_t': '8.0',
+              'toggle_gen': '', 'poi_bus': cell['Utility 34.5 kV POI'], 'grid_voltage_profile': 'none',
+              'load_profiles': lp, 'user_email': 't@t', 'shed_trigger': trigger, 'shed_pickup': pickup,
+              'shed_delay_s': delay, 'shed_step_percent': step}
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    assert not out.get('error'), out.get('message')
+    left = [g for g in out['pcs'] if not g['label'].startswith('Block 9')]
+    return out, out['load_shedding'], left
+
+
+def test_shedding_on_inverter_loading_at_45c(client, quiet):
+    """
+    Block 9 lost at full load and 45 deg C, a scheme watching the PCS's
+    loading (pickup 1.0 pu of their rating, 2 s): one 5 % step of the nine
+    halls' SSTs - 1.54 MW - at 10.03 s takes the 32 PCS from 102.3 % to
+    97.5 % at 59.93 Hz, and they never reach their ten-second ceiling. A 3 %
+    step (0.93 MW) only just does it (99.4 %); a delay of 9.5 s still sheds
+    before the ceiling falls at 18 s.
+    """
+    out, shed, left = _andes9_shed(client, quiet, 45, 'loading')
+    assert shed['enabled'] and len(shed['loads']) == 9 and all('SST' in n for n in shed['loads'])
+    (s,) = shed['steps']
+    assert s['t_s'] == pytest.approx(10.03, abs=0.03) and s['shed_mw'] == pytest.approx(1.54, abs=0.02)
+    assert s['kept_percent'] == pytest.approx(95.0)
+    for g in left:
+        assert _at(g, 'current_pu', 20, out['time']) == pytest.approx(0.975, abs=0.003)
+        assert _at(g, 'frequency_hz', 20, out['time']) == pytest.approx(59.933, abs=0.005)
+        assert g['current_limited_from_s'] is None
+    out3, small, left = _andes9_shed(client, quiet, 45, 'loading', step='3')
+    assert small['shed_mw'] == pytest.approx(0.93, abs=0.02)
+    assert _at(left[0], 'current_pu', 20, out3['time']) == pytest.approx(0.994, abs=0.003)
+    _, late, left = _andes9_shed(client, quiet, 45, 'loading', delay='9.5')
+    assert late['steps'][0]['t_s'] == pytest.approx(17.53, abs=0.03) and left[0]['current_limited_from_s'] is None
+
+
+@pytest.mark.parametrize('inlet, trigger, profile, shed_mw', [
+    (40, 'loading', False, 0.0), (45, 'loading', True, 0.0),
+    (40, 'frequency', False, 1.54), (45, 'frequency', True, 2.74)])
+def test_shedding_by_loading_not_by_frequency(client, quiet, inlet, trigger, profile, shed_mw):
+    """
+    What tells the scheme the PCS are over their rating. Their loading does:
+    at 40 deg C after the loss (97 %) and on the DGX H100 training cycle at
+    45 deg C (peaks of 1.00 pu, never 2 s long) it sheds nothing. The
+    island's frequency does not: droop sets it by power, not by rating, so a
+    block lost at 40 deg C (59.885 Hz) looks as one at 45 deg C (59.88), and
+    a 59.9 Hz pickup sheds 1.54 MW there for nothing - and 2.74 MW of the
+    training cycle, whose restarts take the island to 59.80 Hz.
+    """
+    pickup = '59.9' if trigger == 'frequency' else ''
+    _, shed, left = _andes9_shed(client, quiet, inlet, trigger, profile=profile, pickup=pickup,
+                                 tf='40' if profile else '25')
+    assert shed['shed_mw'] == pytest.approx(shed_mw, abs=0.03)
+    assert all(g['current_limited_from_s'] is None for g in left)
