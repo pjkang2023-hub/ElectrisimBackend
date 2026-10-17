@@ -1804,3 +1804,114 @@ def test_nine_blocks_carry_30_mw(spec9, inlet, out_block, pcs_loading, battery_m
         assert c['pcs'][0]['frequency_hz'] == pytest.approx(60.0, abs=0.02)
     else:
         assert max(a['loading_percent'] for a in c['vsc']) == pytest.approx(100, abs=0.05)
+
+
+# --- Nine blocks: Block 9 lost at full load, in time ---------------------------------------------------
+# tests/reference/reference_pcs3750_mv_9blocks.diagram_payload.json: the nine-block spec drawn through the
+# MCP server (875 cells) and its load-flow request captured from the page (prepareNetworkData).
+
+def _payload9(inlet):
+    with open(os.path.join(HERE, 'reference', f'{GRID}_9blocks.diagram_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    for v in p.values():
+        if isinstance(v, dict) and 'inlet_c' in v:
+            v['inlet_c'] = str(inlet)
+    return p
+
+
+def test_nine_blocks_drawn_give_the_specs_answer(client, quiet):
+    """The drawn nine blocks' load flow: the 36 PCS at 87.1 %, as the spec's."""
+    with quiet():
+        out = json.loads(client.post('/', json=_payload9(40)).get_data(as_text=True))
+    pcs = [g for g in out['pcs'] if g.get('p_mw') is not None]
+    assert len(pcs) == 36 and _equal(pcs)
+    assert pcs[0]['loading_percent'] == pytest.approx(87.1, abs=0.1)
+
+
+@pytest.mark.parametrize('inlet, profile, i_after, i_end, bb_end', [
+    (40, False, 0.974, 0.974, 0.983), (45, False, 1.023, 1.001, 0.963), (45, True, None, None, None)])
+def test_andes_nine_blocks_lose_one(client, quiet, inlet, profile, i_after, i_end, bb_end):
+    """
+    Block 9's T2 out at 8 s, the racks at full load: the other 32 PCS take
+    0.96 MW each in one step, no overshoot, at 59.88 Hz. At 40 deg C that is
+    97 % of their current and holds. At 45 deg C, 102 %: inside the 120 %
+    ten-second rating; at 18 s their ceiling falls to 1 pu, they hold at it,
+    and the backbone sags to 0.963 pu, the racks' load falling with it - 0.92
+    MW each, some 1.2 MW short of what they need: the load to shed within 10 s.
+    On the DGX H100 training profile, though, 45 deg C is no trouble: the
+    cycle averages under the 32 PCS's rating and they never reach a ceiling.
+    """
+    p = _payload9(inlet)
+    lp = {}
+    if profile:
+        with open(os.path.join(HERE, 'reference', f'{GRID}_9blocks.spec.json'), encoding='utf-8') as fh:
+            lp = {x['id']: {'name': x['name'], 'kind': x['kind'], 'dt': x['dt_s'], 't0': 0, 'p': x['values']}
+                  for x in json.load(fh)['load_profiles']}
+    cell = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
+    p['0'] = {'typ': 'TransientStabilityAndes Parameters', 'frequency': '60', 'sn_mva': '100', 'tf': '25',
+              'tstep': '0', 'fault_bus': '', 'fault_enabled': 'false',
+              'toggle_line': cell['Block 9 T2 0.505/34.5 kV Dy1 (505 V star floating)'], 'toggle_t': '8.0',
+              'toggle_gen': '', 'poi_bus': cell['Utility 34.5 kV POI'], 'grid_voltage_profile': 'none',
+              'load_profiles': lp, 'user_email': 't@t'}
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    assert not out.get('error'), out.get('message')
+    tm = out['time']
+    left = [g for g in out['pcs'] if not g['label'].startswith('Block 9')]
+    assert len(left) == 32
+    if profile:
+        for g in left:
+            assert g['current_limited_from_s'] is None and g['peak_current_pu'] < 1.01
+        return
+    bb = next(b['values'] for b in out['bus_voltage'] if b['name'] == 'Load backbone 5')
+    for g in left:
+        assert _at(g, 'p_mw', 7.9, tm) == pytest.approx(0.865, abs=0.003)
+        assert _at(g, 'p_mw', 12, tm) == pytest.approx(0.96, abs=0.003)
+        assert _at(g, 'frequency_hz', 12, tm) == pytest.approx(59.88, abs=0.01)
+        assert _at(g, 'current_pu', 12, tm) == pytest.approx(i_after, abs=0.003)
+        assert g['peak_current_pu'] == pytest.approx(i_after, abs=0.003)          # no overshoot on the step
+        assert _at(g, 'current_pu', 24.9, tm) == pytest.approx(i_end, abs=0.003)
+    assert _at({'v': bb}, 'v', 24.9, tm) == pytest.approx(bb_end, abs=0.002)
+    if inlet == 45:
+        g = left[0]
+        assert g['current_limited_from_s'] == pytest.approx(18.0, abs=0.1)
+        assert _at(g, 'p_mw', 24.9, tm) == pytest.approx(0.92, abs=0.003)
+
+
+def test_emt_nine_blocks_lose_one_at_45c(client, quiet):
+    """
+    The same loss in EMT, at 45 deg C: Block 9's T2 behind a 1 m feeder whose
+    breakers open at 30 ms (each phase at its current's zero, by 35 ms). The
+    32 PCS step from 0.88 to 0.99 MW, at their current limit some 9 ms of
+    the first cycles (48 ms over 400 ms), the island to 59.85 Hz and the
+    backbone to 0.973 pu; no SST blocks, the racks carried. The rectifiers,
+    ramp-limited, do not move - the GS1.1 take the step. The transition is
+    not where the trouble is; the ten seconds after it are (ANDES above).
+    """
+    p = _payload9(45)
+    row = lambda name: next(v for v in p.values() if isinstance(v, dict) and v.get('userFriendlyName') == name)
+    bb9, t2 = row('Load backbone 9'), row('Block 9 T2 0.505/34.5 kV Dy1 (505 V star floating)')
+    k = max(int(x) for x in p if x.isdigit()) + 1
+    p[str(k)] = dict(bb9, typ='Bus99', name='t2hv9', id='t2hv9', userFriendlyName='Block 9 T2 HV terminal')
+    p[str(k + 1)] = dict(row('Backbone cable BB8-BB9'), typ='Line99', name='t2feed9', id='t2feed9',
+                         userFriendlyName='Block 9 T2 feeder', busFrom=bb9['name'], busTo='t2hv9', length_km='0.001')
+    t2['hv_bus'] = row('Block 9 T2 HV breaker')['bus'] = 't2hv9'
+    p['0'] = {'typ': 'EmtStudy Parameters', 'frequency': '60', 'time_step_us': '20', 'user_email': 't@t',
+              'duration_ms': '100', 'ac_trip_lines': 'Block 9 T2 feeder', 'ac_trip_time_ms': '30'}
+    with quiet():
+        emt = json.loads(client.post('/', json=p).get_data(as_text=True))['emt']
+    (trip,) = emt['line_trips']
+    assert all(30 <= t < 36 for t in trip['opened_ms'])
+    assert not emt['converters_blocked']
+    conv = {c['label']: c for c in emt['converters']}
+    gfm = [c for n, c in conv.items() if 'GFM' in n and not n.startswith('Block 9')]
+    assert len(gfm) == 32
+    for c in gfm:
+        assert c['p_start_mw'] == pytest.approx(0.876, abs=0.005) and c['p_end_mw'] == pytest.approx(0.987, abs=0.005)
+        assert 5 < c['limited_ms'] < 15 and c['f_min_hz'] == pytest.approx(59.85, abs=0.01)
+    for n, c in conv.items():
+        if 'AFE' in n and not n.startswith('Block 9'):
+            assert c['p_end_mw'] == pytest.approx(c['p_start_mw'], abs=0.001)
+    bus = {b['label']: b for b in emt['ac']['buses']}
+    for b in range(1, 10):
+        assert bus[f'Load backbone {b}']['v_rms_min_pu'] == pytest.approx(0.973, abs=0.002)
