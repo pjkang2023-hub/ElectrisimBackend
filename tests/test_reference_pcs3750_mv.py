@@ -1766,3 +1766,41 @@ def test_energising_the_filter_on_the_island(client, quiet):
     assert sum(c['p_end_mw'] for c in pcs) > 11
     emt, pcs = _energise_filter(client, quiet, load=0.85)
     assert not emt['converters_blocked'] and emt['energise']['v_rms_min_pu'] > 0.9
+
+
+# --- The specification's own example: 30 MW of racks on nine blocks, N+1 ---------------------------
+
+@pytest.fixture(scope='module')
+def spec9():
+    with open(os.path.join(HERE, 'reference', f'{GRID}_9blocks.spec.json'), encoding='utf-8') as fh:
+        return json.load(fh)
+
+
+@pytest.mark.parametrize('inlet, out_block, pcs_loading, battery_mw', [
+    (40, None, 87.1, 0.0), (45, None, 91.4, 0.0), (50, None, 96.2, 0.0),
+    (40, 9, 98.1, 0.65), (45, 9, 103.0, 2.08)])
+def test_nine_blocks_carry_30_mw(spec9, inlet, out_block, pcs_loading, battery_mw):
+    """
+    The specification's example: 30 MW of racks (3.33 MW a hall) on nine
+    blocks, a ring of nine backbone switchboards, one block and one hall on
+    each - the 3-block reference scaled (its generator reproduces the 3-block
+    spec exactly). With all nine in service the inverters carry it at 87 %
+    of their 40 °C rating, 91 % at 45 °C and 96 % even at 50 °C; 92.8 % from
+    the grid to the racks. N+1 at 40 °C holds: a block out, the other 32
+    inverters run at 98 % - no shedding, where the 3-block reference's eight
+    reach 142 % - and only the AFEs, current-limited on their 0.99 pu bus,
+    reach their rating, the batteries making up 0.65 MW. At 45 °C it does
+    not: 103 %, inside the 120 % ten-second rating but over the continuous,
+    some 1 MW of racks to shed within 10 s (the hand check's 0.5 MW left out
+    the T2, backbone and SST losses the inverters carry). Each case solves in
+    seconds; nine blocks once took half an hour.
+    """
+    c = _case(spec9, inlet=inlet, out_block=out_block)
+    assert len(c['pcs']) == (32 if out_block else 36) and _equal(c['pcs'])
+    assert c['pcs'][0]['loading_percent'] == pytest.approx(pcs_loading, abs=0.3)
+    assert c['bat_mw'] == pytest.approx(battery_mw, abs=0.05)
+    if not out_block:
+        assert 30.0 / c['grid_mw'] == pytest.approx(0.928, abs=0.002)
+        assert c['pcs'][0]['frequency_hz'] == pytest.approx(60.0, abs=0.02)
+    else:
+        assert max(a['loading_percent'] for a in c['vsc']) == pytest.approx(100, abs=0.05)
