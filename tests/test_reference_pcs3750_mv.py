@@ -1983,3 +1983,218 @@ def test_shedding_by_loading_not_by_frequency(client, quiet, inlet, trigger, pro
                                  tf='40' if profile else '25')
     assert shed['shed_mw'] == pytest.approx(shed_mw, abs=0.03)
     assert all(g['current_limited_from_s'] is None for g in left)
+
+
+# --- Phase 48: the nine blocks' faults, protection and harmonics -----------------------------------------
+
+def _study9(client, quiet, params, k_pcs=None, open_breakers=(), variant=None, extra=None, payload=None):
+    p = payload or _payload9(40)
+    for v in p.values():
+        if not isinstance(v, dict):
+            continue
+        if k_pcs and str(v.get('typ', '')).startswith('PCS'):
+            v['current_limit_pu'] = str(k_pcs)
+        if v.get('userFriendlyName') in open_breakers:
+            v['closed'] = 'false'
+        if variant:
+            variant(v)
+    cell = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
+    for k, v in (extra or {}).items():
+        p[k] = {**v, 'bus': cell[v['bus']]}
+    label = {v['name']: v.get('userFriendlyName') for v in p.values() if isinstance(v, dict) and 'name' in v}
+    p['0'] = params
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    assert not out.get('error'), out.get('message')
+    return out, label, cell
+
+
+I_LOAD9_KA = 30.8 / (3 ** 0.5 * 34.5)          # the nine blocks' backbone load: 0.515 kA
+
+
+@pytest.mark.parametrize('fault, k, open_breakers, backbone_a', [
+    ('3ph', 1.2, (), 718), ('3ph', 1.5, (), 898), ('2ph', 1.2, (), 623),
+    ('1ph', 1.2, (), 838), ('1ph', 1.5, (), 838), ('1ph', 1.2, ('Zigzag 2 breaker',), 431),
+    ('1ph', 1.2, ('Zigzag breaker', 'Zigzag 2 breaker'), 22.4)])
+def test_nine_blocks_fault_levels(client, quiet, fault, k, open_breakers, backbone_a):
+    """
+    IEC 60909 on the nine blocks. A backbone phase fault is three times the
+    three blocks' - 718 A three-phase at 1.2 pu, 898 A at 1.5, 623 A line to
+    line - and still only 1.2-1.7 times the 515 A load: overcurrent cannot
+    see it, differential protection must. An earth fault is no longer the
+    inverters' to limit but the zigzags': 838 A at 1.2 pu and 1.5 alike, 419 A
+    through each - a little over their 400 A short-time rating, a small
+    fraction of its I2t at the relays' times; with one, 431 A; with none, the
+    nine cables' charging current, 22 A. The 505 V load side, fed by its own
+    PCS and the other 32 through its T2: 49 kA, three times the three blocks'
+    16 kA - its switchgear's rating and arc flash rise with it. The grid side
+    and the POI are as the reference's.
+    """
+    out, label, _ = _study9(client, quiet, {**IEC, 'fault_type': fault}, k_pcs=k, open_breakers=open_breakers)
+    ka = {label[r['name']]: r.get('ikss_ka', r.get('i_first_sym_ka')) for r in out['busbars']}
+    for n in range(1, 10):
+        assert ka[f'Load backbone {n}'] * 1e3 == pytest.approx(backbone_a, rel=0.01)
+    if fault == '3ph' and k == 1.2:
+        assert ka['Load backbone 1'] / I_LOAD9_KA == pytest.approx(1.39, abs=0.02)
+        assert ka['Block 5 505 V load side'] == pytest.approx(49.1, abs=1.5)
+        assert ka['Block 1 505 V grid side'] == pytest.approx(68.2, abs=0.3)
+        assert ka['Utility 34.5 kV POI'] == pytest.approx(8.37, abs=0.02)
+
+
+def _protection_payload9():
+    """
+    The nine blocks' protection request: the drawn nine blocks' cells, each
+    breaker's relay as the three-block drawing's protection request carries
+    its counterpart's (Block n's as Block 1's, each ring cable's ends as
+    BB1-BB2's), checked against the nine-block spec's settings.
+    """
+    import re
+    p = _payload9(40)
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_protection_payload.json'), encoding='utf-8') as fh:
+        p3 = json.load(fh)
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
+        base = set(next(v for v in json.load(fh).values() if isinstance(v, dict) and str(v.get('typ', '')).startswith('Switch')))
+    with open(os.path.join(HERE, 'reference', f'{GRID}_9blocks.spec.json'), encoding='utf-8') as fh:
+        spec = {w['name']: w for w in json.load(fh)['switches']}
+    tmpl = {v['userFriendlyName']: v for v in p3.values() if isinstance(v, dict) and str(v.get('typ', '')).startswith('Switch')}
+
+    def role(name):
+        m = re.match(r'Cable BB(\d+)-BB(\d+) breaker at BB(\d+)', name)
+        if m:
+            return 'Cable BB1-BB2 breaker at BB1' if m.group(3) == m.group(1) else 'Cable BB1-BB2 breaker at BB2'
+        return re.sub(r'^(Block|Hall) \d+', r'\1 1', name)
+
+    for v in p.values():
+        if not (isinstance(v, dict) and str(v.get('typ', '')).startswith('Switch')):
+            continue
+        v.update({k: x for k, x in tmpl[role(v['userFriendlyName'])].items() if k not in base})
+        for k, x in spec[v['userFriendlyName']].items():
+            if k not in ('id', 'bus', 'element', 'et', 'name'):
+                assert str(v[k]) == str(x) or float(v[k]) == pytest.approx(float(x)), (v['userFriendlyName'], k)
+    p['0'] = dict(p3['0'])
+    return p
+
+
+@pytest.mark.parametrize('fault', ['3ph', '1ph'])
+def test_nine_blocks_protection_holds(client, quiet, fault):
+    """
+    The reference's relays on the nine blocks, every one of the nine ring
+    cables and the hall feeders faulted in turn: each cleared by its own
+    87L in 0.05 s, no miscoordination, no unwanted trip, no breaker failure
+    left uncleared. The settings were chosen on fault currents a third of
+    these and keep their margins; the zigzags' duty, both in service and the
+    87L clearing, is about 1 % of their I2t (3 % on the 51N's backup).
+    """
+    p = _protection_payload9()
+    p['0'] = {**p['0'], 'fault_type': fault, 'fault_location_mode': 'line', 'sc_line_id': 'all',
+              'fault_bus_id': '', 'user_email': 't@t'}
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    assert not out.get('error'), out.get('message')
+    s = out['summary']
+    assert s['n_scenarios'] == 18 and s['n_devices'] == 65 and s['n_not_computed'] == 0
+    assert s['n_miscoordination'] == 0 and s['n_unwanted_trips'] == 0 and s['n_breaker_failure_uncleared'] == 0
+    first = {t['user_friendly_name']: t['t_trip_s'] for t in out['scenarios'][0]['trip']}
+    assert first['Cable BB1-BB2 breaker at BB1'] == pytest.approx(0.05) and first['Cable BB1-BB2 breaker at BB2'] == pytest.approx(0.05)
+    if fault == '1ph':
+        assert s['max_grounding_duty_percent'] == pytest.approx(1.1, abs=0.2)
+        assert s['max_grounding_duty_backup_percent'] == pytest.approx(2.7, abs=0.3)
+
+
+def test_nine_blocks_arc_flash_by_the_relays(client, quiet):
+    """
+    Arc flash with the relays clearing, on the nine blocks. The 505 V grid
+    side is the reference's (T1 LV's I>>, 6.4 cal/cm2, PPE 2). The 505 V load
+    side's 48 kA arc, three times the reference's, is still parted by its
+    arc-flash detection in 0.06 s: 3.2 cal/cm2, PPE 1 (the reference's 1.2,
+    PPE 0). The backbone's arcs, 0.72 kA, cleared by 87B in 0.1 s - 1.5
+    cal/cm2; a hall's by its feeder in 0.15 s - 2.3 cal/cm2. Every bus stays
+    within PPE 2.
+    """
+    p = _protection_payload9()
+    p['0'] = {'typ': 'ArcFlashPandaPower Parameters', 'electrode_config': 'VCB', 'equipment_mode': 'by_voltage',
+              'clearing_time_mode': 'relays', 'frequency': '60', 'user_email': 't@t'}
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    assert not out.get('error'), out.get('message')
+    rows = {r['name']: r for r in out['arc_flash']}
+    for n in range(1, 10):
+        g = rows[f'Block {n} 505 V grid side']
+        assert g['incident_energy_cal_cm2'] == pytest.approx(6.4, abs=0.1) and str(g['ppe_category']) == '2'
+        ld = rows[f'Block {n} 505 V load side']
+        assert ld['clearing_relays'] == [f'Block {n} T2 LV breaker'] and ld['clearing_time_used_s'] == pytest.approx(0.06)
+        assert ld['ikss_ka'] == pytest.approx(48.3, abs=1.0)
+        assert ld['incident_energy_cal_cm2'] == pytest.approx(3.17, abs=0.1) and str(ld['ppe_category']) == '1'
+        bb = rows[f'Load backbone {n}']
+        assert bb['clearing_time_used_s'] == pytest.approx(0.1) and bb['incident_energy_cal_cm2'] == pytest.approx(1.53, abs=0.05)
+        h = rows[f'Hall {n} 34.5 kV']
+        assert h['clearing_time_used_s'] == pytest.approx(0.15) and h['incident_energy_cal_cm2'] == pytest.approx(2.30, abs=0.05)
+
+
+def _harmonics9(client, quiet, tmp_path, neglect=False, orders='5,7,11,13,17,19,23,25', variant=None, extra=None):
+    import opendssdirect as dss
+    with open(os.path.join(HERE, 'reference', 'reference_ai_factory_800vdc.diagram_harmonic_payload.json'),
+              encoding='utf-8') as fh:
+        params = json.load(fh)['0']
+    before = dss.Basic.DataPath()
+    dss.Basic.DataPath(str(tmp_path))
+    try:
+        out, label, _ = _study9(client, quiet, {**params, 'harmonics': orders, 'neglectLoadY': neglect},
+                                variant=variant, extra=extra)
+    finally:
+        dss.Basic.DataPath(before)
+    assert out['harmonic_analysis']['executed']
+    return {label.get(b['name'], b['name']): b for b in out['busbars']}
+
+
+def test_nine_blocks_harmonics(client, quiet, tmp_path):
+    """
+    The nine blocks' island resonates where the three blocks' does, at the
+    20th: three times the inverters' reactors and T2s in parallel against
+    three times the cables. Damped by the SSTs every bus passes (backbone
+    2.2 % THD); undamped, the 19th reaches 8.1 %, 10.8 % THD - as before. But
+    the island's impedance is a third of the reference's, and the remedy
+    must scale with it: the reference's 1 Mvar filter leaves 6.1 % THD and
+    fails; 3 Mvar - on BB5, or 1 Mvar on each of BB2, BB5 and BB8 - passes
+    (3.4 %). The inverters' own damping, a resistance in each PCS's own per
+    unit, scales by itself: 1 pu holds 3.0 %, and even 3 pu passes (4.8 %),
+    which on three blocks did not.
+    """
+    def show(buses):
+        return [buses[f'Load backbone {n}'] for n in range(1, 10)]
+
+    damped = show(_harmonics9(client, quiet, tmp_path))
+    assert all(b['vthd_percent'] == pytest.approx(2.20, abs=0.1) and b['ieee519']['ok'] for b in damped)
+    bare = _harmonics9(client, quiet, tmp_path, neglect=True)
+    b2 = bare['Load backbone 2']
+    assert b2['vthd_percent'] == pytest.approx(10.8, abs=0.3) and not b2['ieee519']['ok']
+    assert 100 * float(b2['harmonic_voltages_kv']['19']) / b2['fundamental_voltage_kv'] == pytest.approx(8.07, abs=0.2)
+    orders = list(range(2, 41))
+    flat = '\n'.join(f'{n},1.0,0' for n in orders)
+
+    def one_source(v):
+        if str(v.get('typ', '')).startswith('Solid-State'):
+            v['spectrum'] = 'custom' if v.get('userFriendlyName') == 'Hall 2 SST' else 'none'
+            v['spectrum_csv'] = flat
+        if str(v.get('typ', '')).startswith('VSC'):
+            v['spectrum'] = 'none'
+
+    scan = _harmonics9(client, quiet, tmp_path, neglect=True, orders=','.join(map(str, orders)), variant=one_source)
+    scan = {int(k): float(v) for k, v in scan['Load backbone 2']['harmonic_voltages_kv'].items() if float(v) > 0}
+    assert max(scan, key=scan.get) == 20 and scan[20] > 50 * scan[5]
+
+    def filters(q, where):
+        return {f'hf{i}': {**BACKBONE_FILTER, 'name': f'HF{i}', 'id': f'hf{i}', 'userFriendlyName': f'Backbone filter {i}',
+                           'bus': b, 'q_mvar': str(q)} for i, b in enumerate(where)}
+
+    one = show(_harmonics9(client, quiet, tmp_path, neglect=True, extra=filters(1.0, ['Load backbone 2'])))
+    assert one[1]['vthd_percent'] == pytest.approx(6.07, abs=0.2) and not one[1]['ieee519']['ok']
+    for extra in (filters(3.0, ['Load backbone 5']), filters(1.0, ['Load backbone 2', 'Load backbone 5', 'Load backbone 8'])):
+        held = show(_harmonics9(client, quiet, tmp_path, neglect=True, extra=extra))
+        assert all(b['vthd_percent'] == pytest.approx(3.44, abs=0.15) and b['ieee519']['ok'] for b in held)
+    for r, thd in ((1.0, 2.97), (3.0, 4.83)):
+        def damp(v, r=r):
+            if str(v.get('typ', '')).startswith('PCS'):
+                v['harmonic_r_pu'] = str(r)
+        held = show(_harmonics9(client, quiet, tmp_path, neglect=True, variant=damp))
+        assert all(b['vthd_percent'] == pytest.approx(thd, abs=0.15) and b['ieee519']['ok'] for b in held)
