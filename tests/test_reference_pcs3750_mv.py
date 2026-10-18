@@ -2198,3 +2198,84 @@ def test_nine_blocks_harmonics(client, quiet, tmp_path):
                 v['harmonic_r_pu'] = str(r)
         held = show(_harmonics9(client, quiet, tmp_path, neglect=True, variant=damp))
         assert all(b['vthd_percent'] == pytest.approx(thd, abs=0.15) and b['ieee519']['ok'] for b in held)
+
+
+# --- Phase 49: the nine blocks' DC fault, filter energising and a shed step -------------------------------
+
+def test_nine_blocks_dc_bus_fault_on_a_quadrant(client, quiet):
+    """
+    Block 5's DC1 bolted on the nine blocks: as the reference's - the GS1.1
+    pair 51.4 kA (25.7 kA a unit), the rectifier's diodes 8.7 kA from its
+    T1 - but the inverter's diodes 9.1 kA from a 505 V load bus the other 35
+    PCS hold stiffer (7.2 kA on three blocks): 69.2 kA in all (67.3). Only
+    the faulted quadrant's sources feed it.
+    """
+    from test_dc_fault import STUDY
+    p = _payload9(40)
+    cell = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
+    out, _, _ = _study9(client, quiet, {**STUDY, 'fault_bus': cell['Block 5 DC1'], 'duration_ms': '20', 'frequency': '60'},
+                        payload=p)
+    (f,) = out['dcfault']['faults']
+    c = {(x['kind'], x['name']): x for x in f['contributions']}
+    assert c[('Battery', 'Block 5 DC1 GS1.1 A')]['ik_ka'] == pytest.approx(25.70, abs=0.05)
+    assert c[('VSC (diodes, blocked)', 'Block 5 AFE 1 (6 x PCS157SE)')]['ik_ka'] == pytest.approx(8.68, abs=0.1)
+    assert c[('PCS (diodes, blocked)', 'Block 5 GFM 1 (6 x PCS157SE)')]['ik_ka'] == pytest.approx(9.13, abs=0.1)
+    assert f['ik_ka'] == pytest.approx(69.2, abs=0.3)
+    assert all(abs(x['ik_ka']) < 1e-3 for (k, n), x in c.items() if not n.startswith('Block 5'))
+
+
+@pytest.mark.parametrize('controlled, i_peak_a, limited_ms', [(False, 81, 2.0), (True, 32, 0.0)])
+def test_nine_blocks_energising_one_of_three_filters(client, quiet, controlled, i_peak_a, limited_ms):
+    """
+    The nine blocks' filtering as Phase 48 sized it - 1 Mvar on each of BB2,
+    BB5 and BB8 - with BB5's switched on at 40 ms at full load. On three
+    blocks the 1 Mvar filter closed with its poles together took the
+    inverters to their limit for 27 ms and every SST blocked; here each unit
+    is a third of the island's share, and the 36 PCS carry 87 % of their
+    rating: an 81 A inrush, the backbone within 0.99-1.01 pu, the inverters
+    at their limit 2 ms, no SST blocking. A synchronous breaker brings it to
+    32 A and never touches the limit.
+    """
+    p = _payload9(40)
+    cell = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
+    for i, bb in enumerate(('Load backbone 2', 'Load backbone 5', 'Load backbone 8')):
+        p[f'hf{i}'] = {**BACKBONE_FILTER, 'name': f'HF{i}', 'id': f'hf{i}', 'userFriendlyName': f'Backbone filter {i}',
+                       'bus': cell[bb]}
+    p['0'] = {'typ': 'EmtStudy Parameters', 'frequency': '60', 'time_step_us': '20', 'user_email': 't@t',
+              'duration_ms': '200', 'ac_energise_shunt': 'HF1', 'ac_energise_time_ms': '40',
+              'ac_energise_controlled': 'true' if controlled else 'false'}
+    with quiet():
+        emt = json.loads(client.post('/', json=p).get_data(as_text=True))['emt']
+    e = emt['energise']
+    assert e['bus'] == 'Load backbone 5' and e['i_peak_ka'] * 1e3 == pytest.approx(i_peak_a, abs=3)
+    assert 0.99 < e['v_rms_min_pu'] and e['v_rms_max_pu'] < 1.01
+    assert not emt['converters_blocked']
+    pcs = [c for c in emt['converters'] if c['kind'] == 'PCS']
+    assert len(pcs) == 36 and all(c['limited_ms'] == pytest.approx(limited_ms, abs=0.5) for c in pcs)
+
+
+def test_emt_nine_blocks_a_shed_step_at_45c(client, quiet):
+    """
+    Phase 47's shedding step in EMT: Block 9 out, 45 deg C, the 32 PCS at
+    103 % of their rating; at 30 ms 1.5 MW of racks - one 5 % step of the
+    nine halls, here 45 % of Hall 5's - comes off. The PCS fall from 0.99 to
+    0.94 MW each, the island's frequency rises by 0.06 Hz, the backbone
+    holds above 0.98 pu and nothing blocks: the step is benign.
+    """
+    p = _payload9(45)
+    for v in p.values():
+        if isinstance(v, dict) and str(v.get('typ', '')).startswith('PCS') and v.get('userFriendlyName', '').startswith('Block 9'):
+            v['in_service'] = 'false'
+    p['0'] = {'typ': 'EmtStudy Parameters', 'frequency': '60', 'time_step_us': '20', 'user_email': 't@t',
+              'duration_ms': '200', 'step_load': 'Hall 5: 90 DGX H100 racks', 'step_percent': '-45', 'step_time_ms': '30'}
+    with quiet():
+        emt = json.loads(client.post('/', json=p).get_data(as_text=True))['emt']
+    assert not emt['converters_blocked']
+    pcs = [c for c in emt['converters'] if c['kind'] == 'PCS' and not c['label'].startswith('Block 9')]
+    assert len(pcs) == 32
+    for c in pcs:
+        assert c['p_start_mw'] == pytest.approx(0.987, abs=0.005) and c['p_end_mw'] == pytest.approx(0.937, abs=0.005)
+        assert c['i_peak_ka'] < c['current_limit_ka']
+    bus = {b['label']: b for b in emt['ac']['buses']}
+    for n in range(1, 9):
+        assert bus[f'Load backbone {n}']['v_rms_min_pu'] > 0.98

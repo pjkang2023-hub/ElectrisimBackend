@@ -1397,3 +1397,51 @@ def test_emt_variant_bus_stores_carry_the_island_when_the_rectifiers_hand_over(c
         client, {**big, **{r: {'ease_f_start_hz': '59.5', 'ease_f_end_hz': '59.0'} for r in _LINEUP_RECTIFIERS}})
     rect = conv['Lineup A rectifier 1']
     assert not lost and rect['eased_ms'] > 0 and rect['pll_f_min_hz'] < 59.5
+
+
+# --- The rectifiers handing over in ANDES -----------------------------------------------------------
+
+def _tds_islanded_at_full_load(client, changes):
+    import numpy as np
+    p = _variant(_payload('tds_'), {'Gas turbine': {'in_service': 'false'}, **changes})
+    grid = next(v['name'] for v in p.values() if isinstance(v, dict) and v.get('userFriendlyName') == 'Grid')
+    p['0'].update({'fault_enabled': 'false', 'tf': '6', 'toggle_line': grid, 'toggle_t': '2.0', 'max_points': '3000'})
+    out = _post(client, p)
+    t = np.array(out['time'])
+    lineup = np.array(next(b['values'] for b in out['bus_voltage'] if b['name'] == 'Lineup A 0.48 kV'), dtype=float)
+    return out, {e['label']: e for e in out['rectifier_easing']}, float(lineup[-1])
+
+
+def test_tds_rectifiers_hand_over_to_their_stores(client):
+    """
+    The grid lost at 2 s with the turbine off, in ANDES: the island's
+    rectifiers, held at their load-flow power, leave it short - the eSTATCOM
+    empties at 2.5 s, the BESS PCS at their limit, and the lineups' AC buses
+    sag to 0.53 pu. With EMT's easing on the lineup rectifiers (0.85 pu, to
+    0.1, back over 5 s) they hand their 800 V buses to its stores as the
+    voltage dips: with the 20c variant's 7 MW stores the lineups hold at
+    0.85 pu; with the drawn 2.5 MW stores each rectifier can ease only by its
+    share of its bus's spare - 0.625 MW - and the lineups reach 0.66 pu. By
+    frequency (59.5 to 59.0 Hz), the easing engages as the frequency falls
+    and holds 0.64 pu. The DC side is otherwise held as the load flow left
+    it: the stores' energy is not drawn down in ANDES (EMT and the time
+    series follow it).
+    """
+    big = {f'{s} converter': {'rated_mw': '6' if s.startswith('Hall B') else '7'} for s in _BUS_STORES}
+    out, ease, end = _tds_islanded_at_full_load(client, big)
+    assert not ease and end == pytest.approx(0.53, abs=0.02)
+    assert {r['label']: r for r in out['pcs']}['eSTATCOM']['stopped_s'] == pytest.approx(2.47, abs=0.05)
+    out, ease, end = _tds_islanded_at_full_load(client, {**big, **{r: _UV_EASING for r in _LINEUP_RECTIFIERS}})
+    assert sorted(ease) == sorted(r for r in _LINEUP_RECTIFIERS if r.startswith('Lineup'))   # the catcher's bus is idle
+    assert end == pytest.approx(0.85, abs=0.02)
+    r = ease['Lineup A rectifier 1']
+    assert r['spare_mw'] == pytest.approx(1.75, abs=0.01) and r['min_factor'] == pytest.approx(0.1)
+    assert r['eased_from_s'] == pytest.approx(2.48, abs=0.05)
+    assert any("Rectifier 'Lineup A rectifier 1' eased from" in w for w in out['warnings'])
+    out, ease, end = _tds_islanded_at_full_load(client, {r: _UV_EASING for r in _LINEUP_RECTIFIERS})
+    assert ease['Lineup A rectifier 1']['spare_mw'] == pytest.approx(0.625, abs=0.01)
+    assert end == pytest.approx(0.66, abs=0.02)
+    out, ease, end = _tds_islanded_at_full_load(
+        client, {**big, **{r: {'ease_f_start_hz': '59.5', 'ease_f_end_hz': '59.0'} for r in _LINEUP_RECTIFIERS}})
+    assert ease['Lineup A rectifier 1']['eased_from_s'] == pytest.approx(2.02, abs=0.05)
+    assert end == pytest.approx(0.64, abs=0.02)

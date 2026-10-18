@@ -1153,11 +1153,13 @@ def build_system(
     reach, smoothing = _converter_dc_reach(flow) if flow is not None and profile_library else ({}, {})
     dc_assigned = _lp.dc_load_assignments(in_data) if profile_library else {}
     following, smoothed = [], set()
+    converter_pq: Dict[str, str] = {}
     for bus_name, p_mw, q_mvar, label in converter_loads:
         bus = bus_map.get(bus_name)
         if bus is None:
             continue
         pq_i += 1
+        converter_pq[label] = f"PQ_{pq_i}"
         mix, total = [], 0.0
         for w, name in reach.get(label, []):
             total += w
@@ -1885,6 +1887,8 @@ def build_system(
         "free_islands": bool(island_slacks or running_islands),
         "profiled_loads": profiled_loads,
         "profile_repeat": profile_repeat,
+        "converter_pq": converter_pq,
+        "dc_flow": flow,
     }
     return ss, meta
 
@@ -2208,6 +2212,142 @@ class _GridFormingLimits:
         return out
 
 
+class _RectifierEasing:
+    """
+    Rectifiers handing their DC bus to its stores in an island short of power
+    (EMT's easing, in ANDES). A rectifier holding its DC bus is, here, the
+    load its AC side is in the load flow; with uv_ease_pu set, below that
+    voltage at its AC bus it eases at once to uv_floor_pu of its load, and
+    back over uv_restore_s once its voltage recovers; with ease_f_start_hz
+    and ease_f_end_hz, it eases in proportion as its island's frequency falls
+    between them, to the same floor. It never eases by more than the stores
+    on its DC bus can take - the spare of the DC/DC converters in droop
+    feeding that bus, their rating less what they give in the load flow,
+    shared among the bus's rectifiers by their load. The DC side is held as
+    the load flow left it otherwise: the stores' energy is not drawn down.
+    """
+
+    def __init__(self, ss, meta: Dict[str, Any], profiled: List[Dict[str, Any]], warnings: List[str]):
+        self.ss, self.meta = ss, meta
+        self.units: List[Dict[str, Any]] = []
+        self.active = False
+        net = meta.get("dc_flow")
+        if net is None or "vsc" not in net or not len(net.vsc) or "uv_ease_pu" not in net.vsc.columns:
+            return
+        import pandapower_electrisim as pe
+        label = lambda i: str(getattr(net, "user_friendly_names", {}).get(net.vsc.at[i, "name"], net.vsc.at[i, "name"]))
+        position = {idx: k for k, idx in enumerate(ss.PQ.idx.v)}
+        by_idx = {load["idx"]: load for load in profiled}
+        candidates = []
+        for i in net.vsc.index:
+            if pe._electrisim_is_aux(net.vsc, i) or not bool(net.vsc.at[i, "in_service"]):
+                continue
+            uv = float(net.vsc.at[i, "uv_ease_pu"] or 0.0)
+            f0, f1 = float(net.vsc.at[i, "ease_f_start_hz"] or 0.0), float(net.vsc.at[i, "ease_f_end_hz"] or 0.0)
+            if uv <= 0 and not (f0 > 0 and f1 > 0 and f0 > f1):
+                continue
+            pq = meta.get("converter_pq", {}).get(label(i))
+            if pq is None or pq not in position:
+                continue
+            k = position[pq]
+            candidates.append({
+                "label": label(i), "bus_dc": int(net.vsc.at[i, "bus_dc"]), "k": k, "pq": pq,
+                "bus": ss.PQ.bus.v[k], "p0": float(ss.PQ.Ppf.v[k]), "uv": uv,
+                "floor": min(max(float(net.vsc.at[i, "uv_floor_pu"] or 0.5), 0.0), 1.0),
+                "restore_s": max(float(net.vsc.at[i, "uv_restore_s"] or 5.0), 1e-3),
+                "f0": f0 if f0 > f1 > 0 else 0.0, "f1": f1 if f0 > f1 > 0 else 0.0,
+                "profile": by_idx.get(pq), "factor": 1.0, "uv_since": None, "uv_recovered": None,
+                "eased_from": None, "min_factor": 1.0, "hist": [],
+            })
+        if not candidates:
+            return
+        # The stores on each DC bus: its DC/DC converters in droop, by their spare.
+        spare: Dict[int, float] = {}
+        for c in getattr(net, "electrisim_dc_dc_converters", None) or []:
+            if c.get("in_service", True) and c.get("control") == "droop" and c.get("droop_line") is not None:
+                now = pe._electrisim_dc_dc_delivered_mw(net, c)
+                now = now if math.isfinite(now) else 0.0
+                spare[int(c["bus_out"])] = spare.get(int(c["bus_out"]), 0.0) + max(float(c.get("rated_mw") or 0.0) - now, 0.0)
+        sn = float(meta["sn_mva"])
+        for bus, rows in {u["bus_dc"]: [v for v in candidates if v["bus_dc"] == u["bus_dc"]] for u in candidates}.items():
+            total = sum(max(r["p0"], 0.0) for r in rows) or 1.0
+            for r in rows:
+                r["spare_mw"] = spare.get(bus, 0.0) * max(r["p0"], 0.0) / total
+                r["lowest"] = 1.0 if r["spare_mw"] <= 1e-9 else r["floor"]
+        self.sn = sn
+        # A rectifier with no load to hand over (a catcher's, its bus idle) is left out.
+        self.units = [u for u in candidates if u["p0"] * sn > 1e-3]
+        none = [u["label"] for u in self.units if u["lowest"] >= 1.0 - 1e-9]
+        if none:
+            warnings.append("Rectifier easing: no store on the DC bus of " + ", ".join(none) + " to take its load; it holds.")
+        self.active = any(u["lowest"] < 1.0 - 1e-9 for u in self.units)
+
+    def _frequency(self) -> Optional[float]:
+        ss, vals = self.ss, []
+        for m in ("GENROU", "GENCLS"):
+            mdl = getattr(ss, m, None)
+            if mdl is not None and mdl.n:
+                vals += [float(w) for w, u in zip(mdl.omega.v, mdl.u.v) if u]
+        return float(np.mean(vals)) * float(self.meta["frequency"]) if vals else None
+
+    def check(self, t: float, dt: float) -> None:
+        ss = self.ss
+        f = self._frequency()
+        for u in self.units:
+            if u["lowest"] >= 1.0 - 1e-9:
+                continue
+            v = float(ss.Bus.v.v[ss.Bus.idx2uid(u["bus"])])
+            target = 1.0
+            if u["uv"] > 0:
+                if v < u["uv"]:
+                    u["uv_since"] = t if u["uv_since"] is None else u["uv_since"]
+                    u["uv_recovered"] = None
+                    target = u["floor"]
+                elif u["uv_since"] is not None:
+                    u["uv_recovered"] = t if u["uv_recovered"] is None else u["uv_recovered"]
+                    back = (t - u["uv_recovered"]) / u["restore_s"]
+                    target = u["floor"] + (1.0 - u["floor"]) * min(back, 1.0)
+                    if back >= 1.0:
+                        u["uv_since"] = u["uv_recovered"] = None
+            if u["f0"] > 0 and f is not None and f < u["f0"]:
+                share = min((u["f0"] - f) / (u["f0"] - u["f1"]), 1.0)
+                target = min(target, 1.0 - share * (1.0 - u["floor"]))
+            # No lower than its floor, nor than what its bus's stores cannot take of its load now.
+            p_now = float(ss.PQ.Ppf.v[u["k"]]) / max(u["factor"], 1e-9) * self.sn
+            target = max(target, u["lowest"], 1.0 - u["spare_mw"] / p_now if p_now > 1e-9 else 1.0)
+            if abs(target - u["factor"]) > 1e-6:
+                scale = target / u["factor"]
+                k = u["k"]
+                for key in ("Ppf", "Ipeq", "Req", "Qpf", "Iqeq", "Xeq"):
+                    if hasattr(ss.PQ, key):
+                        getattr(ss.PQ, key).v[k] *= scale
+                if u["profile"] is not None:
+                    u["profile"]["eased"] = target
+                u["factor"] = target
+                if target < 1.0 - 1e-6 and u["eased_from"] is None:
+                    u["eased_from"] = t
+            u["min_factor"] = min(u["min_factor"], u["factor"])
+            u["hist"].append((t, u["factor"]))
+
+    def result(self, warnings: List[str], times: np.ndarray) -> List[Dict[str, Any]]:
+        sn = float(self.meta["sn_mva"])
+        out = []
+        for u in self.units:
+            if u["eased_from"] is not None:
+                warnings.append(
+                    f"Rectifier '{u['label']}' eased from t = {u['eased_from']:.3f} s to {u['min_factor']:.3g} of its "
+                    f"{u['p0'] * sn:.3g} MW, its DC bus's stores taking the rest (at most {u['spare_mw']:.3g} MW).")
+            ts = [h[0] for h in u["hist"]] or [0.0]
+            fs = [h[1] for h in u["hist"]] or [1.0]
+            out.append({
+                "label": u["label"], "p0_mw": _clean_num(u["p0"] * sn), "spare_mw": _clean_num(u["spare_mw"]),
+                "lowest_factor": _clean_num(u["lowest"]), "eased_from_s": _clean_num(u["eased_from"]) if u["eased_from"] is not None else None,
+                "min_factor": _clean_num(u["min_factor"]),
+                "factor": [_clean_num(float(x)) for x in np.interp(times, ts, fs)] if len(times) else [],
+            })
+        return out
+
+
 class _LoadShedding:
     """
     A load-shedding scheme on a grid-forming island: when its trigger has been
@@ -2348,7 +2488,8 @@ class _LoadShedding:
 
 def _run_tds_following_profiles(ss, profiled: List[Dict[str, Any]], tf: float, repeat: bool,
                                 warnings: List[str], limits: Optional[_GridFormingLimits] = None,
-                                shedding: Optional[_LoadShedding] = None) -> bool:
+                                shedding: Optional[_LoadShedding] = None,
+                                easing: Optional[_RectifierEasing] = None) -> bool:
     """
     Run the time-domain simulation in short pieces, setting each profiled
     load's power before each piece.
@@ -2382,6 +2523,8 @@ def _run_tds_following_profiles(ss, profiled: List[Dict[str, Any]], tf: float, r
     if limits is not None and limits.active:
         step = min(step, limits.check_s)
         limits.check(0.0)
+    if easing is not None and easing.active:
+        step = min(step, _PCS_CHECK_S)
     # The pieces' ends on a grid of the step, none near an event (an Alter of
     # the grid's voltage, a fault, a trip): a piece ending on one stopped the
     # run there - ANDES resumed on the event's time with no step to take - or
@@ -2397,10 +2540,10 @@ def _run_tds_following_profiles(ss, profiled: List[Dict[str, Any]], tf: float, r
             f = (_mix_value(load["mix"], t0, t1, repeat) if load.get("mix")
                  else _lp.average_profile(load["t"], load["p"], t0, t1, repeat))
             i, v0 = load["i"], load["v0"]
-            p = load["p_rated"] * f * load.get("kept", 1.0)
+            p = load["p_rated"] * f * load.get("kept", 1.0) * load.get("eased", 1.0)
             ss.PQ.Ppf.v[i], ss.PQ.Ipeq.v[i], ss.PQ.Req.v[i] = p, p / v0, p / v0 ** 2
             if load["q_mode"] == "pf":
-                q = load["q_rated"] * f * load.get("kept", 1.0)
+                q = load["q_rated"] * f * load.get("kept", 1.0) * load.get("eased", 1.0)
                 ss.PQ.Qpf.v[i], ss.PQ.Iqeq.v[i], ss.PQ.Xeq.v[i] = q, q / v0, q / v0 ** 2
         ss.TDS.config.tf = t1
         if not ss.TDS.run():
@@ -2410,6 +2553,8 @@ def _run_tds_following_profiles(ss, profiled: List[Dict[str, Any]], tf: float, r
             limits.check(float(ss.dae.t))
         if shedding is not None and shedding.active:
             shedding.check(float(ss.dae.t))
+        if easing is not None and easing.active:
+            easing.check(float(ss.dae.t), t1 - t0)
     return True
 
 
@@ -2470,9 +2615,10 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
             limits = _GridFormingLimits(ss, meta, check_s)
         meta["pcs_limits"] = limits
         shedding = _LoadShedding(ss, meta, params, limits, profiled, meta["warnings"])
-        if profiled or (limits is not None and limits.active):
+        easing = _RectifierEasing(ss, meta, profiled, meta["warnings"])
+        if profiled or (limits is not None and limits.active) or easing.active:
             tds_ok = _run_tds_following_profiles(ss, profiled, tf, meta.get("profile_repeat", True),
-                                                 meta["warnings"], limits, shedding)
+                                                 meta["warnings"], limits, shedding, easing)
         else:
             tds_ok = bool(ss.TDS.run())
         if limits is not None:
@@ -2697,6 +2843,7 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
                              shedding.kept_at(t_ds) if "kept" in load else np.ones(len(t_ds)))],
             } for load in (meta.get("profiled_loads") or [])],
             "load_shedding": shedding.result(meta["warnings"], t_ds),
+            "rectifier_easing": easing.result(meta["warnings"], t_ds),
             "ride_through": {
                 "enabled": bool(ride_pts),
                 "pass": ride_pass,
