@@ -2319,3 +2319,31 @@ def test_opf_on_the_inverter_island(client, quiet, nine, inlet):
         assert math.hypot(g['p_mw'], g['q_mvar']) < rating
     assert not [w for w in out.get('warnings', []) if 'OPF dispatched' in w]
     assert max(b['vm_pu'] for b in out['busbars']) == pytest.approx(1.10, abs=0.002)
+
+
+def test_opf_says_when_the_island_cannot_be_supplied(client, quiet):
+    """
+    Block 3 out: its eight PCS at their continuous rating, 7.95 MW, against
+    the three blocks' 11.1 MW. The load flow carries it on their short-time
+    overload; no steady-state dispatch exists, and the OPF says so - the
+    island, its load and its sources' limit - in the error details the dialog
+    shows, where it had said only that it did not converge.
+    """
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    for v in p.values():
+        if isinstance(v, dict) and str(v.get('typ', '')).startswith('PCS') and v['userFriendlyName'].startswith('Block 3'):
+            v['in_service'] = 'false'
+    p['0'] = {'typ': 'OptimalPowerFlowPandaPower Parameters', 'opf_type': 'ac', 'frequency': '60',
+              'ac_algorithm': 'pypower', 'dc_algorithm': 'pypower', 'calculate_voltage_angles': 'auto', 'init': 'pf',
+              'delta': '1e-16', 'trafo_model': 't', 'trafo_loading': 'current', 'ac_line_model': 'pi', 'numba': True,
+              'suppress_warnings': True, 'cost_function': 'polynomial', 'user_email': 't@t',
+              **{f'{e}_cost_{c}': {} for e in ('generator', 'ext_grid', 'storage', 'sgen', 'load', 'dcline')
+                 for c in ('cp1', 'cp2')}}
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    assert out['error']
+    msg = out['diagnostic']['general_error']          # the dialog's error details (the exception is suppressed)
+    assert msg.startswith('The island with ') and 'Hall 1 34.5 kV' in msg
+    assert 'draws 11.1 MW, more than its 8 source(s) can give at their limits (7.95 MW' in msg
+    assert 'no dispatch exists' in msg

@@ -3807,6 +3807,57 @@ def _electrisim_pcs_opf_circle_check(net):
                                   "separately, not together).")
 
 
+def _electrisim_opf_island_shortfalls(net):
+    """
+    Each island with no external grid whose load is more than its sources can
+    give at their OPF limits: a reason the OPF cannot converge that no solver
+    setting changes (the PCS3750C-MV with a block out: eight PCS at their
+    continuous rating against the three blocks' load).
+    """
+    try:
+        graph = top.create_nxgraph(net, respect_switches=True)
+        grids = set(int(b) for b in net.ext_grid.loc[net.ext_grid['in_service'] == True, 'bus']) \
+            if len(net.ext_grid) else set()
+        out = []
+        for comp in top.connected_components(graph):
+            comp = set(int(b) for b in comp)
+            if comp & grids:
+                continue
+            load = 0.0
+            if len(net.load):
+                ld = net.load[net.load['bus'].isin(comp) & (net.load['in_service'] == True)]
+                scale = ld['scaling'] if 'scaling' in ld.columns else 1.0
+                load = float((ld['p_mw'] * scale).sum())
+            if not len(net.gen) or not ((net.gen['bus'].isin(comp)) & (net.gen['in_service'] == True)).any():
+                continue        # nothing holds its voltage: an isolated island, which the diagnostic names
+            cap, n = 0.0, 0
+            for table in ('gen', 'sgen', 'storage'):
+                df = net[table] if table in net else None
+                if df is None or not len(df):
+                    continue
+                on = df[df['bus'].isin(comp) & (df['in_service'] == True)]
+                for i in on.index:
+                    controllable = 'controllable' in on.columns and bool(on.at[i, 'controllable'])
+                    if table == 'storage':
+                        # Positive charging: the most it gives is its lowest p.
+                        lo = on.at[i, 'min_p_mw'] if controllable and 'min_p_mw' in on.columns else on.at[i, 'p_mw']
+                        cap += -float(lo) if pd.notna(lo) else 0.0
+                    else:
+                        hi = on.at[i, 'max_p_mw'] if controllable and 'max_p_mw' in on.columns else on.at[i, 'p_mw']
+                        cap += float(hi) if pd.notna(hi) else 0.0
+                    n += 1
+            if load > 1e-6 and load > cap * 1.0001:
+                friendly = getattr(net, 'user_friendly_names', {}) or {}
+                names = [str(friendly.get(net.bus.at[b, 'name'], net.bus.at[b, 'name'])) for b in sorted(comp)[:3]]
+                out.append(f"The island with {', '.join(names)}{' and others' if len(comp) > 3 else ''} draws "
+                           f"{load:.3g} MW, more than its {n} source(s) can give at their limits ({cap:.3g} MW, "
+                           "at their continuous ratings): no dispatch exists. Shed load, or run the load flow, "
+                           "which lets grid-forming PCS share an overload within their short-time rating.")
+        return out
+    except Exception:
+        return []
+
+
 def _electrisim_pcs_opf_costs(net, gen_cp1, sgen_cp1):
     """Each PCS's own marginal cost (EUR/MWh) where the diagram gives one and the study's costs do not."""
     for rec in getattr(net, 'electrisim_pcs', None) or []:
@@ -13259,6 +13310,10 @@ def optimalPowerFlow(net, opf_params):
         
         # Initialize diagnostic response
         exc_text = str(e)
+        shortfalls = _electrisim_opf_island_shortfalls(net)
+        if shortfalls:
+            # Not the solver's fault: no dispatch exists. Said first, ahead of the solver tips.
+            exc_text = ' '.join(shortfalls) + '\n\n' + exc_text
         if isinstance(e, OPFNotConverged) or "did not converge" in exc_text.lower():
             exc_text += (
                 "\n\nTips:\n"
@@ -13297,6 +13352,10 @@ def optimalPowerFlow(net, opf_params):
         # If no specific diagnostic was found, include the original exception
         if not diagnostic_response["diagnostic"]:
             diagnostic_response["diagnostic"]["general_error"] = str(e)
+        # An island its sources cannot supply: shown in the dialog's error details (the exception text is
+        # suppressed outside debugging).
+        if shortfalls:
+            diagnostic_response["diagnostic"]["general_error"] = ' '.join(shortfalls)
 
         if solver_verbose_text.strip():
             diagnostic_response["solver_verbose_log"] = _truncate_solver_verbose_log(solver_verbose_text)
