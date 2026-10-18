@@ -2279,3 +2279,43 @@ def test_emt_nine_blocks_a_shed_step_at_45c(client, quiet):
     bus = {b['label']: b for b in emt['ac']['buses']}
     for n in range(1, 9):
         assert bus[f'Load backbone {n}']['v_rms_min_pu'] > 0.98
+
+
+# --- The OPF on the inverter island ---------------------------------------------------------------
+
+@pytest.mark.parametrize('nine, inlet', [(False, 40), (False, 45), (True, 40), (True, 45)])
+def test_opf_on_the_inverter_island(client, quiet, nine, inlet):
+    """
+    The AC OPF on the drawn reference, three blocks and nine. A PCS on a DC
+    network had a power window of its whole rating - its short-time overload's
+    too - and its Q box was taken at that window's ends, where its rating
+    leaves none: the backbone island, whose only sources they are, had no
+    reactive power and the OPF never converged. Now its P is held to its
+    continuous rating and its Q to its cap (60 %); every case converges, each
+    PCS carrying its share within its rating (no warning of a dispatch past
+    its circle), the backbone at the OPF's 1.10 pu bound (equal costs: the
+    least losses).
+    """
+    name = f'{GRID}_9blocks' if nine else GRID
+    with open(os.path.join(HERE, 'reference', f'{name}.diagram_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    for v in p.values():
+        if isinstance(v, dict) and 'inlet_c' in v:
+            v['inlet_c'] = str(inlet)
+    p['0'] = {'typ': 'OptimalPowerFlowPandaPower Parameters', 'opf_type': 'ac', 'frequency': '60',
+              'ac_algorithm': 'pypower', 'dc_algorithm': 'pypower', 'calculate_voltage_angles': 'auto', 'init': 'pf',
+              'delta': '1e-16', 'trafo_model': 't', 'trafo_loading': 'current', 'ac_line_model': 'pi', 'numba': True,
+              'suppress_warnings': True, 'cost_function': 'polynomial', 'user_email': 't@t',
+              **{f'{e}_cost_{c}': {} for e in ('generator', 'ext_grid', 'storage', 'sgen', 'load', 'dcline')
+                 for c in ('cp1', 'cp2')}}
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    assert not out.get('error'), out.get('exception')
+    pcs = out['generators']
+    assert len(pcs) == (36 if nine else 12)
+    rating = 0.994 if inlet == 40 else 0.947
+    for g in pcs:
+        assert 0.85 < g['p_mw'] < rating and abs(g['q_mvar']) < 0.1
+        assert math.hypot(g['p_mw'], g['q_mvar']) < rating
+    assert not [w for w in out.get('warnings', []) if 'OPF dispatched' in w]
+    assert max(b['vm_pu'] for b in out['busbars']) == pytest.approx(1.10, abs=0.002)

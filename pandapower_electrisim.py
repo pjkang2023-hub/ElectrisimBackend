@@ -3769,16 +3769,42 @@ def _electrisim_pcs_opf_limits(net, rec):
     its set power and gives reactive power: the 800 VDC AI factory's
     eSTATCOM, free to the OPF, exported 14.7 MW from 7.5 MW-s.
     """
-    p_hi, p_lo = rec['p_max_mw'], rec['p_min_mw']
+    s = rec['s_rated']
+    # A steady-state dispatch: its continuous rating, not its short-time overload's ceiling.
+    p_hi, p_lo = min(rec['p_max_mw'], s), max(rec['p_min_mw'], -s)
     if rec['source']['kind'] == 'Supercapacitor':
         p_hi = p_lo = min(max(rec.get('p_set_ac', 0.0), p_lo), p_hi)
-    q_box = converter_rating.q_limit(rec['s_rated'], max(abs(p_hi), abs(p_lo)), rec.get('q_max_pu'))
+    if rec['source']['kind'] == 'DC bus':
+        # On a DC network its window is its whole rating either way, which left it no Q at the window's
+        # ends: an island of such PCS (the PCS3750C-MV's backbone) had no source of reactive power and
+        # its OPF never converged. Its Q up to its cap (or its rating) instead; the box's corners lie
+        # outside its circle, so a result beyond its rating is warned of after the OPF.
+        q_box = s * (rec.get('q_max_pu') or 1.0)
+        rec['opf_box_outside_circle'] = True
+    else:
+        q_box = converter_rating.q_limit(s, max(abs(p_hi), abs(p_lo)), rec.get('q_max_pu'))
     table, idx = rec['table'], rec['index']
     for col, value in (('controllable', True), ('min_p_mw', p_lo), ('max_p_mw', max(p_hi, p_lo + 1e-6)),
                        ('min_q_mvar', -q_box), ('max_q_mvar', q_box)):
         net[table].at[idx, col] = value
     # Start it inside its window.
     net[table].at[idx, 'p_mw'] = min(max(float(net[table].at[idx, 'p_mw']), p_lo), p_hi)
+
+
+def _electrisim_pcs_opf_circle_check(net):
+    """After the OPF: a PCS whose box let it past its rating (its P and Q together) is warned of."""
+    for rec in getattr(net, 'electrisim_pcs', None) or []:
+        if not rec.get('opf_box_outside_circle') or rec['table'] not in ('gen', 'sgen'):
+            continue
+        res = net[f"res_{rec['table']}"]
+        if rec['index'] not in res.index:
+            continue
+        p, q = float(res.at[rec['index'], 'p_mw']), float(res.at[rec['index'], 'q_mvar'])
+        s = math.hypot(p, q)
+        if math.isfinite(s) and s > rec['s_rated'] * 1.001:
+            _electrisim_warn(net, f"PCS '{rec['label']}': the OPF dispatched {p:.4g} MW and {q:.4g} Mvar, "
+                                  f"{s:.4g} MVA - past its {rec['s_rated']:.4g} MVA rating (the OPF limits P and Q "
+                                  "separately, not together).")
 
 
 def _electrisim_pcs_opf_costs(net, gen_cp1, sgen_cp1):
@@ -13279,6 +13305,7 @@ def optimalPowerFlow(net, opf_params):
     
     # Build response with OPF results
     else:
+        _electrisim_pcs_opf_circle_check(net)
         # Define output classes (similar to powerflow function)
         class BusbarOut(object):
             def __init__(self, name: str, id: str, vm_pu: float, va_degree: float, p_mw: float, q_mvar: float, 
