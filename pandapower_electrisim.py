@@ -4378,6 +4378,12 @@ def _electrisim_build_ssts(net, Busbars):
         rec = {'name': name, 'id': el.get('id', ''), 'label': label, 'in_service': on, 'bus_mv': int(b_mv),
                'bus_lvdc': int(b_lvdc), 'bus_lvac': int(b_lvac) if b_lvac is not None else None,
                'link_kv': safe_float(el.get('link_kv'), 0.0), 'stages': [], 'aux': [], 'inverter_mode': None,
+               # Easing in an island short of power, as a rectifier's: its MV voltage below uv_ease_pu, or its
+               # frequency between ease_f_start_hz and ease_f_end_hz, its LV DC output eases off and its bus's
+               # stores take the rest (ANDES and EMT; 0: none).
+               'ease': {k: safe_float(el.get(k), d) for k, d in (
+                   ('uv_ease_pu', 0.0), ('uv_floor_pu', 0.5), ('uv_restore_s', 5.0),
+                   ('ease_f_start_hz', 0.0), ('ease_f_end_hz', 0.0))},
                # For the EMT study: its stages' model, switching frequencies, current limit and its rectifier's
                # and inverter's current loop bandwidth.
                'emt': {'model': 'switching' if el.get('emt_model') == 'switching' else 'average',

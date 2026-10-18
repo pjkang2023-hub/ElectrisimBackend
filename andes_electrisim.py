@@ -2232,33 +2232,44 @@ class _RectifierEasing:
         self.units: List[Dict[str, Any]] = []
         self.active = False
         net = meta.get("dc_flow")
-        if net is None or "vsc" not in net or not len(net.vsc) or "uv_ease_pu" not in net.vsc.columns:
+        if net is None:
             return
         import pandapower_electrisim as pe
-        label = lambda i: str(getattr(net, "user_friendly_names", {}).get(net.vsc.at[i, "name"], net.vsc.at[i, "name"]))
         position = {idx: k for k, idx in enumerate(ss.PQ.idx.v)}
         by_idx = {load["idx"]: load for load in profiled}
         candidates = []
-        for i in net.vsc.index:
-            if pe._electrisim_is_aux(net.vsc, i) or not bool(net.vsc.at[i, "in_service"]):
-                continue
-            uv = float(net.vsc.at[i, "uv_ease_pu"] or 0.0)
-            f0, f1 = float(net.vsc.at[i, "ease_f_start_hz"] or 0.0), float(net.vsc.at[i, "ease_f_end_hz"] or 0.0)
+
+        def add(label, bus_dc, s, kind):
+            uv = float(s.get("uv_ease_pu") or 0.0)
+            f0, f1 = float(s.get("ease_f_start_hz") or 0.0), float(s.get("ease_f_end_hz") or 0.0)
             if uv <= 0 and not (f0 > 0 and f1 > 0 and f0 > f1):
-                continue
-            pq = meta.get("converter_pq", {}).get(label(i))
+                return
+            pq = meta.get("converter_pq", {}).get(label)
             if pq is None or pq not in position:
-                continue
+                return
             k = position[pq]
             candidates.append({
-                "label": label(i), "bus_dc": int(net.vsc.at[i, "bus_dc"]), "k": k, "pq": pq,
+                "label": label, "kind": kind, "bus_dc": int(bus_dc), "k": k, "pq": pq,
                 "bus": ss.PQ.bus.v[k], "p0": float(ss.PQ.Ppf.v[k]), "uv": uv,
-                "floor": min(max(float(net.vsc.at[i, "uv_floor_pu"] or 0.5), 0.0), 1.0),
-                "restore_s": max(float(net.vsc.at[i, "uv_restore_s"] or 5.0), 1e-3),
+                "floor": min(max(float(s.get("uv_floor_pu") or 0.5), 0.0), 1.0),
+                "restore_s": max(float(s.get("uv_restore_s") or 5.0), 1e-3),
                 "f0": f0 if f0 > f1 > 0 else 0.0, "f1": f1 if f0 > f1 > 0 else 0.0,
                 "profile": by_idx.get(pq), "factor": 1.0, "uv_since": None, "uv_recovered": None,
                 "eased_from": None, "min_factor": 1.0, "hist": [],
             })
+
+        if "vsc" in net and len(net.vsc) and "uv_ease_pu" in net.vsc.columns:
+            for i in net.vsc.index:
+                if pe._electrisim_is_aux(net.vsc, i) or not bool(net.vsc.at[i, "in_service"]):
+                    continue
+                name = net.vsc.at[i, "name"]
+                add(str(getattr(net, "user_friendly_names", {}).get(name, name)), net.vsc.at[i, "bus_dc"],
+                    {c: net.vsc.at[i, c] for c in ("uv_ease_pu", "uv_floor_pu", "uv_restore_s",
+                                                   "ease_f_start_hz", "ease_f_end_hz")}, "Rectifier")
+        # An SST eases its MV draw as a rectifier does, handing its LV DC bus to that bus's stores.
+        for rec in getattr(net, "electrisim_ssts", None) or []:
+            if rec.get("in_service", True) and rec.get("ease"):
+                add(f"{rec['label']} (MV)", rec["bus_lvdc"], rec["ease"], "SST")
         if not candidates:
             return
         # The stores on each DC bus: its DC/DC converters in droop, by their spare.
@@ -2279,7 +2290,7 @@ class _RectifierEasing:
         self.units = [u for u in candidates if u["p0"] * sn > 1e-3]
         none = [u["label"] for u in self.units if u["lowest"] >= 1.0 - 1e-9]
         if none:
-            warnings.append("Rectifier easing: no store on the DC bus of " + ", ".join(none) + " to take its load; it holds.")
+            warnings.append("Easing: no store on the DC bus of " + ", ".join(none) + " to take its load; it holds.")
         self.active = any(u["lowest"] < 1.0 - 1e-9 for u in self.units)
 
     def _frequency(self) -> Optional[float]:
@@ -2335,12 +2346,12 @@ class _RectifierEasing:
         for u in self.units:
             if u["eased_from"] is not None:
                 warnings.append(
-                    f"Rectifier '{u['label']}' eased from t = {u['eased_from']:.3f} s to {u['min_factor']:.3g} of its "
+                    f"{u['kind']} '{u['label']}' eased from t = {u['eased_from']:.3f} s to {u['min_factor']:.3g} of its "
                     f"{u['p0'] * sn:.3g} MW, its DC bus's stores taking the rest (at most {u['spare_mw']:.3g} MW).")
             ts = [h[0] for h in u["hist"]] or [0.0]
             fs = [h[1] for h in u["hist"]] or [1.0]
             out.append({
-                "label": u["label"], "p0_mw": _clean_num(u["p0"] * sn), "spare_mw": _clean_num(u["spare_mw"]),
+                "label": u["label"], "kind": u["kind"], "p0_mw": _clean_num(u["p0"] * sn), "spare_mw": _clean_num(u["spare_mw"]),
                 "lowest_factor": _clean_num(u["lowest"]), "eased_from_s": _clean_num(u["eased_from"]) if u["eased_from"] is not None else None,
                 "min_factor": _clean_num(u["min_factor"]),
                 "factor": [_clean_num(float(x)) for x in np.interp(times, ts, fs)] if len(times) else [],

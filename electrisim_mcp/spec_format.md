@@ -258,7 +258,13 @@ and inverter's, as a VSC's), and its stages' capacitors' ESR and ESL (0: none):
 `ride_through_pu` (EMT: with its internal link below this, its DC/DC stage
 passes no power rather than block, keeping the link charged through an MV
 fault, and its power ramps back over 0.2 s once the link is 5 % above it;
-its stages block only below 30 %; 0, the default: none - they block at 80 %).
+its stages block only below 30 %; 0, the default: none - they block at 80 %),
+and its easing in an island short of power, as a VSC's (ANDES and EMT; 0, the
+default: never): `uv_ease_pu`, `uv_floor_pu`, `uv_restore_s`,
+`ease_f_start_hz`, `ease_f_end_hz` - its MV voltage below `uv_ease_pu`, or its
+frequency falling from `ease_f_start_hz` to `ease_f_end_hz`, the power its LV
+DC port delivers is capped (to `uv_floor_pu` of its rating, back over
+`uv_restore_s`), its LV DC bus sagging into its stores' droop.
 
 **dc_dc_converters** - `id`, **`bus_in`**, **`bus_out`** (DC), `control_mode`
 (`voltage`, `power`, `droop`, `dispatch`, `mppt`, `follower` or `smoothing`),

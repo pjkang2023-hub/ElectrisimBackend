@@ -357,6 +357,8 @@ class Vsc:
         uv = getattr(self, '_uv', (0.0, 0.5, 5.0))
         self.uv = uv if uv[0] > 0 and self.mode_dc.startswith('vm') else None
         self.uv_cap, self.uv_at, self.v_ac_min = 1.0, None, 1.0
+        self.ease_k = 1.0                                    # its easing's cap now, a share of its rating
+        self.ease_self = getattr(self, 'ease_self', True)    # False: an SST's rectifier, its DC/DC stage easing
         self.f_f = f0
         self.eased_time, self.ease_min, self.f_min = 0.0, 1.0, f0
         self.trace = []                                      # (t, P out, Q out, v_dc, |i|) for the results
@@ -472,7 +474,13 @@ class Vsc:
                 else:
                     self.uv_cap = min(1.0, self.uv_cap + (1.0 - floor) * dt / restore)
                 k = min(k, self.uv_cap)
-            if self.ease is not None or self.uv is not None:
+            self.ease_k = k
+            if (self.ease is not None or self.uv is not None) and not self.ease_self:
+                # An SST's rectifier: it holds its link, and its DC/DC stage eases by k instead.
+                if k < 1.0:
+                    self.eased_time += dt
+                    self.ease_min = min(self.ease_min, k)
+            elif self.ease is not None or self.uv is not None:
                 if k < 1.0 and p_in > k * self.s_rated:
                     p_in, eased = k * self.s_rated, True
                     self.eased_time += dt
@@ -801,7 +809,7 @@ class DcDc:
                  vm_out_pu=1.0, p_set_mw=0.0, rated_mw=0.0, eta=1.0, p_nl_mw=0.0, bidirectional=False,
                  limit_pu=1.2, model='average', switching_khz=20.0, c_out_mf=0.0, c_out_esr_mohm=0.0,
                  c_out_esl_uh=0.0, c_in_esr_mohm=0.0, c_in_esl_uh=0.0, block_pu=0.8, r_in=0.0, r_out=0.0,
-                 every_step=False, droop_pu=0.0, p_ref=None, p_in_ref=None, ride_through_pu=0.0):
+                 every_step=False, droop_pu=0.0, p_ref=None, p_in_ref=None, ride_through_pu=0.0, ease_from=None):
         """
         ``c_out_esr_mohm``, ``c_out_esl_uh``, ``c_in_esr_mohm``,
         ``c_in_esl_uh``: its output and input capacitors' series resistance
@@ -818,6 +826,10 @@ class DcDc:
         input is back above it plus 5 %, rather than block; it blocks only below
         30 % (0: none - it blocks at ``block_pu``). An SST's DC/DC stage, its MV
         side in a fault: it keeps its link's charge for when the fault clears.
+        ``ease_from``: a converter whose ``ease_k`` caps the power it delivers,
+        as a share of its rating - an SST's DC/DC stage, its rectifier seeing
+        its MV voltage dip or its frequency fall: its LV DC bus sags into its
+        stores' droop, as a rectifier's does.
         """
         ckt = builder.ckt
         self.label = label
@@ -844,6 +856,8 @@ class DcDc:
         if self.rt_pause is not None:
             self.block_in, self.block_out = 0.3 * vn_in, 0.3 * vn_out
         self.paused = False
+        self.ease_from = ease_from
+        self.eased_time, self.ease_min = 0.0, 1.0
         self.pauses = []                                     # [start, end or None] of each pause
         self.t_resumed = None                                # its power ramps back from here, over RT_RAMP_S
         c_in, c_out = dcdc_capacitors(c_out_mf, rated, vn_in, vn_out)
@@ -1067,6 +1081,13 @@ class DcDc:
             # Resumed: its power back in a ramp, not at once - every SST on a recovering backbone at
             # its limit together held the inverters at theirs, the backbone down and the SSTs paused.
             i_max *= max(t_s - self.t_resumed, 0.0) / RT_RAMP_S
+        k = getattr(self.ease_from, 'ease_k', 1.0) if self.ease_from is not None else 1.0
+        if k < 1.0:
+            cap = k * self.rated / max(v_out_m, 0.05 * self.vn_out)
+            if i_ref > cap:
+                self.eased_time += dt
+                self.ease_min = min(self.ease_min, k)
+            i_max = min(i_max, cap)
         lo = -i_max if self.bidirectional else 0.0
         limited = not lo <= i_ref <= i_max
         i_ref = min(max(i_ref, lo), i_max)

@@ -567,13 +567,19 @@ class _EmtBuilder:
             r_ohm, x_ohm = reactor(rec['bus_mv'], rect['rated_mw'])
             label = f"{rec['label']} rectifier"
             ride = e.get('ride_through_pu', 0.0)
+            ease = rec.get('ease') or {}
             # Riding through, its rectifier holds on to a sagging link, to 30 %, as its DC/DC stage does.
             conv = Vsc(self, label, rec['bus_mv'], link, self.bus_node[link], 1e-6, min(block, 0.3) if ride > 0 else block,
                        p=p, q=q, p_dc=p_dc,
                        rated_mva=rect['rated_mw'], limit_pu=limit, r_ohm=r_ohm, x_ohm=x_ohm, mode_dc='vm_pu',
                        mode_ac='q_mvar', model=model, switching_khz=e.get('switching_khz', 5.0),
                        eta=eta, p_nl_mw=p_nl, input_side='ac', current_loop_hz=e.get('current_loop_hz', 500.0),
-                       c_link_esr_mohm=e.get('rect_dc_link_esr_mohm', 0.0), c_link_esl_uh=e.get('rect_dc_link_esl_uh', 0.0))
+                       c_link_esr_mohm=e.get('rect_dc_link_esr_mohm', 0.0), c_link_esl_uh=e.get('rect_dc_link_esl_uh', 0.0),
+                       **{k: ease.get(k, d) for k, d in (('ease_f_start_hz', 0.0), ('ease_f_end_hz', 0.0), ('uv_ease_pu', 0.0),
+                                                         ('uv_floor_pu', 0.5), ('uv_restore_s', 5.0))})
+            # Easing, its rectifier still holds its link: it reads its MV side, its DC/DC stage eases.
+            conv.ease_self = False
+            rect_conv = conv
             if ride > 0:
                 # Riding through, it takes the inrush of the backbone's return - its current to between 2.5
                 # and 3.75 times its limit as the reference's voltage came back - blocking at 4 times it.
@@ -594,7 +600,8 @@ class _EmtBuilder:
                         switching_khz=e.get('dcdc_switching_khz', 20.0), block_pu=block,
                         c_in_esr_mohm=e.get('dcdc_c_in_esr_mohm', 0.0), c_in_esl_uh=e.get('dcdc_c_in_esl_uh', 0.0),
                         c_out_esr_mohm=e.get('dcdc_c_out_esr_mohm', 0.0), c_out_esl_uh=e.get('dcdc_c_out_esl_uh', 0.0),
-                        ride_through_pu=ride)
+                        ride_through_pu=ride,
+                        ease_from=rect_conv if (rect_conv.ease is not None or rect_conv.uv is not None) else None)
             self._add_dcdc(conv, rec['id'])
 
             # Its grid-following inverter.
@@ -1350,6 +1357,9 @@ def _dcdc_result(conv, t_event):
     if getattr(conv, 'rt_pause', None) is not None:
         # Its fault ride-through: each pause, [start, end] (ms; end None: still paused at the end of the run).
         out['paused_ms'] = [[_round(a * 1e3), _round(b * 1e3) if b is not None else None] for a, b in conv.pauses]
+    if getattr(conv, 'ease_from', None) is not None:
+        # An SST's DC/DC stage easing off as its MV side dipped or its frequency fell: how long, how far.
+        out.update(eased_ms=_round(conv.eased_time * 1e3), ease_min_pu=_round(conv.ease_min))
     if len(tr):
         cycle = 0.02
         first = tr[:, 0] <= max(min(tr[0, 0] + cycle, t_event), tr[0, 0])

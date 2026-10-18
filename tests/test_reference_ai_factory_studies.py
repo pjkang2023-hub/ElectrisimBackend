@@ -1399,6 +1399,32 @@ def test_emt_variant_bus_stores_carry_the_island_when_the_rectifiers_hand_over(c
     assert not lost and rect['eased_ms'] > 0 and rect['pll_f_min_hz'] < 59.5
 
 
+def test_emt_ssts_hand_over_to_their_stores(client):
+    """
+    Hall B's SSTs easing too (0.85 pu, to 0.1): each SST's rectifier reads
+    the dip and holds its link, and its DC/DC stage caps what it delivers,
+    Hall B's 800 V sagging into its stores' droop. With the 20c variant's
+    stores, Hall B's SSTs - which blocked at 141 ms once the eSTATCOM
+    emptied - now run on to the end; only the eSTATCOM blocks, and the 800 V
+    holds at 0.96 pu. With the drawn 2.5 MW stores the floor of 0.1 hands
+    them more than they can take: Hall B's 800 V collapses at 31 ms, its
+    stores' converters and the SSTs' DC/DC stages blocking - as the
+    rectifiers' does, the floor must leave on the SSTs what the stores
+    cannot carry.
+    """
+    ssts = {s: _UV_EASING for s in _HALL_B_SSTS}
+    big = {f'{s} converter': {'rated_mw': '6' if s.startswith('Hall B') else '7'} for s in _BUS_STORES}
+    conv, blocked, lost, low = _emt_islanded_at_full_load(
+        client, {**big, **{r: _UV_EASING for r in _LINEUP_RECTIFIERS}, **ssts})
+    assert not lost and low > 0.955
+    assert [k for k in blocked if k.startswith('Hall B')] == [] and blocked['eSTATCOM'] > 120
+    assert 20 < conv['Hall B SST 1 rectifier']['uv_eased_at_ms'] < 25
+    dcdc = conv['Hall B SST 1 DC/DC']
+    assert dcdc['eased_ms'] > 200 and dcdc['ease_min_pu'] == pytest.approx(0.1)
+    conv, blocked, lost, low = _emt_islanded_at_full_load(client, ssts)
+    assert all(25 < blocked[f'{s} DC/DC'] < 40 for s in _HALL_B_SSTS) and len(lost) > 20
+
+
 # --- The rectifiers handing over in ANDES -----------------------------------------------------------
 
 def _tds_islanded_at_full_load(client, changes):
@@ -1445,3 +1471,31 @@ def test_tds_rectifiers_hand_over_to_their_stores(client):
         client, {**big, **{r: {'ease_f_start_hz': '59.5', 'ease_f_end_hz': '59.0'} for r in _LINEUP_RECTIFIERS}})
     assert ease['Lineup A rectifier 1']['eased_from_s'] == pytest.approx(2.02, abs=0.05)
     assert end == pytest.approx(0.64, abs=0.02)
+
+
+_HALL_B_SSTS = [f'Hall B SST {k}' for k in (1, 2, 3)]
+
+
+def test_tds_ssts_hand_over_to_their_stores(client):
+    """
+    Hall B's SSTs easing as the lineup rectifiers do (0.85 pu, to 0.1, back
+    over 5 s), in the same island: each hands its 2.78 MW to Hall B's stores
+    as the voltage dips. With the 20c variant's two 6 MW stores - 4 MW of
+    spare an SST - they ease to their floor beside the rectifiers, and the
+    lineups end at 0.885 pu rather than 0.85. With the drawn 2.5 MW stores,
+    5 MW of spare shared by the three, each eases only by its 1.67 MW, to
+    0.39 of its load.
+    """
+    big = {f'{s} converter': {'rated_mw': '6' if s.startswith('Hall B') else '7'} for s in _BUS_STORES}
+    rect = {r: _UV_EASING for r in _LINEUP_RECTIFIERS}
+    out, ease, end = _tds_islanded_at_full_load(client, {**big, **rect, **{s: _UV_EASING for s in _HALL_B_SSTS}})
+    assert end == pytest.approx(0.885, abs=0.02)
+    for s in _HALL_B_SSTS:
+        e = ease[f'{s} (MV)']
+        assert e['kind'] == 'SST' and e['spare_mw'] == pytest.approx(4.0, abs=0.01)
+        assert e['min_factor'] == pytest.approx(0.1) and e['eased_from_s'] == pytest.approx(2.48, abs=0.05)
+    assert any(w.startswith("SST 'Hall B SST 1 (MV)' eased from") for w in out['warnings'])
+    out, ease, end = _tds_islanded_at_full_load(client, {s: _UV_EASING for s in _HALL_B_SSTS})
+    assert sorted(ease) == [f'{s} (MV)' for s in _HALL_B_SSTS]
+    e = ease['Hall B SST 1 (MV)']
+    assert e['spare_mw'] == pytest.approx(5.0 / 3, abs=0.01) and e['min_factor'] == pytest.approx(0.39, abs=0.01)
