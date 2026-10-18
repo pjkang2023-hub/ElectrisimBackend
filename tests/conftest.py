@@ -12,8 +12,6 @@ BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
-# The simulation routes must stay open for tests; auth is covered separately.
-os.environ.setdefault('ELECTRISIM_AUTH_MODE', 'off')
 # Script import is gated by default; the import goldens need it.
 os.environ.setdefault('ELECTRISIM_ALLOW_SCRIPT_IMPORT', '1')
 

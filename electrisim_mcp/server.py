@@ -14,7 +14,6 @@ Run it the way an MCP client launches it, over stdio:
 Configuration (environment):
 
     ELECTRISIM_BACKEND_URL    backend base URL            (http://127.0.0.1:5000)
-    ELECTRISIM_TOKEN          bearer token, only if the backend enforces auth
     ELECTRISIM_BRIDGE_PORT    local bridge port           (5503)
     ELECTRISIM_BRIDGE_ORIGINS comma-separated page origins allowed to use the bridge
                               (http://127.0.0.1:5501,http://localhost:5501)

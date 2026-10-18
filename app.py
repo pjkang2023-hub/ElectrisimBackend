@@ -71,8 +71,6 @@ import pandapower_electrisim
 import grid_code_pq_electrisim
 import grid_code_vq_electrisim
 import opendss_electrisim
-import electrisim_auth
-from electrisim_auth import require_auth, authenticated_email
 import electrisim_ops
 import electrisim_sld
 import opender_electrisim
@@ -118,11 +116,10 @@ cors_origins = [o.strip() for o in _cors_env.split(',') if o.strip()] if _cors_e
 CORS(app, 
      origins=cors_origins, 
      methods=['GET', 'POST', 'OPTIONS'],
-     allow_headers=['Content-Type', 'Authorization', 'Accept', 'Accept-Encoding',
+     allow_headers=['Content-Type', 'Accept', 'Accept-Encoding',
                     'Access-Control-Allow-Credentials'],
      supports_credentials=True)
 
-_console(electrisim_auth.startup_report())
 electrisim_ops.install(app)
 _console(electrisim_ops.startup_report(app))
 
@@ -169,7 +166,6 @@ def _log_incoming_request():
 
 
 @app.route('/', methods=['POST'])
-@require_auth
 def simulation():
     try:
         in_data = request.get_json(force=True, silent=True)
@@ -177,15 +173,6 @@ def simulation():
             return jsonify({
                 'error': 'Request body must be a JSON object with simulation elements.'
             }), 400
-
-        # Identity: prefer the verified token claim over the request body.
-        # in_data[...]['user_email'] is set by the client and must not be
-        # trusted for logging, attribution, quota, or billing.
-        _verified_email = authenticated_email(None)
-        if _verified_email:
-            for _el in in_data.values():
-                if isinstance(_el, dict) and 'user_email' in _el:
-                    _el['user_email'] = _verified_email
         try:
             _typs = sorted({
                 _element_typ(v) for v in in_data.values() if _element_typ(v)
@@ -2126,7 +2113,6 @@ def pandapower_net_to_json(net):
 
 
 @app.route('/import-pandapower', methods=['POST'])
-@require_auth
 def import_pandapower():
     """
     Accepts a Pandapower .py script, executes it to build `net`,
@@ -2185,7 +2171,6 @@ def import_pandapower():
 
 
 @app.route('/build-model', methods=['POST'])
-@require_auth
 def build_model():
     """
     Build a network from a declarative single-line-diagram spec and return the
@@ -2340,7 +2325,6 @@ def _bus_voltages_from_equipment(dss, bus_names):
 
 
 @app.route('/import-opendss', methods=['POST'])
-@require_auth
 def import_opendss():
     """
     Accepts an OpenDSS .dss text, builds a model, and returns

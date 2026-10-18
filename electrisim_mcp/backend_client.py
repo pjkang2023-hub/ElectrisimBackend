@@ -29,11 +29,9 @@ class SpecProblems(BackendError):
 
 
 class BackendClient:
-    def __init__(self, base_url=None, token=None, timeout=60.0):
+    def __init__(self, base_url=None, timeout=60.0):
         self.base_url = (base_url or os.getenv('ELECTRISIM_BACKEND_URL')
                          or DEFAULT_BACKEND_URL).rstrip('/')
-        # Needed only when the backend runs with ELECTRISIM_AUTH_MODE=enforce.
-        self.token = token if token is not None else os.getenv('ELECTRISIM_TOKEN')
         self.timeout = timeout
 
     def build_model(self, spec, run_power_flow=False, include_model=True, limits=None):
@@ -46,8 +44,6 @@ class BackendClient:
         data = json.dumps(body).encode('utf-8')
         req = urllib.request.Request(self.base_url + path, data=data, method='POST',
                                      headers={'Content-Type': 'application/json'})
-        if self.token:
-            req.add_header('Authorization', f'Bearer {self.token}')
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 return json.loads(resp.read().decode('utf-8'))
@@ -55,11 +51,6 @@ class BackendClient:
             payload = _json_or_none(exc)
             if exc.code == 400 and payload and payload.get('problems'):
                 raise SpecProblems(payload['problems']) from None
-            if exc.code == 401:
-                raise BackendError(
-                    'The backend requires authentication (ELECTRISIM_AUTH_MODE=enforce). '
-                    'Set ELECTRISIM_TOKEN for the MCP server to a valid api.electrisim.com token.'
-                ) from None
             if exc.code == 404:
                 raise BackendError(
                     f'{self.base_url} has no {path} route. The backend is older than '
