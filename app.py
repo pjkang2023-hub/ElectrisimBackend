@@ -874,6 +874,23 @@ def simulation():
                     return response
                 return response_data
 
+            if "AcDcOpfPandaPower" in typ:
+                # The AC/DC optimal power flow with least shed (Pyomo and Ipopt), on the drawn network.
+                import acdc_opf_electrisim
+                net = pp.create_empty_network(f_hz=float(in_data[x].get('frequency') or 50))
+                Busbars = pandapower_electrisim.create_busbars(in_data, net)
+                pandapower_electrisim.create_other_elements(in_data, net, x, Busbars)
+                response_data = acdc_opf_electrisim.acdc_opf_study(net, in_data[x], in_data)
+                accept_encoding = request.headers.get('Accept-Encoding', '')
+                if 'gzip' in accept_encoding and len(response_data) > 1024:
+                    compressed = gzip.compress(response_data.encode('utf-8'))
+                    response = make_response(compressed)
+                    response.headers['Content-Encoding'] = 'gzip'
+                    response.headers['Content-Type'] = 'application/json'
+                    response.headers['Content-Length'] = len(compressed)
+                    return response
+                return response_data
+
             if "DcFaultStudy" in typ:
                 import dc_fault_electrisim
                 user_email = in_data[x].get('user_email', 'unknown@user.com')

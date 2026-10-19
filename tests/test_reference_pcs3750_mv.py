@@ -2347,3 +2347,21 @@ def test_opf_says_when_the_island_cannot_be_supplied(client, quiet):
     assert msg.startswith('The island with ') and 'Hall 1 34.5 kV' in msg
     assert 'draws 11.1 MW, more than its 8 source(s) can give at their limits (7.95 MW' in msg
     assert 'no dispatch exists' in msg
+
+
+def test_load_flow_names_transformers_past_their_rating(client, quiet):
+    """
+    At 40 C full load each block's 3.75 MVA T1 carries the AFEs' 3.85 MW and
+    its own loss: 103.9 % of its nameplate (the block is rated 3,977 kVA). The
+    result boxes coloured it; the load flow now says so, as it does for a
+    converter past its rating. Each T2, at 100.0 %, is not named.
+    """
+    with open(os.path.join(HERE, 'reference', f'{GRID}.diagram_payload.json'), encoding='utf-8') as fh:
+        p = json.load(fh)
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    over = [w for w in out['warnings'] if ' is loaded to ' in w and w.startswith(('Line', 'Transformer'))]
+    assert len(over) == 3, over
+    for k in (1, 2, 3):
+        assert any(w.startswith(f"Transformer 'Block {k} T1") and 'loaded to 103.9 % of its rating' in w for w in over)
+    assert not any('T2' in w for w in over)

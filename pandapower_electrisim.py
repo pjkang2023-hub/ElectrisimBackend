@@ -2657,7 +2657,7 @@ def _electrisim_finish_dc_dc(net):
 
 # The studies that model DC/DC converters; the others see each as the power its input draws.
 _DCDC_STUDIES = ('PowerFlowPandaPower', 'TimeSeriesSimulationPandaPower', 'ContingencyAnalysisPandaPower', 'EmtStudy',
-                 'DcFaultStudy')
+                 'DcFaultStudy', 'AcDcOpfPandaPower')
 
 
 def _electrisim_freeze_dc_dc(net):
@@ -3202,6 +3202,30 @@ def _electrisim_rectifiers_within_rating(net):
             worst = max(worst, abs(target - p_dc))
             net.vsc.at[vi, 'control_value_dc'] = target
     return worst
+
+
+def _electrisim_warn_branch_overloads(net):
+    """
+    Each line and transformer past its rating after the load flow, named, as a
+    converter past its rating is: the result boxes colour them, but nothing
+    said so - a block's 3.75 MVA T1 carried 3.89 MVA (103.9 %) at full load
+    unremarked. Electrisim's own aids (a DC/DC converter's or an SST's
+    internal stages, a zigzag's) are left out.
+    """
+    names = getattr(net, 'user_friendly_names', None) or {}
+    for kind, table, rating in (('Line', 'line', 'its thermal rating (max_i_ka)'),
+                                ('Transformer', 'trafo', 'its rating (sn_mva)'),
+                                ('Three-winding transformer', 'trafo3w', 'its rating')):
+        df, res = net.get(table), net.get(f'res_{table}')
+        if df is None or res is None or not len(df) or 'loading_percent' not in res.columns:
+            continue
+        for i in df.index:
+            if i not in res.index or not bool(df.at[i, 'in_service']) or _electrisim_is_aux(df, i):
+                continue
+            loading = res.at[i, 'loading_percent']
+            if pd.notna(loading) and float(loading) > 100.05:
+                name = df.at[i, 'name']
+                _electrisim_warn(net, f"{kind} '{names.get(name, name)}' is loaded to {float(loading):.1f} % of {rating}.")
 
 
 def _electrisim_warn_rectifier_limits(net):
@@ -11176,6 +11200,8 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                 # The DC network: buses, loads, sources, capacitors, breakers, diodes, SSTs, sources and
                 # stores, DC/DC converters, VSCs and DC cables - the time series' steps alike.
                 result = {**result, **_electrisim_dc_results(net)}
+                # Lines and transformers past their rating, said as the converters' are.
+                _electrisim_warn_branch_overloads(net)
 
                 #Switch (net.res_switch: p_from_mw, q_from_mvar, p_to_mw, q_to_mvar, i_ka, loading_percent)
                 if(hasattr(net, 'res_switch') and not net.res_switch.empty):
