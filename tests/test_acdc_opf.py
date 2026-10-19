@@ -2,8 +2,9 @@
 The AC/DC optimal power flow with least shed (acdc_opf_electrisim), run as the frontend sends it.
 
 Checked against an independent model of the PCS3750C-MV reference written from its spec
-(electrisim-lab, experiment 01), against Electrisim's own load flow, and on the networks it must
-refuse. Needs Pyomo and Ipopt; skipped without them.
+(electrisim-lab, experiment 01), against Electrisim's own load flow, and on the 800 VDC factory and
+the AI campus (DC/DC converters, diodes, supercapacitors, PV arrays, fuel cells), connected and
+islanded. Needs Pyomo and Ipopt; skipped without them.
 """
 import json
 import os
@@ -103,7 +104,68 @@ def test_ac_networks_no_worse_than_the_load_flow(client, quiet, ref):
         assert g['p_mw'] > 0
 
 
-def test_refuses_what_it_does_not_model(client, quiet):
-    """The 800 VDC factory has DC/DC converters and diodes: refused, naming them, not solved without them."""
-    out = _run(client, quiet, _payload('reference_ai_factory_800vdc', objective='shed'))
-    assert out['error'] and out['message'].startswith('This study does not model yet: DC/DC converter')
+def _off(p, *labels):
+    """Elements out of service by the start of their label: the utility, the gas turbines."""
+    for v in p.values():
+        if isinstance(v, dict) and str(v.get('typ', '')).startswith(('External Grid', 'Generator')) \
+                and any(str(v.get('userFriendlyName', '')).startswith(x) for x in labels):
+            v['in_service'] = 'false'
+    return p
+
+
+def test_factory_no_worse_than_the_load_flow(client, quiet):
+    """
+    The 800 VDC factory - DC/DC converters, diode-ORed shelves, supercapacitors - every load served: the grid
+    gives 8.438 MW, less than the load flow's 8.578; each diode forward only, the supercapacitors at none.
+    """
+    out = _run(client, quiet, _payload('reference_ai_factory_800vdc', objective='losses'))
+    assert out['solved'], out
+    assert out['shed_mw'] == 0
+    assert out['grid']['load_flow_p_mw'] == pytest.approx(8.578, abs=2e-3)
+    assert out['grid']['p_mw'] == pytest.approx(8.438, abs=5e-3)
+    assert len(out['dcdc']) == 9 and len(out['diodes']) == 24
+    assert all(d['p_mw'] >= -1e-6 for d in out['diodes'])
+    assert any('supercapacitor' in w for w in out['warnings'])
+
+
+def test_factory_island_least_shed(client, quiet):
+    """
+    The factory on its own (the grid and the gas turbine out), its stores free to discharge: 6.05 MW of its
+    22 MW of racks shed, every DC store converter at its battery's 2.5 MW (2.448 MW out), each substation PCS
+    at its battery's limit - where the load flow's reference PCS carries 18.6 MW past its rating.
+    """
+    out = _run(client, quiet, _off(_payload('reference_ai_factory_800vdc', objective='shed', batteries=True),
+                                   'Grid', 'Gas turbine'))
+    assert out['solved'], out
+    assert out['shed_mw'] == pytest.approx(6.053, abs=0.02)
+    stores = [c['p_mw'] for c in out['dcdc'] if 'DC Store' in c['name']]
+    assert len(stores) == 5 and all(x == pytest.approx(2.448, abs=2e-3) for x in stores)
+    assert all(r['p_mw'] == pytest.approx(2.45, abs=5e-3) for r in out['pcs'] if 'BESS' in r['name'])
+
+
+def test_campus_with_pv_and_fuel_cells(client, quiet):
+    """
+    The AI campus - PV arrays and SOFC systems behind PCS, batteries and supercapacitors behind DC/DC converters:
+    connected, the grid gives 23.309 MW (the load flow 23.461), each PV array at its maximum power point, each
+    SOFC at its set power.
+    """
+    out = _run(client, quiet, _payload('reference_ai_campus', objective='losses'))
+    assert out['solved'], out
+    assert out['grid']['load_flow_p_mw'] == pytest.approx(23.461, abs=2e-3)
+    assert out['grid']['p_mw'] == pytest.approx(23.309, abs=5e-3)
+    for s in out['sources']:
+        assert s['p_mw'] == pytest.approx(s['p_max_mw'], abs=1e-3)
+
+
+def test_campus_island_least_shed(client, quiet):
+    """
+    The campus on its own (the utility and both gas turbines out): 15.06 MW of its 48 MW shed with the batteries
+    free; 14.59 MW if the fuel cells may run up to their rating (4.75 MW each, from 4.5).
+    """
+    p = lambda **kw: _off(_payload('reference_ai_campus', objective='shed', batteries=True, **kw), 'Utility', 'Gas turbine')
+    out = _run(client, quiet, p())
+    assert out['solved'], out
+    assert out['shed_mw'] == pytest.approx(15.06, abs=0.03)
+    fc = _run(client, quiet, p(fuel_cells=True))
+    assert fc['shed_mw'] == pytest.approx(14.59, abs=0.03)
+    assert all(s['p_mw'] == pytest.approx(4.75, abs=1e-3) for s in fc['sources'] if s['kind'] == 'SOFC')

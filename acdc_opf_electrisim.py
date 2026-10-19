@@ -20,12 +20,21 @@ go:
   DC     the DC buses joined by in-service DC lines and closed DC breakers, each group a node (their
          resistance left out); its batteries within their C-rates (priced, so they discharge only
          where needed); its DC loads.
+  DC/DC  each DC/DC converter a link between the groups at its terminals: its efficiency and no-load
+         loss, within its rating, one way or both as drawn - whatever its control in the load flow
+         (droop, voltage, power, smoothing), the optimiser sets its power.
+  Diodes each DC diode a one-way link from its anode's group to its cathode's, within its rated
+         current at its bus voltage, its forward drop a loss. The groups have no voltage, so what each
+         of two diode-ORed feeds carries is the optimiser's choice, not set by their voltages.
+  Sources a PV array up to its maximum power point (curtailed only if it must be); an SOFC system at
+         its set power, or up to its rating if asked (priced like stored energy); supercapacitors and
+         flywheels hold no steady power, so at none (a PCS fed from one gives Q only).
   Ratings each line (max_i_ka) and two-winding transformer (sn_mva) within its rating times its
          voltage, if asked.
 
 Objectives: least losses (all loads served), or least shed - the most of the sheddable loads served,
-then the least losses. Elements it does not model yet (DC/DC converters, DC diodes, supercapacitors,
-fuel cells, PV arrays) are named and the study refused, rather than left out silently.
+then the least losses. A PCS fed from a source this study does not know is named and the study
+refused, rather than left out silently.
 """
 from __future__ import annotations
 
@@ -73,24 +82,24 @@ def _flag(df, col) -> pd.Series:
     return df[col].fillna(False).astype(bool)
 
 
+SOURCE_KINDS = ('DC bus', 'Battery', 'PV Array', 'SOFC', 'Supercapacitor', 'Flywheel', None)
+DER_KINDS = ('Battery', 'PV Array', 'SOFC', 'Supercapacitor', 'Flywheel')
+
+
 def _unsupported(net) -> List[str]:
     out = []
-    for c in getattr(net, 'electrisim_dc_dc_converters', None) or []:
-        out.append(f"DC/DC converter '{c.get('label', c.get('name'))}'")
-    for d in getattr(net, 'electrisim_dc_diodes', None) or []:
-        out.append(f"DC diode '{d.get('label', d.get('name'))}'")
     for d in getattr(net, 'electrisim_ders', None) or []:
-        if d.get('kind') != 'Battery':
+        if d.get('kind') not in DER_KINDS:
             out.append(f"{d.get('kind')} '{d.get('label')}'")
     for r in getattr(net, 'electrisim_pcs', None) or []:
         src = r.get('source') or {}
-        if src.get('kind') not in ('DC bus', 'Battery', None):
+        if src.get('kind') not in SOURCE_KINDS:
             out.append(f"PCS '{r.get('label')}' fed from a {src.get('kind')}")
     return out
 
 
 def _dc_groups(net) -> Dict[int, int]:
-    """Each DC bus's group: joined by in-service DC lines (and closed DC breakers, which are DC lines)."""
+    """Each DC bus's group: joined by in-service DC lines (and closed DC breakers, which are DC lines), not by diodes."""
     parent = {int(b): int(b) for b in net.bus_dc.index} if len(getattr(net, 'bus_dc', [])) else {}
 
     def root(b):
@@ -99,8 +108,9 @@ def _dc_groups(net) -> Dict[int, int]:
             b = parent[b]
         return b
 
+    diode = _flag(getattr(net, 'line_dc', None), 'electrisim_dc_diode')
     for i in getattr(net, 'line_dc', pd.DataFrame()).index:
-        if bool(net.line_dc.at[i, 'in_service']):
+        if bool(net.line_dc.at[i, 'in_service']) and not bool(diode.get(i, False)):
             a, b = int(net.line_dc.at[i, 'from_bus_dc']), int(net.line_dc.at[i, 'to_bus_dc'])
             if a in parent and b in parent:
                 parent[root(a)] = root(b)
@@ -115,6 +125,40 @@ def _battery_limits(obj) -> tuple:
     ch = energy * float(f.get('c_rate_charge', 1.0) or 1.0)
     soc, lo, hi = (float(getattr(obj, k, d)) for k, d in (('soc0', 0.5), ('soc_min', 0.0), ('soc_max', 1.0)))
     return (dis if soc > lo + 1e-6 else 0.0), (ch if soc < hi - 1e-6 else 0.0)
+
+
+def _aux_rows(net, kind: str, n: int) -> Optional[np.ndarray]:
+    """
+    The internal rows (ppci) of pandapower's auxiliary buses of ``kind`` ('vsc', 'trafo3w'), or -1 for one out of
+    service. pandapower updates its bus lookup to the internal numbering but leaves its auxiliary lookup in the
+    order it built them, before the rows out of service (an open bus, or one fused to another by a closed switch)
+    went to the end: each auxiliary row moves up by the rows out of service before it.
+    """
+    aux = net._pd2ppc_lookups.get('aux') or {}
+    if aux.get(kind) is None:
+        return None
+    lookup = net._pd2ppc_lookups['bus']
+    drawn = np.asarray([int(lookup[b]) for b in net.bus.index])
+    oos_before_aux = len(net.bus) - len({int(i) for i in drawn if 0 <= i < n})
+    # The auxiliary rows out of service: those of elements out of service, in build order.
+    oos_aux = []
+    for k, rows_k in aux.items():
+        table = net.get(k)
+        rows_k = np.asarray(rows_k if rows_k is not None else []).ravel()
+        if table is None or len(table) != len(rows_k):
+            continue
+        oos_aux.extend(int(r) for r, on in zip(rows_k, table['in_service'].to_numpy(dtype=bool)) if not on)
+    oos_set = set(oos_aux)
+    oos_aux = np.sort(np.asarray(oos_aux, dtype=np.int64))
+    out = []
+    for r in np.asarray(aux[kind]).ravel():
+        r = int(r)
+        if r in oos_set:
+            out.append(-1)
+            continue
+        i = r - oos_before_aux - int(np.searchsorted(oos_aux, r))
+        out.append(i if 0 <= i < n else -1)
+    return np.asarray(out, dtype=np.int64)
 
 
 def _stage_eta(net, table, idx) -> tuple:
@@ -133,6 +177,7 @@ def build_and_solve(net, params: Dict[str, Any]) -> Dict[str, Any]:
     shed_dc = str(params.get('shed_dc_loads', 'true')).lower() == 'true'
     shed_ac = str(params.get('shed_ac_loads', 'false')).lower() == 'true'
     batteries = str(params.get('batteries', 'false')).lower() == 'true'
+    fuel_cells = str(params.get('fuel_cells', 'false')).lower() == 'true'
     limits = str(params.get('branch_limits', 'true')).lower() == 'true'
     tf = float(params.get('transformer_factor', 1.0) or 1.0)
     warnings: List[str] = []
@@ -162,7 +207,7 @@ def build_and_solve(net, params: Dict[str, Any]) -> Dict[str, Any]:
             if i is not None:
                 drop.add(i)
     vsc_row = {}
-    aux_rows = (net._pd2ppc_lookups.get('aux') or {}).get('vsc')
+    aux_rows = _aux_rows(net, 'vsc', n)
     if aux_rows is not None and len(getattr(net, 'vsc', [])):
         for k, v in enumerate(net.vsc.index):
             if k >= len(aux_rows) or not 0 <= int(aux_rows[k]) < n or not bool(net.vsc.at[v, 'in_service']):
@@ -242,6 +287,8 @@ def build_and_solve(net, params: Dict[str, Any]) -> Dict[str, Any]:
     # PCS: their generator rows are theirs, not generators of their own.
     pcs = [r for r in getattr(net, 'electrisim_pcs', None) or [] if r.get('in_service', True)]
     pcs_names = {r.get('name') for r in getattr(net, 'electrisim_pcs', None) or []}
+    # (a PCS on a PV array or SOFC is a static generator in the load flow, on a battery a generator)
+    pcs_rows = {(r.get('table'), r.get('index')) for r in getattr(net, 'electrisim_pcs', None) or []}
 
     # Generators (not PCS): P within its limits if controllable, else fixed; Q within its limits.
     gens = [g for g in net.gen.index if bool(net.gen.at[g, 'in_service']) and net.gen.at[g, 'name'] not in pcs_names
@@ -252,7 +299,15 @@ def build_and_solve(net, params: Dict[str, Any]) -> Dict[str, Any]:
         col = lambda c, d: float(net.gen.at[g, c]) if c in net.gen.columns and pd.notna(net.gen.at[g, c]) else d
         has_limits = all(c in net.gen.columns and pd.notna(net.gen.at[g, c]) for c in ('min_p_mw', 'max_p_mw'))
         controllable = bool(net.gen.at[g, 'controllable']) if 'controllable' in net.gen.columns and pd.notna(net.gen.at[g, 'controllable']) else False
-        if controllable and has_limits:
+        slack = bool(net.gen.at[g, 'slack']) if 'slack' in net.gen.columns and pd.notna(net.gen.at[g, 'slack']) else False
+        if slack and not (controllable and has_limits):
+            # An island's slack (the grid gone): free as a grid is, within its rating if it has one.
+            hi_g = col('max_p_mw', float('nan'))
+            if not math.isfinite(hi_g):
+                hi_g = col('sn_mva', float('nan'))
+            m.Pgen[g].setlb(max(col('min_p_mw', 0.0), 0.0) / base)
+            m.Pgen[g].setub(hi_g / base if math.isfinite(hi_g) and hi_g > 0 else None)
+        elif controllable and has_limits:
             # Dispatched within its limits, as pandapower's OPF would.
             m.Pgen[g].setlb(col('min_p_mw', 0.0) / base)
             m.Pgen[g].setub(col('max_p_mw', 0.0) / base)
@@ -272,7 +327,8 @@ def build_and_solve(net, params: Dict[str, Any]) -> Dict[str, Any]:
         if df is None or res is None:
             return
         for e in df.index:
-            if e in res.index and bool(df.at[e, 'in_service']) and not pe._electrisim_is_aux(df, e):
+            if e in res.index and bool(df.at[e, 'in_service']) and not pe._electrisim_is_aux(df, e) \
+                    and (table, e) not in pcs_rows and df.at[e, 'name'] not in pcs_names:
                 add(ix(df.at[e, 'bus']), sign * float(res.at[e, 'p_mw']) / base, sign * float(res.at[e, 'q_mvar']) / base, f'{table} {e}')
 
     fixed('sgen', 1)
@@ -319,16 +375,99 @@ def build_and_solve(net, params: Dict[str, Any]) -> Dict[str, Any]:
     # Batteries on DC buses (coupled directly) and behind PCS.
     bats = [d for d in getattr(net, 'electrisim_ders', None) or [] if d.get('kind') == 'Battery'
             and getattr(d.get('obj'), 'in_service', True)]
+    # A battery drawn only as a PCS's source is not one of the DERs: its own entry, behind its PCS.
+    known = {d.get('name') for d in bats}
+    for r in pcs:
+        src = r.get('source') or {}
+        name = getattr(src.get('obj'), 'name', None)
+        if src.get('kind') == 'Battery' and name is not None and name not in known and getattr(src['obj'], 'in_service', True):
+            known.add(name)
+            bats.append({'kind': 'Battery', 'obj': src['obj'], 'coupling': 'pcs', 'name': name, 'label': src.get('label')})
     bat_ids = list(range(len(bats)))
     lim = {k: _battery_limits(bats[k]['obj']) for k in bat_ids}
     m.Bd = pyo.Var(bat_ids, bounds=lambda m, k: (0.0, (lim[k][0] if batteries else 0.0) / base), initialize=0.0)
     m.Bc = pyo.Var(bat_ids, bounds=lambda m, k: (0.0, (lim[k][1] if batteries else 0.0) / base), initialize=0.0)
     pcs_battery = {}
     for k, d in enumerate(bats):
-        if d.get('coupling') == 'direct' and d.get('bus') is not None:
-            dc(d['bus'], m.Bd[k] - m.Bc[k])
+        if d.get('coupling') in ('direct', 'converter') and d.get('bus') is not None:
+            dc(d['bus'], m.Bd[k] - m.Bc[k])          # on a converter's input: the converter is a link of its own
         else:
             pcs_battery[d.get('name')] = k
+
+    # PV arrays and SOFC systems: on a DC bus (directly, or behind a DC/DC converter) and behind PCS.
+    # Each source's DC power within (lo, hi) MW; an SOFC's rise above its set power priced like stored energy.
+    srcs = []                                        # (record or PCS source, kind, lo, hi, set)
+    zero_stores = []
+
+    def source_window(obj, kind, p_now):
+        if kind == 'PV Array':
+            return 0.0, max(p_now, 0.0), max(p_now, 0.0)
+        p_max = obj.p_rated * (1.0 - obj.aux_frac) / 1e6
+        return p_now, (max(p_max, p_now) if fuel_cells else p_now), p_now
+
+    for d in getattr(net, 'electrisim_ders', None) or []:
+        obj = d.get('obj')
+        if not getattr(obj, 'in_service', True) or d.get('coupling') == 'pcs':
+            continue
+        if d['kind'] in ('Supercapacitor', 'Flywheel'):
+            zero_stores.append(d.get('label'))
+            continue
+        if d['kind'] not in ('PV Array', 'SOFC'):
+            continue
+        if d.get('coupling') == 'direct' and 'load' in (d.get('parts') or {}):
+            ld = d['parts']['load']
+            p_now = -float(net.res_load_dc.at[ld, 'p_dc_mw']) if ld in net.res_load_dc.index else -float(net.load_dc.at[ld, 'p_dc_mw'])
+        else:
+            p_now = (obj.mpp()[2] if d['kind'] == 'PV Array' else obj.p_operating()) / 1e6
+        srcs.append((d, d['kind']) + source_window(obj, d['kind'], p_now))
+    pcs_src = {}                                     # a PCS (by id) -> its source's variable
+    for r in pcs:
+        src = r.get('source') or {}
+        if src.get('kind') in ('PV Array', 'SOFC') and src.get('obj') is not None:
+            obj = src['obj']
+            p_now = (obj.mpp()[2] if src['kind'] == 'PV Array' else obj.p_operating()) / 1e6
+            pcs_src[id(r)] = len(srcs)
+            srcs.append(({'label': r.get('label')}, src['kind']) + source_window(obj, src['kind'], p_now))
+        elif src.get('kind') in ('Supercapacitor', 'Flywheel'):
+            zero_stores.append(getattr(src.get('obj'), 'name', None) and _label(net, src['obj'].name) or r.get('label'))
+    m.Pv = pyo.Var(list(range(len(srcs))), bounds=lambda m, k: (srcs[k][2] / base, srcs[k][3] / base),
+                   initialize=lambda m, k: srcs[k][4] / base)
+    for k, (d, kind, lo_s, hi_s, _) in enumerate(srcs):
+        if 'bus' in d:
+            dc(d['bus'], m.Pv[k])
+    if zero_stores:
+        warnings.append(f"{len(zero_stores)} supercapacitor or flywheel store(s) hold no steady power: at none in this study"
+                        f" ({', '.join(str(z) for z in zero_stores[:4])}{', ...' if len(zero_stores) > 4 else ''}).")
+
+    # DC/DC converters: links between the groups at their terminals, forward and (if drawn so) back.
+    convs = [c for c in getattr(net, 'electrisim_dc_dc_converters', None) or [] if c.get('in_service', True)
+             and groups.get(int(c['bus_in'])) is not None and groups.get(int(c['bus_out'])) is not None]
+    cids = list(range(len(convs)))
+    rated = lambda c: (float(c['rated_mw']) if float(c.get('rated_mw') or 0) > 0 else None)
+    m.Df = pyo.Var(cids, bounds=lambda m, k: (0.0, rated(convs[k]) / base if rated(convs[k]) else None), initialize=0.0)
+    m.Dr = pyo.Var(cids, bounds=lambda m, k: (0.0, (rated(convs[k]) / base if rated(convs[k]) else None)
+                                               if convs[k].get('bidirectional') else 0.0), initialize=0.0)
+    for k, c in enumerate(convs):
+        eta = float(c.get('eta') or 1.0)
+        if rated(c):
+            m.conv.add(m.Df[k] + m.Dr[k] <= rated(c) / base)
+        dc(c['bus_out'], m.Df[k] - m.Dr[k])
+        dc(c['bus_in'], -(m.Df[k] / eta - m.Dr[k] * eta) - float(c.get('p_nl_mw') or 0.0) / base)
+
+    # DC diodes: one way, anode to cathode, within their rated current; the forward drop a loss.
+    diodes = [d for d in getattr(net, 'electrisim_dc_diodes', None) or [] if d.get('in_service', True)
+              and groups.get(int(d['bus_from'])) is not None and groups.get(int(d['bus_to'])) is not None]
+    did = list(range(len(diodes)))
+    vn_dc = lambda b: float(net.bus_dc.at[b, 'vn_kv'])
+    m.Dd = pyo.Var(did, bounds=lambda m, k: (0.0, (float(diodes[k]['rated_current_ka']) * vn_dc(diodes[k]['bus_from']) / base)
+                                             if float(diodes[k].get('rated_current_ka') or 0) > 0 else None), initialize=0.0)
+    for k, d in enumerate(diodes):
+        drop_ = min(float(d.get('v_f_v') or 0.0) / (vn_dc(d['bus_from']) * 1e3), 0.5)
+        dc(d['bus_from'], -m.Dd[k])
+        dc(d['bus_to'], m.Dd[k] * (1.0 - drop_))
+    if diodes:
+        warnings.append('The DC buses are nodes without voltage here: what each diode carries is the optimiser\'s '
+                        'choice, not set by its feeds\' voltages.')
 
     # PCS: discharging and charging apart, each with its efficiency.
     pids = list(range(len(pcs)))
@@ -350,6 +489,12 @@ def build_and_solve(net, params: Dict[str, Any]) -> Dict[str, Any]:
         src = r.get('source') or {}
         if src.get('kind') == 'DC bus' and r.get('dc_bus') is not None:
             dc(r['dc_bus'], -draw)
+        elif id(r) in pcs_src:
+            m.Pc[k].fix(0.0)                             # a PV array or SOFC takes nothing back
+            m.conv.add(m.Pv[pcs_src[id(r)]] == draw)
+        elif src.get('kind') in ('Supercapacitor', 'Flywheel'):
+            m.Po[k].fix(0.0)                             # Q only
+            m.Pc[k].fix(0.0)
         else:
             kb = pcs_battery.get(getattr(src.get('obj'), 'name', None)) if src.get('obj') is not None else None
             if kb is None:
@@ -464,7 +609,8 @@ def build_and_solve(net, params: Dict[str, Any]) -> Dict[str, Any]:
 
     # Objective.
     grid_p = sum(m.Pg[g] for g in grids) + sum(m.Pgen[g] for g in gens)
-    stored = BAT_PRICE * sum(m.Bd[k] for k in bat_ids)
+    stored = BAT_PRICE * (sum(m.Bd[k] for k in bat_ids)
+                          + sum(m.Pv[k] - srcs[k][4] / base for k in range(len(srcs)) if srcs[k][1] == 'SOFC'))
     shed = sum((1 - m.La[e]) * float(net.res_load.at[e, 'p_mw']) / base for e in ac_loads) + \
         sum((1 - m.Ld[e]) * (float(net.res_load_dc.at[e, 'p_dc_mw']) if e in net.res_load_dc.index else float(net.load_dc.at[e, 'p_dc_mw'])) / base
             for e in dloads)
@@ -512,6 +658,14 @@ def build_and_solve(net, params: Dict[str, Any]) -> Dict[str, Any]:
     out['ssts'] = [{'id': str(s.get('id') or ''), 'name': s.get('label'), 'p_lvdc_mw': round(v(m.Ps[k]) * base, 4), 'p_mv_mw': round(v(mv) * base, 4)}
                    for k, (s, mv) in enumerate(sst_info)]
     out['batteries_mw'] = round(sum(v(m.Bd[k]) - v(m.Bc[k]) for k in bat_ids) * base, 4)
+    out['dcdc'] = [{'id': str(c.get('id') or ''), 'name': c.get('label'), 'p_mw': round((v(m.Df[k]) - v(m.Dr[k])) * base, 4),
+                    'loading_percent': round(abs(v(m.Df[k]) - v(m.Dr[k])) * base / rated(c) * 100, 2) if rated(c) else None}
+                   for k, c in enumerate(convs)]
+    out['diodes'] = [{'id': str(d.get('id') or ''), 'name': d.get('label'), 'p_mw': round(v(m.Dd[k]) * base, 4),
+                      'i_ka': round(v(m.Dd[k]) * base / vn_dc(d['bus_from']), 4)} for k, d in enumerate(diodes)]
+    out['sources'] = [{'name': d.get('label'), 'kind': kind, 'p_mw': round(v(m.Pv[k]) * base, 4), 'p_max_mw': round(hi_s, 4)}
+                      for k, (d, kind, lo_s, hi_s, _) in enumerate(srcs)]
+    out['fuel_cells'] = fuel_cells
     vmap = {i: v(m.V[i]) for i in rows}
     out['buses'] = [{'id': _cid(net.bus, b), 'name': _label(net, net.bus.at[b, 'name']), 'vm_pu': round(vmap[ix(b)], 4)}
                     for b in net.bus.index if ix(b) in vmap and not pe._electrisim_is_aux(net.bus, b)]
