@@ -12,20 +12,31 @@ go:
          limits; static generators, AC storage, motors and loads fixed at the load flow's power.
   AFEs   each VSC that is not one of Electrisim's internal stages, at the internal bus pandapower puts
          behind its reactor (the reactor and its loss in the admittance matrix); its MVA within its
-         rating times min(V, 1).
+         rating times min(V, 1); in its load flow's direction (a rectifier does not invert) unless
+         vsc_reverse.
   PCS    each PCS: its efficiency both ways, within its rating times min(V, 1), |Q| within its cap;
          fed from its DC bus, or from the battery behind it.
   SSTs   each SST: its rectifier's and DC/DC stage's efficiency and no-load loss, each stage within
          its rating; its MV reactive power as the load flow has it.
-  DC     the DC buses joined by in-service DC lines and closed DC breakers, each group a node (their
-         resistance left out); its batteries within their C-rates (priced, so they discharge only
-         where needed); its DC loads.
-  DC/DC  each DC/DC converter a link between the groups at its terminals: its efficiency and no-load
-         loss, within its rating, one way or both as drawn - whatever its control in the load flow
-         (droop, voltage, power, smoothing), the optimiser sets its power.
-  Diodes each DC diode a one-way link from its anode's group to its cathode's, within its rated
-         current at its bus voltage, its forward drop a loss. The groups have no voltage, so what each
-         of two diode-ORed feeds carries is the optimiser's choice, not set by their voltages.
+  DC     each DC bus with its voltage, within its limits (0.9-1.1 pu if none), its cables and closed
+         breakers V (V - V') / R; its batteries within their C-rates (priced, so they discharge only
+         where needed, but always covering their converters' no-load loss); its DC loads. Without
+         voltages (dc_voltages false), the buses joined by cables are each a node.
+  DC/DC  each DC/DC converter a link between the buses at its terminals: its efficiency and no-load
+         loss, within its rating, one way or both as drawn.
+  Diodes each DC diode one way, within its rated current: conducting only when its anode is its
+         forward drop and on-state resistance above its cathode (a complementarity).
+  Set points as drawn (the default, with voltages): an AFE in voltage control, a DC/DC converter in
+         voltage mode and an SST hold their DC bus at their set voltage - or below it, at their limit;
+         a droop converter delivers what its droop line gives at its bus's voltage. So diode-ORed feeds
+         share as their voltages make them, and a store whose droop is set at a rectifier's voltage
+         carries its bus only once the rectifier is at its limit. Easing as drawn (uv_ease_pu, or an
+         easing frequency band, on a VSC or SST): in an AC island without an external grid, such a
+         converter holds its bus only below uv_floor_pu of its rating - in its easing band above it,
+         its bus may sag into its stores' droop. Free (dc_setpoints free), the optimiser retunes them:
+         the best the converters could do. The complementarities are solved directly, then by
+         continuation (relaxed and tightened; from the free set points; the easing floors raised from
+         none); a solve that still stalls is said not to have converged, not to be infeasible.
   Sources a PV array up to its maximum power point (curtailed only if it must be); an SOFC system at
          its set power, or up to its rating if asked (priced like stored energy); supercapacitors and
          flywheels hold no steady power, so at none (a PCS fed from one gives Q only).
@@ -117,6 +128,41 @@ def _dc_groups(net) -> Dict[int, int]:
     return {b: root(b) for b in parent}
 
 
+def _dc_line_r(net, i) -> float:
+    ld = net.line_dc
+    par = float(ld.at[i, 'parallel']) if 'parallel' in ld.columns and pd.notna(ld.at[i, 'parallel']) and float(ld.at[i, 'parallel']) > 0 else 1.0
+    return float(ld.at[i, 'r_ohm_per_km']) * float(ld.at[i, 'length_km']) / par
+
+
+def _dc_nodes(net) -> Dict[int, int]:
+    """
+    Each DC bus's node when the DC side has voltages: every drawn bus its own, but Electrisim's hidden buses (a
+    droop's source, a battery's cells) joined to the bus their hidden line reaches - the study sets the converter's
+    and battery's power itself - and buses joined by a line of no resistance.
+    """
+    parent = {int(b): int(b) for b in net.bus_dc.index} if len(getattr(net, 'bus_dc', [])) else {}
+
+    def root(b):
+        while parent[b] != b:
+            parent[b] = parent[parent[b]]
+            b = parent[b]
+        return b
+
+    hidden_bus = _flag(getattr(net, 'bus_dc', None), 'electrisim_hidden')
+    hidden = _flag(getattr(net, 'line_dc', None), 'electrisim_hidden')
+    diode = _flag(getattr(net, 'line_dc', None), 'electrisim_dc_diode')
+    for i in getattr(net, 'line_dc', pd.DataFrame()).index:
+        if not bool(net.line_dc.at[i, 'in_service']) or bool(diode.get(i, False)):
+            continue
+        a, b = int(net.line_dc.at[i, 'from_bus_dc']), int(net.line_dc.at[i, 'to_bus_dc'])
+        if a in parent and b in parent and (bool(hidden.get(i, False)) or _dc_line_r(net, i) <= 1e-9):
+            ra, rb = root(a), root(b)
+            if bool(hidden_bus.get(ra, False)):            # the drawn bus is the node
+                ra, rb = rb, ra
+            parent[rb] = ra
+    return {b: root(b) for b in parent}
+
+
 def _battery_limits(obj) -> tuple:
     """(discharge MW, charge MW) of a battery DER: its C-rates on its energy, nothing past its charge window."""
     f = getattr(obj, 'fields', {}) or {}
@@ -178,6 +224,7 @@ def build_and_solve(net, params: Dict[str, Any]) -> Dict[str, Any]:
     shed_ac = str(params.get('shed_ac_loads', 'false')).lower() == 'true'
     batteries = str(params.get('batteries', 'false')).lower() == 'true'
     fuel_cells = str(params.get('fuel_cells', 'false')).lower() == 'true'
+    vsc_reverse = str(params.get('vsc_reverse', 'false')).lower() == 'true'
     limits = str(params.get('branch_limits', 'true')).lower() == 'true'
     tf = float(params.get('transformer_factor', 1.0) or 1.0)
     warnings: List[str] = []
@@ -344,9 +391,25 @@ def build_and_solve(net, params: Dict[str, Any]) -> Dict[str, Any]:
         add(ix(net.load.at[e, 'bus']), -m.La[e] * float(net.res_load.at[e, 'p_mw']) / base,
             -m.La[e] * float(net.res_load.at[e, 'q_mvar']) / base)
 
-    # The DC side: groups of DC buses.
-    groups = _dc_groups(net)
+    # The DC side: each bus with its voltage, joined by its cables' resistance (the default); or, without voltages,
+    # groups of buses joined by cables, each a node.
+    dcv = str(params.get('dc_voltages', 'true')).lower() == 'true' and len(getattr(net, 'bus_dc', [])) > 0
+    groups = _dc_nodes(net) if dcv else _dc_groups(net)
     dc_bal: Dict[int, Any] = {}
+    vn_dc = lambda b: float(net.bus_dc.at[b, 'vn_kv'])
+    nodes = sorted(set(groups.values()))
+    vm_dc0 = {b: (float(net.res_bus_dc.at[b, 'vm_pu']) if b in getattr(net, 'res_bus_dc', pd.DataFrame()).index
+                  and np.isfinite(net.res_bus_dc.at[b, 'vm_pu']) and float(net.res_bus_dc.at[b, 'vm_pu']) > 0 else 1.0)
+              for b in nodes}
+
+    def dc_lim(b, col, d):
+        df = net.bus_dc
+        return float(df.at[b, col]) if col in df.columns and pd.notna(df.at[b, col]) else d
+
+    # Each node's voltage (kV) within its bus's limits (0.9-1.1 pu if none), and never excluding the load flow's.
+    m.Vd = pyo.Var(nodes if dcv else [], initialize=lambda m, b: vn_dc(b) * vm_dc0[b],
+                   bounds=lambda m, b: (vn_dc(b) * min(dc_lim(b, 'min_vm_pu', 0.9), vm_dc0[b]),
+                                        vn_dc(b) * max(dc_lim(b, 'max_vm_pu', 1.1), vm_dc0[b])))
 
     def dc(b, expr):
         g = groups.get(int(b))
@@ -367,7 +430,15 @@ def build_and_solve(net, params: Dict[str, Any]) -> Dict[str, Any]:
             s = math.hypot(float(net.res_vsc.at[v, 'p_mw']), float(net.res_vsc.at[v, 'q_mvar'])) * 1.2 or 1.0
             warnings.append(f"VSC '{_label(net, net.vsc.at[v, 'name'])}' has no rating: taken as 1.2 times its load flow's.")
         afe_rating[v] = s
-        m.conv.add(m.ua[v] <= m.V[i])
+        # Its rating times min(V, 1), smoothed - exactly, not only at most: a held set point's limit is its rating.
+        m.conv.add(m.ua[v] == 0.5 * (m.V[i] + 1.0 - pyo.sqrt((m.V[i] - 1.0) ** 2 + 1e-6)))
+        # A rectifier stays a rectifier, an inverter an inverter: the load flow's direction, unless allowed to reverse.
+        p_lf = float(net.res_vsc.at[v, 'p_mw']) if v in net.res_vsc.index and np.isfinite(net.res_vsc.at[v, 'p_mw']) else 0.0
+        if not vsc_reverse:
+            if p_lf > 1e-3 or (abs(p_lf) <= 1e-3 and str(net.vsc.at[v, 'control_mode_dc']) == 'vm_pu'):
+                m.Pa[v].setlb(0.0)                     # idle in the load flow, holding its DC bus: a rectifier
+            elif p_lf < -1e-3:
+                m.Pa[v].setub(0.0)
         m.conv.add(m.Pa[v] ** 2 + m.Qa[v] ** 2 <= (s / base * m.ua[v]) ** 2)
         add(i, -m.Pa[v], -m.Qa[v])
         dc(net.vsc.at[v, 'bus_dc'], m.Pa[v])           # its reactor's loss is in the admittance matrix
@@ -385,7 +456,11 @@ def build_and_solve(net, params: Dict[str, Any]) -> Dict[str, Any]:
             bats.append({'kind': 'Battery', 'obj': src['obj'], 'coupling': 'pcs', 'name': name, 'label': src.get('label')})
     bat_ids = list(range(len(bats)))
     lim = {k: _battery_limits(bats[k]['obj']) for k in bat_ids}
-    m.Bd = pyo.Var(bat_ids, bounds=lambda m, k: (0.0, (lim[k][0] if batteries else 0.0) / base), initialize=0.0)
+    # Not free to discharge, a battery still covers its own converters' no-load loss, as in the load flow.
+    keep_alive = {k: sum(float(c.get('p_nl_mw') or 0.0) for c in getattr(net, 'electrisim_dc_dc_converters', None) or []
+                         if c.get('in_service', True) and bats[k].get('bus') is not None and int(c['bus_in']) == int(bats[k]['bus']))
+                  for k in bat_ids}
+    m.Bd = pyo.Var(bat_ids, bounds=lambda m, k: (0.0, (lim[k][0] if batteries else min(keep_alive[k], lim[k][0])) / base), initialize=0.0)
     m.Bc = pyo.Var(bat_ids, bounds=lambda m, k: (0.0, (lim[k][1] if batteries else 0.0) / base), initialize=0.0)
     pcs_battery = {}
     for k, d in enumerate(bats):
@@ -458,14 +533,54 @@ def build_and_solve(net, params: Dict[str, Any]) -> Dict[str, Any]:
     diodes = [d for d in getattr(net, 'electrisim_dc_diodes', None) or [] if d.get('in_service', True)
               and groups.get(int(d['bus_from'])) is not None and groups.get(int(d['bus_to'])) is not None]
     did = list(range(len(diodes)))
-    vn_dc = lambda b: float(net.bus_dc.at[b, 'vn_kv'])
     m.Dd = pyo.Var(did, bounds=lambda m, k: (0.0, (float(diodes[k]['rated_current_ka']) * vn_dc(diodes[k]['bus_from']) / base)
                                              if float(diodes[k].get('rated_current_ka') or 0) > 0 else None), initialize=0.0)
+    # With voltages: each diode's current (kA), conducting only when its anode is its forward drop (and its on-state
+    # resistance's) above its cathode - and then exactly so (a complementarity, relaxed to a watt).
+    def _i_lf(d):
+        res = getattr(net, 'res_line_dc', None)
+        i = d.get('line')
+        if res is None or i not in res.index or not bool(net.line_dc.at[i, 'in_service']):
+            return 0.0
+        x = float(res.at[i, 'i_ka'])
+        return abs(x) if np.isfinite(x) else 0.0
+
+    m.Id = pyo.Var(did if dcv else [], bounds=lambda m, k: (0.0, float(diodes[k]['rated_current_ka'])
+                                                            if float(diodes[k].get('rated_current_ka') or 0) > 0 else None),
+                   initialize=lambda m, k: _i_lf(diodes[k]))
+    m.dcv = pyo.ConstraintList()
+    m.eps = pyo.Param(mutable=True, initialize=1e-7)   # the complementarities' relaxation (see the solve)
+    m.holdc = pyo.ConstraintList()                     # the held set points (switched on in the solve)
+    m.fl = pyo.Param(mutable=True, initialize=1.0)     # the easing floors' share (a continuation in the solve)
     for k, d in enumerate(diodes):
+        if dcv:
+            m.Dd[k].fix(0.0)
+            a, c = groups[int(d['bus_from'])], groups[int(d['bus_to'])]
+            gap_ = float(d.get('v_f_v') or 0.0) / 1e3 + float(d.get('r_on_ohm') or 0.0) * m.Id[k] - (m.Vd[a] - m.Vd[c])
+            m.dcv.add(gap_ >= 0)
+            m.dcv.add(m.Id[k] * gap_ <= 10.0 * m.eps)
+            dc(d['bus_from'], -m.Vd[a] * m.Id[k] / base)
+            dc(d['bus_to'], m.Vd[c] * m.Id[k] / base)
+            continue
         drop_ = min(float(d.get('v_f_v') or 0.0) / (vn_dc(d['bus_from']) * 1e3), 0.5)
         dc(d['bus_from'], -m.Dd[k])
         dc(d['bus_to'], m.Dd[k] * (1.0 - drop_))
-    if diodes:
+    # With voltages: the cables (and closed breakers) between nodes, V (V - V') / R out of each end.
+    dc_lines = []
+    if dcv:
+        hidden = _flag(net.line_dc, 'electrisim_hidden')
+        diode_l = _flag(net.line_dc, 'electrisim_dc_diode')
+        for i in net.line_dc.index:
+            if not bool(net.line_dc.at[i, 'in_service']) or bool(hidden.get(i, False)) or bool(diode_l.get(i, False)):
+                continue
+            a, b = groups.get(int(net.line_dc.at[i, 'from_bus_dc'])), groups.get(int(net.line_dc.at[i, 'to_bus_dc']))
+            if a is None or b is None or a == b:
+                continue
+            g_ = 1.0 / _dc_line_r(net, i)
+            dc(a, -m.Vd[a] * (m.Vd[a] - m.Vd[b]) * g_ / base)
+            dc(b, -m.Vd[b] * (m.Vd[b] - m.Vd[a]) * g_ / base)
+            dc_lines.append((i, a, b, g_))
+    if diodes and not dcv:
         warnings.append('The DC buses are nodes without voltage here: what each diode carries is the optimiser\'s '
                         'choice, not set by its feeds\' voltages.')
 
@@ -514,12 +629,14 @@ def build_and_solve(net, params: Dict[str, Any]) -> Dict[str, Any]:
     sids = list(range(len(ssts)))
     m.Ps = pyo.Var(sids, bounds=(0.0, None), initialize=0.0)       # delivered at the LV DC port
     sst_info = []
+    sst_link = []
     for k, s in enumerate(ssts):
         st = {x['stage']: x for x in s['stages']}
         rect, dcdc = st['rectifier'], st['dcdc']
         eta_r, nl_r = _stage_eta(net, *rect['input'])
         eta_d, nl_d = _stage_eta(net, *dcdc['input'])
         link_in = m.Ps[k] / eta_d + nl_d / base
+        sst_link.append(link_in)
         mv = link_in / eta_r + nl_r / base
         mv_load = rect['input'][1]
         q = float(net.res_load.at[mv_load, 'q_mvar']) / base if mv_load in net.res_load.index else 0.0
@@ -538,6 +655,89 @@ def build_and_solve(net, params: Dict[str, Any]) -> Dict[str, Any]:
             m.Ld[e].fix(1.0)
         p0 = float(net.res_load_dc.at[e, 'p_dc_mw']) if e in net.res_load_dc.index else float(net.load_dc.at[e, 'p_dc_mw'])
         dc(net.load_dc.at[e, 'bus_dc'], -m.Ld[e] * p0 / base)
+
+    # With voltages, the converters' DC set points as drawn (the default): an AFE in voltage control and a DC/DC
+    # converter in voltage mode hold their bus, a droop converter delivers what its droop line gives at its bus's
+    # voltage, an SST's DC/DC stage holds its LV DC bus - so diode-ORed feeds share as their voltages make them.
+    # Free, the optimiser sets them within the buses' limits.
+    setpoints = dcv and str(params.get('dc_setpoints', 'drawn')).lower() != 'free'
+    held: Dict[int, tuple] = {}
+
+    def hold(b, kv, what, headroom=None):
+        """
+        A converter holding bus ``b`` at ``kv``: the bus at its set point, or below it with the converter at its limit
+        (``headroom`` 0, in p.u.; None - no limit - holds it exactly). Two on one bus: the higher set point's
+        converter at its limit, as their voltage controls would leave them.
+        """
+        nd = groups.get(int(b))
+        if nd is None:
+            return
+        held.setdefault(nd, []).append((kv, what))
+        m.Vd[nd].setlb(min(m.Vd[nd].lb, 0.5 * kv))
+        m.Vd[nd].setub(max(m.Vd[nd].ub, kv))
+        m.holdc.add(m.Vd[nd] <= kv)
+        if headroom is None:
+            m.holdc.add(m.Vd[nd] >= kv)
+        else:
+            m.holdc.add((kv - m.Vd[nd]) / kv * headroom <= m.eps)
+
+    # Easing as drawn: in an AC island without an external grid, a rectifier (or an SST's DC/DC stage) with
+    # uv_ease_pu or an easing frequency band set backs off to uv_floor_pu of its rating, its DC bus sagging into its
+    # stores' droop (EMT, ANDES). In steady state: it holds its set point only while it draws less than that floor;
+    # above it, it is in its easing band, and its bus may sag - the stores sharing the load.
+    import scipy.sparse.csgraph as csg_
+    n_c, comp_ = csg_.connected_components(ybus[rows][:, rows], directed=False)
+    row_comp = {r: int(comp_[k]) for k, r in enumerate(rows)}
+    grid_comps = {row_comp[ix(net.ext_grid.at[g, 'bus'])] for g in grids if ix(net.ext_grid.at[g, 'bus']) in row_comp}
+    in_island = lambda r: r in row_comp and row_comp[r] not in grid_comps
+
+    def easing(src):
+        uv = float(src.get('uv_ease_pu') or 0.0) if pd.notna(src.get('uv_ease_pu')) else 0.0
+        f0 = float(src.get('ease_f_start_hz') or 0.0) if pd.notna(src.get('ease_f_start_hz')) else 0.0
+        f1 = float(src.get('ease_f_end_hz') or 0.0) if pd.notna(src.get('ease_f_end_hz')) else 0.0
+        if uv <= 0 and not (f0 > f1 > 0):
+            return None
+        fl = src.get('uv_floor_pu')
+        return min(max(float(fl) if fl is not None and pd.notna(fl) else 0.5, 0.0), 1.0)
+
+    eased = []
+    if setpoints:
+        for a in afe:
+            if str(net.vsc.at[a, 'control_mode_dc']) == 'vm_pu':
+                bdc = int(net.vsc.at[a, 'bus_dc'])
+                floor_ = easing({c: net.vsc.at[a, c] for c in ('uv_ease_pu', 'uv_floor_pu', 'ease_f_start_hz', 'ease_f_end_hz')
+                                 if c in net.vsc.columns}) if in_island(vsc_row[a]) else None
+                k_ = 1.0 if floor_ is None else m.fl * floor_
+                if floor_ is not None:
+                    eased.append(_label(net, net.vsc.at[a, 'name']))
+                hold(bdc, float(net.vsc.at[a, 'control_value_dc']) * vn_dc(bdc), f"VSC '{_label(net, net.vsc.at[a, 'name'])}'",
+                     (k_ * afe_rating[a] / base * m.ua[a]) ** 2 - m.Pa[a] ** 2 - m.Qa[a] ** 2)
+        for k, c in enumerate(convs):
+            out_node = groups[int(c['bus_out'])]
+            if c.get('control') == 'droop' and float(c.get('droop_r_ohm') or 0) > 0:
+                m.holdc.add((m.Df[k] - m.Dr[k]) * base == m.Vd[out_node] * (float(c['droop_v0_kv']) - m.Vd[out_node]) / float(c['droop_r_ohm']))
+            elif c.get('mode') == 'voltage':
+                hold(c['bus_out'], float(c.get('vm_out_pu') or 1.0) * vn_dc(int(c['bus_out'])), f"DC/DC converter '{c.get('label')}'",
+                     (rated(c) / base - m.Df[k]) if rated(c) else None)
+        for s in ssts:
+            st = {x['stage']: x for x in s['stages']}
+            table, idx = st['dcdc']['input']
+            df = net[table]
+            if 'electrisim_dcdc_out_table' in df.columns and df.at[idx, 'electrisim_dcdc_out_table'] == 'vsc':
+                vi = int(df.at[idx, 'electrisim_dcdc_out_idx'])
+                if vi in net.vsc.index:
+                    k_s = ssts.index(s)
+                    floor_ = easing(s.get('ease') or {}) if in_island(ix(s['bus_mv']) if ix(s['bus_mv']) is not None else -1) else None
+                    if floor_ is None:
+                        h_s = (float(st['dcdc']['rated_mw']) / base - m.Ps[k_s]) * (float(st['rectifier']['rated_mw']) / base - sst_link[k_s])
+                    else:
+                        eased.append(s.get('label'))
+                        h_s = m.fl * floor_ * float(st['dcdc']['rated_mw']) / base - m.Ps[k_s]
+                    hold(s['bus_lvdc'], float(net.vsc.at[vi, 'control_value_dc']) * vn_dc(int(s['bus_lvdc'])), f"SST '{s.get('label')}'", h_s)
+    if eased:
+        warnings.append(f"{len(eased)} rectifier(s) and SST(s) ease in their island as drawn: each holds its DC bus only below its "
+                        f"easing floor, its bus sagging into its stores' droop above it ({', '.join(str(e) for e in eased[:4])}"
+                        f"{', ...' if len(eased) > 4 else ''}).")
 
     m.dcbal = pyo.ConstraintList()
     for g, expr in dc_bal.items():
@@ -623,13 +823,42 @@ def build_and_solve(net, params: Dict[str, Any]) -> Dict[str, Any]:
     ipopt = _ipopt_path()
     if not ipopt:
         raise RuntimeError('Ipopt was not found: set ELECTRISIM_IPOPT to ipopt.exe, or unzip it into tools/ipopt beside the backend.')
-    res = pyo.SolverFactory('ipopt', executable=ipopt).solve(m, options={'max_iter': 3000, 'tol': 1e-7})
+    solver = pyo.SolverFactory('ipopt', executable=ipopt)
+    if dcv and (len(m.dcv) or len(m.holdc)):
+        # The complementarities (diodes, held set points) by continuation, each solve starting from the last -
+        # Ipopt alone can stall on them. Directly; then relaxed and tightened from the load flow's point; then from
+        # the free set points' solution; then with Ipopt's adaptive barrier; then (with easing) the floors raised
+        # from none to theirs.
+        start = [(x, x.value) for x in m.component_data_objects(pyo.Var) if not x.fixed]
+        tight = [(True, 1e-3, 1.0), (True, 1e-5, 1.0), (True, 1e-7, 1.0)]
+        paths = [([(True, 1e-7, 1.0)], {}), (tight, {}), ([(False, 1e-3, 1.0)] + tight, {}), (tight, {'mu_strategy': 'adaptive'})] if len(m.holdc) \
+            else [(tight, {})]
+        if eased:
+            paths.append(([(True, 1e-3, f) for f in (0.0, 0.25, 0.5, 0.75)] + tight, {}))
+        for stages, extra in paths:
+            for x, val in start:
+                x.set_value(val, skip_validation=True)
+            for on, e, f in stages:
+                (m.holdc.activate if on else m.holdc.deactivate)()
+                m.eps.set_value(e)
+                m.fl.set_value(f)
+                res = solver.solve(m, options={'max_iter': 3000, 'tol': 1e-7, **extra})
+                if not pyo.check_optimal_termination(res):
+                    break
+            if pyo.check_optimal_termination(res):
+                break
+    else:
+        res = solver.solve(m, options={'max_iter': 3000, 'tol': 1e-7})
     status = str(res.solver.termination_condition)
     ok = pyo.check_optimal_termination(res)
     v = lambda x: float(pyo.value(x))
 
     out: Dict[str, Any] = {'status': status, 'solved': bool(ok), 'objective': mode, 'warnings': warnings,
                            'branch_limits': limits, 'batteries': batteries, 'transformer_factor': tf}
+    if not ok and status in ('maxIterations', 'maxTimeLimit', 'maxEvaluations', 'other', 'error', 'internalSolverError'):
+        out['message'] = ('Ipopt did not converge (' + status + '): the case is not proven infeasible. Try the set points free, '
+                          'or without DC voltages.')
+        return out
     if not ok:
         out['message'] = ('No dispatch meets every constraint' + (' with the branch ratings enforced' if limits else '')
                           + (': try least shed, letting the batteries discharge, or a higher transformer factor.' if mode != 'shed' else '.'))
@@ -661,8 +890,21 @@ def build_and_solve(net, params: Dict[str, Any]) -> Dict[str, Any]:
     out['dcdc'] = [{'id': str(c.get('id') or ''), 'name': c.get('label'), 'p_mw': round((v(m.Df[k]) - v(m.Dr[k])) * base, 4),
                     'loading_percent': round(abs(v(m.Df[k]) - v(m.Dr[k])) * base / rated(c) * 100, 2) if rated(c) else None}
                    for k, c in enumerate(convs)]
-    out['diodes'] = [{'id': str(d.get('id') or ''), 'name': d.get('label'), 'p_mw': round(v(m.Dd[k]) * base, 4),
-                      'i_ka': round(v(m.Dd[k]) * base / vn_dc(d['bus_from']), 4)} for k, d in enumerate(diodes)]
+    if dcv:
+        out['diodes'] = [{'id': str(d.get('id') or ''), 'name': d.get('label'),
+                          'p_mw': round(v(m.Vd[groups[int(d['bus_from'])]]) * v(m.Id[k]), 4), 'i_ka': round(v(m.Id[k]), 4)}
+                         for k, d in enumerate(diodes)]
+        hidden_bus = _flag(net.bus_dc, 'electrisim_hidden')
+        out['dc_buses'] = [{'id': _cid(net.bus_dc, b), 'name': _label(net, net.bus_dc.at[b, 'name']),
+                            'vm_pu': round(v(m.Vd[groups[b]]) / vn_dc(groups[b]), 4)}
+                           for b in net.bus_dc.index if b in groups and not bool(hidden_bus.get(b, False))]
+        out['dc_lines'] = [{'id': _cid(net.line_dc, i), 'name': _label(net, net.line_dc.at[i, 'name']),
+                            'i_ka': round((v(m.Vd[a]) - v(m.Vd[b])) * g_, 4)} for i, a, b, g_ in dc_lines]
+    else:
+        out['diodes'] = [{'id': str(d.get('id') or ''), 'name': d.get('label'), 'p_mw': round(v(m.Dd[k]) * base, 4),
+                          'i_ka': round(v(m.Dd[k]) * base / vn_dc(d['bus_from']), 4)} for k, d in enumerate(diodes)]
+    out['dc_voltages'] = dcv
+    out['dc_setpoints'] = 'drawn' if setpoints else ('free' if dcv else None)
     out['sources'] = [{'name': d.get('label'), 'kind': kind, 'p_mw': round(v(m.Pv[k]) * base, 4), 'p_max_mw': round(hi_s, 4)}
                       for k, (d, kind, lo_s, hi_s, _) in enumerate(srcs)]
     out['fuel_cells'] = fuel_cells
