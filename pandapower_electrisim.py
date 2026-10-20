@@ -19096,6 +19096,15 @@ def _prot_switch_current_ka(net_sc, sw_idx, fault_bus_idx=None):
     try:
         sw = net_sc.switch.loc[int(sw_idx)]
         et, element = str(sw.get('et')), int(sw.get('element'))
+        if et == 'b':
+            # A breaker between two buses (a bus coupler, or a feeder breaker
+            # drawn so): its own current, when the study gave it an impedance
+            # (_prot_bus_switch_branches); the fault's total otherwise.
+            res = getattr(net_sc, 'res_switch_sc', None)
+            if res is not None and int(sw_idx) in res.index and 'ikss_ka' in res.columns:
+                value = res.at[int(sw_idx), 'ikss_ka']
+                if pd.notna(value):
+                    return abs(float(value))
         table = {'l': 'res_line_sc', 't': 'res_trafo_sc', 't3': 'res_trafo3w_sc'}.get(et)
         if table and hasattr(net_sc, table):
             result = getattr(net_sc, table)
@@ -19728,11 +19737,38 @@ def _prot_earth_fault_net(net_sc, fault_type):
     _electrisim_fold_neutral_impedance(net_sc, 10)
 
 
+_PROT_BUS_SWITCH_Z_PU = 1e-6        # on 1 MVA: 1 milliohm at 33 kV, 0.16 micro-ohm at 0.4 kV
+
+
+def _prot_bus_switch_branches(net_sc, sw_indices):
+    """
+    pandapower fuses the buses of a closed bus-bus switch into one node, so
+    the switch has no current of its own and a relay on it read the fault's
+    total. Each such switch with a relay becomes a branch of negligible
+    impedance (1e-6 pu on 1 MVA), and the short circuit reports its current.
+    """
+    if net_sc.switch.empty:
+        return
+    if 'z_ohm' not in net_sc.switch.columns:
+        net_sc.switch['z_ohm'] = 0.0
+    for si in sw_indices:
+        if si is None or int(si) not in net_sc.switch.index:
+            continue
+        si = int(si)
+        if net_sc.switch.at[si, 'et'] != 'b' or not bool(net_sc.switch.at[si, 'closed']):
+            continue
+        if _prot_num(net_sc.switch.at[si, 'z_ohm']) > 0:
+            continue
+        vn = _prot_num(net_sc.bus.at[int(net_sc.switch.at[si, 'bus']), 'vn_kv'], 1.0)
+        net_sc.switch.at[si, 'z_ohm'] = max(_PROT_BUS_SWITCH_Z_PU * vn * vn, 1e-9)
+
+
 def _prot_run_bus_scenario(base_net, fault_bus_idx, fault_type, case, attach_summaries, r_fault_ohm=0.0):
     """Short-circuit and protection times for a fault placed directly on a bus (through r_fault_ohm: an arc)."""
     summary_by_sw_idx = {int(s['sw_idx']): s for s in attach_summaries if s.get('sw_idx') is not None}
     net_sc = deepcopy(base_net)
     try:
+        _prot_bus_switch_branches(net_sc, summary_by_sw_idx)
         ensure_ext_grid_zero_sequence_min(net_sc)
         _prot_earth_fault_net(net_sc, fault_type)
         sc.calc_sc(net_sc, bus=int(fault_bus_idx), branch_results=True, fault=fault_type, case=case,
@@ -19808,6 +19844,7 @@ def _prot_run_scenario(base_net, sc_line_id, sc_fraction, fault_type, case, atta
 
     try:
         fault_bus = int(max(net_sc.bus.index))
+        _prot_bus_switch_branches(net_sc, summary_by_sw_idx)
         ensure_ext_grid_zero_sequence_min(net_sc)
         _prot_earth_fault_net(net_sc, fault_type)
         sc.calc_sc(net_sc, bus=fault_bus, branch_results=True, fault=fault_type, case=case,

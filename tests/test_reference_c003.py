@@ -530,3 +530,27 @@ def test_emt_recovery_needs_pcs_short_time_current(client, limit, recovers):
         assert pcs['limited_ms'] < 130 and bus['MVA']['vuf_end_percent'] < 0.1 and bus['MVA']['v_rms_final_pu'] > 0.95
     else:
         assert pcs['limited_ms'] > 400 and bus['MVA']['vuf_end_percent'] > 1.0
+
+
+def test_revc_feeder_relays_see_their_own_current(client):
+    """
+    Rev C draws its feeder breakers as bus-bus switches (board to feeder bus). The protection study gave a relay on
+    such a breaker the fault's total current - 1.60 kA on every feeder for a fault on MVA, and 16 miscoordinations that
+    were artefacts. Each relay now sees its own feeder's current, the short-circuit study's cable current: 431 A on
+    F-S1A, 306 A on F-E1A.
+    """
+    p = _state('revc', 'NORMAL', 'ProtectionCoordinationPandaPower')
+    cell = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
+    for v in p.values():
+        if isinstance(v, dict) and str(v.get('userFriendlyName', '')).startswith('CB_F_'):
+            v.update({'protection_type': 'ocr', 'oc_relay_type': 'DTOC', 'pickup_mode': 'manual', 'I_s_a': '440',
+                      'I_g_a': '440', 't_g': '0.4', 'I_gg_a': '0'})
+    p['0'] = {'typ': 'ProtectionCoordinationPandaPower', 'user_email': 't@t', 'fault_type': '3ph', 'case': 'max',
+              'fault_location_mode': 'bus', 'fault_bus_id': cell['MVA'], 'sc_fraction': 0.5, 'grading_mode': 'manual',
+              't_diff': 0.3, 'frequency': '50'}
+    out = _post(client, p)
+    trip = {t['user_friendly_name']: 1000 * t['ikss_ka'] for t in out['scenarios'][0]['trip']}
+    cable = _feeder_ka(client, 'revc', 'NORMAL', 'MVA')
+    total = 1000 * out['scenarios'][0]['short_circuit']['ikss_ka']
+    assert trip['CB_F_S1A'] == pytest.approx(cable['F_S1A'], rel=0.01) and trip['CB_F_E1A'] == pytest.approx(cable['F_E1A'], rel=0.01)
+    assert max(trip.values()) < 0.5 * total
