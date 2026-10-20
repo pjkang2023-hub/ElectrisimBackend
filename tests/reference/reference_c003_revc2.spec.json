@@ -1,0 +1,1851 @@
+{
+ "name": "C003 CAMPAIGN-003-revC2 - Rev C.2: six-board dual-radial, 19 SOFC (18+1) on owner data 2026-10-20, 6 PCS 2+2+1+1, 4 GT, tie NO, dual-cord, genset",
+ "frequency_hz": 50.0,
+ "layout": "transmission",
+ "buses": [
+  {
+   "id": "SOFC1A",
+   "vn_kv": 33.0,
+   "name": "SOFC1A"
+  },
+  {
+   "id": "SOFC1B",
+   "vn_kv": 33.0,
+   "name": "SOFC1B"
+  },
+  {
+   "id": "SOFC2A",
+   "vn_kv": 33.0,
+   "name": "SOFC2A"
+  },
+  {
+   "id": "SOFC2B",
+   "vn_kv": 33.0,
+   "name": "SOFC2B"
+  },
+  {
+   "id": "BESS1",
+   "vn_kv": 33.0,
+   "name": "BESS1"
+  },
+  {
+   "id": "BESS2",
+   "vn_kv": 33.0,
+   "name": "BESS2"
+  },
+  {
+   "id": "MVA",
+   "vn_kv": 33.0,
+   "name": "MVA"
+  },
+  {
+   "id": "MVB",
+   "vn_kv": 33.0,
+   "name": "MVB"
+  },
+  {
+   "id": "GEN_LV",
+   "vn_kv": 0.4,
+   "name": "GEN_LV"
+  },
+  {
+   "id": "SOFC01_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC01_HV"
+  },
+  {
+   "id": "SOFC01_LV",
+   "vn_kv": 0.4,
+   "name": "SOFC01_LV"
+  },
+  {
+   "id": "SOFC02_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC02_HV"
+  },
+  {
+   "id": "SOFC02_LV",
+   "vn_kv": 0.4,
+   "name": "SOFC02_LV"
+  },
+  {
+   "id": "SOFC03_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC03_HV"
+  },
+  {
+   "id": "SOFC03_LV",
+   "vn_kv": 0.4,
+   "name": "SOFC03_LV"
+  },
+  {
+   "id": "SOFC04_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC04_HV"
+  },
+  {
+   "id": "SOFC04_LV",
+   "vn_kv": 0.4,
+   "name": "SOFC04_LV"
+  },
+  {
+   "id": "SOFC05_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC05_HV"
+  },
+  {
+   "id": "SOFC05_LV",
+   "vn_kv": 0.4,
+   "name": "SOFC05_LV"
+  },
+  {
+   "id": "SOFC06_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC06_HV"
+  },
+  {
+   "id": "SOFC06_LV",
+   "vn_kv": 0.4,
+   "name": "SOFC06_LV"
+  },
+  {
+   "id": "SOFC07_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC07_HV"
+  },
+  {
+   "id": "SOFC07_LV",
+   "vn_kv": 0.4,
+   "name": "SOFC07_LV"
+  },
+  {
+   "id": "SOFC08_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC08_HV"
+  },
+  {
+   "id": "SOFC08_LV",
+   "vn_kv": 0.4,
+   "name": "SOFC08_LV"
+  },
+  {
+   "id": "SOFC09_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC09_HV"
+  },
+  {
+   "id": "SOFC09_LV",
+   "vn_kv": 0.4,
+   "name": "SOFC09_LV"
+  },
+  {
+   "id": "SOFC10_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC10_HV"
+  },
+  {
+   "id": "SOFC10_LV",
+   "vn_kv": 0.4,
+   "name": "SOFC10_LV"
+  },
+  {
+   "id": "SOFC11_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC11_HV"
+  },
+  {
+   "id": "SOFC11_LV",
+   "vn_kv": 0.4,
+   "name": "SOFC11_LV"
+  },
+  {
+   "id": "SOFC12_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC12_HV"
+  },
+  {
+   "id": "SOFC12_LV",
+   "vn_kv": 0.4,
+   "name": "SOFC12_LV"
+  },
+  {
+   "id": "SOFC13_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC13_HV"
+  },
+  {
+   "id": "SOFC13_LV",
+   "vn_kv": 0.4,
+   "name": "SOFC13_LV"
+  },
+  {
+   "id": "SOFC14_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC14_HV"
+  },
+  {
+   "id": "SOFC14_LV",
+   "vn_kv": 0.4,
+   "name": "SOFC14_LV"
+  },
+  {
+   "id": "SOFC15_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC15_HV"
+  },
+  {
+   "id": "SOFC15_LV",
+   "vn_kv": 0.4,
+   "name": "SOFC15_LV"
+  },
+  {
+   "id": "SOFC16_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC16_HV"
+  },
+  {
+   "id": "SOFC16_LV",
+   "vn_kv": 0.4,
+   "name": "SOFC16_LV"
+  },
+  {
+   "id": "SOFC17_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC17_HV"
+  },
+  {
+   "id": "SOFC17_LV",
+   "vn_kv": 0.4,
+   "name": "SOFC17_LV"
+  },
+  {
+   "id": "SOFC18_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC18_HV"
+  },
+  {
+   "id": "SOFC18_LV",
+   "vn_kv": 0.4,
+   "name": "SOFC18_LV"
+  },
+  {
+   "id": "SOFC19_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC19_HV"
+  },
+  {
+   "id": "SOFC19_LV",
+   "vn_kv": 0.4,
+   "name": "SOFC19_LV"
+  },
+  {
+   "id": "PCS1_HV",
+   "vn_kv": 33.0,
+   "name": "PCS1_HV"
+  },
+  {
+   "id": "PCS1_LV",
+   "vn_kv": 0.69,
+   "name": "PCS1_LV"
+  },
+  {
+   "id": "PCS2_HV",
+   "vn_kv": 33.0,
+   "name": "PCS2_HV"
+  },
+  {
+   "id": "PCS2_LV",
+   "vn_kv": 0.69,
+   "name": "PCS2_LV"
+  },
+  {
+   "id": "PCS3_HV",
+   "vn_kv": 33.0,
+   "name": "PCS3_HV"
+  },
+  {
+   "id": "PCS3_LV",
+   "vn_kv": 0.69,
+   "name": "PCS3_LV"
+  },
+  {
+   "id": "PCS4_HV",
+   "vn_kv": 33.0,
+   "name": "PCS4_HV"
+  },
+  {
+   "id": "PCS4_LV",
+   "vn_kv": 0.69,
+   "name": "PCS4_LV"
+  },
+  {
+   "id": "PCS5_HV",
+   "vn_kv": 33.0,
+   "name": "PCS5_HV"
+  },
+  {
+   "id": "PCS5_LV",
+   "vn_kv": 0.69,
+   "name": "PCS5_LV"
+  },
+  {
+   "id": "PCS6_HV",
+   "vn_kv": 33.0,
+   "name": "PCS6_HV"
+  },
+  {
+   "id": "PCS6_LV",
+   "vn_kv": 0.69,
+   "name": "PCS6_LV"
+  },
+  {
+   "id": "F_S1A_N",
+   "vn_kv": 33.0,
+   "name": "F_S1A_N"
+  },
+  {
+   "id": "F_S1B_N",
+   "vn_kv": 33.0,
+   "name": "F_S1B_N"
+  },
+  {
+   "id": "F_S2A_N",
+   "vn_kv": 33.0,
+   "name": "F_S2A_N"
+  },
+  {
+   "id": "F_S2B_N",
+   "vn_kv": 33.0,
+   "name": "F_S2B_N"
+  },
+  {
+   "id": "F_E1A_N",
+   "vn_kv": 33.0,
+   "name": "F_E1A_N"
+  },
+  {
+   "id": "F_E1B_N",
+   "vn_kv": 33.0,
+   "name": "F_E1B_N"
+  },
+  {
+   "id": "F_E2A_N",
+   "vn_kv": 33.0,
+   "name": "F_E2A_N"
+  },
+  {
+   "id": "F_E2B_N",
+   "vn_kv": 33.0,
+   "name": "F_E2B_N"
+  },
+  {
+   "id": "IT_cordA_N",
+   "vn_kv": 33.0,
+   "name": "IT_cordA_N"
+  },
+  {
+   "id": "OTHER_A_N",
+   "vn_kv": 33.0,
+   "name": "OTHER_A_N"
+  },
+  {
+   "id": "IT_cordB_N",
+   "vn_kv": 33.0,
+   "name": "IT_cordB_N"
+  },
+  {
+   "id": "OTHER_B_N",
+   "vn_kv": 33.0,
+   "name": "OTHER_B_N"
+  }
+ ],
+ "lines": [
+  {
+   "id": "F_S1A",
+   "name": "F_S1A",
+   "from_bus": "F_S1A_N",
+   "to_bus": "MVA",
+   "length_km": 1.0,
+   "r_ohm_per_km": 0.02178,
+   "x_ohm_per_km": 0.04356,
+   "c_nf_per_km": 0.0,
+   "max_i_ka": 1.0497
+  },
+  {
+   "id": "F_S1B",
+   "name": "F_S1B",
+   "from_bus": "F_S1B_N",
+   "to_bus": "MVB",
+   "length_km": 1.0,
+   "r_ohm_per_km": 0.02178,
+   "x_ohm_per_km": 0.04356,
+   "c_nf_per_km": 0.0,
+   "max_i_ka": 1.0497
+  },
+  {
+   "id": "F_S2A",
+   "name": "F_S2A",
+   "from_bus": "F_S2A_N",
+   "to_bus": "MVA",
+   "length_km": 1.0,
+   "r_ohm_per_km": 0.02178,
+   "x_ohm_per_km": 0.04356,
+   "c_nf_per_km": 0.0,
+   "max_i_ka": 1.0497
+  },
+  {
+   "id": "F_S2B",
+   "name": "F_S2B",
+   "from_bus": "F_S2B_N",
+   "to_bus": "MVB",
+   "length_km": 1.0,
+   "r_ohm_per_km": 0.02178,
+   "x_ohm_per_km": 0.04356,
+   "c_nf_per_km": 0.0,
+   "max_i_ka": 1.0497
+  },
+  {
+   "id": "F_E1A",
+   "name": "F_E1A",
+   "from_bus": "F_E1A_N",
+   "to_bus": "MVA",
+   "length_km": 1.0,
+   "r_ohm_per_km": 0.02178,
+   "x_ohm_per_km": 0.04356,
+   "c_nf_per_km": 0.0,
+   "max_i_ka": 1.0497
+  },
+  {
+   "id": "F_E1B",
+   "name": "F_E1B",
+   "from_bus": "F_E1B_N",
+   "to_bus": "MVB",
+   "length_km": 1.0,
+   "r_ohm_per_km": 0.02178,
+   "x_ohm_per_km": 0.04356,
+   "c_nf_per_km": 0.0,
+   "max_i_ka": 1.0497
+  },
+  {
+   "id": "F_E2A",
+   "name": "F_E2A",
+   "from_bus": "F_E2A_N",
+   "to_bus": "MVA",
+   "length_km": 1.0,
+   "r_ohm_per_km": 0.02178,
+   "x_ohm_per_km": 0.04356,
+   "c_nf_per_km": 0.0,
+   "max_i_ka": 1.0497
+  },
+  {
+   "id": "F_E2B",
+   "name": "F_E2B",
+   "from_bus": "F_E2B_N",
+   "to_bus": "MVB",
+   "length_km": 1.0,
+   "r_ohm_per_km": 0.02178,
+   "x_ohm_per_km": 0.04356,
+   "c_nf_per_km": 0.0,
+   "max_i_ka": 1.0497
+  }
+ ],
+ "transformers": [
+  {
+   "id": "TR_SOFC01",
+   "name": "TR_SOFC01",
+   "hv_bus": "SOFC01_HV",
+   "lv_bus": "SOFC01_LV",
+   "sn_mva": 3.0,
+   "vk_percent": 6.0002,
+   "vkr_percent": 0.048,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_SOFC02",
+   "name": "TR_SOFC02",
+   "hv_bus": "SOFC02_HV",
+   "lv_bus": "SOFC02_LV",
+   "sn_mva": 3.0,
+   "vk_percent": 6.0002,
+   "vkr_percent": 0.048,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_SOFC03",
+   "name": "TR_SOFC03",
+   "hv_bus": "SOFC03_HV",
+   "lv_bus": "SOFC03_LV",
+   "sn_mva": 3.0,
+   "vk_percent": 6.0002,
+   "vkr_percent": 0.048,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_SOFC04",
+   "name": "TR_SOFC04",
+   "hv_bus": "SOFC04_HV",
+   "lv_bus": "SOFC04_LV",
+   "sn_mva": 3.0,
+   "vk_percent": 6.0002,
+   "vkr_percent": 0.048,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_SOFC05",
+   "name": "TR_SOFC05",
+   "hv_bus": "SOFC05_HV",
+   "lv_bus": "SOFC05_LV",
+   "sn_mva": 3.0,
+   "vk_percent": 6.0002,
+   "vkr_percent": 0.048,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_SOFC06",
+   "name": "TR_SOFC06",
+   "hv_bus": "SOFC06_HV",
+   "lv_bus": "SOFC06_LV",
+   "sn_mva": 3.0,
+   "vk_percent": 6.0002,
+   "vkr_percent": 0.048,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_SOFC07",
+   "name": "TR_SOFC07",
+   "hv_bus": "SOFC07_HV",
+   "lv_bus": "SOFC07_LV",
+   "sn_mva": 3.0,
+   "vk_percent": 6.0002,
+   "vkr_percent": 0.048,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_SOFC08",
+   "name": "TR_SOFC08",
+   "hv_bus": "SOFC08_HV",
+   "lv_bus": "SOFC08_LV",
+   "sn_mva": 3.0,
+   "vk_percent": 6.0002,
+   "vkr_percent": 0.048,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_SOFC09",
+   "name": "TR_SOFC09",
+   "hv_bus": "SOFC09_HV",
+   "lv_bus": "SOFC09_LV",
+   "sn_mva": 3.0,
+   "vk_percent": 6.0002,
+   "vkr_percent": 0.048,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_SOFC10",
+   "name": "TR_SOFC10",
+   "hv_bus": "SOFC10_HV",
+   "lv_bus": "SOFC10_LV",
+   "sn_mva": 3.0,
+   "vk_percent": 6.0002,
+   "vkr_percent": 0.048,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_SOFC11",
+   "name": "TR_SOFC11",
+   "hv_bus": "SOFC11_HV",
+   "lv_bus": "SOFC11_LV",
+   "sn_mva": 3.0,
+   "vk_percent": 6.0002,
+   "vkr_percent": 0.048,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_SOFC12",
+   "name": "TR_SOFC12",
+   "hv_bus": "SOFC12_HV",
+   "lv_bus": "SOFC12_LV",
+   "sn_mva": 3.0,
+   "vk_percent": 6.0002,
+   "vkr_percent": 0.048,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_SOFC13",
+   "name": "TR_SOFC13",
+   "hv_bus": "SOFC13_HV",
+   "lv_bus": "SOFC13_LV",
+   "sn_mva": 3.0,
+   "vk_percent": 6.0002,
+   "vkr_percent": 0.048,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_SOFC14",
+   "name": "TR_SOFC14",
+   "hv_bus": "SOFC14_HV",
+   "lv_bus": "SOFC14_LV",
+   "sn_mva": 3.0,
+   "vk_percent": 6.0002,
+   "vkr_percent": 0.048,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_SOFC15",
+   "name": "TR_SOFC15",
+   "hv_bus": "SOFC15_HV",
+   "lv_bus": "SOFC15_LV",
+   "sn_mva": 3.0,
+   "vk_percent": 6.0002,
+   "vkr_percent": 0.048,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_SOFC16",
+   "name": "TR_SOFC16",
+   "hv_bus": "SOFC16_HV",
+   "lv_bus": "SOFC16_LV",
+   "sn_mva": 3.0,
+   "vk_percent": 6.0002,
+   "vkr_percent": 0.048,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_SOFC17",
+   "name": "TR_SOFC17",
+   "hv_bus": "SOFC17_HV",
+   "lv_bus": "SOFC17_LV",
+   "sn_mva": 3.0,
+   "vk_percent": 6.0002,
+   "vkr_percent": 0.048,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_SOFC18",
+   "name": "TR_SOFC18",
+   "hv_bus": "SOFC18_HV",
+   "lv_bus": "SOFC18_LV",
+   "sn_mva": 3.0,
+   "vk_percent": 6.0002,
+   "vkr_percent": 0.048,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_SOFC19",
+   "name": "TR_SOFC19",
+   "hv_bus": "SOFC19_HV",
+   "lv_bus": "SOFC19_LV",
+   "sn_mva": 3.0,
+   "vk_percent": 6.0002,
+   "vkr_percent": 0.048,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_PCS1",
+   "name": "TR_PCS1",
+   "hv_bus": "PCS1_HV",
+   "lv_bus": "PCS1_LV",
+   "sn_mva": 5.5,
+   "vk_percent": 6.0006,
+   "vkr_percent": 0.088,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_PCS2",
+   "name": "TR_PCS2",
+   "hv_bus": "PCS2_HV",
+   "lv_bus": "PCS2_LV",
+   "sn_mva": 5.5,
+   "vk_percent": 6.0006,
+   "vkr_percent": 0.088,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_PCS3",
+   "name": "TR_PCS3",
+   "hv_bus": "PCS3_HV",
+   "lv_bus": "PCS3_LV",
+   "sn_mva": 5.5,
+   "vk_percent": 6.0006,
+   "vkr_percent": 0.088,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_PCS4",
+   "name": "TR_PCS4",
+   "hv_bus": "PCS4_HV",
+   "lv_bus": "PCS4_LV",
+   "sn_mva": 5.5,
+   "vk_percent": 6.0006,
+   "vkr_percent": 0.088,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_PCS5",
+   "name": "TR_PCS5",
+   "hv_bus": "PCS5_HV",
+   "lv_bus": "PCS5_LV",
+   "sn_mva": 5.5,
+   "vk_percent": 6.0006,
+   "vkr_percent": 0.088,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_PCS6",
+   "name": "TR_PCS6",
+   "hv_bus": "PCS6_HV",
+   "lv_bus": "PCS6_LV",
+   "sn_mva": 5.5,
+   "vk_percent": 6.0006,
+   "vkr_percent": 0.088,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  },
+  {
+   "id": "TR_GEN",
+   "name": "TR_GEN",
+   "hv_bus": "MVA",
+   "lv_bus": "GEN_LV",
+   "sn_mva": 3.0,
+   "vk_percent": 6.0002,
+   "vkr_percent": 0.048,
+   "vector_group": "Dyn",
+   "shift_degree": 330
+  }
+ ],
+ "switches": [
+  {
+   "id": "CB_BS1",
+   "name": "CB_BS1",
+   "bus": "SOFC1A",
+   "element": "SOFC1B",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_BS2",
+   "name": "CB_BS2",
+   "bus": "SOFC2A",
+   "element": "SOFC2B",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC01_1",
+   "name": "CB_SOFC01_1",
+   "bus": "SOFC1A",
+   "element": "SOFC01_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC01_2",
+   "name": "CB_SOFC01_2",
+   "bus": "SOFC2A",
+   "element": "SOFC01_HV",
+   "et": "bus",
+   "closed": false
+  },
+  {
+   "id": "CB_SOFC02_1",
+   "name": "CB_SOFC02_1",
+   "bus": "SOFC1A",
+   "element": "SOFC02_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC02_2",
+   "name": "CB_SOFC02_2",
+   "bus": "SOFC2A",
+   "element": "SOFC02_HV",
+   "et": "bus",
+   "closed": false
+  },
+  {
+   "id": "CB_SOFC03_1",
+   "name": "CB_SOFC03_1",
+   "bus": "SOFC1A",
+   "element": "SOFC03_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC03_2",
+   "name": "CB_SOFC03_2",
+   "bus": "SOFC2A",
+   "element": "SOFC03_HV",
+   "et": "bus",
+   "closed": false
+  },
+  {
+   "id": "CB_SOFC04_1",
+   "name": "CB_SOFC04_1",
+   "bus": "SOFC1A",
+   "element": "SOFC04_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC04_2",
+   "name": "CB_SOFC04_2",
+   "bus": "SOFC2A",
+   "element": "SOFC04_HV",
+   "et": "bus",
+   "closed": false
+  },
+  {
+   "id": "CB_SOFC05_1",
+   "name": "CB_SOFC05_1",
+   "bus": "SOFC1A",
+   "element": "SOFC05_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC05_2",
+   "name": "CB_SOFC05_2",
+   "bus": "SOFC2A",
+   "element": "SOFC05_HV",
+   "et": "bus",
+   "closed": false
+  },
+  {
+   "id": "CB_SOFC06_1",
+   "name": "CB_SOFC06_1",
+   "bus": "SOFC1B",
+   "element": "SOFC06_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC06_2",
+   "name": "CB_SOFC06_2",
+   "bus": "SOFC2B",
+   "element": "SOFC06_HV",
+   "et": "bus",
+   "closed": false
+  },
+  {
+   "id": "CB_SOFC07_1",
+   "name": "CB_SOFC07_1",
+   "bus": "SOFC1B",
+   "element": "SOFC07_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC07_2",
+   "name": "CB_SOFC07_2",
+   "bus": "SOFC2B",
+   "element": "SOFC07_HV",
+   "et": "bus",
+   "closed": false
+  },
+  {
+   "id": "CB_SOFC08_1",
+   "name": "CB_SOFC08_1",
+   "bus": "SOFC1B",
+   "element": "SOFC08_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC08_2",
+   "name": "CB_SOFC08_2",
+   "bus": "SOFC2B",
+   "element": "SOFC08_HV",
+   "et": "bus",
+   "closed": false
+  },
+  {
+   "id": "CB_SOFC09_1",
+   "name": "CB_SOFC09_1",
+   "bus": "SOFC1B",
+   "element": "SOFC09_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC09_2",
+   "name": "CB_SOFC09_2",
+   "bus": "SOFC2B",
+   "element": "SOFC09_HV",
+   "et": "bus",
+   "closed": false
+  },
+  {
+   "id": "CB_SOFC10_1",
+   "name": "CB_SOFC10_1",
+   "bus": "SOFC1B",
+   "element": "SOFC10_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC10_2",
+   "name": "CB_SOFC10_2",
+   "bus": "SOFC2B",
+   "element": "SOFC10_HV",
+   "et": "bus",
+   "closed": false
+  },
+  {
+   "id": "CB_SOFC11_1",
+   "name": "CB_SOFC11_1",
+   "bus": "SOFC1A",
+   "element": "SOFC11_HV",
+   "et": "bus",
+   "closed": false
+  },
+  {
+   "id": "CB_SOFC11_2",
+   "name": "CB_SOFC11_2",
+   "bus": "SOFC2A",
+   "element": "SOFC11_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC12_1",
+   "name": "CB_SOFC12_1",
+   "bus": "SOFC1A",
+   "element": "SOFC12_HV",
+   "et": "bus",
+   "closed": false
+  },
+  {
+   "id": "CB_SOFC12_2",
+   "name": "CB_SOFC12_2",
+   "bus": "SOFC2A",
+   "element": "SOFC12_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC13_1",
+   "name": "CB_SOFC13_1",
+   "bus": "SOFC1A",
+   "element": "SOFC13_HV",
+   "et": "bus",
+   "closed": false
+  },
+  {
+   "id": "CB_SOFC13_2",
+   "name": "CB_SOFC13_2",
+   "bus": "SOFC2A",
+   "element": "SOFC13_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC14_1",
+   "name": "CB_SOFC14_1",
+   "bus": "SOFC1A",
+   "element": "SOFC14_HV",
+   "et": "bus",
+   "closed": false
+  },
+  {
+   "id": "CB_SOFC14_2",
+   "name": "CB_SOFC14_2",
+   "bus": "SOFC2A",
+   "element": "SOFC14_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC15_1",
+   "name": "CB_SOFC15_1",
+   "bus": "SOFC1A",
+   "element": "SOFC15_HV",
+   "et": "bus",
+   "closed": false
+  },
+  {
+   "id": "CB_SOFC15_2",
+   "name": "CB_SOFC15_2",
+   "bus": "SOFC2A",
+   "element": "SOFC15_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC16_1",
+   "name": "CB_SOFC16_1",
+   "bus": "SOFC1B",
+   "element": "SOFC16_HV",
+   "et": "bus",
+   "closed": false
+  },
+  {
+   "id": "CB_SOFC16_2",
+   "name": "CB_SOFC16_2",
+   "bus": "SOFC2B",
+   "element": "SOFC16_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC17_1",
+   "name": "CB_SOFC17_1",
+   "bus": "SOFC1B",
+   "element": "SOFC17_HV",
+   "et": "bus",
+   "closed": false
+  },
+  {
+   "id": "CB_SOFC17_2",
+   "name": "CB_SOFC17_2",
+   "bus": "SOFC2B",
+   "element": "SOFC17_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC18_1",
+   "name": "CB_SOFC18_1",
+   "bus": "SOFC1B",
+   "element": "SOFC18_HV",
+   "et": "bus",
+   "closed": false
+  },
+  {
+   "id": "CB_SOFC18_2",
+   "name": "CB_SOFC18_2",
+   "bus": "SOFC2B",
+   "element": "SOFC18_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC19_1",
+   "name": "CB_SOFC19_1",
+   "bus": "SOFC1B",
+   "element": "SOFC19_HV",
+   "et": "bus",
+   "closed": false
+  },
+  {
+   "id": "CB_SOFC19_2",
+   "name": "CB_SOFC19_2",
+   "bus": "SOFC2B",
+   "element": "SOFC19_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_PCS1",
+   "name": "CB_PCS1",
+   "bus": "BESS1",
+   "element": "PCS1_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_PCS2",
+   "name": "CB_PCS2",
+   "bus": "BESS1",
+   "element": "PCS2_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_PCS3",
+   "name": "CB_PCS3",
+   "bus": "BESS2",
+   "element": "PCS3_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_PCS4",
+   "name": "CB_PCS4",
+   "bus": "BESS2",
+   "element": "PCS4_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_PCS5",
+   "name": "CB_PCS5",
+   "bus": "MVA",
+   "element": "PCS5_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_PCS6",
+   "name": "CB_PCS6",
+   "bus": "MVB",
+   "element": "PCS6_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_F_S1A",
+   "name": "CB_F_S1A",
+   "bus": "SOFC1A",
+   "element": "F_S1A_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_F_S1B",
+   "name": "CB_F_S1B",
+   "bus": "SOFC1B",
+   "element": "F_S1B_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_F_S2A",
+   "name": "CB_F_S2A",
+   "bus": "SOFC2A",
+   "element": "F_S2A_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_F_S2B",
+   "name": "CB_F_S2B",
+   "bus": "SOFC2B",
+   "element": "F_S2B_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_F_E1A",
+   "name": "CB_F_E1A",
+   "bus": "BESS1",
+   "element": "F_E1A_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_F_E1B",
+   "name": "CB_F_E1B",
+   "bus": "BESS1",
+   "element": "F_E1B_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_F_E2A",
+   "name": "CB_F_E2A",
+   "bus": "BESS2",
+   "element": "F_E2A_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_F_E2B",
+   "name": "CB_F_E2B",
+   "bus": "BESS2",
+   "element": "F_E2B_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_TIE",
+   "name": "CB_TIE",
+   "bus": "MVA",
+   "element": "MVB",
+   "et": "bus",
+   "closed": false
+  },
+  {
+   "id": "CB_L_IT_cordA",
+   "name": "CB_L_IT_cordA",
+   "bus": "MVA",
+   "element": "IT_cordA_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_L_OTHER_A",
+   "name": "CB_L_OTHER_A",
+   "bus": "MVA",
+   "element": "OTHER_A_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_L_IT_cordB",
+   "name": "CB_L_IT_cordB",
+   "bus": "MVB",
+   "element": "IT_cordB_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_L_OTHER_B",
+   "name": "CB_L_OTHER_B",
+   "bus": "MVB",
+   "element": "OTHER_B_N",
+   "et": "bus",
+   "closed": true
+  }
+ ],
+ "loads": [
+  {
+   "id": "IT_cordA",
+   "name": "IT_cordA (critical)",
+   "bus": "IT_cordA_N",
+   "p_mw": 12.5,
+   "q_mvar": 4.11
+  },
+  {
+   "id": "OTHER_A",
+   "name": "OTHER_A (critical)",
+   "bus": "OTHER_A_N",
+   "p_mw": 2.5,
+   "q_mvar": 0.82
+  },
+  {
+   "id": "IT_cordB",
+   "name": "IT_cordB (critical)",
+   "bus": "IT_cordB_N",
+   "p_mw": 12.5,
+   "q_mvar": 4.11
+  },
+  {
+   "id": "OTHER_B",
+   "name": "OTHER_B (critical)",
+   "bus": "OTHER_B_N",
+   "p_mw": 2.5,
+   "q_mvar": 0.82
+  }
+ ],
+ "pcs": [
+  {
+   "id": "SOFC01",
+   "name": "SOFC01 inverter",
+   "bus": "SOFC01_LV",
+   "source": "SOFC01_FC",
+   "control": "grid_following",
+   "s_rated_mva": 2.2,
+   "vn_ac_kv": 0.4,
+   "efficiency_percent": 100,
+   "current_limit_pu": 1.2
+  },
+  {
+   "id": "SOFC02",
+   "name": "SOFC02 inverter",
+   "bus": "SOFC02_LV",
+   "source": "SOFC02_FC",
+   "control": "grid_following",
+   "s_rated_mva": 2.2,
+   "vn_ac_kv": 0.4,
+   "efficiency_percent": 100,
+   "current_limit_pu": 1.2
+  },
+  {
+   "id": "SOFC03",
+   "name": "SOFC03 inverter",
+   "bus": "SOFC03_LV",
+   "source": "SOFC03_FC",
+   "control": "grid_following",
+   "s_rated_mva": 2.2,
+   "vn_ac_kv": 0.4,
+   "efficiency_percent": 100,
+   "current_limit_pu": 1.2
+  },
+  {
+   "id": "SOFC04",
+   "name": "SOFC04 inverter",
+   "bus": "SOFC04_LV",
+   "source": "SOFC04_FC",
+   "control": "grid_following",
+   "s_rated_mva": 2.2,
+   "vn_ac_kv": 0.4,
+   "efficiency_percent": 100,
+   "current_limit_pu": 1.2
+  },
+  {
+   "id": "SOFC05",
+   "name": "SOFC05 inverter",
+   "bus": "SOFC05_LV",
+   "source": "SOFC05_FC",
+   "control": "grid_following",
+   "s_rated_mva": 2.2,
+   "vn_ac_kv": 0.4,
+   "efficiency_percent": 100,
+   "current_limit_pu": 1.2
+  },
+  {
+   "id": "SOFC06",
+   "name": "SOFC06 inverter",
+   "bus": "SOFC06_LV",
+   "source": "SOFC06_FC",
+   "control": "grid_following",
+   "s_rated_mva": 2.2,
+   "vn_ac_kv": 0.4,
+   "efficiency_percent": 100,
+   "current_limit_pu": 1.2
+  },
+  {
+   "id": "SOFC07",
+   "name": "SOFC07 inverter",
+   "bus": "SOFC07_LV",
+   "source": "SOFC07_FC",
+   "control": "grid_following",
+   "s_rated_mva": 2.2,
+   "vn_ac_kv": 0.4,
+   "efficiency_percent": 100,
+   "current_limit_pu": 1.2
+  },
+  {
+   "id": "SOFC08",
+   "name": "SOFC08 inverter",
+   "bus": "SOFC08_LV",
+   "source": "SOFC08_FC",
+   "control": "grid_following",
+   "s_rated_mva": 2.2,
+   "vn_ac_kv": 0.4,
+   "efficiency_percent": 100,
+   "current_limit_pu": 1.2
+  },
+  {
+   "id": "SOFC09",
+   "name": "SOFC09 inverter",
+   "bus": "SOFC09_LV",
+   "source": "SOFC09_FC",
+   "control": "grid_following",
+   "s_rated_mva": 2.2,
+   "vn_ac_kv": 0.4,
+   "efficiency_percent": 100,
+   "current_limit_pu": 1.2
+  },
+  {
+   "id": "SOFC10",
+   "name": "SOFC10 inverter",
+   "bus": "SOFC10_LV",
+   "source": "SOFC10_FC",
+   "control": "grid_following",
+   "s_rated_mva": 2.2,
+   "vn_ac_kv": 0.4,
+   "efficiency_percent": 100,
+   "current_limit_pu": 1.2
+  },
+  {
+   "id": "SOFC11",
+   "name": "SOFC11 inverter",
+   "bus": "SOFC11_LV",
+   "source": "SOFC11_FC",
+   "control": "grid_following",
+   "s_rated_mva": 2.2,
+   "vn_ac_kv": 0.4,
+   "efficiency_percent": 100,
+   "current_limit_pu": 1.2
+  },
+  {
+   "id": "SOFC12",
+   "name": "SOFC12 inverter",
+   "bus": "SOFC12_LV",
+   "source": "SOFC12_FC",
+   "control": "grid_following",
+   "s_rated_mva": 2.2,
+   "vn_ac_kv": 0.4,
+   "efficiency_percent": 100,
+   "current_limit_pu": 1.2
+  },
+  {
+   "id": "SOFC13",
+   "name": "SOFC13 inverter",
+   "bus": "SOFC13_LV",
+   "source": "SOFC13_FC",
+   "control": "grid_following",
+   "s_rated_mva": 2.2,
+   "vn_ac_kv": 0.4,
+   "efficiency_percent": 100,
+   "current_limit_pu": 1.2
+  },
+  {
+   "id": "SOFC14",
+   "name": "SOFC14 inverter",
+   "bus": "SOFC14_LV",
+   "source": "SOFC14_FC",
+   "control": "grid_following",
+   "s_rated_mva": 2.2,
+   "vn_ac_kv": 0.4,
+   "efficiency_percent": 100,
+   "current_limit_pu": 1.2
+  },
+  {
+   "id": "SOFC15",
+   "name": "SOFC15 inverter",
+   "bus": "SOFC15_LV",
+   "source": "SOFC15_FC",
+   "control": "grid_following",
+   "s_rated_mva": 2.2,
+   "vn_ac_kv": 0.4,
+   "efficiency_percent": 100,
+   "current_limit_pu": 1.2
+  },
+  {
+   "id": "SOFC16",
+   "name": "SOFC16 inverter",
+   "bus": "SOFC16_LV",
+   "source": "SOFC16_FC",
+   "control": "grid_following",
+   "s_rated_mva": 2.2,
+   "vn_ac_kv": 0.4,
+   "efficiency_percent": 100,
+   "current_limit_pu": 1.2
+  },
+  {
+   "id": "SOFC17",
+   "name": "SOFC17 inverter",
+   "bus": "SOFC17_LV",
+   "source": "SOFC17_FC",
+   "control": "grid_following",
+   "s_rated_mva": 2.2,
+   "vn_ac_kv": 0.4,
+   "efficiency_percent": 100,
+   "current_limit_pu": 1.2
+  },
+  {
+   "id": "SOFC18",
+   "name": "SOFC18 inverter",
+   "bus": "SOFC18_LV",
+   "source": "SOFC18_FC",
+   "control": "grid_following",
+   "s_rated_mva": 2.2,
+   "vn_ac_kv": 0.4,
+   "efficiency_percent": 100,
+   "current_limit_pu": 1.2
+  },
+  {
+   "id": "SOFC19",
+   "name": "SOFC19 inverter",
+   "bus": "SOFC19_LV",
+   "source": "SOFC19_FC",
+   "control": "grid_following",
+   "s_rated_mva": 2.2,
+   "vn_ac_kv": 0.4,
+   "efficiency_percent": 100,
+   "current_limit_pu": 1.2
+  },
+  {
+   "id": "PCS1",
+   "name": "PCS1 PCST5500",
+   "bus": "PCS1_LV",
+   "source": "PCS1_BAT",
+   "control": "grid_forming",
+   "s_rated_mva": 5.5,
+   "vn_ac_kv": 0.69,
+   "p_set_mw": 0,
+   "droop_pf_percent": 4.0,
+   "droop_qv_percent": 5.0,
+   "inlet_c": 40,
+   "derate_temp_curve": "40:1.00, 45:0.909",
+   "current_limit_pu": 1.1
+  },
+  {
+   "id": "PCS2",
+   "name": "PCS2 PCST5500",
+   "bus": "PCS2_LV",
+   "source": "PCS2_BAT",
+   "control": "grid_forming",
+   "s_rated_mva": 5.5,
+   "vn_ac_kv": 0.69,
+   "p_set_mw": 0,
+   "droop_pf_percent": 4.0,
+   "droop_qv_percent": 5.0,
+   "inlet_c": 40,
+   "derate_temp_curve": "40:1.00, 45:0.909",
+   "current_limit_pu": 1.1
+  },
+  {
+   "id": "PCS3",
+   "name": "PCS3 PCST5500",
+   "bus": "PCS3_LV",
+   "source": "PCS3_BAT",
+   "control": "grid_forming",
+   "s_rated_mva": 5.5,
+   "vn_ac_kv": 0.69,
+   "p_set_mw": 0,
+   "droop_pf_percent": 4.0,
+   "droop_qv_percent": 5.0,
+   "inlet_c": 40,
+   "derate_temp_curve": "40:1.00, 45:0.909",
+   "current_limit_pu": 1.1
+  },
+  {
+   "id": "PCS4",
+   "name": "PCS4 PCST5500",
+   "bus": "PCS4_LV",
+   "source": "PCS4_BAT",
+   "control": "grid_forming",
+   "s_rated_mva": 5.5,
+   "vn_ac_kv": 0.69,
+   "p_set_mw": 0,
+   "droop_pf_percent": 4.0,
+   "droop_qv_percent": 5.0,
+   "inlet_c": 40,
+   "derate_temp_curve": "40:1.00, 45:0.909",
+   "current_limit_pu": 1.1
+  },
+  {
+   "id": "PCS5",
+   "name": "PCS5 PCST5500",
+   "bus": "PCS5_LV",
+   "source": "PCS5_BAT",
+   "control": "grid_forming",
+   "s_rated_mva": 5.5,
+   "vn_ac_kv": 0.69,
+   "p_set_mw": 0,
+   "droop_pf_percent": 4.0,
+   "droop_qv_percent": 5.0,
+   "inlet_c": 40,
+   "derate_temp_curve": "40:1.00, 45:0.909",
+   "current_limit_pu": 1.1
+  },
+  {
+   "id": "PCS6",
+   "name": "PCS6 PCST5500",
+   "bus": "PCS6_LV",
+   "source": "PCS6_BAT",
+   "control": "grid_forming",
+   "s_rated_mva": 5.5,
+   "vn_ac_kv": 0.69,
+   "p_set_mw": 0,
+   "droop_pf_percent": 4.0,
+   "droop_qv_percent": 5.0,
+   "inlet_c": 40,
+   "derate_temp_curve": "40:1.00, 45:0.909",
+   "current_limit_pu": 1.1
+  }
+ ],
+ "batteries": [
+  {
+   "id": "PCS1_BAT",
+   "name": "PCS1 LTO 635 kWh",
+   "vn_v": 1300,
+   "capacity_kwh": 635.0,
+   "r0_mohm": 20,
+   "soc_percent": 60,
+   "c_rate_discharge": 10,
+   "c_rate_charge": 10
+  },
+  {
+   "id": "PCS2_BAT",
+   "name": "PCS2 LTO 635 kWh",
+   "vn_v": 1300,
+   "capacity_kwh": 635.0,
+   "r0_mohm": 20,
+   "soc_percent": 60,
+   "c_rate_discharge": 10,
+   "c_rate_charge": 10
+  },
+  {
+   "id": "PCS3_BAT",
+   "name": "PCS3 LTO 635 kWh",
+   "vn_v": 1300,
+   "capacity_kwh": 635.0,
+   "r0_mohm": 20,
+   "soc_percent": 60,
+   "c_rate_discharge": 10,
+   "c_rate_charge": 10
+  },
+  {
+   "id": "PCS4_BAT",
+   "name": "PCS4 LTO 635 kWh",
+   "vn_v": 1300,
+   "capacity_kwh": 635.0,
+   "r0_mohm": 20,
+   "soc_percent": 60,
+   "c_rate_discharge": 10,
+   "c_rate_charge": 10
+  },
+  {
+   "id": "PCS5_BAT",
+   "name": "PCS5 LTO 635 kWh",
+   "vn_v": 1300,
+   "capacity_kwh": 635.0,
+   "r0_mohm": 20,
+   "soc_percent": 60,
+   "c_rate_discharge": 10,
+   "c_rate_charge": 10
+  },
+  {
+   "id": "PCS6_BAT",
+   "name": "PCS6 LTO 635 kWh",
+   "vn_v": 1300,
+   "capacity_kwh": 635.0,
+   "r0_mohm": 20,
+   "soc_percent": 60,
+   "c_rate_discharge": 10,
+   "c_rate_charge": 10
+  }
+ ],
+ "sofcs": [
+  {
+   "id": "SOFC01_FC",
+   "name": "SOFC01 SOFC",
+   "p_rated_kw": 1936.0,
+   "v_rated": 800,
+   "p_set_kw": 1594.7,
+   "min_load_percent": 30,
+   "ramp_percent_s": 1,
+   "aux_load_percent": 0
+  },
+  {
+   "id": "SOFC02_FC",
+   "name": "SOFC02 SOFC",
+   "p_rated_kw": 1936.0,
+   "v_rated": 800,
+   "p_set_kw": 1594.7,
+   "min_load_percent": 30,
+   "ramp_percent_s": 1,
+   "aux_load_percent": 0
+  },
+  {
+   "id": "SOFC03_FC",
+   "name": "SOFC03 SOFC",
+   "p_rated_kw": 1936.0,
+   "v_rated": 800,
+   "p_set_kw": 1594.7,
+   "min_load_percent": 30,
+   "ramp_percent_s": 1,
+   "aux_load_percent": 0
+  },
+  {
+   "id": "SOFC04_FC",
+   "name": "SOFC04 SOFC",
+   "p_rated_kw": 1936.0,
+   "v_rated": 800,
+   "p_set_kw": 1594.7,
+   "min_load_percent": 30,
+   "ramp_percent_s": 1,
+   "aux_load_percent": 0
+  },
+  {
+   "id": "SOFC05_FC",
+   "name": "SOFC05 SOFC",
+   "p_rated_kw": 1936.0,
+   "v_rated": 800,
+   "p_set_kw": 1594.7,
+   "min_load_percent": 30,
+   "ramp_percent_s": 1,
+   "aux_load_percent": 0
+  },
+  {
+   "id": "SOFC06_FC",
+   "name": "SOFC06 SOFC",
+   "p_rated_kw": 1936.0,
+   "v_rated": 800,
+   "p_set_kw": 1594.7,
+   "min_load_percent": 30,
+   "ramp_percent_s": 1,
+   "aux_load_percent": 0
+  },
+  {
+   "id": "SOFC07_FC",
+   "name": "SOFC07 SOFC",
+   "p_rated_kw": 1936.0,
+   "v_rated": 800,
+   "p_set_kw": 1594.7,
+   "min_load_percent": 30,
+   "ramp_percent_s": 1,
+   "aux_load_percent": 0
+  },
+  {
+   "id": "SOFC08_FC",
+   "name": "SOFC08 SOFC",
+   "p_rated_kw": 1936.0,
+   "v_rated": 800,
+   "p_set_kw": 1594.7,
+   "min_load_percent": 30,
+   "ramp_percent_s": 1,
+   "aux_load_percent": 0
+  },
+  {
+   "id": "SOFC09_FC",
+   "name": "SOFC09 SOFC",
+   "p_rated_kw": 1936.0,
+   "v_rated": 800,
+   "p_set_kw": 1594.7,
+   "min_load_percent": 30,
+   "ramp_percent_s": 1,
+   "aux_load_percent": 0
+  },
+  {
+   "id": "SOFC10_FC",
+   "name": "SOFC10 SOFC",
+   "p_rated_kw": 1936.0,
+   "v_rated": 800,
+   "p_set_kw": 1594.7,
+   "min_load_percent": 30,
+   "ramp_percent_s": 1,
+   "aux_load_percent": 0
+  },
+  {
+   "id": "SOFC11_FC",
+   "name": "SOFC11 SOFC",
+   "p_rated_kw": 1936.0,
+   "v_rated": 800,
+   "p_set_kw": 1594.7,
+   "min_load_percent": 30,
+   "ramp_percent_s": 1,
+   "aux_load_percent": 0
+  },
+  {
+   "id": "SOFC12_FC",
+   "name": "SOFC12 SOFC",
+   "p_rated_kw": 1936.0,
+   "v_rated": 800,
+   "p_set_kw": 1594.7,
+   "min_load_percent": 30,
+   "ramp_percent_s": 1,
+   "aux_load_percent": 0
+  },
+  {
+   "id": "SOFC13_FC",
+   "name": "SOFC13 SOFC",
+   "p_rated_kw": 1936.0,
+   "v_rated": 800,
+   "p_set_kw": 1594.7,
+   "min_load_percent": 30,
+   "ramp_percent_s": 1,
+   "aux_load_percent": 0
+  },
+  {
+   "id": "SOFC14_FC",
+   "name": "SOFC14 SOFC",
+   "p_rated_kw": 1936.0,
+   "v_rated": 800,
+   "p_set_kw": 1594.7,
+   "min_load_percent": 30,
+   "ramp_percent_s": 1,
+   "aux_load_percent": 0
+  },
+  {
+   "id": "SOFC15_FC",
+   "name": "SOFC15 SOFC",
+   "p_rated_kw": 1936.0,
+   "v_rated": 800,
+   "p_set_kw": 1594.7,
+   "min_load_percent": 30,
+   "ramp_percent_s": 1,
+   "aux_load_percent": 0
+  },
+  {
+   "id": "SOFC16_FC",
+   "name": "SOFC16 SOFC",
+   "p_rated_kw": 1936.0,
+   "v_rated": 800,
+   "p_set_kw": 1594.7,
+   "min_load_percent": 30,
+   "ramp_percent_s": 1,
+   "aux_load_percent": 0
+  },
+  {
+   "id": "SOFC17_FC",
+   "name": "SOFC17 SOFC",
+   "p_rated_kw": 1936.0,
+   "v_rated": 800,
+   "p_set_kw": 1594.7,
+   "min_load_percent": 30,
+   "ramp_percent_s": 1,
+   "aux_load_percent": 0
+  },
+  {
+   "id": "SOFC18_FC",
+   "name": "SOFC18 SOFC",
+   "p_rated_kw": 1936.0,
+   "v_rated": 800,
+   "p_set_kw": 1594.7,
+   "min_load_percent": 30,
+   "ramp_percent_s": 1,
+   "aux_load_percent": 0
+  },
+  {
+   "id": "SOFC19_FC",
+   "name": "SOFC19 SOFC",
+   "p_rated_kw": 1936.0,
+   "v_rated": 800,
+   "p_set_kw": 1594.7,
+   "min_load_percent": 30,
+   "ramp_percent_s": 1,
+   "aux_load_percent": 0
+  }
+ ],
+ "generators": [
+  {
+   "id": "GEN_BS",
+   "name": "GEN_BS genset 3 MVA",
+   "bus": "GEN_LV",
+   "p_mw": 0.0,
+   "vm_pu": 1.0,
+   "sn_mva": 3.0,
+   "xdss_pu": 0.15,
+   "cos_phi": 0.8,
+   "dyn_machine_model": "GENROU",
+   "dyn_H": 1.0,
+   "dyn_gov_R": 0.05,
+   "dyn_exciter_model": "SEXS",
+   "dyn_governor_model": "TGOV1",
+   "in_service": false
+  }
+ ],
+ "grounding_transformers": [
+  {
+   "id": "GT_MVA",
+   "name": "GT_MVA zig-zag NER 76 ohm",
+   "bus": "MVA",
+   "r_n_ohm": 76.0,
+   "i_rated_a": 251,
+   "t_rated_s": 10
+  },
+  {
+   "id": "GT_MVB",
+   "name": "GT_MVB zig-zag NER 76 ohm",
+   "bus": "MVB",
+   "r_n_ohm": 76.0,
+   "i_rated_a": 251,
+   "t_rated_s": 10
+  },
+  {
+   "id": "GT_BESS1",
+   "name": "GT_BESS1 zig-zag NER 76 ohm",
+   "bus": "BESS1",
+   "r_n_ohm": 76.0,
+   "i_rated_a": 251,
+   "t_rated_s": 10
+  },
+  {
+   "id": "GT_BESS2",
+   "name": "GT_BESS2 zig-zag NER 76 ohm",
+   "bus": "BESS2",
+   "r_n_ohm": 76.0,
+   "i_rated_a": 251,
+   "t_rated_s": 10
+  }
+ ]
+}

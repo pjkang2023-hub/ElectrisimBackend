@@ -103,7 +103,8 @@ def test_grounding_transformers_give_the_designs_earth_fault(client, design, n_g
 
 
 # --- Phase 2: the owner's operating states ----------------------------------------------------------------------
-SITES = {'ring': 'c003_site_v9.json', 'revc': 'c003_revC1_site.json'}
+SITES = {'ring': 'c003_site_v9.json', 'revc': 'c003_revC1_site.json',
+         'ring10': 'c003_site_v10.json', 'revc2': 'c003_revC2_site.json'}     # the owner's data of 20 October: test_reference_c003_v2
 
 
 def _site(design):
@@ -554,3 +555,51 @@ def test_revc_feeder_relays_see_their_own_current(client):
     total = 1000 * out['scenarios'][0]['short_circuit']['ikss_ka']
     assert trip['CB_F_S1A'] == pytest.approx(cable['F_S1A'], rel=0.01) and trip['CB_F_E1A'] == pytest.approx(cable['F_E1A'], rel=0.01)
     assert max(trip.values()) < 0.5 * total
+
+
+def _blackstart_gen_corrected(design='revc', typ='PowerFlowPandaPower Parameters', extra=None):
+    """Rev C's BLACKSTART_GEN with the cord-A hall feeders open too - as its later black-start states have them."""
+    p = _state(design, 'BLACKSTART_GEN', typ, extra)
+    for v in p.values():
+        if isinstance(v, dict) and str(v.get('typ', '')).startswith('Switch') \
+                and v.get('userFriendlyName') in ('CB_L_DH1_cordA', 'CB_L_DH2_cordA'):
+            v['closed'] = 'false'
+    return p
+
+
+def test_revc_genset_black_start_corrected_carries_aux_a(client):
+    """
+    BLACKSTART_GEN corrected - the cord-A hall feeders open, as the later black-start states have them: the genset
+    carries Aux A alone, 2.0 MW at 67 % of its 3 MVA, the board at 1.0 pu, TR_GEN within its rating.
+    """
+    lf = _post(client, _blackstart_gen_corrected())
+    (gen,) = [g for g in lf['generators'] if g['p_mw']]
+    assert gen['p_mw'] == pytest.approx(2.0, abs=0.01) and sum(l['p_mw'] for l in lf['loads']) == pytest.approx(2.0)
+    assert min(b['vm_pu'] for b in lf['busbars'] if b['vm_pu'] and b['vm_pu'] > 0) > 0.99
+    assert not any('TR_GEN' in w for w in lf.get('warnings') or [])
+
+
+def test_revc_genset_picks_up_aux_a(client):
+    """
+    ANDES, the corrected state: Aux A's 2.0 MW switched onto the genset in one step at 1 s - the frequency's nadir
+    48.0 Hz at 2.4 s, then its 5 % droop's 48.37 Hz (by hand 48.33 Hz, 50 (1 - 0.05 x 2.0 / 3.0)) until something restores it; the
+    loads at constant power. The rest of the site has no source in this state: ANDES failed on it ("list index out of
+    range"); its buses are set aside and reported at 0 V. The voltage swings slowly (0.76-1.08 pu) on the generic
+    exciter data - the genset's AVR is a vendor question.
+    """
+    import numpy as np
+    dt, tf = 0.05, 8.0
+    p = _blackstart_gen_corrected('revc', 'TransientStabilityAndes Parameters', {
+        'sn_mva': '100', 'tf': str(tf), 'tstep': '0', 'fault_enabled': 'false', 'load_model': 'power',
+        'load_profiles': {'pick': {'name': 'Aux A pick-up', 'kind': 'power', 'dt': dt, 't0': 0,
+                                   'p': [0.02 if k * dt < 1.0 else 1.0 for k in range(int(tf / dt) + 2)]}}})
+    for v in p.values():
+        if isinstance(v, dict) and str(v.get('typ', '')).startswith('Load') and str(v.get('userFriendlyName', '')).startswith('AUX_A'):
+            v['load_profile_id'], v['load_profile_q_mode'] = 'pick', 'pf'
+    out = _post(client, p)
+    assert any(w.startswith('No source reaches 70 bus(es)') for w in out['warnings'])
+    t, f = np.array(out['time']), out['frequency_hz']
+    f = np.array(f[0]['values'] if isinstance(f, list) and isinstance(f[0], dict) else f)
+    assert f.min() == pytest.approx(48.0, abs=0.05) and f[-1] == pytest.approx(48.37, abs=0.02)
+    v = {b['name']: b['values'] for b in out['bus_voltage']}
+    assert max(v['MVB']) == 0.0 and min(v['MVA']) > 0.7

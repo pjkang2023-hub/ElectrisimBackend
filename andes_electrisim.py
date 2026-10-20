@@ -298,6 +298,16 @@ def _islands(ss, out_lines=()) -> List[set]:
     return out
 
 
+def _dead_at_start(ss) -> set:
+    """The buses of the islands no Slack or PV (a source's static generator) reaches."""
+    sources = set(ss.Slack.bus.v) | set(ss.PV.bus.v)
+    dead = set()
+    for part in _islands(ss):
+        if not part & sources:
+            dead |= part
+    return dead
+
+
 def _deenergise_island(ss, out_lines, t: float, out_slacks=(), grid_forming=()) -> Tuple[List[Any], List[str], List[set]]:
     """
     Switch off, at time t, everything an outage - lines, or an External
@@ -1886,6 +1896,18 @@ def build_system(
         else:
             warnings.append("Grid voltage profile: the network has no External Grid to apply it to.")
 
+    # Parts of the network no source reaches - a black-start state, a board left dead - have no
+    # slack: ANDES's connectivity check failed on them ("list index out of range"). Their buses go
+    # out of service, their devices with them, and they are reported at 0 V.
+    dead_buses = _dead_at_start(ss)
+    if dead_buses:
+        dead_names = [bus_name_by_idx.get(b, str(b)) for b in ss.Bus.idx.v if b in dead_buses]
+        for k, b in enumerate(ss.Bus.idx.v):
+            if b in dead_buses:
+                ss.Bus.u.v[k] = 0
+        shown = ", ".join(dead_names[:12]) + (f" and {len(dead_names) - 12} more" if len(dead_names) > 12 else "")
+        warnings.append(f"No source reaches {len(dead_names)} bus(es), set aside and reported at 0 V: {shown}.")
+
     if ss.PQ.n:
         warnings.append(
             f"Loads are {_LOAD_MODEL_NAMES[load_model]} through the run"
@@ -1898,6 +1920,7 @@ def build_system(
 
     meta = {
         "load_model": load_model,
+        "dead_at_start": sorted(str(b) for b in dead_buses),
         "bus_map": bus_map,
         "bus_name_by_idx": {str(k): v for k, v in bus_name_by_idx.items()},
         "line_map": line_map,
@@ -2725,7 +2748,9 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
                 if str(bidx) not in meta["bus_name_by_idx"]:
                     continue  # a three-winding transformer's star point
                 islanded = meta.get("islanded_after")
-                if islanded and str(bidx) in islanded[1]:
+                if str(bidx) in meta.get("dead_at_start", ()):
+                    col = np.zeros_like(col)
+                elif islanded and str(bidx) in islanded[1]:
                     # A bus with nothing left on it keeps its last voltage in
                     # ANDES; it is dead.
                     col = np.where(t[idx] >= islanded[0], 0.0, col)
