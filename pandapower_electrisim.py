@@ -170,6 +170,49 @@ def isolated_bus_names(net, machines=False):
     return [r.get('name') or r.get('id') or str(r.get('index')) for r in isolated_refs]
 
 
+def _electrisim_json_finite(obj):
+    """A result with every NaN or infinite float (Python or numpy) as None, through dicts, lists and tuples."""
+    if isinstance(obj, dict):
+        return {k: _electrisim_json_finite(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_electrisim_json_finite(v) for v in obj]
+    if isinstance(obj, (float, np.floating)):
+        return float(obj) if math.isfinite(float(obj)) else None
+    return obj
+
+
+def _electrisim_sc_drop_dead_buses(net):
+    """
+    A short circuit's de-energised buses (no grid, machine or forming PCS reaches them) out of service, with every
+    element on them and every branch to them, and named in a warning; nothing when every bus is supplied.
+    """
+    slacks = set(int(b) for b in net.ext_grid.loc[net.ext_grid['in_service'].astype(bool), 'bus'])
+    if len(net.gen):
+        slacks |= set(int(b) for b in net.gen.loc[net.gen['in_service'].astype(bool), 'bus'])
+    dead = {int(b) for b in top.unsupplied_buses(net, slacks=slacks) if not _electrisim_is_grounding(net.bus, b)}
+    if not dead:
+        return
+    if not slacks or len(dead) >= len(net.bus):
+        raise ValueError(isolated_buses_message(net, machines=True) or 'No source energises any bus.')
+    names = [r.get('name') or r.get('id') or str(r.get('index')) for r in resolve_element_refs(net, 'bus', dead)]
+    net.bus.loc[list(dead), 'in_service'] = False
+    for table in ('load', 'sgen', 'gen', 'storage', 'shunt', 'motor', 'ward', 'xward', 'ext_grid', 'asymmetric_load',
+                  'asymmetric_sgen'):
+        df = net.get(table)
+        if df is not None and len(df) and 'bus' in df.columns:
+            df.loc[df['bus'].isin(dead), 'in_service'] = False
+    for table, cols in (('line', ('from_bus', 'to_bus')), ('trafo', ('hv_bus', 'lv_bus')),
+                        ('trafo3w', ('hv_bus', 'mv_bus', 'lv_bus')), ('impedance', ('from_bus', 'to_bus'))):
+        df = net.get(table)
+        if df is not None and len(df):
+            hit = np.zeros(len(df), dtype=bool)
+            for c in cols:
+                hit |= df[c].isin(dead).to_numpy()
+            df.loc[hit, 'in_service'] = False
+    shown = ', '.join(names[:12]) + (f' and {len(names) - 12} more' if len(names) > 12 else '')
+    _electrisim_warn(net, f"{len(names)} bus(es) no source energises are left out of the short circuit, de-energised: {shown}.")
+
+
 def ensure_ext_grid_zero_sequence_min(net):
     """
     pandapower single-phase min short-circuit reads ext_grid['x0x_min'] and
@@ -4246,16 +4289,57 @@ def _electrisim_share_island(net, n, group, gens):
     return worst
 
 
+def _electrisim_store_seconds(obj, p_mw):
+    """How long (s) a supercapacitor or flywheel delivers ``p_mw`` from its usable energy; None for another source."""
+    if p_mw <= 1e-9 or obj is None:
+        return None
+    if obj.kind == 'Supercapacitor':
+        usable = obj.energy()[1]
+    elif obj.kind == 'Flywheel':
+        usable = obj.e_max * max(obj.s0 ** 2 - obj.s_min ** 2, 0.0)
+    else:
+        return None
+    return usable / (p_mw * 1e6)
+
+
 def _electrisim_warn_island_short(net):
-    """An island its PCS and machines cannot balance within their limits, named once."""
+    """
+    An island its PCS and machines cannot balance within their limits, named once: by how much, what its
+    reference PCS then carries past its rating, how much of its supply only supercapacitors and flywheels give
+    (for seconds), and where to find the least load to shed.
+    """
     for n, short in (getattr(net, 'electrisim_island_short', None) or {}).items():
         if abs(short) <= 1e-6:
             continue
-        members = [r['label'] for r in getattr(net, 'electrisim_pcs', None) or [] if r.get('island') == n]
+        recs = [r for r in getattr(net, 'electrisim_pcs', None) or [] if r.get('island') == n]
+        members = [r['label'] for r in recs]
         what = (f"short by {short:.3f} MW: its grid-forming PCS and machines are at their limits"
                 if short > 0 else f"{-short:.3f} MW over what its PCS and machines can take in")
-        _electrisim_warn(net, f"The island formed by {', '.join(members)} is {what}; "
-                              "its reference PCS carries the difference beyond its limit.")
+        p_of = lambda r: (float(net[f"res_{r['table']}"].at[r['index'], 'p_mw'])            # noqa: E731
+                          if r.get('table') and r.get('index') in getattr(net, f"res_{r['table']}", pd.DataFrame()).index else None)
+        ref = next((r for r in recs if r.get('reference')), None)
+        p_ref = p_of(ref) if ref is not None else None
+        if ref is not None and p_ref is not None and np.isfinite(p_ref):
+            s = float(ref.get('s_rated') or 0.0)
+            past = abs(p_ref) - s
+            carry = (f"its reference PCS '{ref['label']}' carries {p_ref:.3f} MW"
+                     + (f", {past:.3f} MW past its {s:g} MVA rating" if s > 0 and past > 1e-3 else "") + ".")
+        else:
+            carry = "its reference PCS carries the difference beyond its limit."
+        brief = []
+        for r in recs:
+            src = r.get('source') or {}
+            p_r = p_of(r)
+            if src.get('kind') in ('Supercapacitor', 'Flywheel') and p_r is not None and p_r > 1e-3:
+                t = _electrisim_store_seconds(src.get('obj'), p_r)
+                brief.append((r['label'], p_r, t))
+        stores = ''
+        if short > 0 and brief:
+            stores = (f" {sum(b[1] for b in brief):.3f} MW of its supply comes from supercapacitors or flywheels, which hold it "
+                      "for seconds, not as a steady state: "
+                      + ', '.join(f"'{lab}' {pw:.3f} MW" + (f" for about {t:.3g} s" if t is not None else '') for lab, pw, t in brief) + ".")
+        _electrisim_warn(net, f"The island formed by {', '.join(members)} is {what}; {carry}{stores}"
+                              + (" Simulate, AC/DC Optimal Power Flow (least shed) gives the least load to shed." if short > 0 else ''))
 
 
 def _electrisim_der_dc_point(obj, p):
@@ -4293,6 +4377,13 @@ def _electrisim_der_dc_point(obj, p):
         note = (f"its PCS draws {p / 1e3:.4g} kW, more than its rating less its auxiliary load"
                 if p > obj.p_limits()[0] * (1 + 1e-6) else None)
         return obj.v_terminal(i), note
+    if obj.kind == 'Battery':
+        # Past OCV^2 / 4R no terminal voltage delivers it: the iteration below would run its voltage to nothing
+        # and its current (and C-rate) to billions. At its maximum-power point instead, and said so.
+        ocv, r = obj.ocv(), obj.r0 + obj.r1
+        if r > 0 and p > ocv * ocv / (4.0 * r):
+            return 0.5 * ocv, (f"its PCS draws {p / 1e3:.4g} kW, more than it can deliver at any terminal voltage "
+                               f"({ocv * ocv / (4.0 * r) / 1e3:.4g} kW, at half its open-circuit voltage)")
     v = obj.v_nominal()
     for _ in range(100):
         v_new = obj.v_terminal(p / max(v, 1e-6))
@@ -11627,9 +11718,10 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
   
     #print(net.line[net.line.isna().any(axis=1)])
     
-    isolated = isolated_buses_message(net, machines=True)
-    if isolated:
-        raise ValueError(isolated)
+    # Buses no source energises - a black start's dead network - are left out with what is on them, and named:
+    # the energised part is studied (a short circuit cannot be on a dead bus). Refused, every black-start state
+    # of a microgrid went unstudied.
+    _electrisim_sc_drop_dead_buses(net)
 
     pp.diagnostic(net)
     
@@ -12068,8 +12160,12 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
             print(f"Short Circuit: pandapower Python export failed: {py_err}")
             result['pandapower_python_error'] = str(py_err)
 
-    # OPTIMIZED: Compact JSON for faster transfer
+    # OPTIMIZED: Compact JSON for faster transfer. A de-energised bus's results are NaN: null, as the browser's
+    # strict JSON.parse requires.
+    # (Its busbars are objects the encoder's default turns into dicts: cleaned after a first pass.)
     response = json.dumps(result, default=_json_serialize_default, separators=(",", ":"))
+    if 'NaN' in response or 'Infinity' in response:
+        response = json.dumps(_electrisim_json_finite(json.loads(response)), separators=(",", ":"))
     return response
 
 

@@ -1499,3 +1499,19 @@ def test_tds_ssts_hand_over_to_their_stores(client):
     assert sorted(ease) == [f'{s} (MV)' for s in _HALL_B_SSTS]
     e = ease['Hall B SST 1 (MV)']
     assert e['spare_mw'] == pytest.approx(5.0 / 3, abs=0.01) and e['min_factor'] == pytest.approx(0.39, abs=0.01)
+
+
+def test_load_flow_island_short_says_by_how_much_and_where(client):
+    """
+    The site islanded with the turbine off: the load flow balances its island only past its limits, and says so
+    plainly - short by 3.878 MW, its reference PCS (the eSTATCOM) carrying 18.578 MW, 3.578 MW past its 15 MVA
+    rating, all of it from supercapacitors that hold it for about 0.3 s - and where the least load to shed is found.
+    """
+    out = _post(client, _variant(_payload(), {'Grid': {'in_service': 'false'}, 'Gas turbine': {'in_service': 'false'}}))
+    short = [w for w in out.get('warnings') or [] if w.startswith('The island formed by')]
+    assert len(short) == 1, out.get('warnings')
+    w = short[0]
+    assert 'short by 3.878 MW' in w
+    assert "its reference PCS 'eSTATCOM' carries 18.578 MW, 3.578 MW" in w and 'past its 15 MVA rating' in w
+    assert 'from supercapacitors or flywheels' in w and 'for about 0.3' in w
+    assert w.endswith('Simulate, AC/DC Optimal Power Flow (least shed) gives the least load to shed.')

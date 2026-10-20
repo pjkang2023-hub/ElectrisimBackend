@@ -146,7 +146,8 @@ def test_factory_island_least_shed(client, quiet):
     battery's limit (and, past 5 MW batteries, their transformer at its rating). With the set points free (the converters retuned for the island: the rectifiers
     stepping aside), 6.06 MW, every DC store converter at its battery's
     2.5 MW (2.448 MW out) and each substation PCS at its battery's limit; without DC voltages, 6.05 MW. The load
-    flow's own island has its reference PCS carry 18.6 MW past its rating.
+    flow's own island has its reference PCS, the eSTATCOM, carry 18.6 MW - 3.6 MW past its 15 MVA rating, all of it
+    from supercapacitors that hold it for about 0.3 s.
     """
     p = lambda **kw: _off(_payload('reference_ai_factory_800vdc', objective='shed', batteries=True, **kw), 'Grid', 'Gas turbine')
     out = _run(client, quiet, p())
