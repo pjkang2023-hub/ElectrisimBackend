@@ -130,8 +130,9 @@ def test_an_island_held_only_by_pcs_rides_through_a_fault(client, quiet):
         result = json.loads(client.post('/', json=request).get_data(as_text=True))
     assert not result.get('error') and result['converged'] is True, result.get('message')
     # The fault takes it to its current limit, which its virtual impedance holds it at.
-    assert result['time'][-1] == pytest.approx(5.0) and len(result['warnings']) == 1, result['warnings']
-    assert result['warnings'][0].startswith("PCS 'GA' reached its current limit (1.2 pu of its rating) at t = 1.0")
+    warns = [w for w in result['warnings'] if not w.startswith('Loads are ')]
+    assert result['time'][-1] == pytest.approx(5.0) and len(warns) == 1, result['warnings']
+    assert warns[0].startswith("PCS 'GA' reached its current limit (1.2 pu of its rating) at t = 1.0")
     (pcs,) = result['pcs']
     t, i = np.asarray(result['time']), np.asarray(pcs['current_pu'])
     assert i[(t > 1.07) & (t < 1.1)].max() <= 1.2 * 1.03
@@ -142,3 +143,23 @@ def test_an_island_held_only_by_pcs_rides_through_a_fault(client, quiet):
     assert pcs['model'] == 'GENCLS' and pcs['p_mw'][0] == pytest.approx(flow['pcs'][0]['p_mw'], rel=2e-3)
     assert pcs['p_mw'][-1] == pytest.approx(pcs['p_mw'][0], rel=1e-4)
     assert min(pcs['frequency_hz']) < 49.9 and pcs['frequency_hz'][-1] == pytest.approx(50.0, abs=1e-3)
+
+
+@pytest.mark.parametrize('model, weights', [(None, (0, 0, 1)), ('impedance', (0, 0, 1)), ('current', (0, 1, 0)),
+                                            ('power', (1, 0, 0)), ('zip', (0, 0, 1))])
+def test_load_model_through_the_run(quiet, model, weights):
+    """
+    ANDES holds a load at its power in the load flow only; through the run it is what the PQ weights say - by
+    default all constant impedance. The study's load_model sets them, and the result says which it was; an unknown
+    one falls back to constant impedance and says so.
+    """
+    params = {**TDS, **({'load_model': model} if model else {})}
+    request, _ = _radial(params)
+    with quiet():
+        ss, meta = andes_electrisim.build_system(request, params)
+    c = ss.PQ.config
+    assert (c.p2p, c.p2i, c.p2z) == weights and (c.q2q, c.q2i, c.q2z) == weights
+    name = {(0, 0, 1): 'impedance', (0, 1, 0): 'current', (1, 0, 0): 'power'}[weights]
+    assert meta['load_model'] == name
+    assert any(w.startswith(f'Loads are constant {name} through the run') for w in meta['warnings'])
+    assert (model == 'zip') == any("Load model 'zip'" in w for w in meta['warnings'])

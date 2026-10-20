@@ -1791,13 +1791,14 @@ def test_drawn_diagram_eigenvalues(client, quiet, grid):
     assert result['verdict'] == 'stable'
     assert result['n_positive'] == 0
 
-    # Motors are constant P/Q loads in ANDES; the study must say so, as it
-    # does for plants without a dynamic model.
+    # Motors are static loads in ANDES; the study must say so, as it does
+    # for plants without a dynamic model - and what the loads are in the run.
     motors = [m['name'] for m in load_spec(grid).get('motors', [])]
     assert motors
     for motor in motors:
-        assert f"Motor '{motor}' has no ANDES dynamic model here: modelled as a constant P/Q load." \
+        assert f"Motor '{motor}' has no ANDES dynamic model here: modelled as a static load, as the other loads are." \
             in result['warnings'], result['warnings']
+    assert any(w.startswith('Loads are constant impedance through the run') for w in result['warnings'])
 
     # One row per complex pair: the conjugate is the same mode.
     modes = result['least_damped_modes']

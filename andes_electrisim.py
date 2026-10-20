@@ -798,6 +798,11 @@ def _smoothed_mix(mix, stores: List[Dict[str, Any]], tf: float, repeat: bool):
     return [(total, out_t, np.interp(out_t, grid, net) / total)]
 
 
+# (constant power, constant current, constant impedance) weights of a load during the run
+_LOAD_MODELS = {"impedance": (0.0, 0.0, 1.0), "current": (0.0, 1.0, 0.0), "power": (1.0, 0.0, 0.0)}
+_LOAD_MODEL_NAMES = {"impedance": "constant impedance", "current": "constant current", "power": "constant power"}
+
+
 def build_system(
     in_data: Dict[str, Any],
     params: Optional[Dict[str, Any]] = None,
@@ -839,6 +844,20 @@ def build_system(
         ss.files.no_output = True
     except Exception:
         pass
+
+    # The loads during the run. ANDES holds a PQ load at its load-flow power
+    # only in the load flow: from t = 0 it becomes what its config weights
+    # say - by default all constant impedance, so a load at 0.9 pu draws 81 %
+    # of its power and an island's frequency and voltage fall less than with
+    # the load flow's constant power. Constant power has no low-voltage
+    # fallback in ANDES: through a deep fault it may not converge.
+    load_model = str(params.get("load_model") or "impedance").strip().lower()
+    if load_model not in _LOAD_MODELS:
+        warnings.append(f"Load model '{load_model}' is not one of {', '.join(_LOAD_MODELS)}: constant impedance used.")
+        load_model = "impedance"
+    wp, wi, wz = _LOAD_MODELS[load_model]
+    ss.PQ.config.p2p, ss.PQ.config.p2i, ss.PQ.config.p2z = wp, wi, wz
+    ss.PQ.config.q2q, ss.PQ.config.q2i, ss.PQ.config.q2z = wp, wi, wz
 
     # --- Buses ---
     bus_counter = 1
@@ -1234,7 +1253,7 @@ def build_system(
         # the motor's own dynamics are not in the study.
         warnings.append(
             f"Motor '{el.get('userFriendlyName') or el.get('name')}' has no ANDES dynamic model here: "
-            "modelled as a constant P/Q load."
+            "modelled as a static load, as the other loads are."
         )
 
     # --- Shunts / capacitors ---
@@ -1867,10 +1886,18 @@ def build_system(
         else:
             warnings.append("Grid voltage profile: the network has no External Grid to apply it to.")
 
+    if ss.PQ.n:
+        warnings.append(
+            f"Loads are {_LOAD_MODEL_NAMES[load_model]} through the run"
+            + (" (ANDES's model: power with the voltage squared - the load flow holds them at constant power)"
+               if load_model == "impedance" else "")
+            + ".")
+
     if setup:
         ss.setup()
 
     meta = {
+        "load_model": load_model,
         "bus_map": bus_map,
         "bus_name_by_idx": {str(k): v for k, v in bus_name_by_idx.items()},
         "line_map": line_map,
