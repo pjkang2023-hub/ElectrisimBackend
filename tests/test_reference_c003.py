@@ -116,7 +116,8 @@ def _state(design, state_id, typ='PowerFlowPandaPower Parameters', extra=None, l
     """
     The drawn payload in one of the Site's operating states: its switches opened, its sources out of service. As
     mgtwin (v0.6.5) reads a state: the payload draws normally open switches open; the state opens its
-    open_switches and closes its closed_switches (a transfer's second legs, a tie).
+    open_switches and closes its closed_switches (a transfer's second legs, a tie); its load_factors scale its
+    loads (v0.6.10: the dual-corded halls moving to the other cord).
     """
     import copy
     site = _site(design)
@@ -125,6 +126,8 @@ def _state(design, state_id, typ='PowerFlowPandaPower Parameters', extra=None, l
     on = set(state['energized_source_ids']) - set(also_off)
     opened = set(state.get('open_switches') or [])
     closes = set(state.get('closed_switches') or [])
+    # the state's load transfer (mgtwin v0.6.10 load_factors); a load_scale given here replaces its factor
+    load_scale = {**(state.get('load_factors') or {}), **(load_scale or {})}
     p = copy.deepcopy(_payload(design))
     p['0'] = {**p['0'], 'typ': typ, **(extra or {})}
 

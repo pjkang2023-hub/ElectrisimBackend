@@ -485,3 +485,19 @@ def test_short_circuit_on_a_de_energised_bus(client):
     both = sc(['MVB', 'MVA'])
     assert not both.get('error') and any('Fault bus MVB is de-energised' in w for w in both.get('warnings') or [])
     assert [b['ikss_ka'] for b in both['busbars']] == [pytest.approx(0.285, abs=0.005)]
+
+
+def test_a_state_moves_the_halls_to_the_other_cord(client, monkeypatch):
+    """
+    A state's load_factors (mgtwin v0.6.10) are the load transfer a Site's fixed loads cannot express: the ring's
+    BUS_MVB_FAULT with IT_cordA x 2 - the halls on cord A when MVB is lost - puts Section 9's 574 A on LN_A_MVA,
+    as the load_scale the study gave by hand.
+    """
+    import copy
+    import test_reference_c003 as t3
+    site = copy.deepcopy(t3._site('ring10'))
+    next(s for s in site['islands'] if s['id'] == 'BUS_MVB_FAULT')['load_factors'] = {'IT_cordA': 2.0}
+    monkeypatch.setattr(t3, '_site', lambda design: site)
+    declared = _feeder_load_a(client, 'ring10', 'BUS_MVB_FAULT')
+    by_hand = _feeder_load_a(client, 'ring10', 'BUS_MVB_FAULT', load_scale={'IT_cordA': 2.0})
+    assert declared['LN_A_MVA'] == pytest.approx(574, abs=10) and declared == by_hand
