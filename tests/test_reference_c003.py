@@ -113,13 +113,18 @@ def _site(design):
 
 
 def _state(design, state_id, typ='PowerFlowPandaPower Parameters', extra=None, load_scale=None, also_off=()):
-    """The drawn payload in one of the Site's operating states: its switches opened, its sources out of service."""
+    """
+    The drawn payload in one of the Site's operating states: its switches opened, its sources out of service. As
+    mgtwin (v0.6.5) reads a state: the payload draws normally open switches open; the state opens its
+    open_switches and closes its closed_switches (a transfer's second legs, a tie).
+    """
     import copy
     site = _site(design)
     state = next(s for s in site['islands'] if s['id'] == state_id)
     sources = [c['id'] for c in site['converters']] + [m['id'] for m in site['machines']]
     on = set(state['energized_source_ids']) - set(also_off)
     opened = set(state.get('open_switches') or [])
+    closes = set(state.get('closed_switches') or [])
     p = copy.deepcopy(_payload(design))
     p['0'] = {**p['0'], 'typ': typ, **(extra or {})}
 
@@ -132,6 +137,8 @@ def _state(design, state_id, typ='PowerFlowPandaPower Parameters', extra=None, l
         name, t = str(v.get('userFriendlyName', '')), str(v.get('typ', ''))
         if t.startswith('Switch') and name in opened:
             v['closed'] = 'false'
+        if t.startswith('Switch') and name in closes:
+            v['closed'] = 'true'
         for s in sources:
             if name.startswith(label(s)):
                 v['in_service'] = 'true' if s in on else 'false'

@@ -435,3 +435,26 @@ def test_andes_65_percent_step_ring_with_a_pcs_out_collapses(client):
     out, f, sofc, cur = _step(client, 'ring10', 'N1_PCS', tf=4.0)
     assert out['time'][-1] < 1.1
     assert sofc[-1] < 0.5 * sofc[0] and cur[-1] > 1.1
+
+
+def test_a_state_closes_its_transfer_legs(client, monkeypatch):
+    """
+    Switch states as mgtwin v0.6.5 reads them: a normally open switch stays open unless the state lists it in
+    closed_switches. Rev C.2's fast transfer re-closes groups 1-5's transformers onto SOFC-2A through their second
+    legs: with CB_SOFC01_2-05_2 closed only the faulted section SOFC1A is left without supply; as the owner's Site
+    declares it (no closed_switches) the five groups' buses are dead too - the state energises nothing, as
+    mgtwin's energisation gate says.
+    """
+    import copy
+    import test_reference_c003 as t3
+    legs = [f'CB_SOFC0{k}_2' for k in range(1, 6)]
+    unsupplied = {}
+    for closes in ([], legs):
+        site = copy.deepcopy(t3._site('revc2'))
+        next(s for s in site['islands'] if s['id'] == 'FAST_TRANSFER_WHOLE_SECTION')['closed_switches'] = closes
+        monkeypatch.setattr(t3, '_site', lambda design, site=site: site)
+        out = _post(client, _state('revc2', 'FAST_TRANSFER_WHOLE_SECTION'))
+        monkeypatch.undo()
+        unsupplied[len(closes)] = ' '.join(w for w in out.get('warnings') or [] if 'no supply' in w)
+    assert 'SOFC01_HV' in unsupplied[0] and 'SOFC05_LV' in unsupplied[0]
+    assert 'SOFC1A' in unsupplied[5] and 'SOFC01' not in unsupplied[5]
