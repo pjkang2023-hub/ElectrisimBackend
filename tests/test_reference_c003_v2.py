@@ -376,3 +376,62 @@ def test_andes_bridging_ramp_reaches_the_sofc_under_frequency_trip(client, desig
     _, f, sofc = _ramp(client, design, 'power')
     assert f.min() == pytest.approx(f_min, abs=0.03)
     assert sofc[0] - sofc[-1] == pytest.approx(sofc_lost, abs=0.1)
+
+
+def _step(client, design, state, tf=10.0, dt=0.05):
+    """The owner's 65 % step at t = 1 s: the IT from idle (11.05 MW) to 30 MW at constant power, the SOFC held at their
+    idle dispatch (0.96 pf), the PCS at 45 C holding their Q-V droop."""
+    import numpy as np
+    p = _state(design, state, 'TransientStabilityAndes Parameters', {
+        'sn_mva': '100', 'tf': str(tf), 'tstep': '0', 'fault_enabled': 'false', 'load_model': 'power'})
+    n_on = len([x for x in next(st for st in _site(design)['islands'] if st['id'] == state)['energized_source_ids']
+                if x.startswith('SOFC')])
+    p['0']['load_profiles'] = {'step': {'name': 'step', 'kind': 'power', 'dt': dt, 't0': 0,
+                                        'p': [11.05 / LOAD_MW if k * dt < 1.0 else 1.0 for k in range(int(tf / dt) + 2)]}}
+    for v in p.values():
+        if not isinstance(v, dict):
+            continue
+        name, t = str(v.get('userFriendlyName', '')), str(v.get('typ', ''))
+        if 'PCST5500' in name:
+            v['inlet_c'] = '45'
+        if name.endswith(' SOFC'):
+            v['p_set_kw'] = str(round(11.05 * 1.01 / n_on * 1e3, 1))
+        if name.endswith(' inverter'):
+            v['q_mode'], v['pf'] = 'pf', '0.96'
+        if t.startswith('Load') and not t.startswith('Load DC'):
+            v['load_profile_id'], v['load_profile_q_mode'] = 'step', 'pf'
+    out = _post(client, p)
+    gfm = [x for x in out['pcs'] if x['control'] == 'grid_forming']
+    f = np.asarray(gfm[0]['frequency_hz'], dtype=float)
+    sofc = sum(np.asarray(x['p_mw'], dtype=float) for x in out['pcs'] if x['control'] != 'grid_forming')
+    cur = np.max([np.asarray(x['current_pu'], dtype=float) for x in gfm], axis=0)
+    return out, f, sofc, cur
+
+
+@pytest.mark.parametrize('design, state, f_end, i_peak', [('ring10', 'NORMAL', 48.46, 0.92), ('revc2', 'NORMAL', 48.74, 0.72),
+                                                         ('revc2', 'N1_PCS', 48.47, 0.89)])
+def test_andes_65_percent_step_carried(client, design, state, f_end, i_peak):
+    """
+    The owner's 65 % step taken at once - 18.95 MW on the PCS, the SOFC still at idle: the ring with its five PCS and
+    Rev C.2 with five or six carry it at 45 C, the frequency on their droop (48.46, 48.74 and 48.47 Hz), the PCS's
+    current at most 0.92 pu, the batteries giving some 1.5 % of their charge in 9 s. (The workload's own ramp, 8 %/s,
+    is the bridging case.)
+    """
+    out, f, sofc, cur = _step(client, design, state)
+    assert out['time'][-1] == pytest.approx(10.0)
+    assert f[-1] == pytest.approx(f_end, abs=0.03) and cur.max() == pytest.approx(i_peak, abs=0.03)
+    assert sofc[-1] > sofc[0] - 0.3
+
+
+def test_andes_65_percent_step_ring_with_a_pcs_out_collapses(client):
+    """
+    The ring with a PCS out at 45 C: four PCS take the 19 MW step through their virtual machines' 0.2 pu, and the
+    switchboards dip below 0.88 pu within 10 ms - where the SOFC inverters cease (IEEE 1547 momentary cessation,
+    ASSUMED). The PCS then carry the SOFC's 11 MW too, pass their limit and the island collapses within 50 ms - at
+    1.5 pu as at 1.1. Some 16 MW at once is the edge. Model-dependent: a real PCS's voltage loop acts within
+    milliseconds; the requirement is that the SOFC ride through such a dip (R5) and the workload step no faster
+    than its 8 %/s ramp.
+    """
+    out, f, sofc, cur = _step(client, 'ring10', 'N1_PCS', tf=4.0)
+    assert out['time'][-1] < 1.1
+    assert sofc[-1] < 0.5 * sofc[0] and cur[-1] > 1.1
