@@ -11737,6 +11737,24 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
     fault_location = in_data.get('fault_location', 'max')  # Frontend 'fault_location' becomes pandapower 'case'
     fault_bus_mode = normalize_fault_bus_mode(in_data)
     bus = resolve_pp_fault_bus_indices(net, in_data, Busbars)
+    if bus is not None and len(bus):
+        # A fault bus de-energised in this state (set out of service above) has no fault current: pandapower,
+        # given one, failed on an empty array ("attempt to get argmax of an empty sequence").
+        live = [b for b in bus if bool(net.bus.at[b, 'in_service'])]
+        dead = [b for b in bus if b not in live]
+        if dead:
+            dead_names = [r.get('name') or r.get('id') or str(r.get('index'))
+                          for r in resolve_element_refs(net, 'bus', set(dead))]
+            if not live:
+                return {"error": True,
+                        "message": f"Short circuit: fault bus{'es' if len(dead) > 1 else ''} "
+                                   f"{', '.join(dead_names)} {'are' if len(dead) > 1 else 'is'} de-energised in this "
+                                   f"state - no source reaches {'them' if len(dead) > 1 else 'it'}, so there is no "
+                                   f"fault current to compute. Choose a bus a source supplies."}
+            _electrisim_warn(net, f"Fault bus{'es' if len(dead) > 1 else ''} {', '.join(dead_names)} "
+                                  f"{'are' if len(dead) > 1 else 'is'} de-energised in this state and left out: "
+                                  f"no source reaches {'them' if len(dead) > 1 else 'it'}, so no fault current.")
+            bus = live
     if bus is not None and len(bus) == 1:
         bus = bus[0]
     

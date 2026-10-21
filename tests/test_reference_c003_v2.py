@@ -458,3 +458,30 @@ def test_a_state_closes_its_transfer_legs(client, monkeypatch):
         unsupplied[len(closes)] = ' '.join(w for w in out.get('warnings') or [] if 'no supply' in w)
     assert 'SOFC01_HV' in unsupplied[0] and 'SOFC05_LV' in unsupplied[0]
     assert 'SOFC1A' in unsupplied[5] and 'SOFC01' not in unsupplied[5]
+
+
+def test_short_circuit_on_a_de_energised_bus(client):
+    """
+    Rev C.2's BLACKSTART_GEN: the genset alone at MVA, MVB dead (its tie normally open). A fault selected on MVB
+    has no fault current: the study says so instead of pandapower failing on an empty array ("attempt to get argmax
+    of an empty sequence"); selected with MVA, MVB is left out with a warning and MVA's 0.29 kA is computed.
+    """
+    import contextlib
+    import io as _io
+    import json
+    p = _payload('revc2')
+    cell = {v.get('userFriendlyName'): v['name'] for v in p.values() if isinstance(v, dict) and 'name' in v}
+
+    def sc(buses):
+        payload = _state('revc2', 'BLACKSTART_GEN', 'ShortCircuitPandaPower Parameters',
+                         {**SC, 'fault_type': '3ph', 'fault_location': 'max', 'fault_bus_mode': 'selected',
+                          'fault_bus_ids': [cell[b] for b in buses], 'fault_bus_names': buses})
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            r = client.post('/', json=payload)
+        return json.loads(r.get_data(as_text=True))
+    alone = sc(['MVB'])
+    assert alone['error'] and 'MVB is de-energised in this state' in alone['message'] and 'argmax' not in alone['message']
+    both = sc(['MVB', 'MVA'])
+    assert not both.get('error') and any('Fault bus MVB is de-energised' in w for w in both.get('warnings') or [])
+    assert [b['ikss_ka'] for b in both['busbars']] == [pytest.approx(0.285, abs=0.005)]
