@@ -2123,6 +2123,9 @@ _PROFILE_MAX_PIECES = 2000
 
 _PCS_CHECK_S = 0.02          # how often a grid-forming PCS's current and store are looked at (s)
 _PCS_X_MAX = 50.0            # its virtual impedance at most, times its own
+_PCS_VC_T = 0.1              # its voltage control's time constant (s): an integral step each check
+_PCS_VF_RANGE = (0.5, 1.6)   # its internal voltage within (pu)
+_PCS_VC_VDIP = 0.8           # below this terminal voltage (pu) its voltage control holds (a fault)
 
 
 class _GridFormingLimits:
@@ -2141,8 +2144,9 @@ class _GridFormingLimits:
     one check.
     """
 
-    def __init__(self, ss, meta: Dict[str, Any], check_s: float):
+    def __init__(self, ss, meta: Dict[str, Any], check_s: float, voltage_control: bool = True):
         self.ss, self.meta, self.check_s = ss, meta, check_s
+        self.voltage_control = voltage_control
         self.units = []
         gencls = list(ss.GENCLS.idx.v) if getattr(ss, "GENCLS", None) is not None and ss.GENCLS.n else []
         for name, g in meta["gen_map"].items():
@@ -2152,8 +2156,12 @@ class _GridFormingLimits:
                 continue
             i = gencls.index(g["model_idx"])
             st = g.get("store")
+            bus_v = float(ss.Bus.v.v[ss.Bus.idx2uid(g["bus"])])
             self.units.append({
                 "name": name, "g": g, "i": i, "x0": float(ss.GENCLS.xq.v[i]),
+                # Its Q-V droop through its operating point: V = v0 - droop (Q - q0) / S.
+                "v0": bus_v, "q0": float(ss.GENCLS.Qe.v[i]) * float(meta["sn_mva"]) / g["s_rated_mva"],
+                "droop_qv": max(_sf(g.get("droop_qv"), 0.0), 0.0), "vf_hist": [],
                 "k": max(_sf(g.get("current_limit_pu"), 1.2), 0.05), "store": st,
                 # With a short-time overload its limit is the overload's ceiling for the time it has been
                 # over its rating (150 % for 1 s, 120 % to 10 s, then its rating), not a fixed one.
@@ -2208,6 +2216,8 @@ class _GridFormingLimits:
                 u["limited_s"] += self.check_s
             if x_new != x:
                 ss.GENCLS.xq.v[i] = x_new
+            if self.voltage_control:
+                self._hold_voltage(u, x_new)
             if st and ((u["soc"] <= st["soc_min"] and p_dc > 0) or (u["soc"] >= st["soc_max"] and p_dc < 0)):
                 u["soc"] = min(max(u["soc"], st["soc_min"]), st["soc_max"])
                 u["running"], u["stopped_at"] = False, t
@@ -2219,6 +2229,28 @@ class _GridFormingLimits:
             u["hist_x"].append(x_new / u["x0"])
         if tripped:
             ss.TDS.custom_event = True
+
+    def _hold_voltage(self, u, x_new: float) -> None:
+        """
+        GENCLS holds its internal voltage through the run; a grid-forming inverter holds its
+        terminal at its Q-V droop's set point within milliseconds. Each check its internal
+        voltage moves toward that set point - an integral step of check_s / 0.1 s - so as the
+        PCS load up their terminals stay on their droop, as in the load flow. Held while its
+        current is limited (its virtual impedance raised) or its terminal is below 0.8 pu - in a
+        fault, where it would wind up and overshoot on clearing (REGF1's Vdip does the same).
+        """
+        if x_new > u["x0"] * 1.0001:
+            return
+        ss, i, g = self.ss, u["i"], u["g"]
+        v = float(ss.Bus.v.v[ss.Bus.idx2uid(g["bus"])])
+        if v < _PCS_VC_VDIP:
+            return
+        q = float(ss.GENCLS.Qe.v[i]) * float(self.meta["sn_mva"]) / g["s_rated_mva"]
+        target = u["v0"] - u["droop_qv"] * (q - u["q0"])
+        vf = float(ss.GENCLS.vf0.v[i])
+        new = min(max(vf + (target - v) * min(self.check_s / _PCS_VC_T, 1.0), _PCS_VF_RANGE[0]), _PCS_VF_RANGE[1])
+        if abs(new - vf) > 1e-9:
+            ss.GENCLS.vf0.v[i] = new
 
     def report(self, warnings: List[str]) -> None:
         for u in self.units:
@@ -2673,7 +2705,7 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
         if _sb(params.get("pcs_limits"), True):
             # Not finer than the run's own step: a piece shorter than it is one short step.
             check_s = max(_sf(params.get("pcs_check_s"), _PCS_CHECK_S), float(ss.TDS.config.tstep or 0.0))
-            limits = _GridFormingLimits(ss, meta, check_s)
+            limits = _GridFormingLimits(ss, meta, check_s, voltage_control=_sb(params.get("pcs_voltage_control"), True))
         meta["pcs_limits"] = limits
         shedding = _LoadShedding(ss, meta, params, limits, profiled, meta["warnings"])
         easing = _RectifierEasing(ss, meta, profiled, meta["warnings"])

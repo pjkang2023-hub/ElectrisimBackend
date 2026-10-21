@@ -421,16 +421,18 @@ def test_andes_restart_step_shared_by_droop(client, quiet):
 def test_andes_a_block_tripped_at_8_s(client, quiet):
     """
     Block 3's T2 out at 8 s, the racks at 0.85 pu: the other eight PCS take
-    1.16 MW each, 117 % - inside their 120 % for 10 s - at 59.5 Hz; past 10 s
-    over their rating their ceiling falls to it and the island sags further:
-    load must come off within 10 s of losing a block.
+    1.22 MW each, 123 % - inside their 150 % for 1 s, past their 120 % for
+    10 s - at 59.43 Hz, their voltage control holding the backbone (without
+    it the island sagged and the racks drew 1.16 MW); past 10 s over their
+    rating their ceiling falls to it and the island sags further: load must
+    come off within 10 s of losing a block.
     """
     out = _andes(client, quiet, 20, line='Block 3 T2 0.505/34.5 kV Dy1 (505 V star floating)')
     left = [g for g in out['pcs'] if not g['label'].startswith('Block 3')]
     assert len(left) == 8
     for g in left:
-        assert _at(g, 'p_mw', 8.5, out['time']) == pytest.approx(1.16, abs=0.02)
-        assert _at(g, 'frequency_hz', 8.5, out['time']) == pytest.approx(59.5, abs=0.03)
+        assert _at(g, 'p_mw', 8.5, out['time']) == pytest.approx(1.22, abs=0.02)
+        assert _at(g, 'frequency_hz', 8.5, out['time']) == pytest.approx(59.43, abs=0.03)
         assert 1.15 < _at(g, 'current_pu', 8.5, out['time']) < 1.25
         assert max(g['current_limit_series_pu']) == pytest.approx(1.5) and min(g['current_limit_series_pu']) == pytest.approx(1.0)
     assert any("reached its short-time overload's ceiling" in w for w in out['warnings'])
@@ -1829,15 +1831,16 @@ def test_nine_blocks_drawn_give_the_specs_answer(client, quiet):
 
 
 @pytest.mark.parametrize('inlet, profile, i_after, i_end, bb_end', [
-    (40, False, 0.974, 0.974, 0.983), (45, False, 1.023, 1.001, 0.963), (45, True, None, None, None)])
+    (40, False, 0.9795, 0.9795, 0.9886), (45, False, 1.0285, 1.0009, 0.9626), (45, True, None, None, None)])
 def test_andes_nine_blocks_lose_one(client, quiet, inlet, profile, i_after, i_end, bb_end):
     """
     Block 9's T2 out at 8 s, the racks at full load: the other 32 PCS take
-    0.96 MW each in one step, no overshoot, at 59.88 Hz. At 40 deg C that is
-    97 % of their current and holds. At 45 deg C, 102 %: inside the 120 %
-    ten-second rating; at 18 s their ceiling falls to 1 pu, they hold at it,
-    and the backbone sags to 0.963 pu, the racks' load falling with it - 0.92
-    MW each, some 1.2 MW short of what they need: the load to shed within 10 s.
+    0.971 MW each in one step, no overshoot, at 59.87 Hz, their voltage
+    control holding the backbone. At 40 deg C that is 98 % of their current
+    and holds. At 45 deg C, 103 %: inside the 120 % ten-second rating; at 18 s
+    their ceiling falls to 1 pu, they hold at it, and the backbone sags to
+    0.963 pu, the racks' load falling with it - 0.92 MW each, some 1.6 MW short
+    of what they need: the load to shed within 10 s.
     On the DGX H100 training profile, though, 45 deg C is no trouble: the
     cycle averages under the 32 PCS's rating and they never reach a ceiling.
     """
@@ -1866,8 +1869,8 @@ def test_andes_nine_blocks_lose_one(client, quiet, inlet, profile, i_after, i_en
     bb = next(b['values'] for b in out['bus_voltage'] if b['name'] == 'Load backbone 5')
     for g in left:
         assert _at(g, 'p_mw', 7.9, tm) == pytest.approx(0.865, abs=0.003)
-        assert _at(g, 'p_mw', 12, tm) == pytest.approx(0.96, abs=0.003)
-        assert _at(g, 'frequency_hz', 12, tm) == pytest.approx(59.88, abs=0.01)
+        assert _at(g, 'p_mw', 12, tm) == pytest.approx(0.971, abs=0.003)
+        assert _at(g, 'frequency_hz', 12, tm) == pytest.approx(59.87, abs=0.01)
         assert _at(g, 'current_pu', 12, tm) == pytest.approx(i_after, abs=0.003)
         assert g['peak_current_pu'] == pytest.approx(i_after, abs=0.003)          # no overshoot on the step
         assert _at(g, 'current_pu', 24.9, tm) == pytest.approx(i_end, abs=0.003)
@@ -1944,9 +1947,9 @@ def test_shedding_on_inverter_loading_at_45c(client, quiet):
     """
     Block 9 lost at full load and 45 deg C, a scheme watching the PCS's
     loading (pickup 1.0 pu of their rating, 2 s): one 5 % step of the nine
-    halls' SSTs - 1.54 MW - at 10.03 s takes the 32 PCS from 102.3 % to
-    97.5 % at 59.93 Hz, and they never reach their ten-second ceiling. A 3 %
-    step (0.93 MW) only just does it (99.4 %); a delay of 9.5 s still sheds
+    halls' SSTs - 1.54 MW - at 10.03 s takes the 32 PCS from 102.9 % to
+    97.8 % at 59.93 Hz, and they never reach their ten-second ceiling. A 3 %
+    step (0.93 MW) only just does it (99.8 %); a delay of 9.5 s still sheds
     before the ceiling falls at 18 s.
     """
     out, shed, left = _andes9_shed(client, quiet, 45, 'loading')
@@ -1955,12 +1958,12 @@ def test_shedding_on_inverter_loading_at_45c(client, quiet):
     assert s['t_s'] == pytest.approx(10.03, abs=0.03) and s['shed_mw'] == pytest.approx(1.54, abs=0.02)
     assert s['kept_percent'] == pytest.approx(95.0)
     for g in left:
-        assert _at(g, 'current_pu', 20, out['time']) == pytest.approx(0.975, abs=0.003)
-        assert _at(g, 'frequency_hz', 20, out['time']) == pytest.approx(59.933, abs=0.005)
+        assert _at(g, 'current_pu', 20, out['time']) == pytest.approx(0.978, abs=0.003)
+        assert _at(g, 'frequency_hz', 20, out['time']) == pytest.approx(59.926, abs=0.005)
         assert g['current_limited_from_s'] is None
     out3, small, left = _andes9_shed(client, quiet, 45, 'loading', step='3')
     assert small['shed_mw'] == pytest.approx(0.93, abs=0.02)
-    assert _at(left[0], 'current_pu', 20, out3['time']) == pytest.approx(0.994, abs=0.003)
+    assert _at(left[0], 'current_pu', 20, out3['time']) == pytest.approx(0.998, abs=0.003)
     _, late, left = _andes9_shed(client, quiet, 45, 'loading', delay='9.5')
     assert late['steps'][0]['t_s'] == pytest.approx(17.53, abs=0.03) and left[0]['current_limited_from_s'] is None
 

@@ -603,3 +603,43 @@ def test_revc_genset_picks_up_aux_a(client):
     assert f.min() == pytest.approx(48.0, abs=0.05) and f[-1] == pytest.approx(48.37, abs=0.02)
     v = {b['name']: b['values'] for b in out['bus_voltage']}
     assert max(v['MVB']) == 0.0 and min(v['MVA']) > 0.7
+
+
+@pytest.mark.parametrize('voltage_control, v_end, f_end', [(True, 0.974, 48.61), (False, 0.939, 48.85)])
+def test_andes_bridging_ramp_with_the_pcs_voltage_control(client, voltage_control, v_end, f_end):
+    """
+    ANDES through the ring's bridging ramp (one PCS out, 45 C, SOFC at 0.96 pf), the loads constant impedance: the
+    workload ramps 1.244 MW/s net of the SOFC for 12.5 s. A grid-forming PCS in ANDES is a virtual machine (GENCLS)
+    whose internal voltage was held through a run: its terminal sagged as it loaded up - RING_A at 0.939 pu, the
+    loads shrinking with it, 48.85 Hz. With its voltage control (Electrisim's, every 20 ms, its Q-V droop through its
+    operating point) RING_A holds 0.974 pu and the frequency is the droop's, 48.61 Hz - what ANDES's WECC REGF1 gives.
+    """
+    import numpy as np
+    gap, rate, dt, tf = 15.58, 1.64 - 0.396, 0.25, 16.0
+    p = _state('ring', 'N1_PCS', 'TransientStabilityAndes Parameters', {
+        'sn_mva': '100', 'tf': str(tf), 'tstep': '0', 'fault_enabled': 'false', 'load_model': 'impedance',
+        'pcs_voltage_control': 'true' if voltage_control else 'false'})
+    load = sum(float(v['p_mw']) for v in p.values() if isinstance(v, dict) and str(v.get('typ', '')).startswith('Load'))
+    n_on = len([x for x in next(st for st in _site('ring')['islands'] if st['id'] == 'N1_PCS')['energized_source_ids']
+                if x.startswith('SOFC')])
+    f0 = (load - gap) / load
+    values = [min(f0 + (1 - f0) * (k * dt) / (gap / rate), 1.0) for k in range(int(tf / dt) + 2)]
+    p['0']['load_profiles'] = {'ramp': {'name': 'ramp', 'kind': 'power', 'dt': dt, 't0': 0, 'p': values}}
+    for v in p.values():
+        if not isinstance(v, dict):
+            continue
+        name, t = str(v.get('userFriendlyName', '')), str(v.get('typ', ''))
+        if 'PCST5500' in name:
+            v['inlet_c'] = '45'
+        if name.endswith(' SOFC'):
+            v['p_set_kw'] = str(round((load - gap) / n_on * 1e3, 3))
+        if name.endswith(' inverter'):
+            v['q_mode'], v['pf'] = 'pf', '0.96'
+        if t.startswith('Load') and not t.startswith('Load DC'):
+            v['load_profile_id'], v['load_profile_q_mode'] = 'ramp', 'pf'
+    out = _post(client, p)
+    ring_a = next(b['values'] for b in out['bus_voltage'] if b['name'] == 'RING_A')
+    gfm = [x for x in out['pcs'] if x['control'] == 'grid_forming']
+    assert out['time'][-1] == pytest.approx(tf)
+    assert ring_a[-1] == pytest.approx(v_end, abs=0.004)
+    assert np.asarray(gfm[0]['frequency_hz'])[-1] == pytest.approx(f_end, abs=0.03)

@@ -328,3 +328,51 @@ def test_emt_ring_recovers_with_the_sofc_carrying_reactive_power(client, monkeyp
                                         ac_fault_resistance_ohm='0.001', ac_fault_duration_ms='100', duration_ms='500')
     assert not emt['converters_blocked'] and conv['PCS1 PCST5500']['limited_ms'] < 120
     assert bus_res['MVA']['v_rms_final_pu'] == pytest.approx(0.99, abs=0.01) and bus_res['MVA']['vuf_end_percent'] < 0.1
+
+
+# --- Phase 5b: the bridging ramp in ANDES, the PCS holding their Q-V droop ----------------------------------------
+from test_reference_c003 import _site      # noqa: E402
+
+
+def _ramp(client, design, load_model, tf=20.0):
+    """The bridging ramp in ANDES: one PCS out at 45 C, the SOFC at 0.96 pf and at load - 15.58 MW, the IT ramping
+    1.244 MW/s net of the SOFC for 12.5 s."""
+    import numpy as np
+    gap, rate, dt = 15.58, 1.64 - 0.396, 0.25
+    p = _state(design, 'N1_PCS', 'TransientStabilityAndes Parameters', {
+        'sn_mva': '100', 'tf': str(tf), 'tstep': '0', 'fault_enabled': 'false', 'load_model': load_model})
+    n_on = len([x for x in next(st for st in _site(design)['islands'] if st['id'] == 'N1_PCS')['energized_source_ids']
+                if x.startswith('SOFC')])
+    f0 = (LOAD_MW - gap) / LOAD_MW
+    p['0']['load_profiles'] = {'ramp': {'name': 'ramp', 'kind': 'power', 'dt': dt, 't0': 0,
+                                        'p': [min(f0 + (1 - f0) * k * dt / (gap / rate), 1.0) for k in range(int(tf / dt) + 2)]}}
+    for v in p.values():
+        if not isinstance(v, dict):
+            continue
+        name, t = str(v.get('userFriendlyName', '')), str(v.get('typ', ''))
+        if 'PCST5500' in name:
+            v['inlet_c'] = '45'
+        if name.endswith(' SOFC'):
+            v['p_set_kw'] = str(round((LOAD_MW - gap) / n_on * 1e3, 3))
+        if name.endswith(' inverter'):
+            v['q_mode'], v['pf'] = 'pf', '0.96'
+        if t.startswith('Load') and not t.startswith('Load DC'):
+            v['load_profile_id'], v['load_profile_q_mode'] = 'ramp', 'pf'
+    out = _post(client, p)
+    gfm = [x for x in out['pcs'] if x['control'] == 'grid_forming']
+    sofc = sum(np.asarray(x['p_mw'], dtype=float) for x in out['pcs'] if x['control'] != 'grid_forming')
+    return out, np.asarray(gfm[0]['frequency_hz'], dtype=float), sofc
+
+
+@pytest.mark.parametrize('design, f_min, sofc_lost', [('ring10', 48.26, 1.71), ('revc2', 48.75, 0.0)])
+def test_andes_bridging_ramp_reaches_the_sofc_under_frequency_trip(client, design, f_min, sofc_lost):
+    """
+    The bridging ramp in ANDES, the IT at constant power, each PCS holding its Q-V droop: the island's frequency is
+    the droop's, 48.4 Hz at the ring's peak with four PCS - past the SOFC inverters' under-frequency trip (48.75 Hz,
+    IEEE 1547 Category III at 50 Hz, ASSUMED): some 1.7 MW of SOFC trips and the ring settles at 48.26 Hz, its PCS at
+    their 45 C rating. Rev C.2's five PCS reach 48.75 Hz, the trip point itself. Without secondary control acting
+    within the ramp (R2) the SOFC's frequency ride-through must reach below the droop's excursion.
+    """
+    _, f, sofc = _ramp(client, design, 'power')
+    assert f.min() == pytest.approx(f_min, abs=0.03)
+    assert sofc[0] - sofc[-1] == pytest.approx(sofc_lost, abs=0.1)
