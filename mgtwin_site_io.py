@@ -310,6 +310,72 @@ def payload_to_site(payload, site_id='DRAWN', s_base_mva=50.0, template=None):
 
 
 # --- a Site state on the drawn payload ----------------------------------------------------------------------------
+#: Biased differential slope and operating times Electrisim assumes where a Site gives a unit element's
+#: threshold (pickup_a) but - mgtwin's ProtectionFunction has no field for them - not its bias or delay.
+DIFF_SLOPE, DIFF_T_S, BUS_DIFF_T_S, INST_T_S = 0.3, 0.03, 0.05, 0.05
+
+
+def apply_protection(payload, site, group='A', fault_type=None):
+    """
+    The Site's relay settings, the elements active in settings group `group`, on the drawn breakers (a switch cell
+    named by its breaker's id), for Electrisim's protection coordination. A switch carries one relay type and add-ons:
+    87L / 87T -> the differential relay (I_diff_a, diff_slope, t_g); else 51 / 67 (with a 50 its I>>) -> a
+    definite-time OCR in manual pickup (I_g_a, t_g); else 51N / 51G / 67N -> the earth-fault relay (I_e_a, t_e);
+    87B -> the bus differential add-on (bdiff_i_a, ...). For a study of single-phase faults (`fault_type` '1ph') a
+    relay with both carries its earth element instead of its phase one - the element that sees the fault - so a
+    relay with both is modelled for each kind of fault in turn. Elements with no pickup are left out; a breaker whose
+    relay has nothing left keeps no protection. Returns (payload, notes) - notes name what could not be carried.
+    """
+    from mgtwin.ontology import EARTH_OC, PHASE_OC
+
+    p = copy.deepcopy(payload)
+    cells = {str(v.get('userFriendlyName', '')): v for v in p.values()
+             if isinstance(v, dict) and str(v.get('typ', '')).startswith('Switch')}
+    notes = []
+    for r in site.get('relays', []):
+        cell = cells.get(r['switch_id'])
+        if cell is None:
+            notes.append(f"{r['id']}: breaker {r['switch_id']} is not in the drawing")
+            continue
+        act = [f for f in r.get('functions', []) if not f.get('groups') or group in f['groups']]
+        if r.get('pickup_a'):
+            act.append({'ansi': '67' if r.get('directional') else '51', 'pickup_a': r['pickup_a'],
+                        'curve': r.get('curve', ''), 'time_dial': r.get('time_dial')})
+        set_ = [f for f in act if f.get('pickup_a')]
+        by = lambda codes: [f for f in set_ if f['ansi'] in codes]                  # noqa: E731
+        diff, bus, phase, earth = by({'87L', '87T'}), by({'87B'}), by(PHASE_OC), by(EARTH_OC)
+        if fault_type == '1ph' and earth:
+            phase = []
+        for k in ('I_diff_a', 'diff_slope', 'I_g_a', 'I_gg_a', 't_g', 't_gg', 'I_e_a', 't_e',
+                  'bdiff_i_a', 'bdiff_slope', 'bdiff_t_s'):
+            cell.pop(k, None)
+        cell['protection_type'] = 'none'
+        if diff:
+            cell.update({'protection_type': 'differential', 'I_diff_a': str(min(f['pickup_a'] for f in diff)),
+                         'diff_slope': str(DIFF_SLOPE), 't_g': str(DIFF_T_S)})
+            if phase or earth:
+                notes.append(f"{r['id']}: its overcurrent backup is not carried - one relay type per breaker")
+        elif phase:
+            timed = [f for f in phase if f['ansi'] != '50'] or phase
+            inst = [f for f in phase if f['ansi'] == '50']
+            el = min(timed, key=lambda f: f['pickup_a'])
+            cell.update({'protection_type': 'ocr', 'oc_relay_type': 'DTOC', 'pickup_mode': 'manual',
+                         'I_g_a': str(el['pickup_a']), 't_g': str(el.get('time_dial') or 0.5),
+                         'I_gg_a': str(inst[0]['pickup_a'] if inst else 1e6), 't_gg': str(INST_T_S)})
+            if el.get('curve') and el['curve'].upper() != 'DT':
+                notes.append(f"{r['id']}: its {el['ansi']} curve {el['curve']} is taken as definite time {el.get('time_dial')}")
+            if earth and fault_type != '3ph':
+                notes.append(f"{r['id']}: its earth element is not carried - one relay type per breaker")
+        elif earth:
+            el = min(earth, key=lambda f: f['pickup_a'])
+            cell.update({'protection_type': 'earth_fault', 'I_e_a': str(el['pickup_a']),
+                         't_e': str(el.get('time_dial') or 0.3)})
+        if bus:
+            cell.update({'bdiff_i_a': str(min(f['pickup_a'] for f in bus)), 'bdiff_slope': str(DIFF_SLOPE),
+                         'bdiff_t_s': str(BUS_DIFF_T_S)})
+    return p, notes
+
+
 def apply_state(payload, site, state_id, typ=None, extra=None, load_scale=None, also_off=()):
     """
     The drawn payload in one of the Site's operating states: as mgtwin reads a state, the payload draws normally open

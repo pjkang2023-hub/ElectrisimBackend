@@ -18061,7 +18061,11 @@ def _prot_collect_switch_protection_specs(in_data):
             continue
         protection_type = str(row.get('protection_type', _PROTECTION_KIND_NONE) or _PROTECTION_KIND_NONE).strip().lower()
         if protection_type in ('', _PROTECTION_KIND_NONE):
-            continue
+            # A breaker whose only protection is its switchboards' bus differential (a bus section) is
+            # still one of the 87B zone's CTs, and trips with it.
+            if not (_prot_safe_float(row.get('bdiff_i_a')) or 0) > 0:
+                continue
+            protection_type = _PROTECTION_KIND_NONE
         sw_id = row.get('id') or row.get('name')
         if sw_id is None:
             continue
@@ -18418,6 +18422,8 @@ def _attach_protection_devices(net, specs, grading_mode='auto'):
             continue
 
         kind = spec.get('protection_type', _PROTECTION_KIND_NONE)
+        if kind == _PROTECTION_KIND_NONE:
+            continue        # an 87B-only breaker: _prot_apply_bus_differential evaluates it
 
         # --- OCR --------------------------------------------------------------------
         if kind == _PROTECTION_KIND_OCR:
@@ -19213,17 +19219,13 @@ def _prot_diff_zone_currents(net_sc, sw_idx, fault_bus_idx=None):
         if split and element in [split['line']] + split['new']:
             parts = [split['line']] + split['new']
             inside = True
-        res = getattr(net_sc, 'res_line_sc', None)
-        if res is None:
+        if getattr(net_sc, 'res_line_sc', None) is None:
             return None
-        for li in parts:
-            if li not in net_sc.line.index or li not in res.index:
-                continue
-            for end in ('from', 'to'):
-                bus = int(net_sc.line.at[li, f'{end}_bus'])
-                if inside and bus == split['bus']:
-                    continue
-                terminals.append((bus, _prot_num(res.at[li, f'ikss_{end}_ka']), _prot_num(res.at[li, f'ikss_{end}_degree'], np.nan), 1.0))
+        parts = [li for li in parts if li in net_sc.line.index]
+        terminals, remote_inside = _prot_line_terminals(
+            net_sc, parts, {split['bus']} if inside else set(),
+            int(fault_bus_idx) if fault_bus_idx is not None else None)
+        inside = inside or remote_inside
     elif et == 't':
         res = getattr(net_sc, 'res_trafo_sc', None)
         if res is None or element not in res.index:
@@ -19234,6 +19236,11 @@ def _prot_diff_zone_currents(net_sc, sw_idx, fault_bus_idx=None):
         for side, ratio in (('hv', hv / lv if own_lv else 1.0), ('lv', 1.0 if own_lv else lv / hv)):
             terminals.append((int(net_sc.trafo.at[element, f'{side}_bus']), _prot_num(res.at[element, f'ikss_{side}_ka']),
                               _prot_num(res.at[element, f'ikss_{side}_degree'], np.nan), ratio))
+    elif et == 'b':
+        zone = _prot_diff_zone_beyond_bus_breaker(net_sc, int(sw_idx), element, fault_bus_idx)
+        if zone is None:
+            return None
+        terminals, inside = zone
     else:
         return None
     if not terminals:
@@ -19249,6 +19256,101 @@ def _prot_diff_zone_currents(net_sc, sw_idx, fault_bus_idx=None):
         operate = abs(2.0 * max(mags) - sum(mags))
     return {'operate_a': float(operate), 'restraint_a': float(sum(mags) / 2.0), 'phasors': bool(phasors),
             'terminals_a': [round(float(m), 3) for m in mags]}
+
+
+def _prot_remote_breaker(net_sc, line_idx, far_bus):
+    """
+    The breaker at a cable's far end, when the cable ends on a node of its own - that line and one closed breaker
+    between two buses to the board beyond: (switch index, board bus); None when it ends on a board.
+    """
+    lines = [i for i in net_sc.line.index if i != line_idx and bool(net_sc.line.at[i, 'in_service'])
+             and far_bus in (int(net_sc.line.at[i, 'from_bus']), int(net_sc.line.at[i, 'to_bus']))]
+    trafos = [i for i in net_sc.trafo.index if bool(net_sc.trafo.at[i, 'in_service'])
+              and far_bus in (int(net_sc.trafo.at[i, 'hv_bus']), int(net_sc.trafo.at[i, 'lv_bus']))]
+    sw = net_sc.switch[(net_sc.switch['et'] == 'b') & (net_sc.switch['closed'] == True)
+                       & ((net_sc.switch['bus'] == far_bus) | (net_sc.switch['element'] == far_bus))]
+    if lines or trafos or len(sw) != 1:
+        return None
+    si = int(sw.index[0])
+    a, b = int(net_sc.switch.at[si, 'bus']), int(net_sc.switch.at[si, 'element'])
+    return si, (b if a == far_bus else a)
+
+
+def _prot_line_terminals(net_sc, parts, skip_buses, fault):
+    """
+    A cable's terminals for its 87L: each end's current into it, except at `skip_buses` (the relay's own node, a
+    split's fault bus); an end on a node of its own is measured at its breaker (the remote CT) instead, and a fault
+    on that node is inside. Returns (terminals, inside).
+    """
+    res = getattr(net_sc, 'res_line_sc', None)
+    terminals, inside = [], False
+    for part in parts:
+        if res is None or part not in res.index:
+            continue
+        for end in ('from', 'to'):
+            bus = int(net_sc.line.at[part, f'{end}_bus'])
+            if bus in skip_buses:
+                continue
+            remote = _prot_remote_breaker(net_sc, part, bus)
+            ph = _prot_bus_switch_phasor(net_sc, remote[0], remote[1]) if remote else None
+            if ph is not None:
+                terminals.append((remote[1], ph[0], ph[1], 1.0))
+                inside = inside or fault == bus
+            else:
+                terminals.append((bus, _prot_num(res.at[part, f'ikss_{end}_ka']),
+                                  _prot_num(res.at[part, f'ikss_{end}_degree'], np.nan), 1.0))
+    return terminals, inside
+
+
+def _prot_diff_zone_beyond_bus_breaker(net_sc, sw_idx, node, fault_bus_idx):
+    """
+    The 87 zone of a breaker drawn between its switchboard and a node: the one line (87L) or transformer (87T)
+    beyond the node. Terminals (bus, kA, angle, scale): the breaker's own current at its board, and the element's
+    at its far end - a cable's far breaker's when it ends on a node of its own - referred to the breaker's voltage;
+    where an angle is missing (an earth fault; a transformer, whose angles leave out its vector group) the zone is
+    judged by magnitudes. A fault is inside on the node, on the line or its far node, or on a transformer's far bus
+    when that bus is its terminal (nothing beyond it but injections). None when the node leads to anything else.
+    """
+    res_sw = getattr(net_sc, 'res_switch_sc', None)
+    if res_sw is None or sw_idx not in res_sw.index or pd.isna(res_sw.at[sw_idx, 'ikss_ka']):
+        return None
+    split = net_sc.get('_electrisim_sc_split') if hasattr(net_sc, 'get') else None
+    lines = [int(i) for i in net_sc.line.index if bool(net_sc.line.at[i, 'in_service'])
+             and node in (int(net_sc.line.at[i, 'from_bus']), int(net_sc.line.at[i, 'to_bus']))]
+    trafos = [int(i) for i in net_sc.trafo.index if bool(net_sc.trafo.at[i, 'in_service'])
+              and node in (int(net_sc.trafo.at[i, 'hv_bus']), int(net_sc.trafo.at[i, 'lv_bus']))]
+    board = int(net_sc.switch.at[sw_idx, 'bus']) if int(net_sc.switch.at[sw_idx, 'element']) == node \
+        else int(net_sc.switch.at[sw_idx, 'element'])
+    ph = _prot_bus_switch_phasor(net_sc, sw_idx, board)
+    own = (board, ph[0], ph[1], 1.0)
+    fault = int(fault_bus_idx) if fault_bus_idx is not None else None
+    if len(lines) == 1 and not trafos:
+        li = lines[0]
+        parts, inside = [li], fault == node
+        if split and li in [split['line']] + split['new']:
+            parts, inside = [split['line']] + split['new'], True
+        if getattr(net_sc, 'res_line_sc', None) is None:
+            return None
+        far, remote_inside = _prot_line_terminals(net_sc, parts, {node} | ({split['bus']} if split else set()), fault)
+        return [own] + far, inside or remote_inside
+    if len(trafos) == 1 and not lines:
+        ti = trafos[0]
+        res = getattr(net_sc, 'res_trafo_sc', None)
+        if res is None or ti not in res.index:
+            return None
+        hv_bus, lv_bus = int(net_sc.trafo.at[ti, 'hv_bus']), int(net_sc.trafo.at[ti, 'lv_bus'])
+        far, side = (lv_bus, 'lv') if node == hv_bus else (hv_bus, 'hv')
+        ratio = float(net_sc.trafo.at[ti, f'vn_{side}_kv']) / float(net_sc.trafo.at[ti, f'vn_{"hv" if side == "lv" else "lv"}_kv'])
+        far_branches = sum(1 for i in net_sc.line.index if bool(net_sc.line.at[i, 'in_service'])
+                           and far in (int(net_sc.line.at[i, 'from_bus']), int(net_sc.line.at[i, 'to_bus'])))
+        far_branches += sum(1 for i in net_sc.trafo.index if i != ti and bool(net_sc.trafo.at[i, 'in_service'])
+                            and far in (int(net_sc.trafo.at[i, 'hv_bus']), int(net_sc.trafo.at[i, 'lv_bus'])))
+        far_branches += int(((net_sc.switch['et'] == 'b') & (net_sc.switch['closed'] == True)
+                             & ((net_sc.switch['bus'] == far) | (net_sc.switch['element'] == far))).sum())
+        inside = fault == node or (fault == far and far_branches == 0)
+        # a transformer's branch angles leave out its vector group's shift: judged by magnitudes
+        return [(own[0], own[1], np.nan, 1.0), (far, _prot_num(res.at[ti, f'ikss_{side}_ka']), np.nan, ratio)], inside
+    return None
 
 
 def _prot_residual_a(net_sc, sw_idx, fault_type, fault_bus_idx, current_a):
@@ -19479,10 +19581,47 @@ def _prot_apply_alarms(net_sc, trip, fault_type, fault_bus_idx):
                               'picked_up': residual >= cfg['i_a']}
 
 
-def _prot_bus_terminal_current(net_sc, sw_idx):
-    """(kA, angle deg or NaN): a breaker's current at its own bus, from its line's or transformer's branch result."""
+def _prot_bus_switch_phasor(net_sc, sw_idx, at_bus):
+    """
+    (kA, angle deg or NaN) of a breaker between two buses at `at_bus`, into the breaker: pandapower reports only its
+    magnitude (res_switch_sc), but keeps the branch it made of it (_prot_bus_switch_branches) in its ppc, with the
+    angle at each end as for a line - an unbalanced fault's has none. None when it has no current of its own.
+    """
+    sw_idx = int(sw_idx)
+    res = getattr(net_sc, 'res_switch_sc', None)
+    if res is None or sw_idx not in res.index or pd.isna(res.at[sw_idx, 'ikss_ka']):
+        return None
+    mag, angle = _prot_num(res.at[sw_idx, 'ikss_ka']), np.nan
+    try:
+        # its row: the one between its two buses (the ppc's switch rows do not follow net.switch's order)
+        from pandapower.pypower.idx_brch import F_BUS, T_BUS
+        from pandapower.pypower.idx_brch_sc import IKSS_ANGLE_F, IKSS_ANGLE_T, IKSS_F, IKSS_T
+        f, t = net_sc._pd2ppc_lookups['branch']['switch']
+        lookup, br = net_sc._pd2ppc_lookups['bus'], net_sc._ppc['branch']
+        here = int(lookup[int(at_bus)])
+        other_bus = int(net_sc.switch.at[sw_idx, 'element']) if int(net_sc.switch.at[sw_idx, 'bus']) == int(at_bus) \
+            else int(net_sc.switch.at[sw_idx, 'bus'])
+        there = int(lookup[other_bus])
+        rows = [r for r in range(int(f), int(t))
+                if {int(br[r, F_BUS].real), int(br[r, T_BUS].real)} == {here, there}]
+        if len(rows) == 1:
+            r = rows[0]
+            mag_col, ang_col = (IKSS_F, IKSS_ANGLE_F) if int(br[r, F_BUS].real) == here else (IKSS_T, IKSS_ANGLE_T)
+            value = float(br[r, ang_col].real)
+            if np.isfinite(value) and abs(float(br[r, mag_col].real) - mag) <= 0.01 * max(mag, 1e-6):
+                angle = value
+    except Exception:
+        pass
+    return mag, angle
+
+
+def _prot_bus_terminal_current(net_sc, sw_idx, at_bus=None):
+    """(kA, angle deg or NaN): a breaker's current at its own bus (or `at_bus`, a bus section's other board),
+    from its line's or transformer's branch result, or its own as a breaker between two buses."""
     sw = net_sc.switch.loc[int(sw_idx)]
     et, element, bus = str(sw['et']), int(sw['element']), int(sw['bus'])
+    if et == 'b':
+        return _prot_bus_switch_phasor(net_sc, sw_idx, bus if at_bus is None else at_bus)
     sides = {'l': ('line', 'res_line_sc', (('from_bus', 'from'), ('to_bus', 'to'))),
              't': ('trafo', 'res_trafo_sc', (('hv_bus', 'hv'), ('lv_bus', 'lv')))}.get(et)
     if sides is None:
@@ -19502,29 +19641,69 @@ def _prot_apply_bus_differential(net_sc, trip, fault_bus_idx):
     Bus differential (87B): each switchboard whose breakers carry it sums their
     currents at the bus - the fault's current for a fault on it, nothing
     (what goes in comes out) for one beyond - against its pickup plus slope x
-    the restraint, half their magnitudes' sum, and trips them all. An earth
-    fault's branch results have no angles: then their magnitudes, added for a
-    fault on the bus and differenced for one beyond, as the 87L and 87T do.
+    the restraint, half their magnitudes' sum, and trips them all. The zone is
+    every breaker at the board with the 87B (a bus section's at both its
+    boards) and every line or transformer joined to it with no breaker. An
+    earth fault's branch results have no angles: then their magnitudes, all
+    into the zone, for a fault on the bus, and nothing for one beyond - ideal
+    CTs balance - with the restraint their magnitudes' as ever.
     """
     settings = net_sc.get('_electrisim_bus_diff') if hasattr(net_sc, 'get') else None
     if not settings:
         return
     rows = {row.get('switch_idx'): row for row in trip}
     zones = {}
-    for sw_idx, cfg in settings.items():
-        if sw_idx in net_sc.switch.index and bool(net_sc.switch.at[sw_idx, 'closed']):
-            zones.setdefault(int(net_sc.switch.at[sw_idx, 'bus']), []).append(sw_idx)
+    closed = [i for i in settings if i in net_sc.switch.index and bool(net_sc.switch.at[i, 'closed'])]
+    for sw_idx in closed:
+        zones.setdefault(int(net_sc.switch.at[sw_idx, 'bus']), []).append(sw_idx)
+    # A bus section (a breaker between two switchboards) is a CT of each board's zone.
+    for sw_idx in closed:
+        if net_sc.switch.at[sw_idx, 'et'] == 'b' and int(net_sc.switch.at[sw_idx, 'element']) in zones:
+            zones[int(net_sc.switch.at[sw_idx, 'element'])].append(sw_idx)
     for bus, members in zones.items():
-        currents = [(i, _prot_bus_terminal_current(net_sc, i)) for i in members]
-        mags = [abs(c[0]) * 1e3 if c else 0.0 for _, c in currents]
-        phasors = all(np.isfinite(c[1]) for _, c in currents if c and abs(c[0]) > 0)
+        # (current at the board: (kA, angle) or None, the bus it leads to)
+        currents = []
+        for i in members:
+            sw_bus, element = int(net_sc.switch.at[i, 'bus']), int(net_sc.switch.at[i, 'element'])
+            et = str(net_sc.switch.at[i, 'et'])
+            if et == 'b':
+                currents.append((_prot_bus_terminal_current(net_sc, i, at_bus=bus), element if sw_bus == bus else sw_bus))
+                continue
+            table = {'l': 'line', 't': 'trafo'}.get(et)
+            ends = (('from_bus', 'to_bus') if et == 'l' else ('hv_bus', 'lv_bus'))
+            far = None
+            if table and element in net_sc[table].index:
+                a, b = (int(net_sc[table].at[element, c]) for c in ends)
+                far = b if a == bus else a
+            currents.append((_prot_bus_terminal_current(net_sc, i), far))
+        # Lines and transformers joined to the board with no breaker (a ring's taps) are in the zone too:
+        # their currents enter or leave it, so a fault beyond the board balances.
+        on_breaker = {(str(net_sc.switch.at[i, 'et']), int(net_sc.switch.at[i, 'element'])) for i in members}
+        for table, et, res_name, cols in (('line', 'l', 'res_line_sc', (('from_bus', 'from'), ('to_bus', 'to'))),
+                                          ('trafo', 't', 'res_trafo_sc', (('hv_bus', 'hv'), ('lv_bus', 'lv')))):
+            data, res = getattr(net_sc, table, None), getattr(net_sc, res_name, None)
+            if data is None or data.empty or res is None:
+                continue
+            for el in data.index:
+                if (et, int(el)) in on_breaker or not bool(data.at[el, 'in_service']) or el not in res.index:
+                    continue
+                for k, (bus_col, side) in enumerate(cols):
+                    if int(data.at[el, bus_col]) == bus:
+                        far = int(data.at[el, cols[1 - k][0]])
+                        currents.append(((_prot_num(res.at[el, f'ikss_{side}_ka']),
+                                          _prot_num(res.at[el, f'ikss_{side}_degree'], np.nan)), far))
+        mags = [abs(c[0]) * 1e3 if c else 0.0 for c, _ in currents]
+        phasors = all(np.isfinite(c[1]) for c, _ in currents if c and abs(c[0]) > 0)
         inside = fault_bus_idx is not None and int(fault_bus_idx) == bus
         if phasors:
-            operate = abs(sum(m * np.exp(1j * np.radians(c[1])) for m, (_, c) in zip(mags, currents) if m > 0))
-        elif inside:
+            operate = abs(sum(m * np.exp(1j * np.radians(c[1])) for m, (c, _) in zip(mags, currents) if m > 0))
+        elif inside or fault_bus_idx is None:
             operate = sum(mags)
         else:
-            operate = abs(2.0 * max(mags) - sum(mags)) if mags else 0.0
+            # beyond the board what goes in comes out: its CTs, taken as ideal, sum to nothing. (The magnitudes
+            # cannot show it - on a meshed board the fault draws out through two circuits, and an earth fault's
+            # branch results leave out the zero sequence a grounding transformer carries.)
+            operate = 0.0
         restraint = sum(mags) / 2.0
         for i in members:
             cfg = settings[i]
@@ -19532,7 +19711,14 @@ def _prot_apply_bus_differential(net_sc, trip, fault_bus_idx):
             seen = operate >= pickup + slope * restraint
             row = rows.get(i)
             if row is None:
-                continue
+                # an 87B-only breaker (a bus section) has no relay row of its own
+                name = net_sc.switch.at[i, 'name']
+                row = {'switch_idx': i, 'switch_id': None, 'switch_name': name,
+                       'user_friendly_name': (getattr(net_sc, 'user_friendly_names', None) or {}).get(name, name),
+                       'device': 'Bus differential (87B)', 'device_kind': 'Bus differential (87B)', 'is_fuse': False,
+                       'tripped': False, 't_trip_s': None, 'evaluation': {}}
+                trip.append(row)
+                rows[i] = row
             row['bus_differential'] = {'bus_idx': bus, 'i_operate_a': float(operate), 'i_restraint_a': float(restraint),
                                        'pickup_a': pickup, 'slope': slope, 'phasors': bool(phasors), 'tripped': bool(seen),
                                        'terminals_a': [round(float(m), 3) for m in mags]}
@@ -19796,7 +19982,7 @@ def _prot_run_bus_scenario(base_net, fault_bus_idx, fault_type, case, attach_sum
     summary_by_sw_idx = {int(s['sw_idx']): s for s in attach_summaries if s.get('sw_idx') is not None}
     net_sc = deepcopy(base_net)
     try:
-        _prot_bus_switch_branches(net_sc, summary_by_sw_idx)
+        _prot_bus_switch_branches(net_sc, list(summary_by_sw_idx) + list(net_sc.get("_electrisim_bus_diff") or {}))
         ensure_ext_grid_zero_sequence_min(net_sc)
         _prot_earth_fault_net(net_sc, fault_type)
         sc.calc_sc(net_sc, bus=int(fault_bus_idx), branch_results=True, fault=fault_type, case=case,
@@ -19872,7 +20058,7 @@ def _prot_run_scenario(base_net, sc_line_id, sc_fraction, fault_type, case, atta
 
     try:
         fault_bus = int(max(net_sc.bus.index))
-        _prot_bus_switch_branches(net_sc, summary_by_sw_idx)
+        _prot_bus_switch_branches(net_sc, list(summary_by_sw_idx) + list(net_sc.get("_electrisim_bus_diff") or {}))
         ensure_ext_grid_zero_sequence_min(net_sc)
         _prot_earth_fault_net(net_sc, fault_type)
         sc.calc_sc(net_sc, bus=fault_bus, branch_results=True, fault=fault_type, case=case,
@@ -20200,10 +20386,13 @@ def _prot_check_miscoordination(net, scenarios, t_diff, bf_times=None):
         # A breaker on a bus inside the fault's zone only parts an element from the faulted bus, which its
         # primaries leave dead anyway: a bus differential (87B) opening its feeder and zigzag is not unwanted.
         on_faulted_bus = {k for k in rows if ('bus', int(net.switch.at[k, 'bus'])) in zone}
+        # Nor is a breaker on the zone's edge with no source behind it: it parts the faulted zone from a part its
+        # primaries leave dead - a line differential opening both ends of its cable, the far one feeding nothing.
         if t_clear is not None:
             for key in rows:
                 t = trip_time(key)
-                if key in graded or key in on_faulted_bus or t is None or t >= t_clear + t_diff - 1e-9:
+                if key in graded or key in on_faulted_bus or key in boundary or t is None \
+                        or t >= t_clear + t_diff - 1e-9:
                     continue
                 unwanted.append({
                     **common,
