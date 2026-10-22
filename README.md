@@ -86,7 +86,7 @@ operating state need [mgtwin](https://github.com/pjkang2023-hub/mgtwin), a priva
 `requirements-mgtwin.txt`. Without it the backend runs as before: operating states work, the check answers that
 mgtwin is not installed, and results carry no label.
 
-- **Locally**, from a clone: `pip install --no-deps "git+file:///<path to>/mgtwin@v0.6.10"`.
+- **Locally**, from a clone: `pip install --no-deps "git+file:///<path to>/mgtwin@v0.6.11"`.
 - **On Railway**, give the service a fine-grained GitHub token with read-only access to the mgtwin repository as the
   variable `MGTWIN_GITHUB_TOKEN`; the build command in `railway.toml` then runs
   `pip install -r requirements-mgtwin.txt` (pip expands the token into the URL). Unset, the build skips it and says so.

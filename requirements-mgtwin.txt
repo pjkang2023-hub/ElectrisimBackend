@@ -7,10 +7,10 @@
 # Pinned to the release tag. The repository is private, so an install needs read access; pip expands the
 # environment variable below, which must be set (unset, pip leaves the ${...} text in the URL and the clone fails).
 # On a developer's machine with a local clone, install the same tag from it instead:
-#   pip install --no-deps "git+file:///C:/PJWork/MATLAB%20APPs/mgtwin@v0.6.10"
+#   pip install --no-deps "git+file:///C:/PJWork/MATLAB%20APPs/mgtwin@v0.6.11"
 # For a hosted backend, one of:
 #   - a fine-grained GitHub token with read access to the mgtwin repository, as MGTWIN_GITHUB_TOKEN in the host's
 #     environment (the URL then reads https://<token>@github.com/...);
 #   - a wheel built from the tag (pip wheel ... -w wheels/) shipped with the deploy and installed from it;
 #   - mgtwin published (PyPI or a public repository), and this line pinned to the version.
-mgtwin @ git+https://${MGTWIN_GITHUB_TOKEN}@github.com/pjkang2023-hub/mgtwin.git@v0.6.10
+mgtwin @ git+https://${MGTWIN_GITHUB_TOKEN}@github.com/pjkang2023-hub/mgtwin.git@v0.6.11
