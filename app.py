@@ -80,7 +80,7 @@ import andes_electrisim
 import motor_starting_electrisim
 import json
 
-from flask import Flask, request, jsonify, make_response, Response, stream_with_context
+from flask import Flask, request, jsonify, make_response, Response, stream_with_context, g
 from flask_cors import CORS, cross_origin #żeby działało trzeba wywołać polecenie pip install -U flask-cors==3.0.10 
 import pandapower as pp
 import pandas as pd
@@ -118,6 +118,7 @@ CORS(app,
      methods=['GET', 'POST', 'OPTIONS'],
      allow_headers=['Content-Type', 'Accept', 'Accept-Encoding',
                     'Access-Control-Allow-Credentials'],
+     expose_headers=['X-Electrisim-State'],
      supports_credentials=True)
 
 electrisim_ops.install(app)
@@ -141,6 +142,10 @@ def _element_typ(item):
 def add_noindex_header(response):
     """API host is not a website — keep it out of Google Search index."""
     response.headers.setdefault('X-Robots-Tag', 'noindex, nofollow')
+    # The operating state a study ran in (mgtwin_state), readable by the frontend.
+    state_id = getattr(g, 'mgtwin_state_id', None)
+    if state_id:
+        response.headers['X-Electrisim-State'] = str(state_id)
     # REMOVED: this header lets public websites reach this server on loopback/private
     # IPs. With exec/eval endpoints below that is drive-by code execution.
     # response.headers.setdefault('Access-Control-Allow-Private-Network', 'true')
@@ -173,6 +178,20 @@ def simulation():
             return jsonify({
                 'error': 'Request body must be a JSON object with simulation elements.'
             }), 400
+        # An operating state of the network's mgtwin Site: {"site": <Site>, "state_id": "..."}. The drawn diagram is
+        # its normal state; the study runs in the one chosen - its switches, its sources, its load transfers - as
+        # the twin reads a state (mgtwin_site_io.apply_state).
+        state_request = in_data.pop('mgtwin_state', None)
+        if state_request is not None:
+            from mgtwin_site_io import apply_state
+            try:
+                site, state_id = state_request['site'], state_request['state_id']
+                in_data = apply_state(in_data, site, state_id)
+            except (KeyError, TypeError, StopIteration) as e:
+                return jsonify({'error': True, 'message': f"Operating state not applied: mgtwin_state needs a 'site' "
+                                f"with the state {state_request.get('state_id') if isinstance(state_request, dict) else None!r} "
+                                f"among its islands ({type(e).__name__}: {e})."}), 400
+            g.mgtwin_state_id = state_id
         try:
             _typs = sorted({
                 _element_typ(v) for v in in_data.values() if _element_typ(v)
@@ -2127,6 +2146,42 @@ def pandapower_net_to_json(net):
     }
 
     return json.dumps(model)
+
+
+@app.route('/mgtwin/states', methods=['POST'])
+def mgtwin_states():
+    """
+    A Site's operating states, for the state selector: {"site": <Site>} -> {"states": [{id, description,
+    grid_connected, sources, open_switches, closed_switches, load_factors, settings_group}]}.
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    site = body.get('site')
+    if not isinstance(site, dict) or not isinstance(site.get('islands'), list):
+        return jsonify({'error': True, 'message': "Send {'site': <mgtwin Site>} with its 'islands' (operating states)."}), 400
+    return jsonify({'site_id': site.get('id'), 'states': [
+        {'id': i.get('id'), 'description': i.get('description', ''), 'grid_connected': bool(i.get('grid_connected')),
+         'sources': len(i.get('energized_source_ids') or []), 'open_switches': i.get('open_switches') or [],
+         'closed_switches': i.get('closed_switches') or [], 'load_factors': i.get('load_factors') or {},
+         'settings_group': i.get('settings_group', 'A')} for i in site['islands']]})
+
+
+@app.route('/mgtwin/site', methods=['POST'])
+def mgtwin_site():
+    """
+    The drawn diagram as an mgtwin Site: {"diagram": <payload>, "site_id"?, "s_base_mva"?, "template"?: <Site>} ->
+    the Site. A template - a Site of the same network - lends its states, relays and what a diagram cannot hold.
+    """
+    from mgtwin_site_io import payload_to_site
+    body = request.get_json(force=True, silent=True) or {}
+    diagram = body.get('diagram')
+    if not isinstance(diagram, dict):
+        return jsonify({'error': True, 'message': "Send {'diagram': <the diagram payload>}."}), 400
+    try:
+        site = payload_to_site(diagram, str(body.get('site_id') or 'DRAWN'), float(body.get('s_base_mva') or 50.0),
+                               template=body.get('template'))
+    except (KeyError, ValueError, TypeError) as e:
+        return jsonify({'error': True, 'message': f'The diagram could not be read as a Site: {type(e).__name__}: {e}'}), 400
+    return jsonify(site)
 
 
 @app.route('/import-pandapower', methods=['POST'])

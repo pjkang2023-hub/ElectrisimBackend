@@ -268,6 +268,9 @@ def payload_to_site(payload, site_id='DRAWN', s_base_mva=50.0, template=None):
             site['grounding'].append({'id': _first(v.get('userFriendlyName')), 'bus': bus_id[v['bus']],
                                       'kind': 'low_resistance_grounded', 'z0_ohm': float(v.get('r_n_ohm') or 0.0),
                                       'available_when_islanded': True})
+    # in id order: a diagram's cells come in whatever order its keys were written
+    for key in ('buses', 'branches', 'transformers', 'switches', 'converters', 'machines', 'loads', 'grounding'):
+        site[key].sort(key=lambda x: str(x['id']))
     if template is not None:
         ids = {c['id'] for c in site['converters']} | {m['id'] for m in site['machines']}
         sw_ids = {s['id'] for s in site['switches']}
