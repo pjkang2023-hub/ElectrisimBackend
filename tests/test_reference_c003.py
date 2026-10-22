@@ -114,43 +114,13 @@ def _site(design):
 
 def _state(design, state_id, typ='PowerFlowPandaPower Parameters', extra=None, load_scale=None, also_off=()):
     """
-    The drawn payload in one of the Site's operating states: its switches opened, its sources out of service. As
-    mgtwin (v0.6.5) reads a state: the payload draws normally open switches open; the state opens its
-    open_switches and closes its closed_switches (a transfer's second legs, a tie); its load_factors scale its
-    loads (v0.6.10: the dual-corded halls moving to the other cord).
+    The drawn payload in one of the Site's operating states, as mgtwin reads a state (mgtwin_site_io.apply_state):
+    normally open switches open; the state's open_switches opened and closed_switches closed (a transfer's second
+    legs, a tie); its sources in or out of service; its load_factors scaling its loads (the dual-corded halls moving
+    to the other cord) - a load_scale given here replaces the factor for that load.
     """
-    import copy
-    site = _site(design)
-    state = next(s for s in site['islands'] if s['id'] == state_id)
-    sources = [c['id'] for c in site['converters']] + [m['id'] for m in site['machines']]
-    on = set(state['energized_source_ids']) - set(also_off)
-    opened = set(state.get('open_switches') or [])
-    closes = set(state.get('closed_switches') or [])
-    # the state's load transfer (mgtwin v0.6.10 load_factors); a load_scale given here replaces its factor
-    load_scale = {**(state.get('load_factors') or {}), **(load_scale or {})}
-    p = copy.deepcopy(_payload(design))
-    p['0'] = {**p['0'], 'typ': typ, **(extra or {})}
-
-    def label(s):
-        return f'{s} inverter' if s.startswith('SOFC') else (f'{s} PCST5500' if s.startswith('PCS') else f'{s} genset')
-
-    for v in p.values():
-        if not isinstance(v, dict):
-            continue
-        name, t = str(v.get('userFriendlyName', '')), str(v.get('typ', ''))
-        if t.startswith('Switch') and name in opened:
-            v['closed'] = 'false'
-        if t.startswith('Switch') and name in closes:
-            v['closed'] = 'true'
-        for s in sources:
-            if name.startswith(label(s)):
-                v['in_service'] = 'true' if s in on else 'false'
-        if t.startswith('Generator') and name.startswith('GEN_BS') and 'GEN_BS' in on:
-            v['slack'] = 'true'
-        for lid, k in (load_scale or {}).items():
-            if t.startswith('Load') and name.split(' ')[0] == lid:
-                v['p_mw'], v['q_mvar'] = str(float(v['p_mw']) * k), str(float(v['q_mvar']) * k)
-    return p
+    from mgtwin_site_io import apply_state
+    return apply_state(_payload(design), _site(design), state_id, typ, extra, load_scale, also_off)
 
 
 OPF = {'frequency': '50', 'objective': 'shed', 'fuel_cells': 'true', 'batteries': 'false', 'branch_limits': 'true',
