@@ -2146,8 +2146,11 @@ def _protection_request(settings=None, grid='reference_radial'):
 def test_protection_names_isolated_buses(client, quiet, line, cut_off):
     """
     A drawn grid with buses already cut off was refused with pandapower's
-    indices: "Isolated buses found: [np.int64(5), np.int64(6), np.int64(7)]".
-    It must name them as the diagram does, keeping its advice.
+    indices: "Isolated buses found: [np.int64(5), np.int64(6), np.int64(7)]";
+    then refused naming them. A part of the network no source reaches - a
+    line out, a board lost, a black-start step - is now set aside as the short
+    circuit sets it aside, named as the diagram names it in a warning, and the
+    rest of the network studied.
     """
     with open(os.path.join(REFERENCE_DIR, 'reference_radial.diagram_protection_payload.json'),
               encoding='utf-8') as handle:
@@ -2159,9 +2162,11 @@ def test_protection_names_isolated_buses(client, quiet, line, cut_off):
         response = client.post('/', json=payload)
     # The frontend alerts the message.
     result = json.loads(response.get_data(as_text=True))
-    assert result.get('error') is True
-    assert result['message'] == ('Isolated buses found: ' + ', '.join(sorted(cut_off)) + '. Connect every '
-                                 'component to a supplied bus before running protection coordination.')
+    assert not result.get('error'), result.get('message')
+    (warning,) = [w for w in result.get('warnings') or [] if 'no source energises' in w]
+    named = warning.split(': ', 1)[1].rstrip('.').split(', ')
+    assert sorted(named) == sorted(cut_off)
+    assert result['scenarios']
 
 
 def _fault_along_line_ka(spec, line_name, fraction_from_bus):

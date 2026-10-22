@@ -19114,6 +19114,16 @@ def _prot_switch_current_ka(net_sc, sw_idx, fault_bus_idx=None):
     try:
         sw = net_sc.switch.loc[int(sw_idx)]
         et, element = str(sw.get('et')), int(sw.get('element'))
+        # A breaker on a de-energised part of the network (set aside, out of service) carries nothing; the
+        # fault's total, the fallback below, made every breaker on a dead board see it.
+        if not bool(net_sc.bus.at[int(sw.get('bus')), 'in_service']):
+            return 0.0
+        if et == 'b' and not bool(net_sc.bus.at[element, 'in_service']):
+            return 0.0
+        dead_element = {'l': 'line', 't': 'trafo', 't3': 'trafo3w'}.get(et)
+        if dead_element and element in getattr(net_sc, dead_element).index \
+                and not bool(getattr(net_sc, dead_element).at[element, 'in_service']):
+            return 0.0
         if et == 'b':
             # A breaker between two buses (a bus coupler, or a feeder breaker
             # drawn so): its own current, when the study gave it an impedance
@@ -20234,16 +20244,15 @@ def protection_coordination(net, prot_params, in_data):
         if grading_mode not in ('auto', 'manual'):
             grading_mode = 'auto'
 
-        # Validate connectivity early so we surface a clear message before
-        # sc.calc_sc - naming the buses: the indices read
-        # "[np.int64(5), np.int64(6), np.int64(7)]".
-        isolated = isolated_buses_message(
-            net, 'Connect every component to a supplied bus before running protection coordination.',
-            machines=True)
-        if isolated:
+        # De-energised parts of the network - a board lost, a black-start step - are set aside as the short
+        # circuit sets them aside (out of service, named in a warning); they were refused, and with them every
+        # state of an island that leaves a section dead. With no source at all the study says so.
+        try:
+            _electrisim_sc_drop_dead_buses(net)
+        except ValueError as e:
             return json.dumps({
                 'error': True,
-                'message': isolated,
+                'message': f'{e} Connect every component to a supplied bus before running protection coordination.',
                 'scenarios': [],
                 'devices': [],
                 'summary': {'converged': False},
@@ -20306,6 +20315,17 @@ def protection_coordination(net, prot_params, in_data):
                 return json.dumps({
                     'error': True,
                     'message': 'Could not resolve the selected fault busbar. Place a Bus on the diagram and pick it in the Fault tab.',
+                    'scenarios': [],
+                    'devices': [],
+                    'summary': {'converged': False},
+                }, separators=(',', ':'))
+            if not bool(net.bus.at[fault_bus_idx, 'in_service']):
+                name = (resolve_element_refs(net, 'bus', {fault_bus_idx}) or [{}])[0]
+                return json.dumps({
+                    'error': True,
+                    'message': f"Protection coordination: fault bus {name.get('name') or fault_bus_idx} is "
+                               f"de-energised in this state - no source reaches it, so there is no fault current. "
+                               f"Choose a bus a source supplies.",
                     'scenarios': [],
                     'devices': [],
                     'summary': {'converged': False},
@@ -20397,6 +20417,9 @@ def protection_coordination(net, prot_params, in_data):
         }
         if scenario_warning:
             response['warning'] = scenario_warning
+        if getattr(net, 'warnings', None):
+            # the de-energised buses set aside, among others
+            response['warnings'] = list(net.warnings)
         return json.dumps(
             _prot_to_jsonable(response),
             default=_json_serialize_default,
