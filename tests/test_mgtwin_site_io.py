@@ -53,7 +53,8 @@ def test_drawn_diagram_exports_as_its_site(design, site):
     """
     The drawn C003 diagram exported as a Site recovers the corrected Site element by element - buses, cables,
     transformers on their own rating, switches as drawn (normally open ones open), loads, converters, the genset,
-    the earthing - and, the corrected Site lent as its template, every state and relay and each converter's class.
+    the earthing - and, the corrected Site lent as its template, every state and relay, each converter's class and
+    the earthing a diagram does not draw (the ring's declared-ungrounded IT pockets).
     The one difference is drawn on purpose: the ring's TR_IT_A is the Site's 3.5 MVA unit drawn as a bank of five.
     """
     ref = _json(SPECS, site)
@@ -66,7 +67,7 @@ def test_drawn_diagram_exports_as_its_site(design, site):
               'grounding': ('bus', 'z0_ohm')}
     diffs = []
     for key, keys in fields.items():
-        a = {x['id']: x for x in ref[key] if key != 'grounding' or x.get('kind') == 'low_resistance_grounded'}
+        a = {x['id']: x for x in ref[key]}      # grounding too: the drawn zig-zags, the IT pockets the template lends
         b = {x['id']: x for x in got[key]}
         assert set(a) == set(b), key
         for i in a:

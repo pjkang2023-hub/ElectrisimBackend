@@ -118,7 +118,7 @@ CORS(app,
      methods=['GET', 'POST', 'OPTIONS'],
      allow_headers=['Content-Type', 'Accept', 'Accept-Encoding',
                     'Access-Control-Allow-Credentials'],
-     expose_headers=['X-Electrisim-State'],
+     expose_headers=['X-Electrisim-State', 'X-Electrisim-Envelope', 'X-Electrisim-Envelope-Why'],
      supports_credentials=True)
 
 electrisim_ops.install(app)
@@ -146,6 +146,14 @@ def add_noindex_header(response):
     state_id = getattr(g, 'mgtwin_state_id', None)
     if state_id:
         response.headers['X-Electrisim-State'] = str(state_id)
+    # The twin's validity envelope on that study (mgtwin_check.study_label): inside / provisional / outside, why.
+    label = getattr(g, 'mgtwin_label', None)
+    if label:
+        verdict, why = label
+        response.headers['X-Electrisim-Envelope'] = verdict
+        if why:
+            text = '; '.join(why)
+            response.headers['X-Electrisim-Envelope-Why'] = text.encode('ascii', 'replace').decode('ascii')[:900]
     # REMOVED: this header lets public websites reach this server on loopback/private
     # IPs. With exec/eval endpoints below that is drive-by code execution.
     # response.headers.setdefault('Access-Control-Allow-Private-Network', 'true')
@@ -192,6 +200,11 @@ def simulation():
                                 f"with the state {state_request.get('state_id') if isinstance(state_request, dict) else None!r} "
                                 f"among its islands ({type(e).__name__}: {e})."}), 400
             g.mgtwin_state_id = state_id
+            try:
+                from mgtwin_check import study_label
+                g.mgtwin_label = study_label(site, state_id, (in_data.get('0') or {}).get('typ'))
+            except Exception as e:   # noqa: BLE001 - a label is an aid; its failure must not stop the study
+                _console(f"mgtwin envelope label not given: {type(e).__name__}: {e}")
         try:
             _typs = sorted({
                 _element_typ(v) for v in in_data.values() if _element_typ(v)
@@ -2182,6 +2195,28 @@ def mgtwin_site():
     except (KeyError, ValueError, TypeError) as e:
         return jsonify({'error': True, 'message': f'The diagram could not be read as a Site: {type(e).__name__}: {e}'}), 400
     return jsonify(site)
+
+
+@app.route('/mgtwin/check', methods=['POST'])
+def mgtwin_check_design():
+    """
+    Check design: the drawn network through mgtwin's gates - {"diagram": <payload>, "site_id"?, "s_base_mva"?,
+    "template"?: <Site>} -> {counts, by_gate, findings (FAIL and WARN), states}. The template lends the states and
+    relays the gates screen.
+    """
+    import mgtwin_check
+    if not mgtwin_check.available():
+        return jsonify({'error': True, 'message': 'mgtwin is not installed on this server (requirements-mgtwin.txt).'}), 501
+    body = request.get_json(force=True, silent=True) or {}
+    diagram = body.get('diagram')
+    if not isinstance(diagram, dict):
+        return jsonify({'error': True, 'message': "Send {'diagram': <the diagram payload>}."}), 400
+    try:
+        out = mgtwin_check.check_design(diagram, str(body.get('site_id') or 'DRAWN'),
+                                        float(body.get('s_base_mva') or 50.0), template=body.get('template'))
+    except Exception as e:   # noqa: BLE001 - a Site the twin refuses: say why
+        return jsonify({'error': True, 'message': f'The design could not be checked: {type(e).__name__}: {e}'}), 400
+    return jsonify(out)
 
 
 @app.route('/import-pandapower', methods=['POST'])

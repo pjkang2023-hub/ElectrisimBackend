@@ -290,6 +290,12 @@ def payload_to_site(payload, site_id='DRAWN', s_base_mva=50.0, template=None):
             c['params'] = {**copy.deepcopy(t.get('params') or {}), **c['params']}
             if gfm(t) == gfm(c):
                 c['control'] = t['control']             # droop or VSM: the diagram says only grid forming
+        # earthing a diagram does not draw - a declared ungrounded (IT) pocket, a solid neutral - lent by the template
+        drawn = {g['id'] for g in site['grounding']}
+        buses = {b['id'] for b in site['buses']}
+        site['grounding'] += [copy.deepcopy(g) for g in template.get('grounding', [])
+                              if g['id'] not in drawn and g['bus'] in buses]
+        site['grounding'].sort(key=lambda x: str(x['id']))
         mach_t = {m['id']: m for m in template.get('machines', [])}
         for m in site['machines']:
             for k, v in (mach_t.get(m['id']) or {}).items():
