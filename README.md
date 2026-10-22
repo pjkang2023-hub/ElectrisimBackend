@@ -79,6 +79,18 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+#### Optional: mgtwin (Check design, validity labels)
+
+`POST /mgtwin/check` (Simulate → Check Design) and the INSIDE / PROVISIONAL / OUTSIDE label on a study run in an
+operating state need [mgtwin](https://github.com/pjkang2023-hub/mgtwin), a private repository pinned in
+`requirements-mgtwin.txt`. Without it the backend runs as before: operating states work, the check answers that
+mgtwin is not installed, and results carry no label.
+
+- **Locally**, from a clone: `pip install --no-deps "git+file:///<path to>/mgtwin@v0.6.10"`.
+- **On Railway**, give the service a fine-grained GitHub token with read-only access to the mgtwin repository as the
+  variable `MGTWIN_GITHUB_TOKEN`; the build command in `railway.toml` then runs
+  `pip install -r requirements-mgtwin.txt` (pip expands the token into the URL). Unset, the build skips it and says so.
+
 ### 4. Local Development Setup
 
 #### Run Development Server:

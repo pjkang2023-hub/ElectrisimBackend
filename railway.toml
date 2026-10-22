@@ -1,5 +1,8 @@
 [build]
 builder = "nixpacks"
+# mgtwin (Check design, validity labels) is optional and private: installed only when the service has a read-only
+# GitHub token in MGTWIN_GITHUB_TOKEN (requirements-mgtwin.txt pins the tag); without it the backend runs as before.
+buildCommand = "if [ -n \"$MGTWIN_GITHUB_TOKEN\" ]; then pip install -r requirements-mgtwin.txt; else echo 'mgtwin not installed: MGTWIN_GITHUB_TOKEN unset'; fi"
 
 [deploy]
 startCommand = "gunicorn -c gunicorn.conf.py app:app"
