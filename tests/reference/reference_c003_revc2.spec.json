@@ -1,5 +1,5 @@
 {
- "name": "C003 CAMPAIGN-003-revC2 - Rev C.2: six-board dual-radial, 19 SOFC (18+1) on owner data 2026-10-20, 6 PCS 2+2+1+1, 4 GT, tie NO, dual-cord, genset",
+ "name": "C003 CAMPAIGN-003-revC2 - Rev C.2: six-board dual-radial, 19 SOFC (18+1) on owner data 2026-10-20, 6 PCS 2+2+1+1, 4 GT, tie NO, dual-cord, genset - corrected 21",
  "frequency_hz": 50.0,
  "layout": "transmission",
  "buses": [
@@ -357,6 +357,51 @@
    "id": "OTHER_B_N",
    "vn_kv": 33.0,
    "name": "OTHER_B_N"
+  },
+  {
+   "id": "F_S1A_FAR_N",
+   "vn_kv": 33.0,
+   "name": "F_S1A_FAR_N"
+  },
+  {
+   "id": "F_S1B_FAR_N",
+   "vn_kv": 33.0,
+   "name": "F_S1B_FAR_N"
+  },
+  {
+   "id": "F_S2A_FAR_N",
+   "vn_kv": 33.0,
+   "name": "F_S2A_FAR_N"
+  },
+  {
+   "id": "F_S2B_FAR_N",
+   "vn_kv": 33.0,
+   "name": "F_S2B_FAR_N"
+  },
+  {
+   "id": "F_E1A_FAR_N",
+   "vn_kv": 33.0,
+   "name": "F_E1A_FAR_N"
+  },
+  {
+   "id": "F_E1B_FAR_N",
+   "vn_kv": 33.0,
+   "name": "F_E1B_FAR_N"
+  },
+  {
+   "id": "F_E2A_FAR_N",
+   "vn_kv": 33.0,
+   "name": "F_E2A_FAR_N"
+  },
+  {
+   "id": "F_E2B_FAR_N",
+   "vn_kv": 33.0,
+   "name": "F_E2B_FAR_N"
+  },
+  {
+   "id": "GEN_HV",
+   "vn_kv": 33.0,
+   "name": "GEN_HV"
   }
  ],
  "lines": [
@@ -364,7 +409,7 @@
    "id": "F_S1A",
    "name": "F_S1A",
    "from_bus": "F_S1A_N",
-   "to_bus": "MVA",
+   "to_bus": "F_S1A_FAR_N",
    "length_km": 1.0,
    "r_ohm_per_km": 0.02178,
    "x_ohm_per_km": 0.04356,
@@ -375,7 +420,7 @@
    "id": "F_S1B",
    "name": "F_S1B",
    "from_bus": "F_S1B_N",
-   "to_bus": "MVB",
+   "to_bus": "F_S1B_FAR_N",
    "length_km": 1.0,
    "r_ohm_per_km": 0.02178,
    "x_ohm_per_km": 0.04356,
@@ -386,7 +431,7 @@
    "id": "F_S2A",
    "name": "F_S2A",
    "from_bus": "F_S2A_N",
-   "to_bus": "MVA",
+   "to_bus": "F_S2A_FAR_N",
    "length_km": 1.0,
    "r_ohm_per_km": 0.02178,
    "x_ohm_per_km": 0.04356,
@@ -397,7 +442,7 @@
    "id": "F_S2B",
    "name": "F_S2B",
    "from_bus": "F_S2B_N",
-   "to_bus": "MVB",
+   "to_bus": "F_S2B_FAR_N",
    "length_km": 1.0,
    "r_ohm_per_km": 0.02178,
    "x_ohm_per_km": 0.04356,
@@ -408,7 +453,7 @@
    "id": "F_E1A",
    "name": "F_E1A",
    "from_bus": "F_E1A_N",
-   "to_bus": "MVA",
+   "to_bus": "F_E1A_FAR_N",
    "length_km": 1.0,
    "r_ohm_per_km": 0.02178,
    "x_ohm_per_km": 0.04356,
@@ -419,7 +464,7 @@
    "id": "F_E1B",
    "name": "F_E1B",
    "from_bus": "F_E1B_N",
-   "to_bus": "MVB",
+   "to_bus": "F_E1B_FAR_N",
    "length_km": 1.0,
    "r_ohm_per_km": 0.02178,
    "x_ohm_per_km": 0.04356,
@@ -430,7 +475,7 @@
    "id": "F_E2A",
    "name": "F_E2A",
    "from_bus": "F_E2A_N",
-   "to_bus": "MVA",
+   "to_bus": "F_E2A_FAR_N",
    "length_km": 1.0,
    "r_ohm_per_km": 0.02178,
    "x_ohm_per_km": 0.04356,
@@ -441,7 +486,7 @@
    "id": "F_E2B",
    "name": "F_E2B",
    "from_bus": "F_E2B_N",
-   "to_bus": "MVB",
+   "to_bus": "F_E2B_FAR_N",
    "length_km": 1.0,
    "r_ohm_per_km": 0.02178,
    "x_ohm_per_km": 0.04356,
@@ -728,7 +773,7 @@
   {
    "id": "TR_GEN",
    "name": "TR_GEN",
-   "hv_bus": "MVA",
+   "hv_bus": "GEN_HV",
    "lv_bus": "GEN_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -1207,6 +1252,78 @@
    "name": "CB_L_OTHER_B",
    "bus": "MVB",
    "element": "OTHER_B_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_F_S1A_FAR",
+   "name": "CB_F_S1A_FAR",
+   "bus": "MVA",
+   "element": "F_S1A_FAR_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_F_S1B_FAR",
+   "name": "CB_F_S1B_FAR",
+   "bus": "MVB",
+   "element": "F_S1B_FAR_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_F_S2A_FAR",
+   "name": "CB_F_S2A_FAR",
+   "bus": "MVA",
+   "element": "F_S2A_FAR_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_F_S2B_FAR",
+   "name": "CB_F_S2B_FAR",
+   "bus": "MVB",
+   "element": "F_S2B_FAR_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_F_E1A_FAR",
+   "name": "CB_F_E1A_FAR",
+   "bus": "MVA",
+   "element": "F_E1A_FAR_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_F_E1B_FAR",
+   "name": "CB_F_E1B_FAR",
+   "bus": "MVB",
+   "element": "F_E1B_FAR_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_F_E2A_FAR",
+   "name": "CB_F_E2A_FAR",
+   "bus": "MVA",
+   "element": "F_E2A_FAR_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_F_E2B_FAR",
+   "name": "CB_F_E2B_FAR",
+   "bus": "MVB",
+   "element": "F_E2B_FAR_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_GEN",
+   "name": "CB_GEN",
+   "bus": "MVA",
+   "element": "GEN_HV",
    "et": "bus",
    "closed": true
   }

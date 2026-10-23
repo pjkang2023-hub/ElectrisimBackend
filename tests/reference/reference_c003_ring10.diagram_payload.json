@@ -17,8 +17,8 @@
   "user_email": "unknown@user.com"
  },
  "1": {
-  "name": "mxCell_260",
-  "id": "hI-U379kAfT1xGVEWiBY-226",
+  "name": "mxCell_251",
+  "id": "eFw-uuBRl2atDgbCq0K--329",
   "userFriendlyName": "GEN_BS genset 3 MVA",
   "bus": "mxCell_188",
   "typ": "Generator",
@@ -39,7 +39,7 @@
  "2": {
   "typ": "Bus0",
   "name": "mxCell_184",
-  "id": "hI-U379kAfT1xGVEWiBY-2",
+  "id": "eFw-uuBRl2atDgbCq0K--2",
   "vn_kv": "33",
   "userFriendlyName": "RING_A",
   "min_vm_pu": "0.9",
@@ -48,7 +48,7 @@
  "3": {
   "typ": "Bus1",
   "name": "mxCell_185",
-  "id": "hI-U379kAfT1xGVEWiBY-4",
+  "id": "eFw-uuBRl2atDgbCq0K--4",
   "vn_kv": "33",
   "userFriendlyName": "RING_B",
   "min_vm_pu": "0.9",
@@ -57,7 +57,7 @@
  "4": {
   "typ": "Bus2",
   "name": "mxCell_186",
-  "id": "hI-U379kAfT1xGVEWiBY-6",
+  "id": "eFw-uuBRl2atDgbCq0K--6",
   "vn_kv": "33",
   "userFriendlyName": "MVA",
   "min_vm_pu": "0.9",
@@ -66,7 +66,7 @@
  "5": {
   "typ": "Bus3",
   "name": "mxCell_187",
-  "id": "hI-U379kAfT1xGVEWiBY-8",
+  "id": "eFw-uuBRl2atDgbCq0K--8",
   "vn_kv": "33",
   "userFriendlyName": "MVB",
   "min_vm_pu": "0.9",
@@ -75,7 +75,7 @@
  "6": {
   "typ": "Bus4",
   "name": "mxCell_188",
-  "id": "hI-U379kAfT1xGVEWiBY-10",
+  "id": "eFw-uuBRl2atDgbCq0K--10",
   "vn_kv": "0.4",
   "userFriendlyName": "GEN_LV",
   "min_vm_pu": "0.9",
@@ -84,7 +84,7 @@
  "7": {
   "typ": "Bus5",
   "name": "mxCell_189",
-  "id": "hI-U379kAfT1xGVEWiBY-12",
+  "id": "eFw-uuBRl2atDgbCq0K--12",
   "vn_kv": "0.4",
   "userFriendlyName": "SOFC01_LV",
   "min_vm_pu": "0.9",
@@ -93,7 +93,7 @@
  "8": {
   "typ": "Bus6",
   "name": "mxCell_190",
-  "id": "hI-U379kAfT1xGVEWiBY-14",
+  "id": "eFw-uuBRl2atDgbCq0K--14",
   "vn_kv": "0.4",
   "userFriendlyName": "SOFC02_LV",
   "min_vm_pu": "0.9",
@@ -102,7 +102,7 @@
  "9": {
   "typ": "Bus7",
   "name": "mxCell_191",
-  "id": "hI-U379kAfT1xGVEWiBY-16",
+  "id": "eFw-uuBRl2atDgbCq0K--16",
   "vn_kv": "0.4",
   "userFriendlyName": "SOFC03_LV",
   "min_vm_pu": "0.9",
@@ -111,7 +111,7 @@
  "10": {
   "typ": "Bus8",
   "name": "mxCell_192",
-  "id": "hI-U379kAfT1xGVEWiBY-18",
+  "id": "eFw-uuBRl2atDgbCq0K--18",
   "vn_kv": "0.4",
   "userFriendlyName": "SOFC04_LV",
   "min_vm_pu": "0.9",
@@ -120,7 +120,7 @@
  "11": {
   "typ": "Bus9",
   "name": "mxCell_193",
-  "id": "hI-U379kAfT1xGVEWiBY-20",
+  "id": "eFw-uuBRl2atDgbCq0K--20",
   "vn_kv": "0.4",
   "userFriendlyName": "SOFC05_LV",
   "min_vm_pu": "0.9",
@@ -129,7 +129,7 @@
  "12": {
   "typ": "Bus10",
   "name": "mxCell_194",
-  "id": "hI-U379kAfT1xGVEWiBY-22",
+  "id": "eFw-uuBRl2atDgbCq0K--22",
   "vn_kv": "0.4",
   "userFriendlyName": "SOFC06_LV",
   "min_vm_pu": "0.9",
@@ -138,7 +138,7 @@
  "13": {
   "typ": "Bus11",
   "name": "mxCell_195",
-  "id": "hI-U379kAfT1xGVEWiBY-24",
+  "id": "eFw-uuBRl2atDgbCq0K--24",
   "vn_kv": "0.4",
   "userFriendlyName": "SOFC07_LV",
   "min_vm_pu": "0.9",
@@ -147,7 +147,7 @@
  "14": {
   "typ": "Bus12",
   "name": "mxCell_196",
-  "id": "hI-U379kAfT1xGVEWiBY-26",
+  "id": "eFw-uuBRl2atDgbCq0K--26",
   "vn_kv": "0.4",
   "userFriendlyName": "SOFC08_LV",
   "min_vm_pu": "0.9",
@@ -156,7 +156,7 @@
  "15": {
   "typ": "Bus13",
   "name": "mxCell_197",
-  "id": "hI-U379kAfT1xGVEWiBY-28",
+  "id": "eFw-uuBRl2atDgbCq0K--28",
   "vn_kv": "0.4",
   "userFriendlyName": "SOFC09_LV",
   "min_vm_pu": "0.9",
@@ -165,7 +165,7 @@
  "16": {
   "typ": "Bus14",
   "name": "mxCell_198",
-  "id": "hI-U379kAfT1xGVEWiBY-30",
+  "id": "eFw-uuBRl2atDgbCq0K--30",
   "vn_kv": "0.4",
   "userFriendlyName": "SOFC10_LV",
   "min_vm_pu": "0.9",
@@ -174,7 +174,7 @@
  "17": {
   "typ": "Bus15",
   "name": "mxCell_199",
-  "id": "hI-U379kAfT1xGVEWiBY-32",
+  "id": "eFw-uuBRl2atDgbCq0K--32",
   "vn_kv": "0.4",
   "userFriendlyName": "SOFC11_LV",
   "min_vm_pu": "0.9",
@@ -183,7 +183,7 @@
  "18": {
   "typ": "Bus16",
   "name": "mxCell_200",
-  "id": "hI-U379kAfT1xGVEWiBY-34",
+  "id": "eFw-uuBRl2atDgbCq0K--34",
   "vn_kv": "0.4",
   "userFriendlyName": "SOFC12_LV",
   "min_vm_pu": "0.9",
@@ -192,7 +192,7 @@
  "19": {
   "typ": "Bus17",
   "name": "mxCell_201",
-  "id": "hI-U379kAfT1xGVEWiBY-36",
+  "id": "eFw-uuBRl2atDgbCq0K--36",
   "vn_kv": "0.4",
   "userFriendlyName": "SOFC13_LV",
   "min_vm_pu": "0.9",
@@ -201,7 +201,7 @@
  "20": {
   "typ": "Bus18",
   "name": "mxCell_202",
-  "id": "hI-U379kAfT1xGVEWiBY-38",
+  "id": "eFw-uuBRl2atDgbCq0K--38",
   "vn_kv": "0.4",
   "userFriendlyName": "SOFC14_LV",
   "min_vm_pu": "0.9",
@@ -210,7 +210,7 @@
  "21": {
   "typ": "Bus19",
   "name": "mxCell_203",
-  "id": "hI-U379kAfT1xGVEWiBY-40",
+  "id": "eFw-uuBRl2atDgbCq0K--40",
   "vn_kv": "0.4",
   "userFriendlyName": "SOFC15_LV",
   "min_vm_pu": "0.9",
@@ -219,7 +219,7 @@
  "22": {
   "typ": "Bus20",
   "name": "mxCell_204",
-  "id": "hI-U379kAfT1xGVEWiBY-42",
+  "id": "eFw-uuBRl2atDgbCq0K--42",
   "vn_kv": "0.4",
   "userFriendlyName": "SOFC16_LV",
   "min_vm_pu": "0.9",
@@ -228,7 +228,7 @@
  "23": {
   "typ": "Bus21",
   "name": "mxCell_205",
-  "id": "hI-U379kAfT1xGVEWiBY-44",
+  "id": "eFw-uuBRl2atDgbCq0K--44",
   "vn_kv": "0.4",
   "userFriendlyName": "SOFC17_LV",
   "min_vm_pu": "0.9",
@@ -237,7 +237,7 @@
  "24": {
   "typ": "Bus22",
   "name": "mxCell_206",
-  "id": "hI-U379kAfT1xGVEWiBY-46",
+  "id": "eFw-uuBRl2atDgbCq0K--46",
   "vn_kv": "0.4",
   "userFriendlyName": "SOFC18_LV",
   "min_vm_pu": "0.9",
@@ -246,7 +246,7 @@
  "25": {
   "typ": "Bus23",
   "name": "mxCell_207",
-  "id": "hI-U379kAfT1xGVEWiBY-48",
+  "id": "eFw-uuBRl2atDgbCq0K--48",
   "vn_kv": "0.4",
   "userFriendlyName": "SOFC19_LV",
   "min_vm_pu": "0.9",
@@ -255,7 +255,7 @@
  "26": {
   "typ": "Bus24",
   "name": "mxCell_208",
-  "id": "hI-U379kAfT1xGVEWiBY-50",
+  "id": "eFw-uuBRl2atDgbCq0K--50",
   "vn_kv": "0.69",
   "userFriendlyName": "PCS1_LV",
   "min_vm_pu": "0.9",
@@ -264,7 +264,7 @@
  "27": {
   "typ": "Bus25",
   "name": "mxCell_209",
-  "id": "hI-U379kAfT1xGVEWiBY-52",
+  "id": "eFw-uuBRl2atDgbCq0K--52",
   "vn_kv": "0.69",
   "userFriendlyName": "PCS2_LV",
   "min_vm_pu": "0.9",
@@ -273,7 +273,7 @@
  "28": {
   "typ": "Bus26",
   "name": "mxCell_210",
-  "id": "hI-U379kAfT1xGVEWiBY-54",
+  "id": "eFw-uuBRl2atDgbCq0K--54",
   "vn_kv": "0.69",
   "userFriendlyName": "PCS3_LV",
   "min_vm_pu": "0.9",
@@ -282,7 +282,7 @@
  "29": {
   "typ": "Bus27",
   "name": "mxCell_211",
-  "id": "hI-U379kAfT1xGVEWiBY-56",
+  "id": "eFw-uuBRl2atDgbCq0K--56",
   "vn_kv": "0.69",
   "userFriendlyName": "PCS4_LV",
   "min_vm_pu": "0.9",
@@ -291,7 +291,7 @@
  "30": {
   "typ": "Bus28",
   "name": "mxCell_212",
-  "id": "hI-U379kAfT1xGVEWiBY-58",
+  "id": "eFw-uuBRl2atDgbCq0K--58",
   "vn_kv": "0.69",
   "userFriendlyName": "PCS5_LV",
   "min_vm_pu": "0.9",
@@ -300,7 +300,7 @@
  "31": {
   "typ": "Bus29",
   "name": "mxCell_213",
-  "id": "hI-U379kAfT1xGVEWiBY-60",
+  "id": "eFw-uuBRl2atDgbCq0K--60",
   "vn_kv": "33",
   "userFriendlyName": "IT_cordA_N",
   "min_vm_pu": "0.9",
@@ -309,7 +309,7 @@
  "32": {
   "typ": "Bus30",
   "name": "mxCell_214",
-  "id": "hI-U379kAfT1xGVEWiBY-62",
+  "id": "eFw-uuBRl2atDgbCq0K--62",
   "vn_kv": "33",
   "userFriendlyName": "OTHER_A_N",
   "min_vm_pu": "0.9",
@@ -318,7 +318,7 @@
  "33": {
   "typ": "Bus31",
   "name": "mxCell_215",
-  "id": "hI-U379kAfT1xGVEWiBY-64",
+  "id": "eFw-uuBRl2atDgbCq0K--64",
   "vn_kv": "33",
   "userFriendlyName": "IT_cordB_N",
   "min_vm_pu": "0.9",
@@ -327,7 +327,7 @@
  "34": {
   "typ": "Bus32",
   "name": "mxCell_216",
-  "id": "hI-U379kAfT1xGVEWiBY-66",
+  "id": "eFw-uuBRl2atDgbCq0K--66",
   "vn_kv": "33",
   "userFriendlyName": "OTHER_B_N",
   "min_vm_pu": "0.9",
@@ -336,18 +336,315 @@
  "35": {
   "typ": "Bus33",
   "name": "mxCell_217",
-  "id": "hI-U379kAfT1xGVEWiBY-68",
+  "id": "eFw-uuBRl2atDgbCq0K--68",
   "vn_kv": "0.4",
   "userFriendlyName": "IT_cordA_LV",
   "min_vm_pu": "0.9",
   "max_vm_pu": "1.1"
  },
  "36": {
+  "typ": "Bus34",
+  "name": "mxCell_218",
+  "id": "eFw-uuBRl2atDgbCq0K--70",
+  "vn_kv": "33",
+  "userFriendlyName": "SEG_AB1_N",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "37": {
+  "typ": "Bus35",
+  "name": "mxCell_219",
+  "id": "eFw-uuBRl2atDgbCq0K--72",
+  "vn_kv": "33",
+  "userFriendlyName": "SEG_AB1_FAR_N",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "38": {
+  "typ": "Bus36",
+  "name": "mxCell_220",
+  "id": "eFw-uuBRl2atDgbCq0K--74",
+  "vn_kv": "33",
+  "userFriendlyName": "LN_A_MVA_N",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "39": {
+  "typ": "Bus37",
+  "name": "mxCell_221",
+  "id": "eFw-uuBRl2atDgbCq0K--76",
+  "vn_kv": "33",
+  "userFriendlyName": "LN_A_MVA_FAR_N",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "40": {
+  "typ": "Bus38",
+  "name": "mxCell_222",
+  "id": "eFw-uuBRl2atDgbCq0K--78",
+  "vn_kv": "33",
+  "userFriendlyName": "LN_B_MVB_N",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "41": {
+  "typ": "Bus39",
+  "name": "mxCell_223",
+  "id": "eFw-uuBRl2atDgbCq0K--80",
+  "vn_kv": "33",
+  "userFriendlyName": "LN_B_MVB_FAR_N",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "42": {
+  "typ": "Bus40",
+  "name": "mxCell_224",
+  "id": "eFw-uuBRl2atDgbCq0K--82",
+  "vn_kv": "33",
+  "userFriendlyName": "TIE_AB_N",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "43": {
+  "typ": "Bus41",
+  "name": "mxCell_225",
+  "id": "eFw-uuBRl2atDgbCq0K--84",
+  "vn_kv": "33",
+  "userFriendlyName": "TIE_AB_FAR_N",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "44": {
+  "typ": "Bus42",
+  "name": "mxCell_226",
+  "id": "eFw-uuBRl2atDgbCq0K--86",
+  "vn_kv": "33",
+  "userFriendlyName": "GEN_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "45": {
+  "typ": "Bus43",
+  "name": "mxCell_227",
+  "id": "eFw-uuBRl2atDgbCq0K--88",
+  "vn_kv": "33",
+  "userFriendlyName": "SOFC01_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "46": {
+  "typ": "Bus44",
+  "name": "mxCell_228",
+  "id": "eFw-uuBRl2atDgbCq0K--90",
+  "vn_kv": "33",
+  "userFriendlyName": "SOFC02_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "47": {
+  "typ": "Bus45",
+  "name": "mxCell_229",
+  "id": "eFw-uuBRl2atDgbCq0K--92",
+  "vn_kv": "33",
+  "userFriendlyName": "SOFC03_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "48": {
+  "typ": "Bus46",
+  "name": "mxCell_230",
+  "id": "eFw-uuBRl2atDgbCq0K--94",
+  "vn_kv": "33",
+  "userFriendlyName": "SOFC04_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "49": {
+  "typ": "Bus47",
+  "name": "mxCell_231",
+  "id": "eFw-uuBRl2atDgbCq0K--96",
+  "vn_kv": "33",
+  "userFriendlyName": "SOFC05_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "50": {
+  "typ": "Bus48",
+  "name": "mxCell_232",
+  "id": "eFw-uuBRl2atDgbCq0K--98",
+  "vn_kv": "33",
+  "userFriendlyName": "SOFC06_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "51": {
+  "typ": "Bus49",
+  "name": "mxCell_233",
+  "id": "eFw-uuBRl2atDgbCq0K--100",
+  "vn_kv": "33",
+  "userFriendlyName": "SOFC07_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "52": {
+  "typ": "Bus50",
+  "name": "mxCell_234",
+  "id": "eFw-uuBRl2atDgbCq0K--102",
+  "vn_kv": "33",
+  "userFriendlyName": "SOFC08_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "53": {
+  "typ": "Bus51",
+  "name": "mxCell_235",
+  "id": "eFw-uuBRl2atDgbCq0K--104",
+  "vn_kv": "33",
+  "userFriendlyName": "SOFC09_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "54": {
+  "typ": "Bus52",
+  "name": "mxCell_236",
+  "id": "eFw-uuBRl2atDgbCq0K--106",
+  "vn_kv": "33",
+  "userFriendlyName": "SOFC10_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "55": {
+  "typ": "Bus53",
+  "name": "mxCell_237",
+  "id": "eFw-uuBRl2atDgbCq0K--108",
+  "vn_kv": "33",
+  "userFriendlyName": "SOFC11_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "56": {
+  "typ": "Bus54",
+  "name": "mxCell_238",
+  "id": "eFw-uuBRl2atDgbCq0K--110",
+  "vn_kv": "33",
+  "userFriendlyName": "SOFC12_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "57": {
+  "typ": "Bus55",
+  "name": "mxCell_239",
+  "id": "eFw-uuBRl2atDgbCq0K--112",
+  "vn_kv": "33",
+  "userFriendlyName": "SOFC13_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "58": {
+  "typ": "Bus56",
+  "name": "mxCell_240",
+  "id": "eFw-uuBRl2atDgbCq0K--114",
+  "vn_kv": "33",
+  "userFriendlyName": "SOFC14_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "59": {
+  "typ": "Bus57",
+  "name": "mxCell_241",
+  "id": "eFw-uuBRl2atDgbCq0K--116",
+  "vn_kv": "33",
+  "userFriendlyName": "SOFC15_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "60": {
+  "typ": "Bus58",
+  "name": "mxCell_242",
+  "id": "eFw-uuBRl2atDgbCq0K--118",
+  "vn_kv": "33",
+  "userFriendlyName": "SOFC16_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "61": {
+  "typ": "Bus59",
+  "name": "mxCell_243",
+  "id": "eFw-uuBRl2atDgbCq0K--120",
+  "vn_kv": "33",
+  "userFriendlyName": "SOFC17_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "62": {
+  "typ": "Bus60",
+  "name": "mxCell_244",
+  "id": "eFw-uuBRl2atDgbCq0K--122",
+  "vn_kv": "33",
+  "userFriendlyName": "SOFC18_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "63": {
+  "typ": "Bus61",
+  "name": "mxCell_245",
+  "id": "eFw-uuBRl2atDgbCq0K--124",
+  "vn_kv": "33",
+  "userFriendlyName": "SOFC19_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "64": {
+  "typ": "Bus62",
+  "name": "mxCell_246",
+  "id": "eFw-uuBRl2atDgbCq0K--126",
+  "vn_kv": "33",
+  "userFriendlyName": "PCS1_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "65": {
+  "typ": "Bus63",
+  "name": "mxCell_247",
+  "id": "eFw-uuBRl2atDgbCq0K--128",
+  "vn_kv": "33",
+  "userFriendlyName": "PCS2_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "66": {
+  "typ": "Bus64",
+  "name": "mxCell_248",
+  "id": "eFw-uuBRl2atDgbCq0K--130",
+  "vn_kv": "33",
+  "userFriendlyName": "PCS3_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "67": {
+  "typ": "Bus65",
+  "name": "mxCell_249",
+  "id": "eFw-uuBRl2atDgbCq0K--132",
+  "vn_kv": "33",
+  "userFriendlyName": "PCS4_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "68": {
+  "typ": "Bus66",
+  "name": "mxCell_250",
+  "id": "eFw-uuBRl2atDgbCq0K--134",
+  "vn_kv": "33",
+  "userFriendlyName": "PCS5_HV",
+  "min_vm_pu": "0.9",
+  "max_vm_pu": "1.1"
+ },
+ "69": {
   "typ": "Transformer0",
-  "name": "mxCell_308",
-  "id": "hI-U379kAfT1xGVEWiBY-70",
+  "name": "mxCell_356",
+  "id": "eFw-uuBRl2atDgbCq0K--136",
   "userFriendlyName": "TR_SOFC01",
-  "hv_bus": "mxCell_184",
+  "hv_bus": "mxCell_227",
   "lv_bus": "mxCell_189",
   "sn_mva": "3",
   "vn_hv_kv": "33",
@@ -373,12 +670,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "37": {
+ "70": {
   "typ": "Transformer1",
-  "name": "mxCell_310",
-  "id": "hI-U379kAfT1xGVEWiBY-74",
+  "name": "mxCell_359",
+  "id": "eFw-uuBRl2atDgbCq0K--139",
   "userFriendlyName": "TR_SOFC02",
-  "hv_bus": "mxCell_184",
+  "hv_bus": "mxCell_228",
   "lv_bus": "mxCell_190",
   "sn_mva": "3",
   "vn_hv_kv": "33",
@@ -404,12 +701,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "38": {
+ "71": {
   "typ": "Transformer2",
-  "name": "mxCell_312",
-  "id": "hI-U379kAfT1xGVEWiBY-78",
+  "name": "mxCell_362",
+  "id": "eFw-uuBRl2atDgbCq0K--142",
   "userFriendlyName": "TR_SOFC03",
-  "hv_bus": "mxCell_184",
+  "hv_bus": "mxCell_229",
   "lv_bus": "mxCell_191",
   "sn_mva": "3",
   "vn_hv_kv": "33",
@@ -435,12 +732,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "39": {
+ "72": {
   "typ": "Transformer3",
-  "name": "mxCell_314",
-  "id": "hI-U379kAfT1xGVEWiBY-82",
+  "name": "mxCell_365",
+  "id": "eFw-uuBRl2atDgbCq0K--145",
   "userFriendlyName": "TR_SOFC04",
-  "hv_bus": "mxCell_184",
+  "hv_bus": "mxCell_230",
   "lv_bus": "mxCell_192",
   "sn_mva": "3",
   "vn_hv_kv": "33",
@@ -466,12 +763,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "40": {
+ "73": {
   "typ": "Transformer4",
-  "name": "mxCell_316",
-  "id": "hI-U379kAfT1xGVEWiBY-86",
+  "name": "mxCell_368",
+  "id": "eFw-uuBRl2atDgbCq0K--148",
   "userFriendlyName": "TR_SOFC05",
-  "hv_bus": "mxCell_184",
+  "hv_bus": "mxCell_231",
   "lv_bus": "mxCell_193",
   "sn_mva": "3",
   "vn_hv_kv": "33",
@@ -497,12 +794,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "41": {
+ "74": {
   "typ": "Transformer5",
-  "name": "mxCell_318",
-  "id": "hI-U379kAfT1xGVEWiBY-90",
+  "name": "mxCell_371",
+  "id": "eFw-uuBRl2atDgbCq0K--151",
   "userFriendlyName": "TR_SOFC06",
-  "hv_bus": "mxCell_184",
+  "hv_bus": "mxCell_232",
   "lv_bus": "mxCell_194",
   "sn_mva": "3",
   "vn_hv_kv": "33",
@@ -528,12 +825,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "42": {
+ "75": {
   "typ": "Transformer6",
-  "name": "mxCell_320",
-  "id": "hI-U379kAfT1xGVEWiBY-94",
+  "name": "mxCell_374",
+  "id": "eFw-uuBRl2atDgbCq0K--154",
   "userFriendlyName": "TR_SOFC07",
-  "hv_bus": "mxCell_184",
+  "hv_bus": "mxCell_233",
   "lv_bus": "mxCell_195",
   "sn_mva": "3",
   "vn_hv_kv": "33",
@@ -559,12 +856,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "43": {
+ "76": {
   "typ": "Transformer7",
-  "name": "mxCell_322",
-  "id": "hI-U379kAfT1xGVEWiBY-98",
+  "name": "mxCell_377",
+  "id": "eFw-uuBRl2atDgbCq0K--157",
   "userFriendlyName": "TR_SOFC08",
-  "hv_bus": "mxCell_184",
+  "hv_bus": "mxCell_234",
   "lv_bus": "mxCell_196",
   "sn_mva": "3",
   "vn_hv_kv": "33",
@@ -590,12 +887,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "44": {
+ "77": {
   "typ": "Transformer8",
-  "name": "mxCell_324",
-  "id": "hI-U379kAfT1xGVEWiBY-102",
+  "name": "mxCell_380",
+  "id": "eFw-uuBRl2atDgbCq0K--160",
   "userFriendlyName": "TR_SOFC09",
-  "hv_bus": "mxCell_184",
+  "hv_bus": "mxCell_235",
   "lv_bus": "mxCell_197",
   "sn_mva": "3",
   "vn_hv_kv": "33",
@@ -621,12 +918,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "45": {
+ "78": {
   "typ": "Transformer9",
-  "name": "mxCell_326",
-  "id": "hI-U379kAfT1xGVEWiBY-106",
+  "name": "mxCell_383",
+  "id": "eFw-uuBRl2atDgbCq0K--163",
   "userFriendlyName": "TR_SOFC10",
-  "hv_bus": "mxCell_184",
+  "hv_bus": "mxCell_236",
   "lv_bus": "mxCell_198",
   "sn_mva": "3",
   "vn_hv_kv": "33",
@@ -652,12 +949,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "46": {
+ "79": {
   "typ": "Transformer10",
-  "name": "mxCell_328",
-  "id": "hI-U379kAfT1xGVEWiBY-110",
+  "name": "mxCell_386",
+  "id": "eFw-uuBRl2atDgbCq0K--166",
   "userFriendlyName": "TR_SOFC11",
-  "hv_bus": "mxCell_185",
+  "hv_bus": "mxCell_237",
   "lv_bus": "mxCell_199",
   "sn_mva": "3",
   "vn_hv_kv": "33",
@@ -683,12 +980,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "47": {
+ "80": {
   "typ": "Transformer11",
-  "name": "mxCell_330",
-  "id": "hI-U379kAfT1xGVEWiBY-114",
+  "name": "mxCell_389",
+  "id": "eFw-uuBRl2atDgbCq0K--169",
   "userFriendlyName": "TR_SOFC12",
-  "hv_bus": "mxCell_185",
+  "hv_bus": "mxCell_238",
   "lv_bus": "mxCell_200",
   "sn_mva": "3",
   "vn_hv_kv": "33",
@@ -714,12 +1011,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "48": {
+ "81": {
   "typ": "Transformer12",
-  "name": "mxCell_332",
-  "id": "hI-U379kAfT1xGVEWiBY-118",
+  "name": "mxCell_392",
+  "id": "eFw-uuBRl2atDgbCq0K--172",
   "userFriendlyName": "TR_SOFC13",
-  "hv_bus": "mxCell_185",
+  "hv_bus": "mxCell_239",
   "lv_bus": "mxCell_201",
   "sn_mva": "3",
   "vn_hv_kv": "33",
@@ -745,12 +1042,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "49": {
+ "82": {
   "typ": "Transformer13",
-  "name": "mxCell_334",
-  "id": "hI-U379kAfT1xGVEWiBY-122",
+  "name": "mxCell_395",
+  "id": "eFw-uuBRl2atDgbCq0K--175",
   "userFriendlyName": "TR_SOFC14",
-  "hv_bus": "mxCell_185",
+  "hv_bus": "mxCell_240",
   "lv_bus": "mxCell_202",
   "sn_mva": "3",
   "vn_hv_kv": "33",
@@ -776,12 +1073,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "50": {
+ "83": {
   "typ": "Transformer14",
-  "name": "mxCell_336",
-  "id": "hI-U379kAfT1xGVEWiBY-126",
+  "name": "mxCell_398",
+  "id": "eFw-uuBRl2atDgbCq0K--178",
   "userFriendlyName": "TR_SOFC15",
-  "hv_bus": "mxCell_185",
+  "hv_bus": "mxCell_241",
   "lv_bus": "mxCell_203",
   "sn_mva": "3",
   "vn_hv_kv": "33",
@@ -807,12 +1104,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "51": {
+ "84": {
   "typ": "Transformer15",
-  "name": "mxCell_338",
-  "id": "hI-U379kAfT1xGVEWiBY-130",
+  "name": "mxCell_401",
+  "id": "eFw-uuBRl2atDgbCq0K--181",
   "userFriendlyName": "TR_SOFC16",
-  "hv_bus": "mxCell_185",
+  "hv_bus": "mxCell_242",
   "lv_bus": "mxCell_204",
   "sn_mva": "3",
   "vn_hv_kv": "33",
@@ -838,12 +1135,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "52": {
+ "85": {
   "typ": "Transformer16",
-  "name": "mxCell_340",
-  "id": "hI-U379kAfT1xGVEWiBY-134",
+  "name": "mxCell_404",
+  "id": "eFw-uuBRl2atDgbCq0K--184",
   "userFriendlyName": "TR_SOFC17",
-  "hv_bus": "mxCell_185",
+  "hv_bus": "mxCell_243",
   "lv_bus": "mxCell_205",
   "sn_mva": "3",
   "vn_hv_kv": "33",
@@ -869,12 +1166,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "53": {
+ "86": {
   "typ": "Transformer17",
-  "name": "mxCell_342",
-  "id": "hI-U379kAfT1xGVEWiBY-138",
+  "name": "mxCell_407",
+  "id": "eFw-uuBRl2atDgbCq0K--187",
   "userFriendlyName": "TR_SOFC18",
-  "hv_bus": "mxCell_185",
+  "hv_bus": "mxCell_244",
   "lv_bus": "mxCell_206",
   "sn_mva": "3",
   "vn_hv_kv": "33",
@@ -900,12 +1197,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "54": {
+ "87": {
   "typ": "Transformer18",
-  "name": "mxCell_344",
-  "id": "hI-U379kAfT1xGVEWiBY-142",
+  "name": "mxCell_410",
+  "id": "eFw-uuBRl2atDgbCq0K--190",
   "userFriendlyName": "TR_SOFC19",
-  "hv_bus": "mxCell_185",
+  "hv_bus": "mxCell_245",
   "lv_bus": "mxCell_207",
   "sn_mva": "3",
   "vn_hv_kv": "33",
@@ -931,12 +1228,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "55": {
+ "88": {
   "typ": "Transformer19",
-  "name": "mxCell_346",
-  "id": "hI-U379kAfT1xGVEWiBY-146",
+  "name": "mxCell_413",
+  "id": "eFw-uuBRl2atDgbCq0K--193",
   "userFriendlyName": "TR_PCS1",
-  "hv_bus": "mxCell_184",
+  "hv_bus": "mxCell_246",
   "lv_bus": "mxCell_208",
   "sn_mva": "5.5",
   "vn_hv_kv": "33",
@@ -962,12 +1259,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "56": {
+ "89": {
   "typ": "Transformer20",
-  "name": "mxCell_348",
-  "id": "hI-U379kAfT1xGVEWiBY-150",
+  "name": "mxCell_416",
+  "id": "eFw-uuBRl2atDgbCq0K--196",
   "userFriendlyName": "TR_PCS2",
-  "hv_bus": "mxCell_184",
+  "hv_bus": "mxCell_247",
   "lv_bus": "mxCell_209",
   "sn_mva": "5.5",
   "vn_hv_kv": "33",
@@ -993,12 +1290,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "57": {
+ "90": {
   "typ": "Transformer21",
-  "name": "mxCell_350",
-  "id": "hI-U379kAfT1xGVEWiBY-154",
+  "name": "mxCell_419",
+  "id": "eFw-uuBRl2atDgbCq0K--199",
   "userFriendlyName": "TR_PCS3",
-  "hv_bus": "mxCell_184",
+  "hv_bus": "mxCell_248",
   "lv_bus": "mxCell_210",
   "sn_mva": "5.5",
   "vn_hv_kv": "33",
@@ -1024,12 +1321,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "58": {
+ "91": {
   "typ": "Transformer22",
-  "name": "mxCell_352",
-  "id": "hI-U379kAfT1xGVEWiBY-158",
+  "name": "mxCell_422",
+  "id": "eFw-uuBRl2atDgbCq0K--202",
   "userFriendlyName": "TR_PCS4",
-  "hv_bus": "mxCell_185",
+  "hv_bus": "mxCell_249",
   "lv_bus": "mxCell_211",
   "sn_mva": "5.5",
   "vn_hv_kv": "33",
@@ -1055,12 +1352,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "59": {
+ "92": {
   "typ": "Transformer23",
-  "name": "mxCell_354",
-  "id": "hI-U379kAfT1xGVEWiBY-162",
+  "name": "mxCell_425",
+  "id": "eFw-uuBRl2atDgbCq0K--205",
   "userFriendlyName": "TR_PCS5",
-  "hv_bus": "mxCell_185",
+  "hv_bus": "mxCell_250",
   "lv_bus": "mxCell_212",
   "sn_mva": "5.5",
   "vn_hv_kv": "33",
@@ -1086,12 +1383,12 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "60": {
+ "93": {
   "typ": "Transformer24",
-  "name": "mxCell_356",
-  "id": "hI-U379kAfT1xGVEWiBY-166",
+  "name": "mxCell_428",
+  "id": "eFw-uuBRl2atDgbCq0K--208",
   "userFriendlyName": "TR_GEN",
-  "hv_bus": "mxCell_186",
+  "hv_bus": "mxCell_226",
   "lv_bus": "mxCell_188",
   "sn_mva": "3",
   "vn_hv_kv": "33",
@@ -1117,10 +1414,10 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "61": {
+ "94": {
   "typ": "Transformer25",
-  "name": "mxCell_358",
-  "id": "hI-U379kAfT1xGVEWiBY-170",
+  "name": "mxCell_431",
+  "id": "eFw-uuBRl2atDgbCq0K--211",
   "userFriendlyName": "TR_IT_A",
   "hv_bus": "mxCell_213",
   "lv_bus": "mxCell_217",
@@ -1148,10 +1445,10 @@
   "tap_phase_shifter": "false",
   "in_service": "true"
  },
- "62": {
+ "95": {
   "typ": "Load0",
-  "name": "mxCell_262",
-  "id": "hI-U379kAfT1xGVEWiBY-230",
+  "name": "mxCell_252",
+  "id": "eFw-uuBRl2atDgbCq0K--332",
   "userFriendlyName": "IT_cordA (critical)",
   "bus": "mxCell_217",
   "p_mw": "12.5",
@@ -1163,10 +1460,10 @@
   "type": "wye",
   "in_service": "true"
  },
- "63": {
+ "96": {
   "typ": "Load1",
-  "name": "mxCell_264",
-  "id": "hI-U379kAfT1xGVEWiBY-235",
+  "name": "mxCell_253",
+  "id": "eFw-uuBRl2atDgbCq0K--336",
   "userFriendlyName": "OTHER_A (critical)",
   "bus": "mxCell_214",
   "p_mw": "2.5",
@@ -1178,10 +1475,10 @@
   "type": "wye",
   "in_service": "true"
  },
- "64": {
+ "97": {
   "typ": "Load2",
-  "name": "mxCell_266",
-  "id": "hI-U379kAfT1xGVEWiBY-240",
+  "name": "mxCell_254",
+  "id": "eFw-uuBRl2atDgbCq0K--340",
   "userFriendlyName": "IT_cordB (critical)",
   "bus": "mxCell_215",
   "p_mw": "12.5",
@@ -1193,10 +1490,10 @@
   "type": "wye",
   "in_service": "true"
  },
- "65": {
+ "98": {
   "typ": "Load3",
-  "name": "mxCell_268",
-  "id": "hI-U379kAfT1xGVEWiBY-245",
+  "name": "mxCell_255",
+  "id": "eFw-uuBRl2atDgbCq0K--344",
   "userFriendlyName": "OTHER_B (critical)",
   "bus": "mxCell_216",
   "p_mw": "2.5",
@@ -1208,10 +1505,10 @@
   "type": "wye",
   "in_service": "true"
  },
- "66": {
+ "99": {
   "typ": "Battery0",
-  "name": "mxCell_372",
-  "id": "hI-U379kAfT1xGVEWiBY-258",
+  "name": "mxCell_480",
+  "id": "eFw-uuBRl2atDgbCq0K--348",
   "userFriendlyName": "PCS1 LTO 635 kWh",
   "bus": null,
   "sizing": "ratings",
@@ -1235,10 +1532,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "67": {
+ "100": {
   "typ": "Battery1",
-  "name": "mxCell_373",
-  "id": "hI-U379kAfT1xGVEWiBY-259",
+  "name": "mxCell_481",
+  "id": "eFw-uuBRl2atDgbCq0K--349",
   "userFriendlyName": "PCS2 LTO 635 kWh",
   "bus": null,
   "sizing": "ratings",
@@ -1262,10 +1559,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "68": {
+ "101": {
   "typ": "Battery2",
-  "name": "mxCell_374",
-  "id": "hI-U379kAfT1xGVEWiBY-260",
+  "name": "mxCell_482",
+  "id": "eFw-uuBRl2atDgbCq0K--350",
   "userFriendlyName": "PCS3 LTO 635 kWh",
   "bus": null,
   "sizing": "ratings",
@@ -1289,10 +1586,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "69": {
+ "102": {
   "typ": "Battery3",
-  "name": "mxCell_375",
-  "id": "hI-U379kAfT1xGVEWiBY-261",
+  "name": "mxCell_483",
+  "id": "eFw-uuBRl2atDgbCq0K--351",
   "userFriendlyName": "PCS4 LTO 635 kWh",
   "bus": null,
   "sizing": "ratings",
@@ -1316,10 +1613,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "70": {
+ "103": {
   "typ": "Battery4",
-  "name": "mxCell_376",
-  "id": "hI-U379kAfT1xGVEWiBY-262",
+  "name": "mxCell_484",
+  "id": "eFw-uuBRl2atDgbCq0K--352",
   "userFriendlyName": "PCS5 LTO 635 kWh",
   "bus": null,
   "sizing": "ratings",
@@ -1343,10 +1640,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "71": {
+ "104": {
   "typ": "SOFC5",
-  "name": "mxCell_377",
-  "id": "hI-U379kAfT1xGVEWiBY-263",
+  "name": "mxCell_485",
+  "id": "eFw-uuBRl2atDgbCq0K--353",
   "userFriendlyName": "SOFC01 SOFC",
   "bus": null,
   "p_rated_kw": "1936",
@@ -1359,10 +1656,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "72": {
+ "105": {
   "typ": "SOFC6",
-  "name": "mxCell_378",
-  "id": "hI-U379kAfT1xGVEWiBY-264",
+  "name": "mxCell_486",
+  "id": "eFw-uuBRl2atDgbCq0K--354",
   "userFriendlyName": "SOFC02 SOFC",
   "bus": null,
   "p_rated_kw": "1936",
@@ -1375,10 +1672,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "73": {
+ "106": {
   "typ": "SOFC7",
-  "name": "mxCell_379",
-  "id": "hI-U379kAfT1xGVEWiBY-265",
+  "name": "mxCell_487",
+  "id": "eFw-uuBRl2atDgbCq0K--355",
   "userFriendlyName": "SOFC03 SOFC",
   "bus": null,
   "p_rated_kw": "1936",
@@ -1391,10 +1688,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "74": {
+ "107": {
   "typ": "SOFC8",
-  "name": "mxCell_380",
-  "id": "hI-U379kAfT1xGVEWiBY-266",
+  "name": "mxCell_488",
+  "id": "eFw-uuBRl2atDgbCq0K--356",
   "userFriendlyName": "SOFC04 SOFC",
   "bus": null,
   "p_rated_kw": "1936",
@@ -1407,10 +1704,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "75": {
+ "108": {
   "typ": "SOFC9",
-  "name": "mxCell_381",
-  "id": "hI-U379kAfT1xGVEWiBY-267",
+  "name": "mxCell_489",
+  "id": "eFw-uuBRl2atDgbCq0K--357",
   "userFriendlyName": "SOFC05 SOFC",
   "bus": null,
   "p_rated_kw": "1936",
@@ -1423,10 +1720,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "76": {
+ "109": {
   "typ": "SOFC10",
-  "name": "mxCell_382",
-  "id": "hI-U379kAfT1xGVEWiBY-268",
+  "name": "mxCell_490",
+  "id": "eFw-uuBRl2atDgbCq0K--358",
   "userFriendlyName": "SOFC06 SOFC",
   "bus": null,
   "p_rated_kw": "1936",
@@ -1439,10 +1736,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "77": {
+ "110": {
   "typ": "SOFC11",
-  "name": "mxCell_383",
-  "id": "hI-U379kAfT1xGVEWiBY-269",
+  "name": "mxCell_491",
+  "id": "eFw-uuBRl2atDgbCq0K--359",
   "userFriendlyName": "SOFC07 SOFC",
   "bus": null,
   "p_rated_kw": "1936",
@@ -1455,10 +1752,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "78": {
+ "111": {
   "typ": "SOFC12",
-  "name": "mxCell_384",
-  "id": "hI-U379kAfT1xGVEWiBY-270",
+  "name": "mxCell_492",
+  "id": "eFw-uuBRl2atDgbCq0K--360",
   "userFriendlyName": "SOFC08 SOFC",
   "bus": null,
   "p_rated_kw": "1936",
@@ -1471,10 +1768,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "79": {
+ "112": {
   "typ": "SOFC13",
-  "name": "mxCell_385",
-  "id": "hI-U379kAfT1xGVEWiBY-271",
+  "name": "mxCell_493",
+  "id": "eFw-uuBRl2atDgbCq0K--361",
   "userFriendlyName": "SOFC09 SOFC",
   "bus": null,
   "p_rated_kw": "1936",
@@ -1487,10 +1784,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "80": {
+ "113": {
   "typ": "SOFC14",
-  "name": "mxCell_386",
-  "id": "hI-U379kAfT1xGVEWiBY-272",
+  "name": "mxCell_494",
+  "id": "eFw-uuBRl2atDgbCq0K--362",
   "userFriendlyName": "SOFC10 SOFC",
   "bus": null,
   "p_rated_kw": "1936",
@@ -1503,10 +1800,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "81": {
+ "114": {
   "typ": "SOFC15",
-  "name": "mxCell_387",
-  "id": "hI-U379kAfT1xGVEWiBY-273",
+  "name": "mxCell_495",
+  "id": "eFw-uuBRl2atDgbCq0K--363",
   "userFriendlyName": "SOFC11 SOFC",
   "bus": null,
   "p_rated_kw": "1936",
@@ -1519,10 +1816,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "82": {
+ "115": {
   "typ": "SOFC16",
-  "name": "mxCell_388",
-  "id": "hI-U379kAfT1xGVEWiBY-274",
+  "name": "mxCell_496",
+  "id": "eFw-uuBRl2atDgbCq0K--364",
   "userFriendlyName": "SOFC12 SOFC",
   "bus": null,
   "p_rated_kw": "1936",
@@ -1535,10 +1832,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "83": {
+ "116": {
   "typ": "SOFC17",
-  "name": "mxCell_389",
-  "id": "hI-U379kAfT1xGVEWiBY-275",
+  "name": "mxCell_497",
+  "id": "eFw-uuBRl2atDgbCq0K--365",
   "userFriendlyName": "SOFC13 SOFC",
   "bus": null,
   "p_rated_kw": "1936",
@@ -1551,10 +1848,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "84": {
+ "117": {
   "typ": "SOFC18",
-  "name": "mxCell_390",
-  "id": "hI-U379kAfT1xGVEWiBY-276",
+  "name": "mxCell_498",
+  "id": "eFw-uuBRl2atDgbCq0K--366",
   "userFriendlyName": "SOFC14 SOFC",
   "bus": null,
   "p_rated_kw": "1936",
@@ -1567,10 +1864,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "85": {
+ "118": {
   "typ": "SOFC19",
-  "name": "mxCell_391",
-  "id": "hI-U379kAfT1xGVEWiBY-277",
+  "name": "mxCell_499",
+  "id": "eFw-uuBRl2atDgbCq0K--367",
   "userFriendlyName": "SOFC15 SOFC",
   "bus": null,
   "p_rated_kw": "1936",
@@ -1583,10 +1880,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "86": {
+ "119": {
   "typ": "SOFC20",
-  "name": "mxCell_392",
-  "id": "hI-U379kAfT1xGVEWiBY-278",
+  "name": "mxCell_500",
+  "id": "eFw-uuBRl2atDgbCq0K--368",
   "userFriendlyName": "SOFC16 SOFC",
   "bus": null,
   "p_rated_kw": "1936",
@@ -1599,10 +1896,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "87": {
+ "120": {
   "typ": "SOFC21",
-  "name": "mxCell_393",
-  "id": "hI-U379kAfT1xGVEWiBY-279",
+  "name": "mxCell_501",
+  "id": "eFw-uuBRl2atDgbCq0K--369",
   "userFriendlyName": "SOFC17 SOFC",
   "bus": null,
   "p_rated_kw": "1936",
@@ -1615,10 +1912,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "88": {
+ "121": {
   "typ": "SOFC22",
-  "name": "mxCell_394",
-  "id": "hI-U379kAfT1xGVEWiBY-280",
+  "name": "mxCell_502",
+  "id": "eFw-uuBRl2atDgbCq0K--370",
   "userFriendlyName": "SOFC18 SOFC",
   "bus": null,
   "p_rated_kw": "1936",
@@ -1631,10 +1928,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "89": {
+ "122": {
   "typ": "SOFC23",
-  "name": "mxCell_395",
-  "id": "hI-U379kAfT1xGVEWiBY-281",
+  "name": "mxCell_503",
+  "id": "eFw-uuBRl2atDgbCq0K--371",
   "userFriendlyName": "SOFC19 SOFC",
   "bus": null,
   "p_rated_kw": "1936",
@@ -1647,14 +1944,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "90": {
+ "123": {
   "typ": "PCS0",
-  "name": "mxCell_396",
-  "id": "hI-U379kAfT1xGVEWiBY-282",
+  "name": "mxCell_504",
+  "id": "eFw-uuBRl2atDgbCq0K--372",
   "userFriendlyName": "SOFC01 inverter",
   "bus": "mxCell_189",
   "bus_dc": null,
-  "der": "mxCell_377",
+  "der": "mxCell_485",
   "control": "grid_following",
   "s_rated_mva": "2.2",
   "vn_ac_kv": "0.4",
@@ -1680,14 +1977,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "91": {
+ "124": {
   "typ": "PCS1",
-  "name": "mxCell_397",
-  "id": "hI-U379kAfT1xGVEWiBY-283",
+  "name": "mxCell_505",
+  "id": "eFw-uuBRl2atDgbCq0K--373",
   "userFriendlyName": "SOFC02 inverter",
   "bus": "mxCell_190",
   "bus_dc": null,
-  "der": "mxCell_378",
+  "der": "mxCell_486",
   "control": "grid_following",
   "s_rated_mva": "2.2",
   "vn_ac_kv": "0.4",
@@ -1713,14 +2010,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "92": {
+ "125": {
   "typ": "PCS2",
-  "name": "mxCell_398",
-  "id": "hI-U379kAfT1xGVEWiBY-284",
+  "name": "mxCell_506",
+  "id": "eFw-uuBRl2atDgbCq0K--374",
   "userFriendlyName": "SOFC03 inverter",
   "bus": "mxCell_191",
   "bus_dc": null,
-  "der": "mxCell_379",
+  "der": "mxCell_487",
   "control": "grid_following",
   "s_rated_mva": "2.2",
   "vn_ac_kv": "0.4",
@@ -1746,14 +2043,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "93": {
+ "126": {
   "typ": "PCS3",
-  "name": "mxCell_399",
-  "id": "hI-U379kAfT1xGVEWiBY-285",
+  "name": "mxCell_507",
+  "id": "eFw-uuBRl2atDgbCq0K--375",
   "userFriendlyName": "SOFC04 inverter",
   "bus": "mxCell_192",
   "bus_dc": null,
-  "der": "mxCell_380",
+  "der": "mxCell_488",
   "control": "grid_following",
   "s_rated_mva": "2.2",
   "vn_ac_kv": "0.4",
@@ -1779,14 +2076,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "94": {
+ "127": {
   "typ": "PCS4",
-  "name": "mxCell_400",
-  "id": "hI-U379kAfT1xGVEWiBY-286",
+  "name": "mxCell_508",
+  "id": "eFw-uuBRl2atDgbCq0K--376",
   "userFriendlyName": "SOFC05 inverter",
   "bus": "mxCell_193",
   "bus_dc": null,
-  "der": "mxCell_381",
+  "der": "mxCell_489",
   "control": "grid_following",
   "s_rated_mva": "2.2",
   "vn_ac_kv": "0.4",
@@ -1812,14 +2109,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "95": {
+ "128": {
   "typ": "PCS5",
-  "name": "mxCell_401",
-  "id": "hI-U379kAfT1xGVEWiBY-287",
+  "name": "mxCell_509",
+  "id": "eFw-uuBRl2atDgbCq0K--377",
   "userFriendlyName": "SOFC06 inverter",
   "bus": "mxCell_194",
   "bus_dc": null,
-  "der": "mxCell_382",
+  "der": "mxCell_490",
   "control": "grid_following",
   "s_rated_mva": "2.2",
   "vn_ac_kv": "0.4",
@@ -1845,14 +2142,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "96": {
+ "129": {
   "typ": "PCS6",
-  "name": "mxCell_402",
-  "id": "hI-U379kAfT1xGVEWiBY-288",
+  "name": "mxCell_510",
+  "id": "eFw-uuBRl2atDgbCq0K--378",
   "userFriendlyName": "SOFC07 inverter",
   "bus": "mxCell_195",
   "bus_dc": null,
-  "der": "mxCell_383",
+  "der": "mxCell_491",
   "control": "grid_following",
   "s_rated_mva": "2.2",
   "vn_ac_kv": "0.4",
@@ -1878,14 +2175,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "97": {
+ "130": {
   "typ": "PCS7",
-  "name": "mxCell_403",
-  "id": "hI-U379kAfT1xGVEWiBY-289",
+  "name": "mxCell_511",
+  "id": "eFw-uuBRl2atDgbCq0K--379",
   "userFriendlyName": "SOFC08 inverter",
   "bus": "mxCell_196",
   "bus_dc": null,
-  "der": "mxCell_384",
+  "der": "mxCell_492",
   "control": "grid_following",
   "s_rated_mva": "2.2",
   "vn_ac_kv": "0.4",
@@ -1911,14 +2208,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "98": {
+ "131": {
   "typ": "PCS8",
-  "name": "mxCell_404",
-  "id": "hI-U379kAfT1xGVEWiBY-290",
+  "name": "mxCell_512",
+  "id": "eFw-uuBRl2atDgbCq0K--380",
   "userFriendlyName": "SOFC09 inverter",
   "bus": "mxCell_197",
   "bus_dc": null,
-  "der": "mxCell_385",
+  "der": "mxCell_493",
   "control": "grid_following",
   "s_rated_mva": "2.2",
   "vn_ac_kv": "0.4",
@@ -1944,14 +2241,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "99": {
+ "132": {
   "typ": "PCS9",
-  "name": "mxCell_405",
-  "id": "hI-U379kAfT1xGVEWiBY-291",
+  "name": "mxCell_513",
+  "id": "eFw-uuBRl2atDgbCq0K--381",
   "userFriendlyName": "SOFC10 inverter",
   "bus": "mxCell_198",
   "bus_dc": null,
-  "der": "mxCell_386",
+  "der": "mxCell_494",
   "control": "grid_following",
   "s_rated_mva": "2.2",
   "vn_ac_kv": "0.4",
@@ -1977,14 +2274,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "100": {
+ "133": {
   "typ": "PCS10",
-  "name": "mxCell_406",
-  "id": "hI-U379kAfT1xGVEWiBY-292",
+  "name": "mxCell_514",
+  "id": "eFw-uuBRl2atDgbCq0K--382",
   "userFriendlyName": "SOFC11 inverter",
   "bus": "mxCell_199",
   "bus_dc": null,
-  "der": "mxCell_387",
+  "der": "mxCell_495",
   "control": "grid_following",
   "s_rated_mva": "2.2",
   "vn_ac_kv": "0.4",
@@ -2010,14 +2307,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "101": {
+ "134": {
   "typ": "PCS11",
-  "name": "mxCell_407",
-  "id": "hI-U379kAfT1xGVEWiBY-293",
+  "name": "mxCell_515",
+  "id": "eFw-uuBRl2atDgbCq0K--383",
   "userFriendlyName": "SOFC12 inverter",
   "bus": "mxCell_200",
   "bus_dc": null,
-  "der": "mxCell_388",
+  "der": "mxCell_496",
   "control": "grid_following",
   "s_rated_mva": "2.2",
   "vn_ac_kv": "0.4",
@@ -2043,14 +2340,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "102": {
+ "135": {
   "typ": "PCS12",
-  "name": "mxCell_408",
-  "id": "hI-U379kAfT1xGVEWiBY-294",
+  "name": "mxCell_516",
+  "id": "eFw-uuBRl2atDgbCq0K--384",
   "userFriendlyName": "SOFC13 inverter",
   "bus": "mxCell_201",
   "bus_dc": null,
-  "der": "mxCell_389",
+  "der": "mxCell_497",
   "control": "grid_following",
   "s_rated_mva": "2.2",
   "vn_ac_kv": "0.4",
@@ -2076,14 +2373,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "103": {
+ "136": {
   "typ": "PCS13",
-  "name": "mxCell_409",
-  "id": "hI-U379kAfT1xGVEWiBY-295",
+  "name": "mxCell_517",
+  "id": "eFw-uuBRl2atDgbCq0K--385",
   "userFriendlyName": "SOFC14 inverter",
   "bus": "mxCell_202",
   "bus_dc": null,
-  "der": "mxCell_390",
+  "der": "mxCell_498",
   "control": "grid_following",
   "s_rated_mva": "2.2",
   "vn_ac_kv": "0.4",
@@ -2109,14 +2406,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "104": {
+ "137": {
   "typ": "PCS14",
-  "name": "mxCell_410",
-  "id": "hI-U379kAfT1xGVEWiBY-296",
+  "name": "mxCell_518",
+  "id": "eFw-uuBRl2atDgbCq0K--386",
   "userFriendlyName": "SOFC15 inverter",
   "bus": "mxCell_203",
   "bus_dc": null,
-  "der": "mxCell_391",
+  "der": "mxCell_499",
   "control": "grid_following",
   "s_rated_mva": "2.2",
   "vn_ac_kv": "0.4",
@@ -2142,14 +2439,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "105": {
+ "138": {
   "typ": "PCS15",
-  "name": "mxCell_411",
-  "id": "hI-U379kAfT1xGVEWiBY-297",
+  "name": "mxCell_519",
+  "id": "eFw-uuBRl2atDgbCq0K--387",
   "userFriendlyName": "SOFC16 inverter",
   "bus": "mxCell_204",
   "bus_dc": null,
-  "der": "mxCell_392",
+  "der": "mxCell_500",
   "control": "grid_following",
   "s_rated_mva": "2.2",
   "vn_ac_kv": "0.4",
@@ -2175,14 +2472,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "106": {
+ "139": {
   "typ": "PCS16",
-  "name": "mxCell_412",
-  "id": "hI-U379kAfT1xGVEWiBY-298",
+  "name": "mxCell_520",
+  "id": "eFw-uuBRl2atDgbCq0K--388",
   "userFriendlyName": "SOFC17 inverter",
   "bus": "mxCell_205",
   "bus_dc": null,
-  "der": "mxCell_393",
+  "der": "mxCell_501",
   "control": "grid_following",
   "s_rated_mva": "2.2",
   "vn_ac_kv": "0.4",
@@ -2208,14 +2505,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "107": {
+ "140": {
   "typ": "PCS17",
-  "name": "mxCell_413",
-  "id": "hI-U379kAfT1xGVEWiBY-299",
+  "name": "mxCell_521",
+  "id": "eFw-uuBRl2atDgbCq0K--389",
   "userFriendlyName": "SOFC18 inverter",
   "bus": "mxCell_206",
   "bus_dc": null,
-  "der": "mxCell_394",
+  "der": "mxCell_502",
   "control": "grid_following",
   "s_rated_mva": "2.2",
   "vn_ac_kv": "0.4",
@@ -2241,14 +2538,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "108": {
+ "141": {
   "typ": "PCS18",
-  "name": "mxCell_414",
-  "id": "hI-U379kAfT1xGVEWiBY-300",
+  "name": "mxCell_522",
+  "id": "eFw-uuBRl2atDgbCq0K--390",
   "userFriendlyName": "SOFC19 inverter",
   "bus": "mxCell_207",
   "bus_dc": null,
-  "der": "mxCell_395",
+  "der": "mxCell_503",
   "control": "grid_following",
   "s_rated_mva": "2.2",
   "vn_ac_kv": "0.4",
@@ -2274,14 +2571,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "109": {
+ "142": {
   "typ": "PCS19",
-  "name": "mxCell_415",
-  "id": "hI-U379kAfT1xGVEWiBY-301",
+  "name": "mxCell_523",
+  "id": "eFw-uuBRl2atDgbCq0K--391",
   "userFriendlyName": "PCS1 PCST5500",
   "bus": "mxCell_208",
   "bus_dc": null,
-  "der": "mxCell_372",
+  "der": "mxCell_480",
   "control": "grid_forming",
   "s_rated_mva": "5.5",
   "vn_ac_kv": "0.69",
@@ -2309,14 +2606,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "110": {
+ "143": {
   "typ": "PCS20",
-  "name": "mxCell_416",
-  "id": "hI-U379kAfT1xGVEWiBY-302",
+  "name": "mxCell_524",
+  "id": "eFw-uuBRl2atDgbCq0K--392",
   "userFriendlyName": "PCS2 PCST5500",
   "bus": "mxCell_209",
   "bus_dc": null,
-  "der": "mxCell_373",
+  "der": "mxCell_481",
   "control": "grid_forming",
   "s_rated_mva": "5.5",
   "vn_ac_kv": "0.69",
@@ -2344,14 +2641,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "111": {
+ "144": {
   "typ": "PCS21",
-  "name": "mxCell_417",
-  "id": "hI-U379kAfT1xGVEWiBY-303",
+  "name": "mxCell_525",
+  "id": "eFw-uuBRl2atDgbCq0K--393",
   "userFriendlyName": "PCS3 PCST5500",
   "bus": "mxCell_210",
   "bus_dc": null,
-  "der": "mxCell_374",
+  "der": "mxCell_482",
   "control": "grid_forming",
   "s_rated_mva": "5.5",
   "vn_ac_kv": "0.69",
@@ -2379,14 +2676,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "112": {
+ "145": {
   "typ": "PCS22",
-  "name": "mxCell_418",
-  "id": "hI-U379kAfT1xGVEWiBY-304",
+  "name": "mxCell_526",
+  "id": "eFw-uuBRl2atDgbCq0K--394",
   "userFriendlyName": "PCS4 PCST5500",
   "bus": "mxCell_211",
   "bus_dc": null,
-  "der": "mxCell_375",
+  "der": "mxCell_483",
   "control": "grid_forming",
   "s_rated_mva": "5.5",
   "vn_ac_kv": "0.69",
@@ -2414,14 +2711,14 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "113": {
+ "146": {
   "typ": "PCS23",
-  "name": "mxCell_419",
-  "id": "hI-U379kAfT1xGVEWiBY-305",
+  "name": "mxCell_527",
+  "id": "eFw-uuBRl2atDgbCq0K--395",
   "userFriendlyName": "PCS5 PCST5500",
   "bus": "mxCell_212",
   "bus_dc": null,
-  "der": "mxCell_376",
+  "der": "mxCell_484",
   "control": "grid_forming",
   "s_rated_mva": "5.5",
   "vn_ac_kv": "0.69",
@@ -2449,10 +2746,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "114": {
+ "147": {
   "typ": "Grounding Transformer0",
-  "name": "mxCell_420",
-  "id": "hI-U379kAfT1xGVEWiBY-306",
+  "name": "mxCell_528",
+  "id": "eFw-uuBRl2atDgbCq0K--396",
   "userFriendlyName": "GT_A zig-zag NER 38 ohm",
   "bus": "mxCell_186",
   "vn_kv": "0",
@@ -2463,10 +2760,10 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "115": {
+ "148": {
   "typ": "Grounding Transformer1",
-  "name": "mxCell_421",
-  "id": "hI-U379kAfT1xGVEWiBY-307",
+  "name": "mxCell_529",
+  "id": "eFw-uuBRl2atDgbCq0K--397",
   "userFriendlyName": "GT_B zig-zag NER 38 ohm",
   "bus": "mxCell_187",
   "vn_kv": "0",
@@ -2477,13 +2774,13 @@
   "in_service": "true",
   "cost_per_unit_by_currency": "{}"
  },
- "116": {
+ "149": {
   "typ": "Line0",
-  "name": "mxCell_360",
-  "id": "hI-U379kAfT1xGVEWiBY-174",
+  "name": "mxCell_434",
+  "id": "eFw-uuBRl2atDgbCq0K--214",
   "userFriendlyName": "SEG_AB1",
-  "busFrom": "mxCell_184",
-  "busTo": "mxCell_185",
+  "busFrom": "mxCell_218",
+  "busTo": "mxCell_219",
   "length_km": "1",
   "parallel": "1",
   "df": "1",
@@ -2499,13 +2796,13 @@
   "c0_nf_per_km": "0",
   "endtemp_degree": "80"
  },
- "117": {
+ "150": {
   "typ": "Line1",
-  "name": "mxCell_361",
-  "id": "hI-U379kAfT1xGVEWiBY-178",
+  "name": "mxCell_435",
+  "id": "eFw-uuBRl2atDgbCq0K--215",
   "userFriendlyName": "LN_A_MVA",
-  "busFrom": "mxCell_184",
-  "busTo": "mxCell_186",
+  "busFrom": "mxCell_220",
+  "busTo": "mxCell_221",
   "length_km": "1",
   "parallel": "1",
   "df": "1",
@@ -2521,13 +2818,13 @@
   "c0_nf_per_km": "0",
   "endtemp_degree": "80"
  },
- "118": {
+ "151": {
   "typ": "Line2",
-  "name": "mxCell_362",
-  "id": "hI-U379kAfT1xGVEWiBY-182",
+  "name": "mxCell_436",
+  "id": "eFw-uuBRl2atDgbCq0K--216",
   "userFriendlyName": "LN_B_MVB",
-  "busFrom": "mxCell_185",
-  "busTo": "mxCell_187",
+  "busFrom": "mxCell_222",
+  "busTo": "mxCell_223",
   "length_km": "1",
   "parallel": "1",
   "df": "1",
@@ -2543,13 +2840,13 @@
   "c0_nf_per_km": "0",
   "endtemp_degree": "80"
  },
- "119": {
+ "152": {
   "typ": "Line3",
-  "name": "mxCell_363",
-  "id": "hI-U379kAfT1xGVEWiBY-186",
+  "name": "mxCell_437",
+  "id": "eFw-uuBRl2atDgbCq0K--217",
   "userFriendlyName": "TIE_AB",
-  "busFrom": "mxCell_186",
-  "busTo": "mxCell_187",
+  "busFrom": "mxCell_224",
+  "busTo": "mxCell_225",
   "length_km": "1",
   "parallel": "1",
   "df": "1",
@@ -2565,61 +2862,61 @@
   "c0_nf_per_km": "0",
   "endtemp_degree": "80"
  },
- "120": {
+ "153": {
   "typ": "Switch0",
-  "id": "hI-U379kAfT1xGVEWiBY-190",
+  "id": "eFw-uuBRl2atDgbCq0K--218",
   "userFriendlyName": "CB_SEG_AB1",
   "name": "CB_SEG_AB1",
-  "et": "l",
+  "et": "b",
   "type": "CB",
   "closed": "true",
   "z_ohm": "0",
   "in_ka": "0",
   "bus": "mxCell_184",
-  "element": "mxCell_360"
+  "element": "mxCell_218"
  },
- "121": {
+ "154": {
   "typ": "Switch1",
-  "id": "hI-U379kAfT1xGVEWiBY-194",
+  "id": "eFw-uuBRl2atDgbCq0K--221",
   "userFriendlyName": "CB_A_MVA",
   "name": "CB_A_MVA",
-  "et": "l",
+  "et": "b",
   "type": "CB",
   "closed": "true",
   "z_ohm": "0",
   "in_ka": "0",
   "bus": "mxCell_184",
-  "element": "mxCell_361"
+  "element": "mxCell_220"
  },
- "122": {
+ "155": {
   "typ": "Switch2",
-  "id": "hI-U379kAfT1xGVEWiBY-198",
+  "id": "eFw-uuBRl2atDgbCq0K--224",
   "userFriendlyName": "CB_B_MVB",
   "name": "CB_B_MVB",
-  "et": "l",
+  "et": "b",
   "type": "CB",
   "closed": "true",
   "z_ohm": "0",
   "in_ka": "0",
   "bus": "mxCell_185",
-  "element": "mxCell_362"
+  "element": "mxCell_222"
  },
- "123": {
+ "156": {
   "typ": "Switch3",
-  "id": "hI-U379kAfT1xGVEWiBY-202",
+  "id": "eFw-uuBRl2atDgbCq0K--227",
   "userFriendlyName": "CB_TIE",
   "name": "CB_TIE",
-  "et": "l",
+  "et": "b",
   "type": "CB",
   "closed": "true",
   "z_ohm": "0",
   "in_ka": "0",
   "bus": "mxCell_186",
-  "element": "mxCell_363"
+  "element": "mxCell_224"
  },
- "124": {
+ "157": {
   "typ": "Switch4",
-  "id": "hI-U379kAfT1xGVEWiBY-206",
+  "id": "eFw-uuBRl2atDgbCq0K--230",
   "userFriendlyName": "CB_L_IT_cordA",
   "name": "CB_L_IT_cordA",
   "et": "b",
@@ -2630,9 +2927,9 @@
   "bus": "mxCell_186",
   "element": "mxCell_213"
  },
- "125": {
+ "158": {
   "typ": "Switch5",
-  "id": "hI-U379kAfT1xGVEWiBY-211",
+  "id": "eFw-uuBRl2atDgbCq0K--233",
   "userFriendlyName": "CB_L_OTHER_A",
   "name": "CB_L_OTHER_A",
   "et": "b",
@@ -2643,9 +2940,9 @@
   "bus": "mxCell_186",
   "element": "mxCell_214"
  },
- "126": {
+ "159": {
   "typ": "Switch6",
-  "id": "hI-U379kAfT1xGVEWiBY-216",
+  "id": "eFw-uuBRl2atDgbCq0K--236",
   "userFriendlyName": "CB_L_IT_cordB",
   "name": "CB_L_IT_cordB",
   "et": "b",
@@ -2656,9 +2953,9 @@
   "bus": "mxCell_187",
   "element": "mxCell_215"
  },
- "127": {
+ "160": {
   "typ": "Switch7",
-  "id": "hI-U379kAfT1xGVEWiBY-221",
+  "id": "eFw-uuBRl2atDgbCq0K--239",
   "userFriendlyName": "CB_L_OTHER_B",
   "name": "CB_L_OTHER_B",
   "et": "b",
@@ -2668,5 +2965,382 @@
   "in_ka": "0",
   "bus": "mxCell_187",
   "element": "mxCell_216"
+ },
+ "161": {
+  "typ": "Switch8",
+  "id": "eFw-uuBRl2atDgbCq0K--242",
+  "userFriendlyName": "CB_SEG_AB1_FAR",
+  "name": "CB_SEG_AB1_FAR",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_185",
+  "element": "mxCell_219"
+ },
+ "162": {
+  "typ": "Switch9",
+  "id": "eFw-uuBRl2atDgbCq0K--245",
+  "userFriendlyName": "CB_A_MVA_FAR",
+  "name": "CB_A_MVA_FAR",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_186",
+  "element": "mxCell_221"
+ },
+ "163": {
+  "typ": "Switch10",
+  "id": "eFw-uuBRl2atDgbCq0K--248",
+  "userFriendlyName": "CB_B_MVB_FAR",
+  "name": "CB_B_MVB_FAR",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_187",
+  "element": "mxCell_223"
+ },
+ "164": {
+  "typ": "Switch11",
+  "id": "eFw-uuBRl2atDgbCq0K--251",
+  "userFriendlyName": "CB_TIE_FAR",
+  "name": "CB_TIE_FAR",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_187",
+  "element": "mxCell_225"
+ },
+ "165": {
+  "typ": "Switch12",
+  "id": "eFw-uuBRl2atDgbCq0K--254",
+  "userFriendlyName": "CB_GEN",
+  "name": "CB_GEN",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_186",
+  "element": "mxCell_226"
+ },
+ "166": {
+  "typ": "Switch13",
+  "id": "eFw-uuBRl2atDgbCq0K--257",
+  "userFriendlyName": "CB_SOFC01",
+  "name": "CB_SOFC01",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_184",
+  "element": "mxCell_227"
+ },
+ "167": {
+  "typ": "Switch14",
+  "id": "eFw-uuBRl2atDgbCq0K--260",
+  "userFriendlyName": "CB_SOFC02",
+  "name": "CB_SOFC02",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_184",
+  "element": "mxCell_228"
+ },
+ "168": {
+  "typ": "Switch15",
+  "id": "eFw-uuBRl2atDgbCq0K--263",
+  "userFriendlyName": "CB_SOFC03",
+  "name": "CB_SOFC03",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_184",
+  "element": "mxCell_229"
+ },
+ "169": {
+  "typ": "Switch16",
+  "id": "eFw-uuBRl2atDgbCq0K--266",
+  "userFriendlyName": "CB_SOFC04",
+  "name": "CB_SOFC04",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_184",
+  "element": "mxCell_230"
+ },
+ "170": {
+  "typ": "Switch17",
+  "id": "eFw-uuBRl2atDgbCq0K--269",
+  "userFriendlyName": "CB_SOFC05",
+  "name": "CB_SOFC05",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_184",
+  "element": "mxCell_231"
+ },
+ "171": {
+  "typ": "Switch18",
+  "id": "eFw-uuBRl2atDgbCq0K--272",
+  "userFriendlyName": "CB_SOFC06",
+  "name": "CB_SOFC06",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_184",
+  "element": "mxCell_232"
+ },
+ "172": {
+  "typ": "Switch19",
+  "id": "eFw-uuBRl2atDgbCq0K--275",
+  "userFriendlyName": "CB_SOFC07",
+  "name": "CB_SOFC07",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_184",
+  "element": "mxCell_233"
+ },
+ "173": {
+  "typ": "Switch20",
+  "id": "eFw-uuBRl2atDgbCq0K--278",
+  "userFriendlyName": "CB_SOFC08",
+  "name": "CB_SOFC08",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_184",
+  "element": "mxCell_234"
+ },
+ "174": {
+  "typ": "Switch21",
+  "id": "eFw-uuBRl2atDgbCq0K--281",
+  "userFriendlyName": "CB_SOFC09",
+  "name": "CB_SOFC09",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_184",
+  "element": "mxCell_235"
+ },
+ "175": {
+  "typ": "Switch22",
+  "id": "eFw-uuBRl2atDgbCq0K--284",
+  "userFriendlyName": "CB_SOFC10",
+  "name": "CB_SOFC10",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_184",
+  "element": "mxCell_236"
+ },
+ "176": {
+  "typ": "Switch23",
+  "id": "eFw-uuBRl2atDgbCq0K--287",
+  "userFriendlyName": "CB_SOFC11",
+  "name": "CB_SOFC11",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_185",
+  "element": "mxCell_237"
+ },
+ "177": {
+  "typ": "Switch24",
+  "id": "eFw-uuBRl2atDgbCq0K--290",
+  "userFriendlyName": "CB_SOFC12",
+  "name": "CB_SOFC12",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_185",
+  "element": "mxCell_238"
+ },
+ "178": {
+  "typ": "Switch25",
+  "id": "eFw-uuBRl2atDgbCq0K--293",
+  "userFriendlyName": "CB_SOFC13",
+  "name": "CB_SOFC13",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_185",
+  "element": "mxCell_239"
+ },
+ "179": {
+  "typ": "Switch26",
+  "id": "eFw-uuBRl2atDgbCq0K--296",
+  "userFriendlyName": "CB_SOFC14",
+  "name": "CB_SOFC14",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_185",
+  "element": "mxCell_240"
+ },
+ "180": {
+  "typ": "Switch27",
+  "id": "eFw-uuBRl2atDgbCq0K--299",
+  "userFriendlyName": "CB_SOFC15",
+  "name": "CB_SOFC15",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_185",
+  "element": "mxCell_241"
+ },
+ "181": {
+  "typ": "Switch28",
+  "id": "eFw-uuBRl2atDgbCq0K--302",
+  "userFriendlyName": "CB_SOFC16",
+  "name": "CB_SOFC16",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_185",
+  "element": "mxCell_242"
+ },
+ "182": {
+  "typ": "Switch29",
+  "id": "eFw-uuBRl2atDgbCq0K--305",
+  "userFriendlyName": "CB_SOFC17",
+  "name": "CB_SOFC17",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_185",
+  "element": "mxCell_243"
+ },
+ "183": {
+  "typ": "Switch30",
+  "id": "eFw-uuBRl2atDgbCq0K--308",
+  "userFriendlyName": "CB_SOFC18",
+  "name": "CB_SOFC18",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_185",
+  "element": "mxCell_244"
+ },
+ "184": {
+  "typ": "Switch31",
+  "id": "eFw-uuBRl2atDgbCq0K--311",
+  "userFriendlyName": "CB_SOFC19",
+  "name": "CB_SOFC19",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_185",
+  "element": "mxCell_245"
+ },
+ "185": {
+  "typ": "Switch32",
+  "id": "eFw-uuBRl2atDgbCq0K--314",
+  "userFriendlyName": "CB_PCS1",
+  "name": "CB_PCS1",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_184",
+  "element": "mxCell_246"
+ },
+ "186": {
+  "typ": "Switch33",
+  "id": "eFw-uuBRl2atDgbCq0K--317",
+  "userFriendlyName": "CB_PCS2",
+  "name": "CB_PCS2",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_184",
+  "element": "mxCell_247"
+ },
+ "187": {
+  "typ": "Switch34",
+  "id": "eFw-uuBRl2atDgbCq0K--320",
+  "userFriendlyName": "CB_PCS3",
+  "name": "CB_PCS3",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_184",
+  "element": "mxCell_248"
+ },
+ "188": {
+  "typ": "Switch35",
+  "id": "eFw-uuBRl2atDgbCq0K--323",
+  "userFriendlyName": "CB_PCS4",
+  "name": "CB_PCS4",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_185",
+  "element": "mxCell_249"
+ },
+ "189": {
+  "typ": "Switch36",
+  "id": "eFw-uuBRl2atDgbCq0K--326",
+  "userFriendlyName": "CB_PCS5",
+  "name": "CB_PCS5",
+  "et": "b",
+  "type": "CB",
+  "closed": "true",
+  "z_ohm": "0",
+  "in_ka": "0",
+  "bus": "mxCell_185",
+  "element": "mxCell_250"
  }
 }

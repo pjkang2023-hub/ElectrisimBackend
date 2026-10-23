@@ -172,14 +172,179 @@
    "id": "IT_cordA_LV",
    "vn_kv": 0.4,
    "name": "IT_cordA_LV"
+  },
+  {
+   "id": "SEG_AB1_N",
+   "vn_kv": 33.0,
+   "name": "SEG_AB1_N"
+  },
+  {
+   "id": "SEG_AB1_FAR_N",
+   "vn_kv": 33.0,
+   "name": "SEG_AB1_FAR_N"
+  },
+  {
+   "id": "LN_A_MVA_N",
+   "vn_kv": 33.0,
+   "name": "LN_A_MVA_N"
+  },
+  {
+   "id": "LN_A_MVA_FAR_N",
+   "vn_kv": 33.0,
+   "name": "LN_A_MVA_FAR_N"
+  },
+  {
+   "id": "LN_B_MVB_N",
+   "vn_kv": 33.0,
+   "name": "LN_B_MVB_N"
+  },
+  {
+   "id": "LN_B_MVB_FAR_N",
+   "vn_kv": 33.0,
+   "name": "LN_B_MVB_FAR_N"
+  },
+  {
+   "id": "TIE_AB_N",
+   "vn_kv": 33.0,
+   "name": "TIE_AB_N"
+  },
+  {
+   "id": "TIE_AB_FAR_N",
+   "vn_kv": 33.0,
+   "name": "TIE_AB_FAR_N"
+  },
+  {
+   "id": "GEN_HV",
+   "vn_kv": 33.0,
+   "name": "GEN_HV"
+  },
+  {
+   "id": "SOFC01_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC01_HV"
+  },
+  {
+   "id": "SOFC02_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC02_HV"
+  },
+  {
+   "id": "SOFC03_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC03_HV"
+  },
+  {
+   "id": "SOFC04_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC04_HV"
+  },
+  {
+   "id": "SOFC05_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC05_HV"
+  },
+  {
+   "id": "SOFC06_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC06_HV"
+  },
+  {
+   "id": "SOFC07_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC07_HV"
+  },
+  {
+   "id": "SOFC08_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC08_HV"
+  },
+  {
+   "id": "SOFC09_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC09_HV"
+  },
+  {
+   "id": "SOFC10_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC10_HV"
+  },
+  {
+   "id": "SOFC11_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC11_HV"
+  },
+  {
+   "id": "SOFC12_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC12_HV"
+  },
+  {
+   "id": "SOFC13_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC13_HV"
+  },
+  {
+   "id": "SOFC14_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC14_HV"
+  },
+  {
+   "id": "SOFC15_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC15_HV"
+  },
+  {
+   "id": "SOFC16_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC16_HV"
+  },
+  {
+   "id": "SOFC17_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC17_HV"
+  },
+  {
+   "id": "SOFC18_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC18_HV"
+  },
+  {
+   "id": "SOFC19_HV",
+   "vn_kv": 33.0,
+   "name": "SOFC19_HV"
+  },
+  {
+   "id": "PCS1_HV",
+   "vn_kv": 33.0,
+   "name": "PCS1_HV"
+  },
+  {
+   "id": "PCS2_HV",
+   "vn_kv": 33.0,
+   "name": "PCS2_HV"
+  },
+  {
+   "id": "PCS3_HV",
+   "vn_kv": 33.0,
+   "name": "PCS3_HV"
+  },
+  {
+   "id": "PCS4_HV",
+   "vn_kv": 33.0,
+   "name": "PCS4_HV"
+  },
+  {
+   "id": "PCS5_HV",
+   "vn_kv": 33.0,
+   "name": "PCS5_HV"
   }
  ],
  "lines": [
   {
    "id": "SEG_AB1",
    "name": "SEG_AB1",
-   "from_bus": "RING_A",
-   "to_bus": "RING_B",
+   "from_bus": "SEG_AB1_N",
+   "to_bus": "SEG_AB1_FAR_N",
    "length_km": 1.0,
    "r_ohm_per_km": 0.02178,
    "x_ohm_per_km": 0.04356,
@@ -189,8 +354,8 @@
   {
    "id": "LN_A_MVA",
    "name": "LN_A_MVA",
-   "from_bus": "RING_A",
-   "to_bus": "MVA",
+   "from_bus": "LN_A_MVA_N",
+   "to_bus": "LN_A_MVA_FAR_N",
    "length_km": 1.0,
    "r_ohm_per_km": 0.02178,
    "x_ohm_per_km": 0.04356,
@@ -200,8 +365,8 @@
   {
    "id": "LN_B_MVB",
    "name": "LN_B_MVB",
-   "from_bus": "RING_B",
-   "to_bus": "MVB",
+   "from_bus": "LN_B_MVB_N",
+   "to_bus": "LN_B_MVB_FAR_N",
    "length_km": 1.0,
    "r_ohm_per_km": 0.02178,
    "x_ohm_per_km": 0.04356,
@@ -211,8 +376,8 @@
   {
    "id": "TIE_AB",
    "name": "TIE_AB",
-   "from_bus": "MVA",
-   "to_bus": "MVB",
+   "from_bus": "TIE_AB_N",
+   "to_bus": "TIE_AB_FAR_N",
    "length_km": 1.0,
    "r_ohm_per_km": 0.02178,
    "x_ohm_per_km": 0.04356,
@@ -224,7 +389,7 @@
   {
    "id": "TR_SOFC01",
    "name": "TR_SOFC01",
-   "hv_bus": "RING_A",
+   "hv_bus": "SOFC01_HV",
    "lv_bus": "SOFC01_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -235,7 +400,7 @@
   {
    "id": "TR_SOFC02",
    "name": "TR_SOFC02",
-   "hv_bus": "RING_A",
+   "hv_bus": "SOFC02_HV",
    "lv_bus": "SOFC02_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -246,7 +411,7 @@
   {
    "id": "TR_SOFC03",
    "name": "TR_SOFC03",
-   "hv_bus": "RING_A",
+   "hv_bus": "SOFC03_HV",
    "lv_bus": "SOFC03_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -257,7 +422,7 @@
   {
    "id": "TR_SOFC04",
    "name": "TR_SOFC04",
-   "hv_bus": "RING_A",
+   "hv_bus": "SOFC04_HV",
    "lv_bus": "SOFC04_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -268,7 +433,7 @@
   {
    "id": "TR_SOFC05",
    "name": "TR_SOFC05",
-   "hv_bus": "RING_A",
+   "hv_bus": "SOFC05_HV",
    "lv_bus": "SOFC05_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -279,7 +444,7 @@
   {
    "id": "TR_SOFC06",
    "name": "TR_SOFC06",
-   "hv_bus": "RING_A",
+   "hv_bus": "SOFC06_HV",
    "lv_bus": "SOFC06_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -290,7 +455,7 @@
   {
    "id": "TR_SOFC07",
    "name": "TR_SOFC07",
-   "hv_bus": "RING_A",
+   "hv_bus": "SOFC07_HV",
    "lv_bus": "SOFC07_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -301,7 +466,7 @@
   {
    "id": "TR_SOFC08",
    "name": "TR_SOFC08",
-   "hv_bus": "RING_A",
+   "hv_bus": "SOFC08_HV",
    "lv_bus": "SOFC08_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -312,7 +477,7 @@
   {
    "id": "TR_SOFC09",
    "name": "TR_SOFC09",
-   "hv_bus": "RING_A",
+   "hv_bus": "SOFC09_HV",
    "lv_bus": "SOFC09_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -323,7 +488,7 @@
   {
    "id": "TR_SOFC10",
    "name": "TR_SOFC10",
-   "hv_bus": "RING_A",
+   "hv_bus": "SOFC10_HV",
    "lv_bus": "SOFC10_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -334,7 +499,7 @@
   {
    "id": "TR_SOFC11",
    "name": "TR_SOFC11",
-   "hv_bus": "RING_B",
+   "hv_bus": "SOFC11_HV",
    "lv_bus": "SOFC11_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -345,7 +510,7 @@
   {
    "id": "TR_SOFC12",
    "name": "TR_SOFC12",
-   "hv_bus": "RING_B",
+   "hv_bus": "SOFC12_HV",
    "lv_bus": "SOFC12_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -356,7 +521,7 @@
   {
    "id": "TR_SOFC13",
    "name": "TR_SOFC13",
-   "hv_bus": "RING_B",
+   "hv_bus": "SOFC13_HV",
    "lv_bus": "SOFC13_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -367,7 +532,7 @@
   {
    "id": "TR_SOFC14",
    "name": "TR_SOFC14",
-   "hv_bus": "RING_B",
+   "hv_bus": "SOFC14_HV",
    "lv_bus": "SOFC14_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -378,7 +543,7 @@
   {
    "id": "TR_SOFC15",
    "name": "TR_SOFC15",
-   "hv_bus": "RING_B",
+   "hv_bus": "SOFC15_HV",
    "lv_bus": "SOFC15_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -389,7 +554,7 @@
   {
    "id": "TR_SOFC16",
    "name": "TR_SOFC16",
-   "hv_bus": "RING_B",
+   "hv_bus": "SOFC16_HV",
    "lv_bus": "SOFC16_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -400,7 +565,7 @@
   {
    "id": "TR_SOFC17",
    "name": "TR_SOFC17",
-   "hv_bus": "RING_B",
+   "hv_bus": "SOFC17_HV",
    "lv_bus": "SOFC17_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -411,7 +576,7 @@
   {
    "id": "TR_SOFC18",
    "name": "TR_SOFC18",
-   "hv_bus": "RING_B",
+   "hv_bus": "SOFC18_HV",
    "lv_bus": "SOFC18_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -422,7 +587,7 @@
   {
    "id": "TR_SOFC19",
    "name": "TR_SOFC19",
-   "hv_bus": "RING_B",
+   "hv_bus": "SOFC19_HV",
    "lv_bus": "SOFC19_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -433,7 +598,7 @@
   {
    "id": "TR_PCS1",
    "name": "TR_PCS1",
-   "hv_bus": "RING_A",
+   "hv_bus": "PCS1_HV",
    "lv_bus": "PCS1_LV",
    "sn_mva": 5.5,
    "vk_percent": 6.0006,
@@ -444,7 +609,7 @@
   {
    "id": "TR_PCS2",
    "name": "TR_PCS2",
-   "hv_bus": "RING_A",
+   "hv_bus": "PCS2_HV",
    "lv_bus": "PCS2_LV",
    "sn_mva": 5.5,
    "vk_percent": 6.0006,
@@ -455,7 +620,7 @@
   {
    "id": "TR_PCS3",
    "name": "TR_PCS3",
-   "hv_bus": "RING_A",
+   "hv_bus": "PCS3_HV",
    "lv_bus": "PCS3_LV",
    "sn_mva": 5.5,
    "vk_percent": 6.0006,
@@ -466,7 +631,7 @@
   {
    "id": "TR_PCS4",
    "name": "TR_PCS4",
-   "hv_bus": "RING_B",
+   "hv_bus": "PCS4_HV",
    "lv_bus": "PCS4_LV",
    "sn_mva": 5.5,
    "vk_percent": 6.0006,
@@ -477,7 +642,7 @@
   {
    "id": "TR_PCS5",
    "name": "TR_PCS5",
-   "hv_bus": "RING_B",
+   "hv_bus": "PCS5_HV",
    "lv_bus": "PCS5_LV",
    "sn_mva": 5.5,
    "vk_percent": 6.0006,
@@ -488,7 +653,7 @@
   {
    "id": "TR_GEN",
    "name": "TR_GEN",
-   "hv_bus": "MVA",
+   "hv_bus": "GEN_HV",
    "lv_bus": "GEN_LV",
    "sn_mva": 3.0,
    "vk_percent": 6.0002,
@@ -513,32 +678,32 @@
    "id": "CB_SEG_AB1",
    "name": "CB_SEG_AB1",
    "bus": "RING_A",
-   "element": "SEG_AB1",
-   "et": "line",
+   "element": "SEG_AB1_N",
+   "et": "bus",
    "closed": true
   },
   {
    "id": "CB_A_MVA",
    "name": "CB_A_MVA",
    "bus": "RING_A",
-   "element": "LN_A_MVA",
-   "et": "line",
+   "element": "LN_A_MVA_N",
+   "et": "bus",
    "closed": true
   },
   {
    "id": "CB_B_MVB",
    "name": "CB_B_MVB",
    "bus": "RING_B",
-   "element": "LN_B_MVB",
-   "et": "line",
+   "element": "LN_B_MVB_N",
+   "et": "bus",
    "closed": true
   },
   {
    "id": "CB_TIE",
    "name": "CB_TIE",
    "bus": "MVA",
-   "element": "TIE_AB",
-   "et": "line",
+   "element": "TIE_AB_N",
+   "et": "bus",
    "closed": true
   },
   {
@@ -570,6 +735,238 @@
    "name": "CB_L_OTHER_B",
    "bus": "MVB",
    "element": "OTHER_B_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SEG_AB1_FAR",
+   "name": "CB_SEG_AB1_FAR",
+   "bus": "RING_B",
+   "element": "SEG_AB1_FAR_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_A_MVA_FAR",
+   "name": "CB_A_MVA_FAR",
+   "bus": "MVA",
+   "element": "LN_A_MVA_FAR_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_B_MVB_FAR",
+   "name": "CB_B_MVB_FAR",
+   "bus": "MVB",
+   "element": "LN_B_MVB_FAR_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_TIE_FAR",
+   "name": "CB_TIE_FAR",
+   "bus": "MVB",
+   "element": "TIE_AB_FAR_N",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_GEN",
+   "name": "CB_GEN",
+   "bus": "MVA",
+   "element": "GEN_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC01",
+   "name": "CB_SOFC01",
+   "bus": "RING_A",
+   "element": "SOFC01_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC02",
+   "name": "CB_SOFC02",
+   "bus": "RING_A",
+   "element": "SOFC02_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC03",
+   "name": "CB_SOFC03",
+   "bus": "RING_A",
+   "element": "SOFC03_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC04",
+   "name": "CB_SOFC04",
+   "bus": "RING_A",
+   "element": "SOFC04_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC05",
+   "name": "CB_SOFC05",
+   "bus": "RING_A",
+   "element": "SOFC05_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC06",
+   "name": "CB_SOFC06",
+   "bus": "RING_A",
+   "element": "SOFC06_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC07",
+   "name": "CB_SOFC07",
+   "bus": "RING_A",
+   "element": "SOFC07_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC08",
+   "name": "CB_SOFC08",
+   "bus": "RING_A",
+   "element": "SOFC08_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC09",
+   "name": "CB_SOFC09",
+   "bus": "RING_A",
+   "element": "SOFC09_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC10",
+   "name": "CB_SOFC10",
+   "bus": "RING_A",
+   "element": "SOFC10_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC11",
+   "name": "CB_SOFC11",
+   "bus": "RING_B",
+   "element": "SOFC11_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC12",
+   "name": "CB_SOFC12",
+   "bus": "RING_B",
+   "element": "SOFC12_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC13",
+   "name": "CB_SOFC13",
+   "bus": "RING_B",
+   "element": "SOFC13_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC14",
+   "name": "CB_SOFC14",
+   "bus": "RING_B",
+   "element": "SOFC14_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC15",
+   "name": "CB_SOFC15",
+   "bus": "RING_B",
+   "element": "SOFC15_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC16",
+   "name": "CB_SOFC16",
+   "bus": "RING_B",
+   "element": "SOFC16_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC17",
+   "name": "CB_SOFC17",
+   "bus": "RING_B",
+   "element": "SOFC17_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC18",
+   "name": "CB_SOFC18",
+   "bus": "RING_B",
+   "element": "SOFC18_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_SOFC19",
+   "name": "CB_SOFC19",
+   "bus": "RING_B",
+   "element": "SOFC19_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_PCS1",
+   "name": "CB_PCS1",
+   "bus": "RING_A",
+   "element": "PCS1_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_PCS2",
+   "name": "CB_PCS2",
+   "bus": "RING_A",
+   "element": "PCS2_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_PCS3",
+   "name": "CB_PCS3",
+   "bus": "RING_A",
+   "element": "PCS3_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_PCS4",
+   "name": "CB_PCS4",
+   "bus": "RING_B",
+   "element": "PCS4_HV",
+   "et": "bus",
+   "closed": true
+  },
+  {
+   "id": "CB_PCS5",
+   "name": "CB_PCS5",
+   "bus": "RING_B",
+   "element": "PCS5_HV",
    "et": "bus",
    "closed": true
   }

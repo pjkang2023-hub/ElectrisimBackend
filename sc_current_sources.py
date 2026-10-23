@@ -25,6 +25,7 @@ from pandapower.pypower.idx_bus_sc import IKCV, IKSS1, IKSS2, R_EQUIV, X_EQUIV
 
 # The module, not the function the package exports under its name.
 _calc_sc = importlib.import_module('pandapower.shortcircuit.calc_sc')
+_results = importlib.import_module('pandapower.shortcircuit.results')
 
 
 def current_source_factor(ppci, ppci_0, buses):
@@ -96,3 +97,16 @@ def install():
             _cap_at_converter_limits(net, ppci, None, np.atleast_1d(bus_idx), '2ph')
 
     _calc_sc._calc_ikss = _calc_ikss
+
+    # Switch results: pandapower writes res_switch_sc's ikss_ka only for a breaker with an impedance, on a line or
+    # transformer, or open - a network whose breakers are all closed and between buses (the C003 ring with its
+    # cables' nodes) had no such column, and its loading_percent line failed (KeyError 'ikss_ka').
+    copy_switch = _results._copy_switch_results_from_branches
+
+    def _copy_switch_results_from_branches(net, suffix=None, current_parameter='i_ka'):
+        copy_switch(net, suffix=suffix, current_parameter=current_parameter)
+        res = 'res_switch' if suffix is None else f'res_switch{suffix}'
+        if current_parameter not in net[res].columns:
+            net[res][current_parameter] = np.nan
+
+    _results._copy_switch_results_from_branches = _copy_switch_results_from_branches

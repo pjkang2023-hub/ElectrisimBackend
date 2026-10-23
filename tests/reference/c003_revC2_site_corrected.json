@@ -361,13 +361,49 @@
    "id": "OTHER_B_N",
    "v_nom_kv": 33.0,
    "is_poi": false
+  },
+  {
+   "id": "F_S1A_FAR_N",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "F_S1B_FAR_N",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "F_S2A_FAR_N",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "F_S2B_FAR_N",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "F_E1A_FAR_N",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "F_E1B_FAR_N",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "F_E2A_FAR_N",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "F_E2B_FAR_N",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "GEN_HV",
+   "v_nom_kv": 33.0
   }
  ],
  "branches": [
   {
    "id": "F_S1A",
    "from_bus": "F_S1A_N",
-   "to_bus": "MVA",
+   "to_bus": "F_S1A_FAR_N",
    "r_pu": 0.001,
    "x_pu": 0.002,
    "b_pu": 0.0,
@@ -378,7 +414,7 @@
   {
    "id": "F_S1B",
    "from_bus": "F_S1B_N",
-   "to_bus": "MVB",
+   "to_bus": "F_S1B_FAR_N",
    "r_pu": 0.001,
    "x_pu": 0.002,
    "b_pu": 0.0,
@@ -389,7 +425,7 @@
   {
    "id": "F_S2A",
    "from_bus": "F_S2A_N",
-   "to_bus": "MVA",
+   "to_bus": "F_S2A_FAR_N",
    "r_pu": 0.001,
    "x_pu": 0.002,
    "b_pu": 0.0,
@@ -400,7 +436,7 @@
   {
    "id": "F_S2B",
    "from_bus": "F_S2B_N",
-   "to_bus": "MVB",
+   "to_bus": "F_S2B_FAR_N",
    "r_pu": 0.001,
    "x_pu": 0.002,
    "b_pu": 0.0,
@@ -411,7 +447,7 @@
   {
    "id": "F_E1A",
    "from_bus": "F_E1A_N",
-   "to_bus": "MVA",
+   "to_bus": "F_E1A_FAR_N",
    "r_pu": 0.001,
    "x_pu": 0.002,
    "b_pu": 0.0,
@@ -422,7 +458,7 @@
   {
    "id": "F_E1B",
    "from_bus": "F_E1B_N",
-   "to_bus": "MVB",
+   "to_bus": "F_E1B_FAR_N",
    "r_pu": 0.001,
    "x_pu": 0.002,
    "b_pu": 0.0,
@@ -433,7 +469,7 @@
   {
    "id": "F_E2A",
    "from_bus": "F_E2A_N",
-   "to_bus": "MVA",
+   "to_bus": "F_E2A_FAR_N",
    "r_pu": 0.001,
    "x_pu": 0.002,
    "b_pu": 0.0,
@@ -444,7 +480,7 @@
   {
    "id": "F_E2B",
    "from_bus": "F_E2B_N",
-   "to_bus": "MVB",
+   "to_bus": "F_E2B_FAR_N",
    "r_pu": 0.001,
    "x_pu": 0.002,
    "b_pu": 0.0,
@@ -756,7 +792,7 @@
   },
   {
    "id": "TR_GEN",
-   "hv_bus": "MVA",
+   "hv_bus": "GEN_HV",
    "lv_bus": "GEN_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -1180,6 +1216,68 @@
    "to_bus": "OTHER_B_N",
    "normally_closed": true,
    "is_pcc": false
+  },
+  {
+   "id": "CB_F_S1A_FAR",
+   "from_bus": "MVA",
+   "to_bus": "F_S1A_FAR_N",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_F_S1B_FAR",
+   "from_bus": "MVB",
+   "to_bus": "F_S1B_FAR_N",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_F_S2A_FAR",
+   "from_bus": "MVA",
+   "to_bus": "F_S2A_FAR_N",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_F_S2B_FAR",
+   "from_bus": "MVB",
+   "to_bus": "F_S2B_FAR_N",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_F_E1A_FAR",
+   "from_bus": "MVA",
+   "to_bus": "F_E1A_FAR_N",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_F_E1B_FAR",
+   "from_bus": "MVB",
+   "to_bus": "F_E1B_FAR_N",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_F_E2A_FAR",
+   "from_bus": "MVA",
+   "to_bus": "F_E2A_FAR_N",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_F_E2B_FAR",
+   "from_bus": "MVB",
+   "to_bus": "F_E2B_FAR_N",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_GEN",
+   "from_bus": "MVA",
+   "to_bus": "GEN_HV"
   }
  ],
  "relays": [
@@ -2345,6 +2443,7 @@
      "zone_buses": [
       "SOFC1A",
       "F_S1A_N",
+      "F_S1A_FAR_N",
       "MVA"
      ]
     },
@@ -2373,6 +2472,7 @@
      "zone_buses": [
       "SOFC1B",
       "F_S1B_N",
+      "F_S1B_FAR_N",
       "MVB"
      ]
     },
@@ -2401,6 +2501,7 @@
      "zone_buses": [
       "SOFC2A",
       "F_S2A_N",
+      "F_S2A_FAR_N",
       "MVA"
      ]
     },
@@ -2429,6 +2530,7 @@
      "zone_buses": [
       "SOFC2B",
       "F_S2B_N",
+      "F_S2B_FAR_N",
       "MVB"
      ]
     },
@@ -2457,6 +2559,7 @@
      "zone_buses": [
       "BESS1",
       "F_E1A_N",
+      "F_E1A_FAR_N",
       "MVA"
      ]
     },
@@ -2485,6 +2588,7 @@
      "zone_buses": [
       "BESS1",
       "F_E1B_N",
+      "F_E1B_FAR_N",
       "MVB"
      ]
     },
@@ -2513,6 +2617,7 @@
      "zone_buses": [
       "BESS2",
       "F_E2A_N",
+      "F_E2A_FAR_N",
       "MVA"
      ]
     },
@@ -2541,6 +2646,7 @@
      "zone_buses": [
       "BESS2",
       "F_E2B_N",
+      "F_E2B_FAR_N",
       "MVB"
      ]
     },
@@ -2687,6 +2793,256 @@
     }
    ],
    "notes": "functions as the design documents state them; no settings yet"
+  },
+  {
+   "id": "R_F_S1A_FAR",
+   "switch_id": "CB_F_S1A_FAR",
+   "functions": [
+    {
+     "ansi": "87L",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_S1A",
+     "zone_buses": [
+      "SOFC1A",
+      "F_S1A_N",
+      "F_S1A_FAR_N",
+      "MVA"
+     ]
+    },
+    {
+     "ansi": "67N",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_S1A",
+     "direction": "forward"
+    },
+    {
+     "ansi": "87B",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_S1A",
+     "zone_buses": [
+      "MVA"
+     ]
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the feeder's MV-board end"
+  },
+  {
+   "id": "R_F_S1B_FAR",
+   "switch_id": "CB_F_S1B_FAR",
+   "functions": [
+    {
+     "ansi": "87L",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_S1B",
+     "zone_buses": [
+      "SOFC1B",
+      "F_S1B_N",
+      "F_S1B_FAR_N",
+      "MVB"
+     ]
+    },
+    {
+     "ansi": "67N",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_S1B",
+     "direction": "forward"
+    },
+    {
+     "ansi": "87B",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_S1B",
+     "zone_buses": [
+      "MVB"
+     ]
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the feeder's MV-board end"
+  },
+  {
+   "id": "R_F_S2A_FAR",
+   "switch_id": "CB_F_S2A_FAR",
+   "functions": [
+    {
+     "ansi": "87L",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_S2A",
+     "zone_buses": [
+      "SOFC2A",
+      "F_S2A_N",
+      "F_S2A_FAR_N",
+      "MVA"
+     ]
+    },
+    {
+     "ansi": "67N",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_S2A",
+     "direction": "forward"
+    },
+    {
+     "ansi": "87B",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_S2A",
+     "zone_buses": [
+      "MVA"
+     ]
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the feeder's MV-board end"
+  },
+  {
+   "id": "R_F_S2B_FAR",
+   "switch_id": "CB_F_S2B_FAR",
+   "functions": [
+    {
+     "ansi": "87L",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_S2B",
+     "zone_buses": [
+      "SOFC2B",
+      "F_S2B_N",
+      "F_S2B_FAR_N",
+      "MVB"
+     ]
+    },
+    {
+     "ansi": "67N",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_S2B",
+     "direction": "forward"
+    },
+    {
+     "ansi": "87B",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_S2B",
+     "zone_buses": [
+      "MVB"
+     ]
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the feeder's MV-board end"
+  },
+  {
+   "id": "R_F_E1A_FAR",
+   "switch_id": "CB_F_E1A_FAR",
+   "functions": [
+    {
+     "ansi": "87L",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_E1A",
+     "zone_buses": [
+      "BESS1",
+      "F_E1A_N",
+      "F_E1A_FAR_N",
+      "MVA"
+     ]
+    },
+    {
+     "ansi": "67N",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_E1A",
+     "direction": "forward"
+    },
+    {
+     "ansi": "87B",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_E1A",
+     "zone_buses": [
+      "MVA"
+     ]
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the feeder's MV-board end"
+  },
+  {
+   "id": "R_F_E1B_FAR",
+   "switch_id": "CB_F_E1B_FAR",
+   "functions": [
+    {
+     "ansi": "87L",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_E1B",
+     "zone_buses": [
+      "BESS1",
+      "F_E1B_N",
+      "F_E1B_FAR_N",
+      "MVB"
+     ]
+    },
+    {
+     "ansi": "67N",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_E1B",
+     "direction": "forward"
+    },
+    {
+     "ansi": "87B",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_E1B",
+     "zone_buses": [
+      "MVB"
+     ]
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the feeder's MV-board end"
+  },
+  {
+   "id": "R_F_E2A_FAR",
+   "switch_id": "CB_F_E2A_FAR",
+   "functions": [
+    {
+     "ansi": "87L",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_E2A",
+     "zone_buses": [
+      "BESS2",
+      "F_E2A_N",
+      "F_E2A_FAR_N",
+      "MVA"
+     ]
+    },
+    {
+     "ansi": "67N",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_E2A",
+     "direction": "forward"
+    },
+    {
+     "ansi": "87B",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_E2A",
+     "zone_buses": [
+      "MVA"
+     ]
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the feeder's MV-board end"
+  },
+  {
+   "id": "R_F_E2B_FAR",
+   "switch_id": "CB_F_E2B_FAR",
+   "functions": [
+    {
+     "ansi": "87L",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_E2B",
+     "zone_buses": [
+      "BESS2",
+      "F_E2B_N",
+      "F_E2B_FAR_N",
+      "MVB"
+     ]
+    },
+    {
+     "ansi": "67N",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_E2B",
+     "direction": "forward"
+    },
+    {
+     "ansi": "87B",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8 ('67N on every feeder end'); setting open (A18); far end of F_E2B",
+     "zone_buses": [
+      "MVB"
+     ]
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the feeder's MV-board end"
+  },
+  {
+   "id": "R_GEN",
+   "switch_id": "CB_GEN",
+   "functions": [
+    {
+     "ansi": "87B",
+     "notes": "Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8; setting open (A18); trips with its board MVA",
+     "zone_buses": [
+      "MVA"
+     ]
+    },
+    {
+     "ansi": "51",
+     "notes": "ASSUMED: the genset breaker's phase backup; it carries the genset's own fault current for every fault, so a 51V (voltage-restrained) is the proper element - designer to state; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the genset breaker; its board's 87B (Rev C.2: '87B on 6 boards')"
   }
  ],
  "converters": [
@@ -3423,7 +3779,8 @@
     "CB_SOFC02_1",
     "CB_SOFC03_1",
     "CB_SOFC04_1",
-    "CB_SOFC05_1"
+    "CB_SOFC05_1",
+    "CB_F_S1A_FAR"
    ],
    "grid_connected": false,
    "energized_source_ids": [
@@ -3456,7 +3813,9 @@
     "CB_F_E1A",
     "CB_F_E1B",
     "CB_PCS1",
-    "CB_PCS2"
+    "CB_PCS2",
+    "CB_F_E1A_FAR",
+    "CB_F_E1B_FAR"
    ],
    "grid_connected": false,
    "energized_source_ids": [
@@ -3490,7 +3849,9 @@
    "description": "",
    "open_switches": [
     "CB_F_E1A",
-    "CB_F_E1B"
+    "CB_F_E1B",
+    "CB_F_E1A_FAR",
+    "CB_F_E1B_FAR"
    ],
    "grid_connected": false,
    "energized_source_ids": [
@@ -3529,7 +3890,11 @@
     "CB_F_S2A",
     "CB_F_E1A",
     "CB_F_E2A",
-    "CB_PCS5"
+    "CB_PCS5",
+    "CB_F_S1A_FAR",
+    "CB_F_S2A_FAR",
+    "CB_F_E1A_FAR",
+    "CB_F_E2A_FAR"
    ],
    "grid_connected": false,
    "energized_source_ids": [
@@ -3573,7 +3938,15 @@
     "CB_F_S1A",
     "CB_F_S1B",
     "CB_F_S2A",
-    "CB_F_S2B"
+    "CB_F_S2B",
+    "CB_F_E1A_FAR",
+    "CB_F_E1B_FAR",
+    "CB_F_E2A_FAR",
+    "CB_F_E2B_FAR",
+    "CB_F_S1A_FAR",
+    "CB_F_S1B_FAR",
+    "CB_F_S2A_FAR",
+    "CB_F_S2B_FAR"
    ],
    "grid_connected": false,
    "energized_source_ids": [
@@ -3590,7 +3963,11 @@
     "CB_F_S1A",
     "CB_F_S2A",
     "CB_L_IT_cordA",
-    "CB_PCS5"
+    "CB_PCS5",
+    "CB_F_E1A_FAR",
+    "CB_F_E2A_FAR",
+    "CB_F_S1A_FAR",
+    "CB_F_S2A_FAR"
    ],
    "grid_connected": false,
    "energized_source_ids": [
@@ -3607,7 +3984,8 @@
     "CB_SOFC02_1",
     "CB_SOFC03_1",
     "CB_SOFC04_1",
-    "CB_SOFC05_1"
+    "CB_SOFC05_1",
+    "CB_F_S1A_FAR"
    ],
    "grid_connected": false,
    "energized_source_ids": [
@@ -3657,7 +4035,8 @@
     "CB_SOFC02_1",
     "CB_SOFC03_1",
     "CB_SOFC04_1",
-    "CB_SOFC05_1"
+    "CB_SOFC05_1",
+    "CB_F_S1A_FAR"
    ],
    "grid_connected": false,
    "energized_source_ids": [
@@ -3699,7 +4078,11 @@
     "CB_F_E2A",
     "CB_L_IT_cordA",
     "CB_L_IT_cordB",
-    "CB_L_OTHER_B"
+    "CB_L_OTHER_B",
+    "CB_F_S1A_FAR",
+    "CB_F_S2A_FAR",
+    "CB_F_E1A_FAR",
+    "CB_F_E2A_FAR"
    ],
    "grid_connected": false,
    "energized_source_ids": [
@@ -3719,7 +4102,11 @@
     "CB_F_E2A",
     "CB_L_IT_cordA",
     "CB_L_IT_cordB",
-    "CB_L_OTHER_B"
+    "CB_L_OTHER_B",
+    "CB_F_S1A_FAR",
+    "CB_F_S2A_FAR",
+    "CB_F_E1A_FAR",
+    "CB_F_E2A_FAR"
    ],
    "grid_connected": false,
    "energized_source_ids": [

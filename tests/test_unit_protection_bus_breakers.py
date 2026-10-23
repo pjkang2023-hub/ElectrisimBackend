@@ -5,7 +5,6 @@ at both boards; a cable ending on a node of its own is measured at its far break
 (c003_revC2_site_settings_draft.json, the C003 protection settings draft) are carried onto the drawing by
 mgtwin_site_io.apply_protection, and Electrisim's protection coordination evaluates them.
 """
-import copy
 import json
 import os
 
@@ -19,27 +18,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 def _draft():
     with open(os.path.join(HERE, 'reference', 'c003_revC2_site_settings_draft.json'), encoding='utf-8') as fh:
         return json.load(fh)
-
-
-def _with_far_breaker(site, payload, cable='F_S1A', near='CB_F_S1A'):
-    """The cable's far end on a node of its own behind a breaker carrying the near end's 87L and its board's 87B."""
-    s, p = copy.deepcopy(site), copy.deepcopy(payload)
-    cells = {v.get('userFriendlyName'): v for v in p.values() if isinstance(v, dict)}
-    names = {v.get('name'): v for v in p.values() if isinstance(v, dict)}
-    line = cells[cable]
-    far_board = names[line['busTo']]['userFriendlyName']
-    key = 1 + max(int(k) for k in p if str(k).isdigit())
-    p[str(key)] = {'typ': 'Bus999', 'name': 'mxCell_far_node', 'id': 'far-node', 'vn_kv': '33',
-                   'userFriendlyName': f'{cable}_FAR_N', 'min_vm_pu': '0.9', 'max_vm_pu': '1.1'}
-    p[str(key + 1)] = {'typ': 'Switch999', 'id': 'far-sw', 'userFriendlyName': f'{near}_FAR', 'name': f'{near}_FAR',
-                       'et': 'b', 'type': 'CB', 'closed': 'true', 'z_ohm': '0', 'in_ka': '0',
-                       'bus': line['busTo'], 'element': 'mxCell_far_node'}
-    line['busTo'] = 'mxCell_far_node'
-    near_relay = next(r for r in s['relays'] if r['switch_id'] == near)
-    board_87b = next(f for r in s['relays'] for f in r['functions'] if f['ansi'] == '87B' and f['zone_buses'] == [far_board])
-    s['relays'].append({'id': 'R_FAR', 'switch_id': f'{near}_FAR',
-                        'functions': [f for f in near_relay['functions'] if f['ansi'] == '87L'] + [board_87b]})
-    return s, p
 
 
 def _trips(client, site, payload, bus, fault_type, state='NORMAL'):
@@ -62,14 +40,14 @@ def _trips(client, site, payload, bus, fault_type, state='NORMAL'):
 @pytest.mark.parametrize('fault_type', ['3ph', '1ph'])
 def test_each_unit_element_trips_for_its_own_zone_only(client, fault_type):
     """
-    NORMAL, IEC max. A fault on feeder F_S1A's node: its 87L alone, in 0.03 s - no board's 87B, though the board
-    feeds it (a meshed board drawing out through two feeders summed by magnitude used to). On PCS1's transformer
+    NORMAL, IEC max. A fault on feeder F_S1A's node: its 87L alone, both ends in 0.03 s - no board's 87B, though the
+    board feeds it (a meshed board drawing out through two feeders summed by magnitude used to). On PCS1's transformer
     node: its 87T alone. On board SOFC1A: the board's 87B trips every breaker on it - the bus section CB_BS1, which
     carries nothing but the 87B, among them - and nothing on SOFC1B beyond it.
     """
     site, payload = _draft(), _payload('revc2')
     trips, _, unwanted = _trips(client, site, payload, 'F_S1A_N', fault_type)
-    assert trips == {'CB_F_S1A': (0.03, 'Differential (87)')} and not unwanted
+    assert trips == {'CB_F_S1A': (0.03, 'Differential (87)'), 'CB_F_S1A_FAR': (0.03, 'Differential (87)')} and not unwanted
     trips, clearing, unwanted = _trips(client, site, payload, 'PCS1_HV', fault_type)
     assert trips == {'CB_PCS1': (0.03, 'Differential (87)')} and clearing == pytest.approx(0.03) and not unwanted
     trips, clearing, unwanted = _trips(client, site, payload, 'SOFC1A', fault_type)
@@ -80,11 +58,12 @@ def test_each_unit_element_trips_for_its_own_zone_only(client, fault_type):
 
 def test_a_cable_ending_on_its_own_node_is_measured_at_its_far_breaker(client):
     """
-    F_S1A given a breaker at its MVA end: its 87L is two-ended, each end's breaker against the other's current. A
-    fault on either node is inside - both ends trip in 0.03 s and the fault is cleared from both boards; a fault on
-    MVA, beyond the far breaker, leaves both 87L ends still and is cleared by MVA's 87B, the far breaker with it.
+    F_S1A with its breaker at the MVA end (Site Corrections item 9): its 87L is two-ended, each end's breaker against
+    the other's current. A fault on either node is inside - both ends trip in 0.03 s and the fault is cleared from
+    both boards; a fault on MVA, beyond the far breaker, leaves both 87L ends still and is cleared by MVA's 87B, the
+    far breaker with it.
     """
-    site, payload = _with_far_breaker(_draft(), _payload('revc2'))
+    site, payload = _draft(), _payload('revc2')
     for node in ('F_S1A_N', 'F_S1A_FAR_N'):
         trips, clearing, unwanted = _trips(client, site, payload, node, '3ph')
         assert trips == {'CB_F_S1A': (0.03, 'Differential (87)'), 'CB_F_S1A_FAR': (0.03, 'Differential (87)')}, node

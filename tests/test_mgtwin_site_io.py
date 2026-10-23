@@ -26,12 +26,18 @@ def _json(*parts):
 
 @pytest.mark.parametrize('design, site, p_group, bank', [
     ('ring', 'c003_site_v9.json', 1.91, 1), ('revc', 'c003_revC1_site.json', 1.91, 1),
-    ('ring10', 'c003_site_v10.json', 1.936, 5), ('revc2', 'c003_revC2_site.json', 1.936, 1)])
+    ('ring10', 'c003_site_v10_corrected.json', 1.936, 5), ('revc2', 'c003_revC2_site_corrected.json', 1.936, 1)])
 def test_c003_profile_reproduces_the_reference_specs(design, site, p_group, bank):
-    """The importer's c003 profile is the C003 mapping: each reference spec, as drawn, from its Site."""
+    """
+    The importer's c003 profile is the C003 mapping: each reference spec, as drawn, from its Site - the current
+    designs' from their corrected Sites (reactances on their own ratings; every cable switched at both ends, the
+    genset and the ring's taps behind breakers - Site Corrections item 9), the earlier ones from the owner's.
+    """
     spec, notes = site_to_spec(_json(REF, site), 'c003', 'eol', p_group, bank)
     assert spec == _json(REF, f'reference_c003_{design}.spec.json')
-    assert any('given on the 50 MVA system base and rebased' in n for n in notes)
+    # the owner's Sites give reactances on the system base, the corrected ones on each unit's own rating
+    rebased = next(int(n.split(', ')[1].split(' ')[0]) for n in notes if 'given on the 50 MVA system base' in n)
+    assert (rebased == 0) == site.endswith('_corrected.json')
 
 
 def test_generic_profile_builds_and_solves():

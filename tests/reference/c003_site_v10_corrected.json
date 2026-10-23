@@ -176,13 +176,145 @@
    "id": "IT_cordA_LV",
    "v_nom_kv": 0.4,
    "is_poi": false
+  },
+  {
+   "id": "SEG_AB1_N",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "SEG_AB1_FAR_N",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "LN_A_MVA_N",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "LN_A_MVA_FAR_N",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "LN_B_MVB_N",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "LN_B_MVB_FAR_N",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "TIE_AB_N",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "TIE_AB_FAR_N",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "GEN_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "SOFC01_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "SOFC02_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "SOFC03_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "SOFC04_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "SOFC05_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "SOFC06_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "SOFC07_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "SOFC08_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "SOFC09_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "SOFC10_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "SOFC11_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "SOFC12_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "SOFC13_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "SOFC14_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "SOFC15_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "SOFC16_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "SOFC17_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "SOFC18_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "SOFC19_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "PCS1_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "PCS2_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "PCS3_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "PCS4_HV",
+   "v_nom_kv": 33.0
+  },
+  {
+   "id": "PCS5_HV",
+   "v_nom_kv": 33.0
   }
  ],
  "branches": [
   {
    "id": "SEG_AB1",
-   "from_bus": "RING_A",
-   "to_bus": "RING_B",
+   "from_bus": "SEG_AB1_N",
+   "to_bus": "SEG_AB1_FAR_N",
    "r_pu": 0.001,
    "x_pu": 0.002,
    "b_pu": 0.0,
@@ -192,8 +324,8 @@
   },
   {
    "id": "LN_A_MVA",
-   "from_bus": "RING_A",
-   "to_bus": "MVA",
+   "from_bus": "LN_A_MVA_N",
+   "to_bus": "LN_A_MVA_FAR_N",
    "r_pu": 0.001,
    "x_pu": 0.002,
    "b_pu": 0.0,
@@ -203,8 +335,8 @@
   },
   {
    "id": "LN_B_MVB",
-   "from_bus": "RING_B",
-   "to_bus": "MVB",
+   "from_bus": "LN_B_MVB_N",
+   "to_bus": "LN_B_MVB_FAR_N",
    "r_pu": 0.001,
    "x_pu": 0.002,
    "b_pu": 0.0,
@@ -214,8 +346,8 @@
   },
   {
    "id": "TIE_AB",
-   "from_bus": "MVA",
-   "to_bus": "MVB",
+   "from_bus": "TIE_AB_N",
+   "to_bus": "TIE_AB_FAR_N",
    "r_pu": 0.001,
    "x_pu": 0.002,
    "b_pu": 0.0,
@@ -227,7 +359,7 @@
  "transformers": [
   {
    "id": "TR_SOFC01",
-   "hv_bus": "RING_A",
+   "hv_bus": "SOFC01_HV",
    "lv_bus": "SOFC01_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -239,7 +371,7 @@
   },
   {
    "id": "TR_SOFC02",
-   "hv_bus": "RING_A",
+   "hv_bus": "SOFC02_HV",
    "lv_bus": "SOFC02_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -251,7 +383,7 @@
   },
   {
    "id": "TR_SOFC03",
-   "hv_bus": "RING_A",
+   "hv_bus": "SOFC03_HV",
    "lv_bus": "SOFC03_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -263,7 +395,7 @@
   },
   {
    "id": "TR_SOFC04",
-   "hv_bus": "RING_A",
+   "hv_bus": "SOFC04_HV",
    "lv_bus": "SOFC04_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -275,7 +407,7 @@
   },
   {
    "id": "TR_SOFC05",
-   "hv_bus": "RING_A",
+   "hv_bus": "SOFC05_HV",
    "lv_bus": "SOFC05_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -287,7 +419,7 @@
   },
   {
    "id": "TR_SOFC06",
-   "hv_bus": "RING_A",
+   "hv_bus": "SOFC06_HV",
    "lv_bus": "SOFC06_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -299,7 +431,7 @@
   },
   {
    "id": "TR_SOFC07",
-   "hv_bus": "RING_A",
+   "hv_bus": "SOFC07_HV",
    "lv_bus": "SOFC07_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -311,7 +443,7 @@
   },
   {
    "id": "TR_SOFC08",
-   "hv_bus": "RING_A",
+   "hv_bus": "SOFC08_HV",
    "lv_bus": "SOFC08_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -323,7 +455,7 @@
   },
   {
    "id": "TR_SOFC09",
-   "hv_bus": "RING_A",
+   "hv_bus": "SOFC09_HV",
    "lv_bus": "SOFC09_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -335,7 +467,7 @@
   },
   {
    "id": "TR_SOFC10",
-   "hv_bus": "RING_A",
+   "hv_bus": "SOFC10_HV",
    "lv_bus": "SOFC10_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -347,7 +479,7 @@
   },
   {
    "id": "TR_SOFC11",
-   "hv_bus": "RING_B",
+   "hv_bus": "SOFC11_HV",
    "lv_bus": "SOFC11_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -359,7 +491,7 @@
   },
   {
    "id": "TR_SOFC12",
-   "hv_bus": "RING_B",
+   "hv_bus": "SOFC12_HV",
    "lv_bus": "SOFC12_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -371,7 +503,7 @@
   },
   {
    "id": "TR_SOFC13",
-   "hv_bus": "RING_B",
+   "hv_bus": "SOFC13_HV",
    "lv_bus": "SOFC13_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -383,7 +515,7 @@
   },
   {
    "id": "TR_SOFC14",
-   "hv_bus": "RING_B",
+   "hv_bus": "SOFC14_HV",
    "lv_bus": "SOFC14_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -395,7 +527,7 @@
   },
   {
    "id": "TR_SOFC15",
-   "hv_bus": "RING_B",
+   "hv_bus": "SOFC15_HV",
    "lv_bus": "SOFC15_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -407,7 +539,7 @@
   },
   {
    "id": "TR_SOFC16",
-   "hv_bus": "RING_B",
+   "hv_bus": "SOFC16_HV",
    "lv_bus": "SOFC16_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -419,7 +551,7 @@
   },
   {
    "id": "TR_SOFC17",
-   "hv_bus": "RING_B",
+   "hv_bus": "SOFC17_HV",
    "lv_bus": "SOFC17_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -431,7 +563,7 @@
   },
   {
    "id": "TR_SOFC18",
-   "hv_bus": "RING_B",
+   "hv_bus": "SOFC18_HV",
    "lv_bus": "SOFC18_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -443,7 +575,7 @@
   },
   {
    "id": "TR_SOFC19",
-   "hv_bus": "RING_B",
+   "hv_bus": "SOFC19_HV",
    "lv_bus": "SOFC19_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -455,7 +587,7 @@
   },
   {
    "id": "TR_PCS1",
-   "hv_bus": "RING_A",
+   "hv_bus": "PCS1_HV",
    "lv_bus": "PCS1_LV",
    "s_rated_mva": 5.5,
    "hv_kv": 33.0,
@@ -467,7 +599,7 @@
   },
   {
    "id": "TR_PCS2",
-   "hv_bus": "RING_A",
+   "hv_bus": "PCS2_HV",
    "lv_bus": "PCS2_LV",
    "s_rated_mva": 5.5,
    "hv_kv": 33.0,
@@ -479,7 +611,7 @@
   },
   {
    "id": "TR_PCS3",
-   "hv_bus": "RING_A",
+   "hv_bus": "PCS3_HV",
    "lv_bus": "PCS3_LV",
    "s_rated_mva": 5.5,
    "hv_kv": 33.0,
@@ -491,7 +623,7 @@
   },
   {
    "id": "TR_PCS4",
-   "hv_bus": "RING_B",
+   "hv_bus": "PCS4_HV",
    "lv_bus": "PCS4_LV",
    "s_rated_mva": 5.5,
    "hv_kv": 33.0,
@@ -503,7 +635,7 @@
   },
   {
    "id": "TR_PCS5",
-   "hv_bus": "RING_B",
+   "hv_bus": "PCS5_HV",
    "lv_bus": "PCS5_LV",
    "s_rated_mva": 5.5,
    "hv_kv": 33.0,
@@ -515,7 +647,7 @@
   },
   {
    "id": "TR_GEN",
-   "hv_bus": "MVA",
+   "hv_bus": "GEN_HV",
    "lv_bus": "GEN_LV",
    "s_rated_mva": 3.0,
    "hv_kv": 33.0,
@@ -542,28 +674,28 @@
   {
    "id": "CB_SEG_AB1",
    "from_bus": "RING_A",
-   "to_bus": "RING_B",
+   "to_bus": "SEG_AB1_N",
    "normally_closed": true,
    "is_pcc": false
   },
   {
    "id": "CB_A_MVA",
    "from_bus": "RING_A",
-   "to_bus": "MVA",
+   "to_bus": "LN_A_MVA_N",
    "normally_closed": true,
    "is_pcc": false
   },
   {
    "id": "CB_B_MVB",
    "from_bus": "RING_B",
-   "to_bus": "MVB",
+   "to_bus": "LN_B_MVB_N",
    "normally_closed": true,
    "is_pcc": false
   },
   {
    "id": "CB_TIE",
    "from_bus": "MVA",
-   "to_bus": "MVB",
+   "to_bus": "TIE_AB_N",
    "normally_closed": true,
    "is_pcc": false
   },
@@ -594,6 +726,184 @@
    "to_bus": "OTHER_B_N",
    "normally_closed": true,
    "is_pcc": false
+  },
+  {
+   "id": "CB_SEG_AB1_FAR",
+   "from_bus": "RING_B",
+   "to_bus": "SEG_AB1_FAR_N",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_A_MVA_FAR",
+   "from_bus": "MVA",
+   "to_bus": "LN_A_MVA_FAR_N",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_B_MVB_FAR",
+   "from_bus": "MVB",
+   "to_bus": "LN_B_MVB_FAR_N",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_TIE_FAR",
+   "from_bus": "MVB",
+   "to_bus": "TIE_AB_FAR_N",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_GEN",
+   "from_bus": "MVA",
+   "to_bus": "GEN_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_SOFC01",
+   "from_bus": "RING_A",
+   "to_bus": "SOFC01_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_SOFC02",
+   "from_bus": "RING_A",
+   "to_bus": "SOFC02_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_SOFC03",
+   "from_bus": "RING_A",
+   "to_bus": "SOFC03_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_SOFC04",
+   "from_bus": "RING_A",
+   "to_bus": "SOFC04_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_SOFC05",
+   "from_bus": "RING_A",
+   "to_bus": "SOFC05_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_SOFC06",
+   "from_bus": "RING_A",
+   "to_bus": "SOFC06_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_SOFC07",
+   "from_bus": "RING_A",
+   "to_bus": "SOFC07_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_SOFC08",
+   "from_bus": "RING_A",
+   "to_bus": "SOFC08_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_SOFC09",
+   "from_bus": "RING_A",
+   "to_bus": "SOFC09_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_SOFC10",
+   "from_bus": "RING_A",
+   "to_bus": "SOFC10_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_SOFC11",
+   "from_bus": "RING_B",
+   "to_bus": "SOFC11_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_SOFC12",
+   "from_bus": "RING_B",
+   "to_bus": "SOFC12_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_SOFC13",
+   "from_bus": "RING_B",
+   "to_bus": "SOFC13_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_SOFC14",
+   "from_bus": "RING_B",
+   "to_bus": "SOFC14_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_SOFC15",
+   "from_bus": "RING_B",
+   "to_bus": "SOFC15_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_SOFC16",
+   "from_bus": "RING_B",
+   "to_bus": "SOFC16_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_SOFC17",
+   "from_bus": "RING_B",
+   "to_bus": "SOFC17_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_SOFC18",
+   "from_bus": "RING_B",
+   "to_bus": "SOFC18_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_SOFC19",
+   "from_bus": "RING_B",
+   "to_bus": "SOFC19_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_PCS1",
+   "from_bus": "RING_A",
+   "to_bus": "PCS1_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_PCS2",
+   "from_bus": "RING_A",
+   "to_bus": "PCS2_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_PCS3",
+   "from_bus": "RING_A",
+   "to_bus": "PCS3_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_PCS4",
+   "from_bus": "RING_B",
+   "to_bus": "PCS4_HV"
+  },
+  {
+   "normally_closed": true,
+   "id": "CB_PCS5",
+   "from_bus": "RING_B",
+   "to_bus": "PCS5_HV"
   }
  ],
  "relays": [
@@ -804,6 +1114,600 @@
     }
    ],
    "notes": "functions as the design documents state them; no settings yet"
+  },
+  {
+   "id": "R_SEG_AB1_FAR",
+   "switch_id": "CB_SEG_AB1_FAR",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of SEG_AB1 (ASSUMED: the documents state the ring circuit's functions, not each end's)"
+    },
+    {
+     "ansi": "51",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of SEG_AB1 (ASSUMED: the documents state the ring circuit's functions, not each end's)"
+    },
+    {
+     "ansi": "67N",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of SEG_AB1 (ASSUMED: the documents state the ring circuit's functions, not each end's)",
+     "direction": "forward"
+    },
+    {
+     "ansi": "27",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of SEG_AB1 (ASSUMED: the documents state the ring circuit's functions, not each end's)"
+    },
+    {
+     "ansi": "59",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of SEG_AB1 (ASSUMED: the documents state the ring circuit's functions, not each end's)"
+    },
+    {
+     "ansi": "81U",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of SEG_AB1 (ASSUMED: the documents state the ring circuit's functions, not each end's)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the ring cable's other end"
+  },
+  {
+   "id": "R_A_MVA_FAR",
+   "switch_id": "CB_A_MVA_FAR",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of LN_A_MVA (ASSUMED: the documents state the ring circuit's functions, not each end's)"
+    },
+    {
+     "ansi": "51",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of LN_A_MVA (ASSUMED: the documents state the ring circuit's functions, not each end's)"
+    },
+    {
+     "ansi": "67N",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of LN_A_MVA (ASSUMED: the documents state the ring circuit's functions, not each end's)",
+     "direction": "forward"
+    },
+    {
+     "ansi": "27",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of LN_A_MVA (ASSUMED: the documents state the ring circuit's functions, not each end's)"
+    },
+    {
+     "ansi": "59",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of LN_A_MVA (ASSUMED: the documents state the ring circuit's functions, not each end's)"
+    },
+    {
+     "ansi": "81U",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of LN_A_MVA (ASSUMED: the documents state the ring circuit's functions, not each end's)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the ring cable's other end"
+  },
+  {
+   "id": "R_B_MVB_FAR",
+   "switch_id": "CB_B_MVB_FAR",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of LN_B_MVB (ASSUMED: the documents state the ring circuit's functions, not each end's)"
+    },
+    {
+     "ansi": "51",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of LN_B_MVB (ASSUMED: the documents state the ring circuit's functions, not each end's)"
+    },
+    {
+     "ansi": "67N",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of LN_B_MVB (ASSUMED: the documents state the ring circuit's functions, not each end's)",
+     "direction": "forward"
+    },
+    {
+     "ansi": "27",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of LN_B_MVB (ASSUMED: the documents state the ring circuit's functions, not each end's)"
+    },
+    {
+     "ansi": "59",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of LN_B_MVB (ASSUMED: the documents state the ring circuit's functions, not each end's)"
+    },
+    {
+     "ansi": "81U",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of LN_B_MVB (ASSUMED: the documents state the ring circuit's functions, not each end's)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the ring cable's other end"
+  },
+  {
+   "id": "R_TIE_FAR",
+   "switch_id": "CB_TIE_FAR",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of TIE_AB (ASSUMED: the documents state the ring circuit's functions, not each end's)"
+    },
+    {
+     "ansi": "51",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of TIE_AB (ASSUMED: the documents state the ring circuit's functions, not each end's)"
+    },
+    {
+     "ansi": "67N",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of TIE_AB (ASSUMED: the documents state the ring circuit's functions, not each end's)",
+     "direction": "forward"
+    },
+    {
+     "ansi": "27",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of TIE_AB (ASSUMED: the documents state the ring circuit's functions, not each end's)"
+    },
+    {
+     "ansi": "59",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of TIE_AB (ASSUMED: the documents state the ring circuit's functions, not each end's)"
+    },
+    {
+     "ansi": "81U",
+     "notes": "Ring Design Report v2.0 sec. 6; setting open (A18); far end of TIE_AB (ASSUMED: the documents state the ring circuit's functions, not each end's)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the ring cable's other end"
+  },
+  {
+   "id": "R_GEN",
+   "switch_id": "CB_GEN",
+   "functions": [
+    {
+     "ansi": "51",
+     "notes": "ASSUMED: the genset breaker's phase backup; it carries the genset's own fault current for every fault, so a 51V (voltage-restrained) is the proper element - designer to state; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the genset breaker; ASSUMED as Rev C.2's: the ring documents state none"
+  },
+  {
+   "id": "R_SOFC01",
+   "switch_id": "CB_SOFC01",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "51",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "67N",
+     "direction": "forward",
+     "notes": "ASSUMED as Rev C.2; toward the group; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the SOFC tap breaker (ASSUMED: the ring documents state no tap protection)"
+  },
+  {
+   "id": "R_SOFC02",
+   "switch_id": "CB_SOFC02",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "51",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "67N",
+     "direction": "forward",
+     "notes": "ASSUMED as Rev C.2; toward the group; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the SOFC tap breaker (ASSUMED: the ring documents state no tap protection)"
+  },
+  {
+   "id": "R_SOFC03",
+   "switch_id": "CB_SOFC03",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "51",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "67N",
+     "direction": "forward",
+     "notes": "ASSUMED as Rev C.2; toward the group; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the SOFC tap breaker (ASSUMED: the ring documents state no tap protection)"
+  },
+  {
+   "id": "R_SOFC04",
+   "switch_id": "CB_SOFC04",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "51",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "67N",
+     "direction": "forward",
+     "notes": "ASSUMED as Rev C.2; toward the group; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the SOFC tap breaker (ASSUMED: the ring documents state no tap protection)"
+  },
+  {
+   "id": "R_SOFC05",
+   "switch_id": "CB_SOFC05",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "51",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "67N",
+     "direction": "forward",
+     "notes": "ASSUMED as Rev C.2; toward the group; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the SOFC tap breaker (ASSUMED: the ring documents state no tap protection)"
+  },
+  {
+   "id": "R_SOFC06",
+   "switch_id": "CB_SOFC06",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "51",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "67N",
+     "direction": "forward",
+     "notes": "ASSUMED as Rev C.2; toward the group; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the SOFC tap breaker (ASSUMED: the ring documents state no tap protection)"
+  },
+  {
+   "id": "R_SOFC07",
+   "switch_id": "CB_SOFC07",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "51",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "67N",
+     "direction": "forward",
+     "notes": "ASSUMED as Rev C.2; toward the group; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the SOFC tap breaker (ASSUMED: the ring documents state no tap protection)"
+  },
+  {
+   "id": "R_SOFC08",
+   "switch_id": "CB_SOFC08",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "51",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "67N",
+     "direction": "forward",
+     "notes": "ASSUMED as Rev C.2; toward the group; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the SOFC tap breaker (ASSUMED: the ring documents state no tap protection)"
+  },
+  {
+   "id": "R_SOFC09",
+   "switch_id": "CB_SOFC09",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "51",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "67N",
+     "direction": "forward",
+     "notes": "ASSUMED as Rev C.2; toward the group; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the SOFC tap breaker (ASSUMED: the ring documents state no tap protection)"
+  },
+  {
+   "id": "R_SOFC10",
+   "switch_id": "CB_SOFC10",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "51",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "67N",
+     "direction": "forward",
+     "notes": "ASSUMED as Rev C.2; toward the group; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the SOFC tap breaker (ASSUMED: the ring documents state no tap protection)"
+  },
+  {
+   "id": "R_SOFC11",
+   "switch_id": "CB_SOFC11",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "51",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "67N",
+     "direction": "forward",
+     "notes": "ASSUMED as Rev C.2; toward the group; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the SOFC tap breaker (ASSUMED: the ring documents state no tap protection)"
+  },
+  {
+   "id": "R_SOFC12",
+   "switch_id": "CB_SOFC12",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "51",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "67N",
+     "direction": "forward",
+     "notes": "ASSUMED as Rev C.2; toward the group; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the SOFC tap breaker (ASSUMED: the ring documents state no tap protection)"
+  },
+  {
+   "id": "R_SOFC13",
+   "switch_id": "CB_SOFC13",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "51",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "67N",
+     "direction": "forward",
+     "notes": "ASSUMED as Rev C.2; toward the group; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the SOFC tap breaker (ASSUMED: the ring documents state no tap protection)"
+  },
+  {
+   "id": "R_SOFC14",
+   "switch_id": "CB_SOFC14",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "51",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "67N",
+     "direction": "forward",
+     "notes": "ASSUMED as Rev C.2; toward the group; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the SOFC tap breaker (ASSUMED: the ring documents state no tap protection)"
+  },
+  {
+   "id": "R_SOFC15",
+   "switch_id": "CB_SOFC15",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "51",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "67N",
+     "direction": "forward",
+     "notes": "ASSUMED as Rev C.2; toward the group; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the SOFC tap breaker (ASSUMED: the ring documents state no tap protection)"
+  },
+  {
+   "id": "R_SOFC16",
+   "switch_id": "CB_SOFC16",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "51",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "67N",
+     "direction": "forward",
+     "notes": "ASSUMED as Rev C.2; toward the group; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the SOFC tap breaker (ASSUMED: the ring documents state no tap protection)"
+  },
+  {
+   "id": "R_SOFC17",
+   "switch_id": "CB_SOFC17",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "51",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "67N",
+     "direction": "forward",
+     "notes": "ASSUMED as Rev C.2; toward the group; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the SOFC tap breaker (ASSUMED: the ring documents state no tap protection)"
+  },
+  {
+   "id": "R_SOFC18",
+   "switch_id": "CB_SOFC18",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "51",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "67N",
+     "direction": "forward",
+     "notes": "ASSUMED as Rev C.2; toward the group; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the SOFC tap breaker (ASSUMED: the ring documents state no tap protection)"
+  },
+  {
+   "id": "R_SOFC19",
+   "switch_id": "CB_SOFC19",
+   "functions": [
+    {
+     "ansi": "50",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "51",
+     "notes": "ASSUMED as Rev C.2 (Rev C Design Report v1.1 / Recommended Design v1.3 sec. 8); setting open (A18)"
+    },
+    {
+     "ansi": "67N",
+     "direction": "forward",
+     "notes": "ASSUMED as Rev C.2; toward the group; setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the SOFC tap breaker (ASSUMED: the ring documents state no tap protection)"
+  },
+  {
+   "id": "R_PCS1",
+   "switch_id": "CB_PCS1",
+   "functions": [
+    {
+     "ansi": "87T",
+     "zone_buses": [
+      "PCS1_HV",
+      "PCS1_LV"
+     ],
+     "notes": "Recommended Design v1.3 ('87T on PCS taps'); setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the PCS tap breaker"
+  },
+  {
+   "id": "R_PCS2",
+   "switch_id": "CB_PCS2",
+   "functions": [
+    {
+     "ansi": "87T",
+     "zone_buses": [
+      "PCS2_HV",
+      "PCS2_LV"
+     ],
+     "notes": "Recommended Design v1.3 ('87T on PCS taps'); setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the PCS tap breaker"
+  },
+  {
+   "id": "R_PCS3",
+   "switch_id": "CB_PCS3",
+   "functions": [
+    {
+     "ansi": "87T",
+     "zone_buses": [
+      "PCS3_HV",
+      "PCS3_LV"
+     ],
+     "notes": "Recommended Design v1.3 ('87T on PCS taps'); setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the PCS tap breaker"
+  },
+  {
+   "id": "R_PCS4",
+   "switch_id": "CB_PCS4",
+   "functions": [
+    {
+     "ansi": "87T",
+     "zone_buses": [
+      "PCS4_HV",
+      "PCS4_LV"
+     ],
+     "notes": "Recommended Design v1.3 ('87T on PCS taps'); setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the PCS tap breaker"
+  },
+  {
+   "id": "R_PCS5",
+   "switch_id": "CB_PCS5",
+   "functions": [
+    {
+     "ansi": "87T",
+     "zone_buses": [
+      "PCS5_HV",
+      "PCS5_LV"
+     ],
+     "notes": "Recommended Design v1.3 ('87T on PCS taps'); setting open (A18)"
+    }
+   ],
+   "notes": "Site Corrections item 9 (22 Oct 2026): the PCS tap breaker"
   }
  ],
  "converters": [
@@ -1536,7 +2440,9 @@
    "description": "ring open at the A/B segment and the tie: two halves",
    "open_switches": [
     "CB_SEG_AB1",
-    "CB_TIE"
+    "CB_TIE",
+    "CB_SEG_AB1_FAR",
+    "CB_TIE_FAR"
    ],
    "grid_connected": false,
    "energized_source_ids": [
@@ -1571,7 +2477,9 @@
    "description": "MVB isolated: its loads lost, all sources on the ring",
    "open_switches": [
     "CB_B_MVB",
-    "CB_TIE"
+    "CB_TIE",
+    "CB_B_MVB_FAR",
+    "CB_TIE_FAR"
    ],
    "grid_connected": false,
    "energized_source_ids": [
@@ -1611,7 +2519,8 @@
     "CB_B_MVB",
     "CB_L_IT_cordA",
     "CB_L_IT_cordB",
-    "CB_L_OTHER_B"
+    "CB_L_OTHER_B",
+    "CB_B_MVB_FAR"
    ],
    "grid_connected": false,
    "energized_source_ids": [

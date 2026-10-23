@@ -19353,11 +19353,46 @@ def _prot_diff_zone_beyond_bus_breaker(net_sc, sw_idx, node, fault_bus_idx):
     return None
 
 
+def _prot_delta_winding_beyond(net_sc, sw_row):
+    """
+    The bus between the switch and a transformer whose winding on the switch's side is delta - the switch's own for
+    a switch on the transformer, the node a breaker between two buses leads to when the transformer is all that is
+    on it - or None. No zero-sequence current passes the delta: the switch carries a residual only for an earth fault
+    on that bus, between it and the winding.
+    """
+    et, element, bus = str(sw_row['et']), int(sw_row['element']), int(sw_row['bus'])
+    trafo, side_bus = None, bus
+    if et == 't':
+        trafo = element
+    elif et == 'b':
+        node = element
+        lines = [i for i in net_sc.line.index if bool(net_sc.line.at[i, 'in_service'])
+                 and node in (int(net_sc.line.at[i, 'from_bus']), int(net_sc.line.at[i, 'to_bus']))]
+        trafos = [int(i) for i in net_sc.trafo.index if bool(net_sc.trafo.at[i, 'in_service'])
+                  and node in (int(net_sc.trafo.at[i, 'hv_bus']), int(net_sc.trafo.at[i, 'lv_bus']))]
+        if not lines and len(trafos) == 1:
+            trafo, side_bus = trafos[0], node
+    if trafo is None or trafo not in net_sc.trafo.index or _electrisim_is_grounding(net_sc.trafo, trafo):
+        return None
+    group = re.sub(r'[^A-Za-z]', '', str(net_sc.trafo.at[trafo, 'vector_group'] if 'vector_group' in net_sc.trafo.columns else ''))
+    hv = re.match(r'[A-Z]+', group)
+    hv_token = hv.group(0) if hv else ''
+    lv_token = group[len(hv_token):].lower()
+    on_hv = int(net_sc.trafo.at[trafo, 'hv_bus']) == side_bus
+    delta = hv_token.startswith('D') if on_hv else lv_token.startswith('d')
+    if not delta:
+        return None
+    return side_bus if et == 'b' else -1        # on the transformer itself: no bus between them, never a residual
+
+
 def _prot_residual_a(net_sc, sw_idx, fault_type, fault_bus_idx, current_a):
     """
     A switch's residual current in a fault: for a 1ph SC its Ikss, the fault-loop
     current, is the available estimate; a grounding transformer's breaker its
-    neutral current, 3 I0. Other fault types have none.
+    neutral current, 3 I0; a breaker feeding a transformer's delta winding none,
+    but for a fault between it and the winding - zero sequence does not pass a
+    delta (an SOFC group's breaker, whose fault-loop current was taken for
+    residual, tripped its 67N for every earth fault). Other fault types have none.
     """
     if fault_type != '1ph':
         return 0.0
@@ -19366,6 +19401,10 @@ def _prot_residual_a(net_sc, sw_idx, fault_type, fault_bus_idx, current_a):
     if sw_row is not None and sw_row['et'] == 't' and _electrisim_is_grounding(net_sc.trafo, int(sw_row['element'])):
         neutral_ka = _prot_grounding_neutral_ka(net_sc, int(sw_row['element']), fault_bus_idx)
         residual_a = neutral_ka * 1000.0 if neutral_ka is not None else residual_a
+    elif sw_row is not None:
+        node = _prot_delta_winding_beyond(net_sc, sw_row)
+        if node is not None and (fault_bus_idx is None or int(fault_bus_idx) != node):
+            residual_a = 0.0
     return residual_a
 
 

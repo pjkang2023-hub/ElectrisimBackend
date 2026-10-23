@@ -2219,6 +2219,32 @@ def mgtwin_check_design():
     return jsonify(out)
 
 
+@app.route('/mgtwin/protection', methods=['POST'])
+def mgtwin_protection():
+    """
+    The Site's relay settings as the drawn breakers' protection fields: {"site": <Site>, "group"?: "A",
+    "fault_type"?: "3ph" | "1ph"} -> {"group", "switches": {breaker id: {field: value}}, "fields": [the fields a
+    breaker's protection is made of], "notes"}. For a relay with phase and earth elements, "1ph" carries the earth one
+    (mgtwin_site_io.protection_settings); the drawing applies them to the breakers it has.
+    """
+    from mgtwin_site_io import PROTECTION_FIELDS, protection_settings
+    body = request.get_json(force=True, silent=True) or {}
+    site = body.get('site')
+    if not isinstance(site, dict) or not isinstance(site.get('relays'), list) or not site['relays']:
+        return jsonify({'error': True, 'message': "Send {'site': <mgtwin Site>} with its 'relays' and their settings."}), 400
+    group = str(body.get('group') or 'A')
+    fault_type = body.get('fault_type') if body.get('fault_type') in ('3ph', '1ph') else None
+    try:
+        switches, notes = protection_settings(site, group, fault_type)
+    except (KeyError, TypeError, ValueError) as e:
+        return jsonify({'error': True, 'message': f'The Site\'s relays could not be read: {type(e).__name__}: {e}'}), 400
+    unset = sorted(sw for sw, f in switches.items() if f.get('protection_type') == 'none')
+    if len(unset) == len(switches):
+        notes.append('no relay in this Site has a setting yet: every breaker would get no protection')
+    return jsonify({'group': group, 'fault_type': fault_type, 'switches': switches, 'fields': list(PROTECTION_FIELDS),
+                    'notes': notes})
+
+
 @app.route('/import-pandapower', methods=['POST'])
 def import_pandapower():
     """

@@ -66,7 +66,31 @@ def test_the_drawn_diagram_exported_as_a_site(client):
     r, out = _post(client, '/mgtwin/site', {'diagram': payload, 'site_id': site['id'], 'template': site})
     assert r.status_code == 200
     assert out == json.loads(json.dumps(payload_to_site(payload, site['id'], 50.0, template=site)))
-    assert len(out['islands']) == 14 and len(out['relays']) == 59
+    assert len(out['islands']) == 14 and len(out['relays']) == 68      # 59 + the feeders' far ends, the genset
     r, out = _post(client, '/mgtwin/site', {'diagram': payload})
     assert [i['id'] for i in out['islands']] == ['AS_DRAWN']
     assert _post(client, '/mgtwin/site', {})[0].status_code == 400
+
+
+def test_the_sites_protection_for_the_drawing(client):
+    """
+    POST /mgtwin/protection: the C003 Rev C.2 draft settings as the drawn breakers' protection fields, in a settings
+    group - a feeder's 87L and a PCS transformer's 87T as the differential relay, an SOFC group breaker's 51 as a
+    definite-time OCR (its 67N for single-phase studies), a bus section's 87B alone as the add-on. A Site without
+    relays is refused.
+    """
+    with open(os.path.join(REF, 'c003_revC2_site_settings_draft.json'), encoding='utf-8') as fh:
+        site = json.load(fh)
+    r, out = _post(client, '/mgtwin/protection', {'site': site, 'group': 'A', 'fault_type': '3ph'})
+    assert r.status_code == 200 and out['group'] == 'A'
+    sw = out['switches']
+    assert sw['CB_F_S1A']['protection_type'] == 'differential' and sw['CB_F_S1A']['bdiff_i_a'] == '100.0'
+    assert sw['CB_PCS1']['protection_type'] == 'differential' and float(sw['CB_PCS1']['I_diff_a']) == pytest.approx(28.9, abs=0.1)
+    assert sw['CB_SOFC01_1']['protection_type'] == 'ocr' and sw['CB_SOFC01_1']['I_g_a'] == '70.0'
+    assert sw['CB_BS1'] == {'protection_type': 'none', 'bdiff_i_a': '100.0', 'bdiff_slope': '0.3', 'bdiff_t_s': '0.05'}
+    assert set(out['fields']) >= {'protection_type', 'I_diff_a', 'I_g_a', 'I_e_a', 'bdiff_i_a'}
+    _, earth = _post(client, '/mgtwin/protection', {'site': site, 'group': 'A', 'fault_type': '1ph'})
+    assert earth['switches']['CB_SOFC01_1'] == {'protection_type': 'earth_fault', 'I_e_a': '25.0', 't_e': '0.3',
+                                               'bdiff_i_a': '100.0', 'bdiff_slope': '0.3', 'bdiff_t_s': '0.05'}
+    r, _ = _post(client, '/mgtwin/protection', {'site': {'id': 'X', 'relays': []}})
+    assert r.status_code == 400
