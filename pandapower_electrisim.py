@@ -18098,6 +18098,8 @@ def _prot_collect_switch_protection_specs(in_data):
             't_u': _prot_safe_float(row.get('t_u')),
             # Breaker failure (50BF): its breaker's own setting, whatever relay trips it.
             'bf_time_s': _prot_safe_float(row.get('bf_time_s')),
+            # ... and whether it also sends a transfer trip beyond the breaker (the cable's far end, the sources there)
+            'bf_transfer_trip': str(row.get('bf_transfer_trip', '') or '').strip().lower() in ('1', 'true', 'yes'),
             # Arc-flash detection (50ARC), beside whatever relay the breaker has: light in its
             # switchboard (the switch's bus) and current through it, tripping in arc_t_s; it can
             # also block the grid-forming inverters on that bus.
@@ -20208,12 +20210,17 @@ def _prot_reaches_source(adjacency, start, sources, blocked):
 
 
 def _prot_breaker_failure(net, adjacency, element_node, fault_node, sources, rows, primaries, trip_time, label,
-                          bf_times):
+                          bf_times, relay_at_edge=None, bf_transfer=()):
     """
     Each primary breaker that trips, failing to open: what clears the fault
     then. The other relays open their breakers at their trip times; a failed
     breaker with breaker-failure protection (50BF) trips every other breaker
-    at its bus its delay after its relay did. The fault is cleared when no
+    at its bus its delay after its relay did. One that also sends a transfer
+    trip (`bf_transfer`) trips every breaker bounding the zones on both its
+    sides - its board's and, beyond it, the cable's far end or what else
+    bounds that zone - and the sources inside them with no breaker of their
+    own (an inverter's block, a generator's lockout): its board alone leaves a
+    fault on the board fed on through it from the far end. The fault is cleared when no
     source reaches it. One row per primary: the time by the relays alone, by
     50BF, and the clearing time - None, the fault left on.
     """
@@ -20222,13 +20229,17 @@ def _prot_breaker_failure(net, adjacency, element_node, fault_node, sources, row
         return frozenset((('bus', int(sw['bus'])), element_node(sw['et'], sw['element'])))
 
     def cleared_at(events):
+        # events: (t, edges opened, sources tripped)
         adj = {n: set(v) for n, v in adjacency.items()}
-        for t, edges in sorted(events, key=lambda e: e[0]):
+        live = set(sources)
+        for t, edges, *tripped in sorted(events, key=lambda e: e[0]):
             for edge in edges:
                 a, b = tuple(edge)
                 adj.get(a, set()).discard(b)
                 adj.get(b, set()).discard(a)
-            if not _prot_reaches_source(adj, fault_node, sources, ()):
+            for src in (tripped[0] if tripped else ()):
+                live.discard(src)
+            if not _prot_reaches_source(adj, fault_node, live, ()):
                 return t
         return None
 
@@ -20243,10 +20254,21 @@ def _prot_breaker_failure(net, adjacency, element_node, fault_node, sources, row
         t_bf, opened = None, []
         if bf is not None and bf > 0:
             bus = int(net.switch.at[key, 'bus'])
-            at_bus = [si for si in net.switch.index if si != key and bool(net.switch.at[si, 'closed'])
-                      and (int(net.switch.at[si, 'bus']) == bus
-                           or (net.switch.at[si, 'et'] == 'b' and int(net.switch.at[si, 'element']) == bus))]
-            t_bf = cleared_at(relays + [(t_p + bf, [edge_of(si) for si in at_bus])])
+            tripped = set()
+            if relay_at_edge and key in bf_transfer:
+                at_bus = set()
+                for side in edge_of(key):
+                    zone, bounding = _prot_zone(adjacency, [side], relay_at_edge)
+                    at_bus |= {si for si in bounding if si != key}
+                    # a source with no breaker of its own beyond the failed one - a PCS behind its tap, the genset -
+                    # is stopped by the 50BF's trip to it (an inverter block, a generator lockout)
+                    tripped |= zone & set(sources)
+                at_bus = sorted(at_bus)
+            else:
+                at_bus = [si for si in net.switch.index if si != key and bool(net.switch.at[si, 'closed'])
+                          and (int(net.switch.at[si, 'bus']) == bus
+                               or (net.switch.at[si, 'et'] == 'b' and int(net.switch.at[si, 'element']) == bus))]
+            t_bf = cleared_at(relays + [(t_p + bf, [edge_of(si) for si in at_bus], tripped)])
             opened = [_contingency_friendly_name(net, net.switch.at[si, 'name']) for si in at_bus]
         times = [t for t in (t_relays, t_bf) if t is not None]
         out.append({'failed_switch': label(key), 't_primary_s': t_p, 'bf_time_s': bf,
@@ -20255,7 +20277,7 @@ def _prot_breaker_failure(net, adjacency, element_node, fault_node, sources, row
     return out
 
 
-def _prot_check_miscoordination(net, scenarios, t_diff, bf_times=None):
+def _prot_check_miscoordination(net, scenarios, t_diff, bf_times=None, bf_transfer=()):
     """
     Grade the relays of each fault by protection zone. The zone is what the
     fault reaches without passing a relay; the relays on its edge that lead
@@ -20379,7 +20401,8 @@ def _prot_check_miscoordination(net, scenarios, t_diff, bf_times=None):
         t_clear = max(clearing) if clearing and None not in clearing else None
         scenario['clearing_time_s'] = t_clear
         scenario['breaker_failure'] = _prot_breaker_failure(
-            net, adjacency, element_node, fault_node, sources, rows, primaries, trip_time, label, bf_times or {})
+            net, adjacency, element_node, fault_node, sources, rows, primaries, trip_time, label, bf_times or {},
+            relay_at_edge, bf_transfer)
         raised = {}
         for key, row in rows.items():
             stage = row.get('alarm_stage')
@@ -20590,12 +20613,14 @@ def protection_coordination(net, prot_params, in_data):
 
         for scenario in scenarios:
             scenario['fault_label'] = _prot_fault_label(net, scenario)
-        bf_times = {}
+        bf_times, bf_transfer = {}, set()
         for sw_id, spec in specs.items():
             sw_idx = _prot_resolve_sw_idx_for_id(net, sw_id)
             if sw_idx is not None and spec.get('bf_time_s'):
                 bf_times[int(sw_idx)] = float(spec['bf_time_s'])
-        miscoord, unwanted = _prot_check_miscoordination(net, scenarios, t_diff, bf_times)
+                if spec.get('bf_transfer_trip'):
+                    bf_transfer.add(int(sw_idx))
+        miscoord, unwanted = _prot_check_miscoordination(net, scenarios, t_diff, bf_times, bf_transfer)
 
         n_tripped = sum(1 for sc_res in scenarios for trip in sc_res.get('trip', []) if trip.get('tripped'))
         response = {

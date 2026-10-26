@@ -20,8 +20,8 @@ def _draft():
         return json.load(fh)
 
 
-def _trips(client, site, payload, bus, fault_type, state='NORMAL'):
-    """{breaker: (t, how)} for a bolted fault on `bus`, with the scenario's clearing time and unwanted trips."""
+def _scenario(client, site, payload, bus, fault_type, state='NORMAL'):
+    """The protection coordination's scenario for a bolted fault on `bus`, and its unwanted trips."""
     from mgtwin_site_io import apply_protection, apply_state
     group = next(st for st in site['islands'] if st['id'] == state).get('settings_group', 'A')
     prot, _ = apply_protection(payload, site, group)
@@ -31,10 +31,15 @@ def _trips(client, site, payload, bus, fault_type, state='NORMAL'):
               'case': 'max', 'fault_location_mode': 'bus', 'fault_bus_id': cell[bus], 'sc_fraction': 0.5,
               'grading_mode': 'manual', 't_diff': 0.3, 'frequency': '50'}
     out = _post(client, p)
-    sc = out['scenarios'][0]
+    return out['scenarios'][0], out.get('unwanted_trips') or []
+
+
+def _trips(client, site, payload, bus, fault_type, state='NORMAL'):
+    """{breaker: (t, how)} for a bolted fault on `bus`, with the scenario's clearing time and unwanted trips."""
+    sc, unwanted = _scenario(client, site, payload, bus, fault_type, state)
     trips = {t['user_friendly_name']: (t['t_trip_s'], 'B' if (t.get('bus_differential') or {}).get('tripped_first')
                                        else t.get('device')) for t in sc['trip'] if t.get('tripped')}
-    return trips, sc.get('clearing_time_s'), out.get('unwanted_trips') or []
+    return trips, sc.get('clearing_time_s'), unwanted
 
 
 @pytest.mark.parametrize('fault_type', ['3ph', '1ph'])
@@ -70,6 +75,24 @@ def test_a_cable_ending_on_its_own_node_is_measured_at_its_far_breaker(client):
         assert clearing == pytest.approx(0.03) and not unwanted
     trips, _, unwanted = _trips(client, site, payload, 'MVA', '3ph')
     assert 'CB_F_S1A' not in trips and trips['CB_F_S1A_FAR'] == (0.05, 'B') and not unwanted
+
+
+def test_a_stuck_breaker_is_cleared_by_its_50bf_on_both_sides(client):
+    """
+    Every breaker has a 50BF (0.15 s). A fault on board MVA with the feeder breaker at MVA stuck: the feeder still
+    feeds it through the stuck breaker, so its 50BF opens the zone beyond as well as the board - the feeder's other
+    end (a transfer trip) - and the fault is cleared at 0.05 + 0.15 s. A fault on a PCS transformer node with the
+    PCS breaker stuck: the PCS beyond has no breaker of its own, so the 50BF blocks it.
+    """
+    site, payload = _draft(), _payload('revc2')
+    sc, _ = _scenario(client, site, payload, 'MVA', '3ph')
+    bf = {r['failed_switch']: r for r in sc['breaker_failure']}
+    far = bf['CB_F_S1A_FAR']
+    assert 'CB_F_S1A' in far['opened_by_50bf'] and far['t_clear_s'] == pytest.approx(0.2)
+    assert all(r['t_clear_s'] is not None for r in sc['breaker_failure'])
+    sc, _ = _scenario(client, site, payload, 'PCS1_HV', '3ph')
+    stuck = {r['failed_switch']: r for r in sc['breaker_failure']}['CB_PCS1']
+    assert stuck['t_clear_relays_s'] is None and stuck['t_clear_50bf_s'] == pytest.approx(0.18)
 
 
 def test_a_bus_breakers_angle_is_read_from_its_own_branch_row():

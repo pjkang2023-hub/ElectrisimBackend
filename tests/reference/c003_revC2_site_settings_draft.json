@@ -1300,6 +1300,15 @@
       "SOFC1B"
      ],
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); low-impedance biased, Is1 100 A, slope 30 %, check zone; trips every breaker on SOFC1B"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1A",
+      "SOFC1B"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "its board zone(s) only: no other element is stated for this breaker; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -1323,6 +1332,15 @@
       "SOFC2B"
      ],
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); low-impedance biased, Is1 100 A, slope 30 %, check zone; trips every breaker on SOFC2B"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2A",
+      "SOFC2B"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "its board zone(s) only: no other element is stated for this breaker; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -1354,6 +1372,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1A",
+      "SOFC01_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -1385,6 +1412,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2A",
+      "SOFC01_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -1416,6 +1452,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1A",
+      "SOFC02_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -1447,6 +1492,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2A",
+      "SOFC02_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -1478,6 +1532,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1A",
+      "SOFC03_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -1509,6 +1572,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2A",
+      "SOFC03_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -1540,6 +1612,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1A",
+      "SOFC04_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -1571,6 +1652,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2A",
+      "SOFC04_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -1602,6 +1692,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1A",
+      "SOFC05_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -1633,6 +1732,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2A",
+      "SOFC05_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -1664,6 +1772,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1B",
+      "SOFC06_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -1695,6 +1812,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2B",
+      "SOFC06_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -1726,6 +1852,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1B",
+      "SOFC07_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -1757,6 +1892,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2B",
+      "SOFC07_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -1788,6 +1932,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1B",
+      "SOFC08_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -1819,6 +1972,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2B",
+      "SOFC08_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -1850,6 +2012,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1B",
+      "SOFC09_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -1881,6 +2052,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2B",
+      "SOFC09_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -1912,6 +2092,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1B",
+      "SOFC10_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -1943,6 +2132,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2B",
+      "SOFC10_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -1974,6 +2172,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1A",
+      "SOFC11_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -2005,6 +2212,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2A",
+      "SOFC11_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -2036,6 +2252,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1A",
+      "SOFC12_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -2067,6 +2292,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2A",
+      "SOFC12_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -2098,6 +2332,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1A",
+      "SOFC13_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -2129,6 +2372,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2A",
+      "SOFC13_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -2160,6 +2412,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1A",
+      "SOFC14_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -2191,6 +2452,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2A",
+      "SOFC14_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -2222,6 +2492,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1A",
+      "SOFC15_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -2253,6 +2532,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2A",
+      "SOFC15_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -2284,6 +2572,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1B",
+      "SOFC16_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -2315,6 +2612,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2B",
+      "SOFC16_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -2346,6 +2652,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1B",
+      "SOFC17_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -2377,6 +2692,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2B",
+      "SOFC17_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -2408,6 +2732,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1B",
+      "SOFC18_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -2439,6 +2772,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2B",
+      "SOFC18_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -2470,6 +2812,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1B",
+      "SOFC19_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -2501,6 +2852,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2B",
+      "SOFC19_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -2533,6 +2893,15 @@
      "time_dial": 0.3,
      "groups": [],
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); backup, definite time 0.3 s; 1.25 x TR_PCS1 rating 96 A"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "BESS1",
+      "PCS1_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "its board zone(s) only: no other element is stated for this breaker; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -2565,6 +2934,15 @@
      "time_dial": 0.3,
      "groups": [],
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); backup, definite time 0.3 s; 1.25 x TR_PCS2 rating 96 A"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "BESS1",
+      "PCS2_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "its board zone(s) only: no other element is stated for this breaker; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -2597,6 +2975,15 @@
      "time_dial": 0.3,
      "groups": [],
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); backup, definite time 0.3 s; 1.25 x TR_PCS3 rating 96 A"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "BESS2",
+      "PCS3_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "its board zone(s) only: no other element is stated for this breaker; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -2629,6 +3016,15 @@
      "time_dial": 0.3,
      "groups": [],
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); backup, definite time 0.3 s; 1.25 x TR_PCS4 rating 96 A"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "BESS2",
+      "PCS4_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "its board zone(s) only: no other element is stated for this breaker; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -2661,6 +3057,15 @@
      "time_dial": 0.3,
      "groups": [],
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); backup, definite time 0.3 s; 1.25 x TR_PCS5 rating 96 A"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVA",
+      "PCS5_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "its board zone(s) only: no other element is stated for this breaker; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -2693,6 +3098,15 @@
      "time_dial": 0.3,
      "groups": [],
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); backup, definite time 0.3 s; 1.25 x TR_PCS6 rating 96 A"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVB",
+      "PCS6_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "its board zone(s) only: no other element is stated for this breaker; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -2727,6 +3141,15 @@
      "curve": "DT",
      "time_dial": 0.6,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.6 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1A",
+      "F_S1A_N"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -2761,6 +3184,15 @@
      "curve": "DT",
      "time_dial": 0.6,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.6 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC1B",
+      "F_S1B_N"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -2795,6 +3227,15 @@
      "curve": "DT",
      "time_dial": 0.6,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.6 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2A",
+      "F_S2A_N"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -2829,6 +3270,15 @@
      "curve": "DT",
      "time_dial": 0.6,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.6 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "SOFC2B",
+      "F_S2B_N"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -2863,6 +3313,15 @@
      "curve": "DT",
      "time_dial": 0.6,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.6 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "BESS1",
+      "F_E1A_N"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -2897,6 +3356,15 @@
      "curve": "DT",
      "time_dial": 0.6,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.6 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "BESS1",
+      "F_E1B_N"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -2931,6 +3399,15 @@
      "curve": "DT",
      "time_dial": 0.6,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.6 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "BESS2",
+      "F_E2A_N"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -2965,6 +3442,15 @@
      "curve": "DT",
      "time_dial": 0.6,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.6 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "BESS2",
+      "F_E2B_N"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -2988,6 +3474,15 @@
       "MVB"
      ],
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); low-impedance biased, Is1 100 A, slope 30 %, check zone; trips every breaker on MVB"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVA",
+      "MVB"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "its board zone(s) only: no other element is stated for this breaker; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -3031,6 +3526,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVA",
+      "IT_cordA_N"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -3074,6 +3578,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVA",
+      "OTHER_A_N"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -3117,6 +3630,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVB",
+      "IT_cordB_N"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -3160,6 +3682,15 @@
      "curve": "DT",
      "time_dial": 0.3,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.3 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVB",
+      "OTHER_B_N"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "functions as the design documents state them; no settings yet; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); 50 not used islanded (no window above the through-faults)"
@@ -3194,6 +3725,15 @@
      "curve": "DT",
      "time_dial": 0.6,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.6 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVA",
+      "F_S1A_FAR_N"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "Site Corrections item 9 (22 Oct 2026): the feeder's MV-board end; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -3228,6 +3768,15 @@
      "curve": "DT",
      "time_dial": 0.6,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.6 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVB",
+      "F_S1B_FAR_N"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "Site Corrections item 9 (22 Oct 2026): the feeder's MV-board end; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -3262,6 +3811,15 @@
      "curve": "DT",
      "time_dial": 0.6,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.6 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVA",
+      "F_S2A_FAR_N"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "Site Corrections item 9 (22 Oct 2026): the feeder's MV-board end; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -3296,6 +3854,15 @@
      "curve": "DT",
      "time_dial": 0.6,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.6 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVB",
+      "F_S2B_FAR_N"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "Site Corrections item 9 (22 Oct 2026): the feeder's MV-board end; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -3330,6 +3897,15 @@
      "curve": "DT",
      "time_dial": 0.6,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.6 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVA",
+      "F_E1A_FAR_N"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "Site Corrections item 9 (22 Oct 2026): the feeder's MV-board end; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -3364,6 +3940,15 @@
      "curve": "DT",
      "time_dial": 0.6,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.6 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVB",
+      "F_E1B_FAR_N"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "Site Corrections item 9 (22 Oct 2026): the feeder's MV-board end; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -3398,6 +3983,15 @@
      "curve": "DT",
      "time_dial": 0.6,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.6 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVA",
+      "F_E2A_FAR_N"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "Site Corrections item 9 (22 Oct 2026): the feeder's MV-board end; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -3432,6 +4026,15 @@
      "curve": "DT",
      "time_dial": 0.6,
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); forward into the protected circuit, definite time 0.6 s; the design's earth pickup (above 2.5 x the 20 A charging current)"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVB",
+      "F_E2B_FAR_N"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "Site Corrections item 9 (22 Oct 2026): the feeder's MV-board end; C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"
@@ -3455,6 +4058,15 @@
      "time_dial": 0.9,
      "groups": [],
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); backup, definite time 0.9 s; 1.25 x TR_GEN rating 52 A"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVA",
+      "GEN_HV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); breaker failure: if this breaker fails to open, 0.15 s after its relay did every other breaker on its board trips and a transfer trip goes beyond it (the cable's far end; a PCS's inverter block, the genset's lockout)"
     }
    ],
    "notes": "Site Corrections item 9 (22 Oct 2026): the genset breaker; its board's 87B (Rev C.2: '87B on 6 boards'); C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18)"

@@ -317,7 +317,10 @@ DIFF_SLOPE, DIFF_T_S, BUS_DIFF_T_S, INST_T_S = 0.3, 0.03, 0.05, 0.05
 
 #: The protection fields protection_settings writes on a switch; every other is cleared when they are applied.
 PROTECTION_FIELDS = ('protection_type', 'oc_relay_type', 'pickup_mode', 'I_diff_a', 'diff_slope', 'I_g_a', 'I_gg_a',
-                     't_g', 't_gg', 'I_e_a', 't_e', 'bdiff_i_a', 'bdiff_slope', 'bdiff_t_s')
+                     't_g', 't_gg', 'I_e_a', 't_e', 'bdiff_i_a', 'bdiff_slope', 'bdiff_t_s', 'bf_time_s',
+                     'bf_transfer_trip')
+#: Breaker-failure (50BF) timer Electrisim assumes where a Site's 50BF gives none (its time_dial, in seconds).
+BF_T_S = 0.15
 
 
 def protection_settings(site, group='A', fault_type=None):
@@ -326,10 +329,12 @@ def protection_settings(site, group='A', fault_type=None):
     `group`: {breaker id: {field: value (str)}}, and notes naming what could not be carried. A switch carries one
     relay type and add-ons: 87L / 87T -> the differential relay (I_diff_a, diff_slope, t_g); else 51 / 67 (with a 50
     its I>>) -> a definite-time OCR in manual pickup (I_g_a, t_g); else 51N / 51G / 67N -> the earth-fault relay (I_e_a,
-    t_e); 87B -> the bus differential add-on (bdiff_i_a, ...). For a study of single-phase faults (`fault_type` '1ph')
-    a relay with both carries its earth element instead of its phase one - the element that sees the fault - so a
-    relay with both is modelled for each kind of fault in turn. Elements with no pickup are left out; a breaker whose
-    relay has nothing left gets protection_type 'none'.
+    t_e); 87B -> the bus differential add-on (bdiff_i_a, ...); 50BF -> its breaker's bf_time_s (its time_dial, else
+    BF_T_S) - with zone_buses, the buses on its breaker's sides it trips beyond its own board, bf_transfer_trip
+    too. For a study of single-phase faults (`fault_type` '1ph') a relay with both carries its earth element
+    instead of its phase one - the element that sees the fault - so a relay with both is modelled for each kind of
+    fault in turn. Elements with no pickup are left out; a breaker whose relay has nothing left gets protection_type
+    'none'.
     """
     from mgtwin.ontology import EARTH_OC, PHASE_OC
 
@@ -368,6 +373,11 @@ def protection_settings(site, group='A', fault_type=None):
         if bus:
             fields.update({'bdiff_i_a': str(min(f['pickup_a'] for f in bus)), 'bdiff_slope': str(DIFF_SLOPE),
                            'bdiff_t_s': str(BUS_DIFF_T_S)})
+        bf = [f for f in act if f['ansi'] == '50BF']        # a timer, set by its delay rather than a pickup
+        if bf:
+            fields['bf_time_s'] = str(bf[0].get('time_dial') or BF_T_S)
+            if bf[0].get('zone_buses'):
+                fields['bf_transfer_trip'] = 'true'
         out[r['switch_id']] = fields
     return out, notes
 

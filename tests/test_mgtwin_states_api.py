@@ -87,10 +87,12 @@ def test_the_sites_protection_for_the_drawing(client):
     assert sw['CB_F_S1A']['protection_type'] == 'differential' and sw['CB_F_S1A']['bdiff_i_a'] == '100.0'
     assert sw['CB_PCS1']['protection_type'] == 'differential' and float(sw['CB_PCS1']['I_diff_a']) == pytest.approx(28.9, abs=0.1)
     assert sw['CB_SOFC01_1']['protection_type'] == 'ocr' and sw['CB_SOFC01_1']['I_g_a'] == '70.0'
-    assert sw['CB_BS1'] == {'protection_type': 'none', 'bdiff_i_a': '100.0', 'bdiff_slope': '0.3', 'bdiff_t_s': '0.05'}
+    assert sw['CB_BS1'] == {'protection_type': 'none', 'bdiff_i_a': '100.0', 'bdiff_slope': '0.3', 'bdiff_t_s': '0.05',
+                           'bf_time_s': '0.15', 'bf_transfer_trip': 'true'}
     assert set(out['fields']) >= {'protection_type', 'I_diff_a', 'I_g_a', 'I_e_a', 'bdiff_i_a'}
     _, earth = _post(client, '/mgtwin/protection', {'site': site, 'group': 'A', 'fault_type': '1ph'})
     assert earth['switches']['CB_SOFC01_1'] == {'protection_type': 'earth_fault', 'I_e_a': '25.0', 't_e': '0.3',
-                                               'bdiff_i_a': '100.0', 'bdiff_slope': '0.3', 'bdiff_t_s': '0.05'}
+                                               'bdiff_i_a': '100.0', 'bdiff_slope': '0.3', 'bdiff_t_s': '0.05',
+                                               'bf_time_s': '0.15', 'bf_transfer_trip': 'true'}
     r, _ = _post(client, '/mgtwin/protection', {'site': {'id': 'X', 'relays': []}})
     assert r.status_code == 400
