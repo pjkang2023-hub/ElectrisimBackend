@@ -4052,6 +4052,15 @@
      "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); low-impedance biased, Is1 100 A, slope 30 %, check zone; trips every breaker on MVA"
     },
     {
+     "ansi": "87T",
+     "pickup_a": 15.7,
+     "zone_buses": [
+      "GEN_HV",
+      "GEN_LV"
+     ],
+     "notes": "C003 draft settings 22 Oct 2026 - PROVISIONAL pending vendor data (A18); Is1 0.3 In (16 A HV), slopes 30/80 %, 2nd harmonic 15 %, 5th 35 %, unrestrained 8 In (420 A); vector group and ratio correction per TR_GEN"
+    },
+    {
      "ansi": "51",
      "pickup_a": 70.0,
      "curve": "DT",
