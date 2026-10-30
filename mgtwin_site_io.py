@@ -23,6 +23,7 @@ Transformer impedances: mgtwin's x_pu / r_pu are on the transformer's own rating
 from __future__ import annotations
 
 import copy
+import json
 import math
 
 TX_X_OWN_MAX = 0.25            # mgtwin's PLAUSIBLE["tx_x_pu"] upper bound: an x above it is on the system base
@@ -318,12 +319,12 @@ DIFF_SLOPE, DIFF_T_S, BUS_DIFF_T_S, INST_T_S = 0.3, 0.03, 0.05, 0.05
 #: The protection fields protection_settings writes on a switch; every other is cleared when they are applied.
 PROTECTION_FIELDS = ('protection_type', 'oc_relay_type', 'pickup_mode', 'I_diff_a', 'diff_slope', 'I_g_a', 'I_gg_a',
                      't_g', 't_gg', 'I_e_a', 't_e', 'bdiff_i_a', 'bdiff_slope', 'bdiff_t_s', 'bf_time_s',
-                     'bf_transfer_trip')
+                     'bf_transfer_trip', 'zdiff_zones')
 #: Breaker-failure (50BF) timer Electrisim assumes where a Site's 50BF gives none (its time_dial, in seconds).
 BF_T_S = 0.15
 
 
-def protection_settings(site, group='A', fault_type=None):
+def protection_settings(site, group='A', fault_type=None, zones=False):
     """
     The Site's relay settings as Electrisim's switch protection fields, the elements active in settings group
     `group`: {breaker id: {field: value (str)}}, and notes naming what could not be carried. A switch carries one
@@ -334,7 +335,9 @@ def protection_settings(site, group='A', fault_type=None):
     too. For a study of single-phase faults (`fault_type` '1ph') a relay with both carries its earth element
     instead of its phase one - the element that sees the fault - so a relay with both is modelled for each kind of
     fault in turn. Elements with no pickup are left out; a breaker whose relay has nothing left gets protection_type
-    'none'.
+    'none'. With `zones`, every 87L / 87T / 87B is instead a zone differential over its zone_buses (zdiff_zones): a
+    breaker may bound several zones (a ring-bus breaker, two elements'), and the overcurrent or earth element is
+    carried beside them.
     """
     from mgtwin.ontology import EARTH_OC, PHASE_OC
 
@@ -350,6 +353,12 @@ def protection_settings(site, group='A', fault_type=None):
         if fault_type == '1ph' and earth:
             phase = []
         fields = {'protection_type': 'none'}
+        if zones:
+            unit = [f for f in diff + bus if f.get('zone_buses')]
+            fields['zdiff_zones'] = json.dumps([{'buses': list(f['zone_buses']), 'i_a': f['pickup_a'],
+                                                 'slope': DIFF_SLOPE, 't_s': BUS_DIFF_T_S if f['ansi'] == '87B' else DIFF_T_S}
+                                                for f in unit])
+            diff, bus = [], []
         if diff:
             fields.update({'protection_type': 'differential', 'I_diff_a': str(min(f['pickup_a'] for f in diff)),
                            'diff_slope': str(DIFF_SLOPE), 't_g': str(DIFF_T_S)})
@@ -382,7 +391,7 @@ def protection_settings(site, group='A', fault_type=None):
     return out, notes
 
 
-def apply_protection(payload, site, group='A', fault_type=None):
+def apply_protection(payload, site, group='A', fault_type=None, zones=False):
     """
     protection_settings on the drawn breakers (a switch cell named by its breaker's id), for Electrisim's protection
     coordination: each breaker with a relay in the Site has its protection fields replaced. Returns (payload, notes) -
@@ -391,7 +400,7 @@ def apply_protection(payload, site, group='A', fault_type=None):
     p = copy.deepcopy(payload)
     cells = {str(v.get('userFriendlyName', '')): v for v in p.values()
              if isinstance(v, dict) and str(v.get('typ', '')).startswith('Switch')}
-    settings, notes = protection_settings(site, group, fault_type)
+    settings, notes = protection_settings(site, group, fault_type, zones)
     for r in site.get('relays', []):
         cell = cells.get(r['switch_id'])
         if cell is None:

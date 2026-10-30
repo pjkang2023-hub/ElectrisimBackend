@@ -18043,6 +18043,26 @@ def _prot_auto_oc_settings(net, spec, sw_idx, depths, grading_mode):
     return out, 'Automatic settings by Electrisim: ' + '; '.join(parts) + '.'
 
 
+def _prot_zone_diff_rows(row):
+    """A switch row's zone differentials: its zdiff_zones, a JSON list of {buses: [bus names], i_a, slope, t_s}."""
+    raw = row.get('zdiff_zones') if isinstance(row, dict) else None
+    if not raw:
+        return []
+    try:
+        zones = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return []
+    out = []
+    for z in zones if isinstance(zones, list) else []:
+        buses = [str(b) for b in (z.get('buses') or [])] if isinstance(z, dict) else []
+        i_a = _prot_safe_float(z.get('i_a')) if isinstance(z, dict) else None
+        if buses and i_a and i_a > 0:
+            slope, t_s = _prot_safe_float(z.get('slope')), _prot_safe_float(z.get('t_s'))
+            out.append({'buses': buses, 'i_a': float(i_a), 'slope': 0.3 if slope is None else float(slope),
+                        't_s': 0.03 if t_s is None else float(t_s)})
+    return out
+
+
 def _prot_collect_switch_protection_specs(in_data):
     """
     Walk the raw frontend payload and collect the protection spec for every Switch
@@ -18061,9 +18081,9 @@ def _prot_collect_switch_protection_specs(in_data):
             continue
         protection_type = str(row.get('protection_type', _PROTECTION_KIND_NONE) or _PROTECTION_KIND_NONE).strip().lower()
         if protection_type in ('', _PROTECTION_KIND_NONE):
-            # A breaker whose only protection is its switchboards' bus differential (a bus section) is
-            # still one of the 87B zone's CTs, and trips with it.
-            if not (_prot_safe_float(row.get('bdiff_i_a')) or 0) > 0:
+            # A breaker whose only protection is its switchboards' bus differential (a bus section), or the
+            # zone differential of the zones it bounds, is still one of that zone's CTs, and trips with it.
+            if not (_prot_safe_float(row.get('bdiff_i_a')) or 0) > 0 and not _prot_zone_diff_rows(row):
                 continue
             protection_type = _PROTECTION_KIND_NONE
         sw_id = row.get('id') or row.get('name')
@@ -18111,6 +18131,10 @@ def _prot_collect_switch_protection_specs(in_data):
             'bdiff_i_a': _prot_safe_float(row.get('bdiff_i_a')),
             'bdiff_slope': _prot_safe_float(row.get('bdiff_slope')),
             'bdiff_t_s': _prot_safe_float(row.get('bdiff_t_s')),
+            # Zone differential (87T / 87L / 87B over a zone of several buses): the zones this breaker trips for,
+            # each its buses (by name), pickup, slope and time - a ring-bus element between two breakers, a
+            # breaker-and-a-half diameter's element, a ring-main segment with its taps.
+            'zdiff_zones': _prot_zone_diff_rows(row),
             # Intertrip: when its relay trips, every other breaker at its bus trips too.
             'intertrip_bus': str(row.get('intertrip_bus', 'false') or 'false').strip().lower() == 'true',
             # An earth-fault alarm (a sensitive 51N's alarm stage): its residual current - a grounding
@@ -19600,6 +19624,7 @@ def _prot_native_and_custom_trips(net_sc, attach_summaries, summary_by_sw_idx, f
         trip.append(row)
         reported.add(row.get('switch_idx'))
     _prot_apply_bus_differential(net_sc, trip, fault_bus_idx)
+    _prot_apply_zone_differential(net_sc, trip, fault_bus_idx)
     _prot_apply_arc_detection(net_sc, trip, fault_bus_idx)
     _prot_apply_intertrip(net_sc, trip)
     _prot_apply_alarms(net_sc, trip, fault_type, fault_bus_idx)
@@ -19924,7 +19949,119 @@ def _prot_arc_detection_settings(net, specs):
     net['_electrisim_bus_diff'] = bus_diff
     net['_electrisim_intertrip'] = intertrip
     net['_electrisim_alarms'] = alarms
+    net['_electrisim_zone_diff'] = _prot_zone_diff_settings(net, specs)
     return out
+
+
+def _prot_zone_diff_settings(net, specs):
+    """
+    The zone differentials the breakers declare, keyed by their bus set: {key: {'buses': {bus idx}, 'i_a', 'slope',
+    't_s', 'members': [the switches that trip for it]}}. A zone's buses are named as the diagram names them (its
+    cells' names, or their display names). Zones naming a bus the network does not have are left out.
+    """
+    lookup = {str(n): int(i) for i, n in net.bus['name'].items()}
+    for name, friendly in (getattr(net, 'user_friendly_names', None) or {}).items():
+        if str(name) in lookup:
+            lookup.setdefault(str(friendly), lookup[str(name)])
+    zones = {}
+    for sw_id, spec in specs.items():
+        sw_idx = _prot_resolve_sw_idx_for_id(net, sw_id)
+        if sw_idx is None:
+            continue
+        for z in spec.get('zdiff_zones') or []:
+            if any(b not in lookup for b in z['buses']):
+                continue
+            key = tuple(sorted(z['buses']))
+            entry = zones.setdefault(key, {'buses': {lookup[b] for b in z['buses']}, 'i_a': z['i_a'],
+                                           'slope': z['slope'], 't_s': z['t_s'], 'members': []})
+            entry['members'].append(int(sw_idx))
+    return zones
+
+
+def _prot_zone_diff_boundary_switches(net):
+    """The breakers between two buses on a zone's boundary: their currents are computed as branches."""
+    out = set()
+    for z in (net.get('_electrisim_zone_diff') if hasattr(net, 'get') else None) or {}:
+        buses = net['_electrisim_zone_diff'][z]['buses']
+        for i in net.switch.index[net.switch['et'] == 'b']:
+            if (int(net.switch.at[i, 'bus']) in buses) != (int(net.switch.at[i, 'element']) in buses):
+                out.add(int(i))
+    return sorted(out)
+
+
+def _prot_apply_zone_differential(net_sc, trip, fault_bus_idx):
+    """
+    Zone differential (87 over a zone of buses): every current crossing the zone's boundary - a closed breaker
+    between a zone bus and one outside it, a line or transformer with one end inside - summed as it leaves the
+    zone, referred to the zone's highest voltage: the fault's current for a fault inside, and for one outside
+    whatever the zone's own sources (a ring-main segment's taps) feed out through it. Against the pickup plus
+    slope x the restraint, half the magnitudes' sum; its member breakers trip together in its time. An earth
+    fault's branch results have no angles: then the magnitudes, all into the zone, for a fault inside, and
+    nothing for one outside (ideal CTs), as the bus differential reads them.
+    """
+    zones = net_sc.get('_electrisim_zone_diff') if hasattr(net_sc, 'get') else None
+    if not zones:
+        return
+    rows = {row.get('switch_idx'): row for row in trip}
+    vn = net_sc.bus['vn_kv']
+    open_line = {int(net_sc.switch.at[i, 'element']) for i in net_sc.switch.index
+                 if net_sc.switch.at[i, 'et'] == 'l' and not bool(net_sc.switch.at[i, 'closed'])}
+    open_trafo = {int(net_sc.switch.at[i, 'element']) for i in net_sc.switch.index
+                  if net_sc.switch.at[i, 'et'] == 't' and not bool(net_sc.switch.at[i, 'closed'])}
+    for key, z in zones.items():
+        buses = z['buses']
+        v_ref = max(float(vn.at[b]) for b in buses)
+        terms = []      # (kA referred to v_ref, angle)
+        for i in net_sc.switch.index[(net_sc.switch['et'] == 'b') & (net_sc.switch['closed'] == True)]:
+            a, b = int(net_sc.switch.at[i, 'bus']), int(net_sc.switch.at[i, 'element'])
+            if (a in buses) != (b in buses):
+                inside = a if a in buses else b
+                ph = _prot_bus_switch_phasor(net_sc, i, inside)
+                if ph is not None:
+                    terms.append((ph[0] * float(vn.at[inside]) / v_ref, ph[1]))
+        for table, res_name, cols, opened in (('line', 'res_line_sc', (('from_bus', 'from'), ('to_bus', 'to')), open_line),
+                                              ('trafo', 'res_trafo_sc', (('hv_bus', 'hv'), ('lv_bus', 'lv')), open_trafo)):
+            data, res = getattr(net_sc, table, None), getattr(net_sc, res_name, None)
+            if data is None or data.empty or res is None:
+                continue
+            for el in data.index:
+                if not bool(data.at[el, 'in_service']) or el in opened or el not in res.index:
+                    continue
+                ends = [int(data.at[el, c]) for c, _ in cols]
+                if (ends[0] in buses) == (ends[1] in buses):
+                    continue
+                k = 0 if ends[0] in buses else 1
+                side = cols[k][1]
+                terms.append((_prot_num(res.at[el, f'ikss_{side}_ka']) * float(vn.at[ends[k]]) / v_ref,
+                              _prot_num(res.at[el, f'ikss_{side}_degree'], np.nan)))
+        mags = [abs(m) * 1e3 if np.isfinite(m) else 0.0 for m, _ in terms]
+        phasors = all(np.isfinite(a) for m, a in terms if np.isfinite(m) and abs(m) > 0)
+        inside = fault_bus_idx is not None and int(fault_bus_idx) in buses
+        if phasors:
+            operate = abs(sum(mag * np.exp(1j * np.radians(a)) for mag, (_, a) in zip(mags, terms) if mag > 0))
+        elif inside or fault_bus_idx is None:
+            operate = sum(mags)
+        else:
+            operate = 0.0
+        restraint = sum(mags) / 2.0
+        seen = operate >= z['i_a'] + z['slope'] * restraint
+        for i in z['members']:
+            if i not in net_sc.switch.index or not bool(net_sc.switch.at[i, 'closed']):
+                continue
+            row = rows.get(i)
+            if row is None:
+                name = net_sc.switch.at[i, 'name']
+                row = {'switch_idx': i, 'switch_id': None, 'switch_name': name,
+                       'user_friendly_name': (getattr(net_sc, 'user_friendly_names', None) or {}).get(name, name),
+                       'device': 'Zone differential (87)', 'device_kind': 'Zone differential (87)', 'is_fuse': False,
+                       'tripped': False, 't_trip_s': None, 'evaluation': {}}
+                trip.append(row)
+                rows[i] = row
+            row.setdefault('zone_differential', []).append(
+                {'zone': list(key), 'i_operate_a': float(operate), 'i_restraint_a': float(restraint),
+                 'pickup_a': z['i_a'], 'slope': z['slope'], 'phasors': bool(phasors), 'tripped': bool(seen)})
+            if seen and (not row.get('tripped') or row.get('t_trip_s') is None or row['t_trip_s'] > z['t_s']):
+                row['tripped'], row['t_trip_s'] = True, z['t_s']
 
 
 def _prot_apply_arc_detection(net_sc, trip, fault_bus_idx):
@@ -20023,7 +20160,8 @@ def _prot_run_bus_scenario(base_net, fault_bus_idx, fault_type, case, attach_sum
     summary_by_sw_idx = {int(s['sw_idx']): s for s in attach_summaries if s.get('sw_idx') is not None}
     net_sc = deepcopy(base_net)
     try:
-        _prot_bus_switch_branches(net_sc, list(summary_by_sw_idx) + list(net_sc.get("_electrisim_bus_diff") or {}))
+        _prot_bus_switch_branches(net_sc, list(summary_by_sw_idx) + list(net_sc.get("_electrisim_bus_diff") or {})
+                                  + _prot_zone_diff_boundary_switches(net_sc))
         ensure_ext_grid_zero_sequence_min(net_sc)
         _prot_earth_fault_net(net_sc, fault_type)
         sc.calc_sc(net_sc, bus=int(fault_bus_idx), branch_results=True, fault=fault_type, case=case,
@@ -20099,7 +20237,8 @@ def _prot_run_scenario(base_net, sc_line_id, sc_fraction, fault_type, case, atta
 
     try:
         fault_bus = int(max(net_sc.bus.index))
-        _prot_bus_switch_branches(net_sc, list(summary_by_sw_idx) + list(net_sc.get("_electrisim_bus_diff") or {}))
+        _prot_bus_switch_branches(net_sc, list(summary_by_sw_idx) + list(net_sc.get("_electrisim_bus_diff") or {})
+                                  + _prot_zone_diff_boundary_switches(net_sc))
         ensure_ext_grid_zero_sequence_min(net_sc)
         _prot_earth_fault_net(net_sc, fault_type)
         sc.calc_sc(net_sc, bus=fault_bus, branch_results=True, fault=fault_type, case=case,
