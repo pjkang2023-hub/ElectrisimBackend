@@ -1182,6 +1182,17 @@ def _rms(t, y, period):
     return np.sqrt(np.maximum((sq - back) / period, 0.0))
 
 
+def _fundamental_end(t, y, f_hz):
+    """y's 50 Hz component over the run's last cycle, rms (its DC offset aside); 0 for a short run."""
+    period = 1.0 / f_hz
+    last = t >= t[-1] - period
+    if last.sum() < 8 or t[last][-1] - t[last][0] < 0.9 * period:
+        return 0.0
+    x = np.column_stack([np.cos(2 * math.pi * f_hz * t[last]), np.sin(2 * math.pi * f_hz * t[last]), np.ones(last.sum())])
+    coef, *_ = np.linalg.lstsq(x, y[last], rcond=None)
+    return math.hypot(coef[0], coef[1]) / math.sqrt(2.0)
+
+
 def _vuf_end(t, v, f_hz):
     """
     A bus's voltage unbalance factor over the run's last cycle (%): its
@@ -1227,6 +1238,8 @@ def _ac_results(sim, ac, net, t_fine, fault):
                 rms_end.append(float(r[-1]))
         buses.append({'name': str(net.bus.at[b, 'name']), 'id': _row_id(net, 'bus', b), 'label': _label(net, 'bus', b),
                       'vn_kv': ac.vn[b] / 1e3, 'vuf_end_percent': _vuf_end(t, sim['v'][:, nodes], ac.f_hz),
+                      # its zero-sequence voltage over the last cycle (a 59N's displacement), per unit of the phase's
+                      'v0_end_pu': _round(_fundamental_end(t, sim['v'][:, nodes].sum(axis=1) / 3.0, ac.f_hz) / v_ph),
                       'v_rms_min_pu': _round(rms_min / v_ph) if np.isfinite(rms_min) else None,
                       't_min_ms': _round(t_min * 1e3) if t_min is not None else None,
                       'v_rms_final_pu': _round(min(rms_end) / v_ph) if rms_end else None,
@@ -1234,17 +1247,19 @@ def _ac_results(sim, ac, net, t_fine, fault):
     branches = []
     for kind, name, cid, label, phases in ac.series:
         out = {'kind': kind, 'name': name, 'id': cid, 'label': label}
-        peak = 0.0
+        peak, end = 0.0, []
         for k, terms in enumerate(phases):
             terms = terms if isinstance(terms, list) else [terms]
             i = np.zeros(len(t))
             for arr, g, col, sign in terms:
                 i = i + sign * (sim[arr][g][:, col] if arr == 'i_cp' else sim[arr][:, g])
+            end.append(_fundamental_end(t, i, ac.f_hz))
             w = _waveform(t, i, None, t_fine)
             out['t_ms'] = w['t_ms']
             out[f'i_{"abc"[k]}_ka'] = w['i_ka']
             peak = max(peak, float(np.max(np.abs(i))))
         out['i_peak_ka'] = _round(peak * 1e-3)
+        out['i_end_ka'] = _round(max(end) * 1e-3) if end else None     # its highest phase's 50 Hz rms, last cycle
         branches.append(out)
     fault_out = None
     if fault:
