@@ -135,6 +135,10 @@ class AcBuilder:
         self.t_trip = None
         # A shunt energised during the run (ac_energise_shunt): {'shunt', 't', 'switches', 'label', 'bus'}.
         self.energise = None
+        # A transformer energised during the run (ac_energise_trafo): its breaker, cores and closing.
+        self.energise_trafo = None
+        # Every transformer's saturable cores (trafo_saturation=all).
+        self.sat_cores = []
 
     # --- buses and the phase shifts ------------------------------------------------
 
@@ -162,9 +166,11 @@ class AcBuilder:
         self._grids()
         self._lines()
         self._trafos()
+        self._cores_controller()
         self._grounding()
         self._loads()
         self._energised_shunt()
+        self._energised_trafo()
         self._generation()
         for table in ('trafo3w', 'impedance', 'ward', 'xward', 'dcline'):
             if table in net and len(net[table]) and net[table]['in_service'].astype(bool).any():
@@ -435,70 +441,147 @@ class AcBuilder:
                                 [('i_rl', n, None, 1.0)]))
 
     def _trafos(self):
-        net, ckt, w = self.net, self.ckt, self.w
+        net = self.net
         for ti in net.trafo.index:
             if 'electrisim_grounding' in net.trafo.columns and net.trafo.at[ti, 'electrisim_grounding'] == True:
                 continue          # built by _grounding
             hv, lv = int(net.trafo.at[ti, 'hv_bus']), int(net.trafo.at[ti, 'lv_bus'])
             if not bool(net.trafo.at[ti, 'in_service']) or hv not in self.nodes or lv not in self.nodes or ('trafo', ti) in self._open_switches:
                 continue
-            label = _label(net, 'trafo', ti)
-            col = lambda c, d: _f(net.trafo.at[ti, c], d) if c in net.trafo.columns else d
-            hv_c, hv_g, lv_c, lv_g, clock, assumed = parse_vector_group(
-                net.trafo.at[ti, 'vector_group'] if 'vector_group' in net.trafo.columns else 'Dyn', col('shift_degree', 0.0))
-            if assumed:
-                self.warnings.append(f"Transformer {label}: its vector group gives no clock number and its load-flow "
-                                     "shift is 0 - taken as clock 11.")
-            s_ph = col('sn_mva', 1.0) * max(col('parallel', 1.0), 1.0) * 1e6 / 3.0
-            v_hv, v_lv = col('vn_hv_kv', 1.0) * 1e3, col('vn_lv_kv', 1.0) * 1e3
-            tap = (col('tap_pos', 0.0) - col('tap_neutral', 0.0)) * col('tap_step_percent', 0.0) / 100.0
-            if str(net.trafo.at[ti, 'tap_side'] if 'tap_side' in net.trafo.columns else 'hv') == 'lv':
-                v_lv *= 1.0 + tap
-            else:
-                v_hv *= 1.0 + tap
-            vw1 = v_hv / math.sqrt(3.0) if hv_c == 'Y' else v_hv
-            vw2 = v_lv / math.sqrt(3.0) if lv_c == 'Y' else v_lv
-            zb1, zb2 = vw1 * vw1 / s_ph, vw2 * vw2 / s_ph
-            vk, vkr = col('vk_percent', 6.0) / 100.0, col('vkr_percent', 0.5) / 100.0
-            xk = math.sqrt(max(vk * vk - vkr * vkr, 1e-12))
-            i0 = col('i0_percent', 0.0)
-            xm = 100.0 / i0 if i0 > 0 else 1000.0
-            n = vw2 / vw1
-            lm1 = xm * zb1 / w
-            r_m = np.diag([vkr / 2 * zb1, vkr / 2 * zb2])
-            l_m = np.array([[lm1 + xk / 2 * zb1 / w, n * lm1], [n * lm1, n * n * lm1 + xk / 2 * zb2 / w]])
-            neutral = {}
-            for side, conn, grounded in (('hv', hv_c, hv_g), ('lv', lv_c, lv_g)):
-                if conn == 'Y':
-                    if grounded:
-                        neutral[side] = 0
-                    else:
-                        neutral[side] = ckt.node(f'{label} {side} star point')
-                        ckt.add_r(neutral[side], 0, R_BIAS)
-            pfe = col('pfe_kw', 0.0) * 1e3 / 3.0
-            groups = []
-            pairs = winding_pairs(hv_c, lv_c, clock)
-            for k, (hp, lp, rev) in enumerate(pairs):
-                node = lambda bus, side, x: neutral[side] if x == 'n' else self.nodes[bus][x]
-                a1, b1 = node(hv, 'hv', hp[0]), node(hv, 'hv', hp[1])
-                a2, b2 = node(lv, 'lv', lp[0]), node(lv, 'lv', lp[1])
-                if rev:
-                    a2, b2 = b2, a2
-                groups.append((ckt.add_coupled([a1, a2], [b1, b2], r_m, l_m), hp, a1, b1))
-                if pfe > 0:
-                    ckt.add_r(a1, b1, vw1 * vw1 / pfe)
-            # Its HV line currents: what leaves each phase into the windings.
-            phases = []
-            for ph in range(3):
-                terms = []
-                for g, hp, _a1, _b1 in groups:
-                    if hp[0] == ph:
-                        terms.append(('i_cp', g, 0, 1.0))
-                    elif hp[1] == ph:
-                        terms.append(('i_cp', g, 0, -1.0))
-                phases.append(terms)
-            self.series.append(('Transformer', label, _row_id(net, 'trafo', ti), f'{label} (HV side)', phases))
-            self.trafos.append({'label': label, 'clock': clock, 'groups': groups})
+            unit = self._trafo(ti, self.nodes[hv], self.nodes[lv])
+            if str(self.params.get('trafo_saturation') or '').strip().lower() == 'all':
+                self.sat_cores.extend(self._saturable_cores(unit, self._remanence()))
+
+    def _remanence(self):
+        """Each core's remanent flux, per unit of its rated peak (trafo_remanence_pu; default 0.8, -0.4, -0.4)."""
+        f_rem = [_f(x, 0.0) for x in str(self.params.get('trafo_remanence_pu') or '0.8,-0.4,-0.4').split(',')][:3]
+        return f_rem + [0.0] * (3 - len(f_rem))
+
+    def _saturable_cores(self, unit, f_rem):
+        """
+        A transformer's cores made saturable: each its flux, from its remanence and its winding's voltage, past
+        its knee (trafo_knee_pu, default 1.2 of the rated peak) bringing in its air-core inductance
+        (trafo_air_core_pu of its rating, default twice its short-circuit reactance) - a branch across its
+        first winding closed while the flux is past the knee and its current flows the same way.
+        """
+        ckt, p, w = self.ckt, self.params, self.w
+        knee = max(_f(p.get('trafo_knee_pu'), 1.2), 1.0)
+        x_air = _f(p.get('trafo_air_core_pu'), 0.0) or 2.0 * unit['xk']
+        psi_n = SQ2 * unit['vw1'] / w                   # the rated peak flux of its first winding
+        l_air = x_air * unit['zb1'] / w
+        cores = []
+        for k, (g, hp, a1, b1) in enumerate(unit['groups']):
+            core = {'label': unit['label'], 'a': a1, 'b': b1, 'psi': f_rem[k] * psi_n, 'psi_n': psi_n, 'knee': knee,
+                    'x_air': x_air, 'psi_max': abs(f_rem[k]) * psi_n, 'branches': [], 'saturated_ms': 0.0}
+            for sign in (1.0, -1.0):
+                mid = ckt.node(f'{unit["label"]} core {k} {"+" if sign > 0 else "-"}')
+                rl = ckt.add_rl(a1, mid, 1e-3 * unit['zb1'], l_air)
+                sw = ckt.add_switch(mid, b1, closed=False)
+                core['branches'].append({'sign': sign, 'rl': rl, 'sw': sw, 'on': False})
+            cores.append(core)
+        return cores
+
+    @staticmethod
+    def step_cores(cores, state, dt):
+        """Each core's flux moved on by its winding's voltage over dt, its saturation branches in or out.
+        Returns (changed, any saturated)."""
+        changed = any_on = False
+        for c in cores:
+            v = float(state.v[c['a']] - (state.v[c['b']] if c['b'] else 0.0))
+            c['psi'] += 0.5 * (c.get('v_prev', v) + v) * dt
+            c['v_prev'] = v
+            c['psi_max'] = max(c['psi_max'], abs(c['psi']))
+            on = False
+            for br in c['branches']:
+                past = br['sign'] * c['psi'] > c['knee'] * c['psi_n']
+                i = float(state.i_rl[br['rl']]) * br['sign']
+                if not br['on'] and past:
+                    state.set_switch(br['sw'], True)
+                    br['on'], changed = True, True
+                elif br['on'] and i <= 0.0 and not past:
+                    state.set_switch(br['sw'], False)
+                    br['on'], changed = False, True
+                on = on or br['on']
+            if on:
+                c['saturated_ms'] += dt * 1e3
+                c['last_saturated_t'] = state.t if hasattr(state, 't') else None
+            any_on = any_on or on
+        return changed, any_on
+
+    def _cores_controller(self):
+        """Every saturable core's flux, from the run's start (trafo_saturation=all)."""
+        if not self.sat_cores:
+            return
+        last = {'t': None}
+
+        def control(t, state):
+            dt = 0.0 if last['t'] is None else t - last['t']
+            last['t'] = t
+            return self.step_cores(self.sat_cores, state, dt)[0]
+        self.ckt.add_controller(control)
+
+    def _trafo(self, ti, hv_nodes, lv_nodes):
+        """One two-winding transformer between hv_nodes and lv_nodes (each three nodes); its coupled units."""
+        net, ckt, w = self.net, self.ckt, self.w
+        label = _label(net, 'trafo', ti)
+        col = lambda c, d: _f(net.trafo.at[ti, c], d) if c in net.trafo.columns else d
+        hv_c, hv_g, lv_c, lv_g, clock, assumed = parse_vector_group(
+            net.trafo.at[ti, 'vector_group'] if 'vector_group' in net.trafo.columns else 'Dyn', col('shift_degree', 0.0))
+        if assumed:
+            self.warnings.append(f"Transformer {label}: its vector group gives no clock number and its load-flow "
+                                 "shift is 0 - taken as clock 11.")
+        s_ph = col('sn_mva', 1.0) * max(col('parallel', 1.0), 1.0) * 1e6 / 3.0
+        v_hv, v_lv = col('vn_hv_kv', 1.0) * 1e3, col('vn_lv_kv', 1.0) * 1e3
+        tap = (col('tap_pos', 0.0) - col('tap_neutral', 0.0)) * col('tap_step_percent', 0.0) / 100.0
+        if str(net.trafo.at[ti, 'tap_side'] if 'tap_side' in net.trafo.columns else 'hv') == 'lv':
+            v_lv *= 1.0 + tap
+        else:
+            v_hv *= 1.0 + tap
+        vw1 = v_hv / math.sqrt(3.0) if hv_c == 'Y' else v_hv
+        vw2 = v_lv / math.sqrt(3.0) if lv_c == 'Y' else v_lv
+        zb1, zb2 = vw1 * vw1 / s_ph, vw2 * vw2 / s_ph
+        vk, vkr = col('vk_percent', 6.0) / 100.0, col('vkr_percent', 0.5) / 100.0
+        xk = math.sqrt(max(vk * vk - vkr * vkr, 1e-12))
+        i0 = col('i0_percent', 0.0)
+        xm = 100.0 / i0 if i0 > 0 else 1000.0
+        n = vw2 / vw1
+        lm1 = xm * zb1 / w
+        r_m = np.diag([vkr / 2 * zb1, vkr / 2 * zb2])
+        l_m = np.array([[lm1 + xk / 2 * zb1 / w, n * lm1], [n * lm1, n * n * lm1 + xk / 2 * zb2 / w]])
+        neutral = {}
+        for side, conn, grounded in (('hv', hv_c, hv_g), ('lv', lv_c, lv_g)):
+            if conn == 'Y':
+                if grounded:
+                    neutral[side] = 0
+                else:
+                    neutral[side] = ckt.node(f'{label} {side} star point')
+                    ckt.add_r(neutral[side], 0, R_BIAS)
+        pfe = col('pfe_kw', 0.0) * 1e3 / 3.0
+        groups = []
+        pairs = winding_pairs(hv_c, lv_c, clock)
+        ends = {'hv': hv_nodes, 'lv': lv_nodes}
+        for k, (hp, lp, rev) in enumerate(pairs):
+            node = lambda side, x: neutral[side] if x == 'n' else ends[side][x]
+            a1, b1 = node('hv', hp[0]), node('hv', hp[1])
+            a2, b2 = node('lv', lp[0]), node('lv', lp[1])
+            if rev:
+                a2, b2 = b2, a2
+            groups.append((ckt.add_coupled([a1, a2], [b1, b2], r_m, l_m), hp, a1, b1))
+            if pfe > 0:
+                ckt.add_r(a1, b1, vw1 * vw1 / pfe)
+        # Its HV line currents: what leaves each phase into the windings.
+        phases = []
+        for ph in range(3):
+            terms = []
+            for g, hp, _a1, _b1 in groups:
+                if hp[0] == ph:
+                    terms.append(('i_cp', g, 0, 1.0))
+                elif hp[1] == ph:
+                    terms.append(('i_cp', g, 0, -1.0))
+            phases.append(terms)
+        self.series.append(('Transformer', label, _row_id(net, 'trafo', ti), f'{label} (HV side)', phases))
+        self.trafos.append({'label': label, 'clock': clock, 'groups': groups})
+        return {'label': label, 'groups': groups, 'vw1': vw1, 'zb1': zb1, 'xk': xk, 's_ph': s_ph}
 
     def _impedance_load(self, b, p_mw, q_mvar, label, profile=None):
         """
@@ -746,6 +829,89 @@ class AcBuilder:
             return True
         ckt.add_controller(close)
         self.series.append(('Shunt', str(net.shunt.at[i, 'name']), _row_id(net, 'shunt', i), f'{label} (energised)',
+                            [('i_sw', k, None, 1.0) for k in switches]))
+
+    def _energised_trafo(self):
+        """
+        The transformer ac_energise_trafo names, out of the load flow the run starts from, behind its HV
+        breaker's three poles, its LV winding open (its LV breaker open): closed at ac_energise_time_ms - or,
+        given ac_energise_angle_deg, that many degrees after the next upward zero of its first winding's
+        voltage (0: the worst point for a positive remanence); each pole ac_energise_pole_delays_ms after
+        that (default 0, 0, 0: together). Its cores saturable (_saturable_cores) - all ASSUMED unless the
+        transformer's saturation curve is given.
+        """
+        net, ckt, p, w = self.net, self.ckt, self.params, self.w
+        ti = net.get('_electrisim_energise_trafo') if hasattr(net, 'get') else None
+        if ti is None or ti not in net.trafo.index:
+            return
+        hv = int(net.trafo.at[ti, 'hv_bus'])
+        if hv not in self.nodes:
+            self.warnings.append(f"Transformer {_label(net, 'trafo', ti)}: its HV bus is not energised in the "
+                                 "load flow; it is not energised.")
+            return
+        label = _label(net, 'trafo', ti)
+        ends = [ckt.node(f'{label} breaker {"abc"[k]}') for k in range(3)]
+        lv = [ckt.node(f'{label} LV {"abc"[k]}') for k in range(3)]
+        for x in ends + lv:
+            ckt.add_r(x, 0, R_BIAS)
+        switches = [ckt.add_switch(self.nodes[hv][k], ends[k], closed=False) for k in range(3)]
+        unit = self._trafo(ti, ends, lv)
+        f_rem = self._remanence()
+        cores = self._saturable_cores(unit, f_rem)
+        psi_n, knee, x_air = cores[0]['psi_n'], cores[0]['knee'], cores[0]['x_air']
+        delays = [_f(x, 0.0) * 1e-3 for x in str(p.get('ac_energise_pole_delays_ms') or '0,0,0').split(',')][:3]
+        delays += [0.0] * (3 - len(delays))
+        t_on = _f(p.get('ac_energise_time_ms'), 20.0) * 1e-3
+        angle = p.get('ac_energise_angle_deg')
+        angle = None if angle in (None, '', 'none') else _f(angle, 0.0) % 360.0
+        en = {'trafo': ti, 'bus': hv, 't': t_on, 'switches': switches, 'label': label, 'closed_ms': None,
+              'pole_closed_ms': [None, None, None], 't_fire': None,
+              'cores': cores, 'psi_n': psi_n, 'knee': knee, 'x_air': x_air, 'angle': angle, 'rem': f_rem,
+              'rated_a': unit['s_ph'] * 3.0 / (math.sqrt(3.0) * self.vn[hv]), 'saturated_ms': 0.0}
+        self.energise_trafo = en
+        nodes, last = self.nodes[hv], {'t': None, 'x': None, 'zero': None}
+
+        def control(t, state):
+            changed = False
+            dt = 0.0 if last['t'] is None else t - last['t']
+            last['t'] = t
+            if en['t_fire'] is not None and None in en['pole_closed_ms']:
+                # Its later poles, each at its delay.
+                for k, sw in enumerate(switches):
+                    if en['pole_closed_ms'][k] is None and t >= en['t_fire'] + delays[k] - 1e-12:
+                        state.set_switch(sw, True)
+                        en['pole_closed_ms'][k] = t * 1e3
+                        changed = True
+            if en['closed_ms'] is None:
+                # Its first winding's voltage, as it would be closed: the bus side of its poles.
+                hp = unit['groups'][0][1]
+                x = float(state.v[nodes[hp[0]]] - (state.v[nodes[hp[1]]] if hp[1] != 'n' else 0.0))
+                fire = False
+                if t >= t_on - 1e-12:
+                    if angle is None:
+                        fire = True
+                    else:
+                        if last['zero'] is None and last['x'] is not None and last['x'] < 0.0 <= x:
+                            last['zero'] = t
+                        fire = last['zero'] is not None and t >= last['zero'] + angle / 360.0 / self.f_hz - 1e-12
+                last['x'] = x
+                if fire:
+                    en['t_fire'] = t
+                    for k, sw in enumerate(switches):
+                        if delays[k] <= 1e-12:
+                            state.set_switch(sw, True)
+                            en['pole_closed_ms'][k] = t * 1e3
+                    en['closed_ms'] = t * 1e3
+                    changed = True
+                return changed
+            # Each core's flux, and its saturation branches in or out.
+            moved, any_on = self.step_cores(cores, state, dt)
+            changed = changed or moved
+            if any_on:
+                en['saturated_ms'] += dt * 1e3
+            return changed
+        ckt.add_controller(control)
+        self.series.append(('Transformer', str(net.trafo.at[ti, 'name']), _row_id(net, 'trafo', ti), f'{label} (energised)',
                             [('i_sw', k, None, 1.0) for k in switches]))
 
     def _asymmetric_load(self, i, b):

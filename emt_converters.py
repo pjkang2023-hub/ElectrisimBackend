@@ -681,6 +681,8 @@ class GridFormingVsc(Vsc):
         self.tau_f = tau_f
         self.w_gf = self.w0
         self.freq_trace = []                 # (t, f)
+        self.v_ramp = None                   # (s, target pu): its voltage ramped from the load flow's to the target
+        self.ramp_track = (1.0, None)        # its terminal's lowest share of the ramp's line, and when
 
     def control(self, t, state):
         if self.blocked_at is not None:
@@ -722,7 +724,14 @@ class GridFormingVsc(Vsc):
         self.q_f += (q_now - self.q_f) * a
         self.w_gf = self.w0 - self.m_p * (self.p_f - self.p_set)
         theta = self.th_e + self.w_gf * dt
-        e_mag = self.e0 - self.n_q * (self.q_f - self.q_set)
+        e0 = self.e0
+        if self.v_ramp is not None:
+            # A black start's ramp: its internal voltage scaled from where the load flow left it (its terminal
+            # at v0) to where it puts its terminal at the target, linearly over the ramp's time.
+            t_r, to = self.v_ramp
+            v0 = abs(self.v_ph0) / self.v_nom_peak
+            e0 *= 1.0 + (to / max(v0, 1e-3) - 1.0) * min(t_s / t_r, 1.0)
+        e_mag = e0 - self.n_q * (self.q_f - self.q_set)
         e_d, e_q = e_mag, 0.0
         # Its current limit: the voltage across its reactor scaled back to what drives its limit through it -
         # the current its reference would drive, |e - v| / |r + j w l|, not the one it measured (which the last
@@ -730,6 +739,14 @@ class GridFormingVsc(Vsc):
         i_d, i_q = park(i, theta)
         i_mag = math.hypot(i_d, i_q)
         v_d, v_q = park(v, theta)
+        if self.v_ramp is not None and t_s > 0.1 * self.v_ramp[0]:
+            # Its terminal against the ramp's own line: how far below it saturating cores pull it, and when.
+            t_r, to = self.v_ramp
+            v0 = abs(self.v_ph0) / self.v_nom_peak
+            line = v0 + (to - v0) * min(t_s / t_r, 1.0)
+            ratio = math.hypot(v_d, v_q) / self.v_nom_peak / line
+            if ratio < self.ramp_track[0]:
+                self.ramp_track = (ratio, t_s)
         # Its negative sequence first: what it carries there comes off its positive-sequence limit.
         i_lim = self.i_max
         if self.unbalance_control:

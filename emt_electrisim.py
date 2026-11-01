@@ -418,6 +418,10 @@ class _EmtBuilder:
                                       unbalance_control=rec.get('unbalance_control', False),
                                       i2_limit_pu=rec.get('i2_limit_pu', 0.3), **kw)
                 conv.control_mode = 'grid_forming'
+                if _f(self.params.get('gfm_voltage_ramp_s'), 0.0) > 0:
+                    # Its voltage ramped from the load flow's (a black start's: set low) to the target.
+                    conv.v_ramp = (_f(self.params.get('gfm_voltage_ramp_s')),
+                                   _f(self.params.get('gfm_voltage_ramp_to_pu'), 1.0))
             else:
                 pv = obj is not None and obj.kind == 'PV Array'
                 conv = Vsc(self, rec['label'], rec['bus'], key, term, 1e-4, block,
@@ -870,6 +874,18 @@ def emt_study(net, params, in_data=None):
         else:
             net.shunt.at[hit[0], 'in_service'] = False
             net['_electrisim_energise_shunt'] = hit[0]
+    # A transformer energised during the run: out of the load flow it starts from too.
+    energise_tx = str(params.get('ac_energise_trafo') or 'none').strip()
+    if energise_tx not in ('none', ''):
+        hit = [i for i in net.trafo.index
+               if energise_tx in (str(net.trafo.at[i, 'name']), str(_row_id(net, 'trafo', i)))] if len(net.trafo) else []
+        if not hit:
+            warnings_out.append(f'No transformer {energise_tx} to energise: the study runs without it.')
+        elif not bool(net.trafo.at[hit[0], 'in_service']):
+            warnings_out.append(f'Transformer {energise_tx} is out of service: the study runs without energising it.')
+        else:
+            net.trafo.at[hit[0], 'in_service'] = False
+            net['_electrisim_energise_trafo'] = hit[0]
     try:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
@@ -977,6 +993,8 @@ def emt_study(net, params, in_data=None):
         event_times.append(b.ac.t_trip)
     if b.ac.energise is not None:
         event_times.append(b.ac.energise['t'])
+    if b.ac.energise_trafo is not None:
+        event_times.append(b.ac.energise_trafo['t'])
 
     # The grid's voltage following a profile (IEEE 2800's ride-through envelope, or a table): its
     # source's electromotive force stepped, a share of its own, behind its short-circuit impedance.
@@ -1089,6 +1107,20 @@ def emt_study(net, params, in_data=None):
     result['ders'] = [_der_result(rec, m) for rec, m in b.ders]
     if b.ac.energise is not None:
         result['energise'] = _energise_result(sim, b.ac, net)
+    if b.ac.energise_trafo is not None:
+        result['energise_trafo'] = _energise_trafo_result(sim, b.ac)
+    if b.ac.sat_cores:
+        # Every transformer's cores (trafo_saturation=all): the highest flux each reached, how long it saturated,
+        # and when it last was.
+        by_tx = {}
+        for c in b.ac.sat_cores:
+            by_tx.setdefault(c['label'], []).append(c)
+        result['transformer_cores'] = [{'transformer': lb, 'psi_max_pu': [_round(c['psi_max'] / c['psi_n']) for c in cs],
+                                        'saturated_ms': _round(max(c['saturated_ms'] for c in cs)),
+                                        # the last instant any of its cores was past its knee: when it had re-centred
+                                        'last_saturated_ms': _round(max(c.get('last_saturated_t') or 0.0 for c in cs) * 1e3)
+                                        if any(c.get('last_saturated_t') is not None for c in cs) else None}
+                                       for lb, cs in by_tx.items()]
     if b.ac.island is not None:
         result['island'] = {'t_ms': _round(b.ac.island['t'] * 1e3),
                             'opened_ms': [_round(x * 1e3) if x is not None else None for x in b.ac.island['opened']]}
@@ -1241,6 +1273,68 @@ def _ac_results(sim, ac, net, t_fine, fault):
     return {'buses': buses, 'branches': branches, 'fault': fault_out}
 
 
+def _energise_trafo_result(sim, ac, cycles=6):
+    """
+    A transformer energised during the run: when its breaker closed; its inrush on each HV phase - its peak
+    (kA, and as a multiple of its rated current's peak), and cycle by cycle from the closing its fundamental
+    and its second harmonic's share of it (what an 87T's restraint sees: the lowest share over the cycles
+    whose fundamental is above 10 % of rated, phase by phase, and the highest of the phases' in each cycle -
+    cross-blocking); each core's highest flux (per unit of its rated peak) and how long any core was
+    saturated; and its bus's lowest rms voltage over a cycle after the closing.
+    """
+    en = ac.energise_trafo
+    out = {'transformer': en['label'], 'bus': _label(ac.net, 'bus', en['bus']), 'closed_ms': _round(en['closed_ms']),
+           'pole_closed_ms': [_round(x) for x in en['pole_closed_ms']],
+           'rated_a': _round(en['rated_a']), 'remanence_pu': en['rem'], 'knee_pu': en['knee'],
+           'air_core_pu': _round(en['x_air']), 'saturated_ms': _round(en['saturated_ms']),
+           'psi_max_pu': [_round(c['psi_max'] / en['psi_n']) for c in en['cores']]}
+    if en['closed_ms'] is None:
+        out['phases'] = []
+        return out
+    t = sim['t']
+    period = 1.0 / ac.f_hz
+    tc = en['closed_ms'] * 1e-3
+    n = 200                                          # samples a cycle, resampled uniformly
+    rated_pk = en['rated_a'] * SQ2
+    phases, ratio_cycles = [], []
+    for k, sw in zip('abc', en['switches']):
+        i = sim['i_sw'][:, sw]
+        after = t >= tc
+        peak = float(np.max(np.abs(i[after]))) if after.any() else 0.0
+        h1s, ratios = [], []
+        for c in range(cycles):
+            t0 = tc + c * period
+            if t0 + period > t[-1]:
+                break
+            ts = t0 + np.arange(n) * period / n
+            y = np.interp(ts, t, i)
+            spec = np.fft.rfft(y) / n * 2.0
+            h1, h2 = abs(spec[1]), abs(spec[2])
+            h1s.append(h1)
+            ratios.append(h2 / h1 if h1 > 1e-9 else None)
+        ratio_cycles.append(ratios)
+        big = [r for r, h in zip(ratios, h1s) if r is not None and h > 0.1 * rated_pk]
+        phases.append({'phase': k, 'i_peak_ka': _round(peak * 1e-3), 'i_peak_x_rated': _round(peak / rated_pk),
+                       'i1_ka': [_round(h * 1e-3) for h in h1s],
+                       'h2_ratio': [_round(r) if r is not None else None for r in ratios],
+                       'h2_ratio_min': _round(min(big)) if big else None})
+    out['phases'] = phases
+    cross = [max(r[c] for r in ratio_cycles if c < len(r) and r[c] is not None)
+             for c in range(min(len(r) for r in ratio_cycles))] if ratio_cycles and all(ratio_cycles) else []
+    out['h2_ratio_cross_min'] = _round(min(cross)) if cross else None
+    # Its bus's voltage after the closing: the lowest rms over a cycle, per unit of nominal.
+    b = en['bus']
+    v_ph = ac.vn[b] / math.sqrt(3.0)
+    rms_min = np.inf
+    for k in range(3):
+        r = _rms(t, sim['v'][:, ac.nodes[b][k]], period)
+        sel = (t >= tc + period) & np.isfinite(r)
+        if sel.any():
+            rms_min = min(rms_min, float(np.min(r[sel])))
+    out['bus_v_rms_min_pu'] = _round(rms_min / v_ph) if np.isfinite(rms_min) else None
+    return out
+
+
 def _energise_result(sim, ac, net):
     """
     A shunt energised during the run: its inrush, phase by phase (its peak,
@@ -1311,6 +1405,10 @@ def _converter_result(conv, t_event):
         # A rectifier easing off as its island's frequency fell or its voltage dipped: how long, how far.
         out.update(eased_ms=_round(conv.eased_time * 1e3), ease_min_pu=_round(conv.ease_min),
                    pll_f_min_hz=_round(conv.f_min) if conv.ease is not None else None)
+    if getattr(conv, 'v_ramp', None) is not None:
+        # Ramping (a black start): its terminal's lowest share of the ramp's line, and when.
+        out.update(ramp_track_min_pu=_round(conv.ramp_track[0]),
+                   ramp_track_min_ms=_round(conv.ramp_track[1] * 1e3) if conv.ramp_track[1] is not None else None)
     if getattr(conv, 'lfsm', None) is not None:
         # Curtailing on over-frequency (LFSM-O): how long, how far, its PLL's filtered frequency's range.
         out.update(lfsm_ms=_round(conv.eased_time * 1e3), lfsm_min_pu=_round(conv.ease_min),

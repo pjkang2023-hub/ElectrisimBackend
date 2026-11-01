@@ -4202,7 +4202,9 @@ def _electrisim_settle_pcs(net):
             g = v_set - (rec['vm_set_pu'] - rec['droop_qv'] * q / rec['s_rated'])
             worst = max(worst, abs(g))
             if abs(g) > 1e-9:
-                net.gen.at[rec['index'], 'vm_pu'] = _electrisim_secant(rec, 'qv_hist', v_set, g, 0.8, 1.2)
+                # Within 0.8-1.2 of its set point (a black start's ramp sets it low, at 0.05 pu).
+                lo, hi = min(0.8, 0.8 * rec['vm_set_pu']), max(1.2, 1.2 * rec['vm_set_pu'])
+                net.gen.at[rec['index'], 'vm_pu'] = _electrisim_secant(rec, 'qv_hist', v_set, g, lo, hi)
         elif rec['table'] == 'sgen' and rec['q_mode'] == 'qv' and rec['index'] in net.res_sgen.index:
             # Grid-following Q(V): Q = -(V - V_set) / droop x S_rated, within its capability.
             v = float(net.res_bus.at[rec['bus'], 'vm_pu'])
