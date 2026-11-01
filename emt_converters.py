@@ -519,10 +519,15 @@ class Vsc:
         else:
             err = 0.0
             p_in = self.p_ref
-            if self.lfsm is not None and (math.hypot(v_d, v_q) < 0.85 * self.v_nom_peak
-                                          or t_s < getattr(self, 'lfsm_hold_until', 0.0)):
-                # Riding through a dip, or its PLL settling after a resume, its frequency measurement means nothing:
-                # LFSM-O suspended, its filter held.
+            in_dip = self.lfsm is not None and math.hypot(v_d, v_q) < 0.85 * self.v_nom_peak
+            if self.lfsm is not None and not in_dip and getattr(self, 'lfsm_in_dip', False):
+                # Out of a dip: its PLL settles from the voltage's return as from a resume.
+                self.lfsm_hold_until = t_s + getattr(self, 'lfsm_hold_s', 0.0)
+            if self.lfsm is not None:
+                self.lfsm_in_dip = in_dip
+            if self.lfsm is not None and (in_dip or t_s < getattr(self, 'lfsm_hold_until', 0.0)):
+                # Riding through a dip, or its PLL settling after the dip or a resume, its frequency measurement
+                # means nothing: LFSM-O suspended, its filter held.
                 self.lfsm_k = 1.0
             elif self.lfsm is not None:
                 droop, f_start, tau = self.lfsm

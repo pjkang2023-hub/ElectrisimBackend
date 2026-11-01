@@ -2541,6 +2541,8 @@ class _RectifierEasing:
             # No lower than its floor, nor than what its bus's stores cannot take of its load now.
             p_now = float(ss.PQ.Ppf.v[u["k"]]) / max(u["factor"], 1e-9) * self.sn
             target = max(target, u["lowest"], 1.0 - u["spare_mw"] / p_now if p_now > 1e-9 else 1.0)
+            # Never quite to zero: its load's parameters are scaled, and from zero it could not walk back in.
+            target = max(target, 1e-6)
             if abs(target - u["factor"]) > 1e-6:
                 scale = target / u["factor"]
                 k = u["k"]
@@ -2561,7 +2563,8 @@ class _RectifierEasing:
         for u in self.units:
             if u["eased_from"] is not None and u["kind"] == "UPS load":
                 warnings.append(
-                    f"Load '{u['label']}' went onto its UPS at t = {u['eased_from']:.3f} s, down to {u['min_factor']:.3g} "
+                    f"Load '{u['label']}' went onto its UPS at t = {u['eased_from']:.3f} s, down to "
+                    f"{(u['min_factor'] if u['min_factor'] > 1e-3 else 0):.3g} "
                     f"of its {u['p0'] * sn:.3g} MW, and walked back in over {u['restore_s']:g} s once its voltage recovered.")
             elif u["eased_from"] is not None:
                 warnings.append(
