@@ -120,6 +120,9 @@ class AcBuilder:
         self.skip = set()        # (table, index): elements a converter's EMT model stands for
         self.profiles = {}       # load index -> its profile's plan (emt_electrisim._plan_profiles)
         self.profiled = []       # loads following a profile: their nodes, correction sources and plan
+        self.load_rows = {}      # load name / label -> its diagram row (its UPS and constant-power fields)
+        self.event_loads = set() # loads a run's event switches or scales
+        self.dyn_loads = []      # those changing through the run: behind a UPS, at constant power, or by events
         self.gen_rows = {}       # generator name -> its diagram row (its rotor, governor and exciter data)
         self.machines = []       # emt_machine.SynchronousMachine, one per generator modelled as a machine
         t_island = _f(params.get('island_time_ms'), -1.0) if str(params.get('island_time_ms') or '').strip() else -1.0
@@ -518,20 +521,69 @@ class AcBuilder:
                 parts['i_rl'].append(ckt.add_rl(node, star, 0.0, v_ll * v_ll / (q_mvar * 1e6) / w))
             elif q_mvar < -1e-12:
                 parts['i_c'].append(ckt.add_c(node, star, -q_mvar * 1e6 / (w * v_ll * v_ll)))
-        if profile is not None:
+        row = self.load_rows.get(str(label)) or self.load_rows.get(str(label).split(' (')[0]) or {}
+        uv = _f(row.get('uv_ease_pu'), 0.0)
+        cp = str(row.get('emt_load_model') or '').strip().lower() == 'power'
+        named = {str(label), str(label).split(' (')[0], str(row.get('name') or '')} & self.event_loads
+        if profile is not None or uv > 0 or cp or named:
             parts['i_src'] = [ckt.add_isrc(self.nodes[b][k], star) for k in range(3)]
-            self.profiled.append({'nodes': self.nodes[b], 'star': star, 'v2': v_ll * v_ll,
-                                  'p0': p_mw * 1e6, 'q0': q_mvar * 1e6, 'plan': profile,
-                                  'ks': parts['i_src'], 'parts': parts})
-            profile['measure'] = ('ac', self.nodes[b], star, parts)
+            ld = {'nodes': self.nodes[b], 'star': star, 'v2': v_ll * v_ll, 'label': str(label),
+                  'names': {str(label), str(label).split(' (')[0], str(row.get('name') or '')} - {''},
+                  'p0': p_mw * 1e6, 'q0': q_mvar * 1e6, 'plan': profile, 'ks': parts['i_src'], 'parts': parts,
+                  'v_nom': self.vn[b], 'scale': 1.0}
+            self.profiled.append(ld)
+            if profile is not None:
+                profile['measure'] = ('ac', self.nodes[b], star, parts)
+            if uv > 0 or cp or named:
+                ld.update(event=1.0, ups=1.0, v_f=v_ll / self.vn[b], t_last=0.0, cp=cp, ups_at=None, min_ups=1.0,
+                          uv=(uv, min(max(_f(row.get('uv_floor_pu'), 0.0), 0.0), 1.0),
+                              max(_f(row.get('uv_restore_s'), 10.0), 1e-3)) if uv > 0 else None)
+                self.dyn_loads.append(ld)
+
+    def dyn_load(self, name):
+        return next((ld for ld in self.dyn_loads if name in ld['names']), None)
+
+    def load_control(self, t, state):
+        """
+        Each changing load's share of its load-flow power for the next step: its event's (tripped 0, scaled),
+        behind a UPS - below uv_ease_pu its UPS takes it onto its battery down to uv_floor_pu, and walks it back
+        in over uv_restore_s once its voltage is back above it - and at constant power its conductance by
+        1 / V^2 (constant current below 0.8 pu, as a DC load's). Its voltage: the phases' magnitude, through 10 ms.
+        """
+        for ld in self.dyn_loads:
+            dt = t - ld['t_last']
+            ld['t_last'] = t
+            phase = state.v[ld['nodes']] - state.v[ld['star']]
+            # sum of the phases' squares = 1.5 V_peak^2 (balanced)
+            v_pu = math.sqrt(max(float(np.dot(phase, phase)), 0.0) / 1.5) / SQ2 / (ld['v_nom'] / math.sqrt(3.0))
+            if dt > 0:
+                ld['v_f'] += (v_pu - ld['v_f']) * min(dt / 0.01, 1.0)
+            v = max(ld['v_f'], 0.05)
+            if ld['uv'] is not None and dt > 0:
+                v_th, floor, restore = ld['uv']
+                if v < v_th:
+                    ld['ups'] = floor
+                    ld['ups_at'] = t if ld['ups_at'] is None else ld['ups_at']
+                else:
+                    ld['ups'] = min(1.0, ld['ups'] + (1.0 - floor) * dt / restore)
+                ld['min_ups'] = min(ld['min_ups'], ld['ups'])
+            k_v = (1.0 / (v * v) if v >= 0.8 else 1.0 / (0.8 * v)) if ld['cp'] else 1.0
+            # its load flow's voltage is where 1 / V^2 starts from
+            k_v *= ld['v2'] / ld['v_nom'] ** 2 if ld['cp'] else 1.0
+            ld['scale'] = ld['event'] * ld['ups'] * k_v
 
     def follow_profiles(self, t, state):
         """Each profiled load's change in conductance and susceptance, as the currents its sources draw."""
         for ld in self.profiled:
             plan = ld['plan']
-            f = plan['follower'](t)
-            p = plan['p_set'] * f * 1e6
-            q = (plan['q_set'] * f if plan['q_mode'] == 'pf' else plan['q_set']) * 1e6
+            if plan is None:
+                p, q = ld['p0'], ld['q0']
+            else:
+                f = plan['follower'](t)
+                p = plan['p_set'] * f * 1e6
+                q = (plan['q_set'] * f if plan['q_mode'] == 'pf' else plan['q_set']) * 1e6
+            s = ld.get('scale', 1.0)
+            p, q = p * s, q * s
             dg, db = (p - ld['p0']) / ld['v2'], (q - ld['q0']) / ld['v2']
             v = state.v[ld['nodes']]
             phase = v - state.v[ld['star']]

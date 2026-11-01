@@ -100,6 +100,15 @@ class _EmtBuilder:
         ac.gen_rows = {str(r.get('name')): r for r in (self.in_data or {}).values()
                        if isinstance(r, dict) and str(r.get('typ', '')).startswith('Generator')}
         ac.profiles = {i: plan for (table, i), plan in self.profiles.items() if table == 'load'}
+        # Loads that change through the run: behind a UPS, at constant power, or switched by an event.
+        self.timed = _timed_events(self.params, self.warnings)
+        ac.load_rows = {}
+        for r in (self.in_data or {}).values():
+            if isinstance(r, dict) and str(r.get('typ', '')).startswith('Load') and not str(r.get('typ', '')).startswith('Load DC'):
+                for key in (r.get('name'), r.get('userFriendlyName')):
+                    if key:
+                        ac.load_rows[str(key)] = r
+        ac.event_loads = {ev['element'] for ev in self.timed}
         self.ac = ac.build()
         self._cables()
         self._capacitors()
@@ -416,6 +425,11 @@ class _EmtBuilder:
                 if pv:
                     conv.v_dc_ref_fn = emt_der.VscMppt(model, v_dc)
                     conv.mppt = conv.v_dc_ref_fn
+                elif _f(self.params.get('gfl_lfsm_droop_pct'), 0.0) > 0:
+                    # Over-frequency curtailment (LFSM-O, EN 50549): its power cut along its droop above the start.
+                    conv.lfsm = (_f(self.params.get('gfl_lfsm_droop_pct')) / 100.0,
+                                 _f(self.params.get('gfl_lfsm_f_start_hz'), 50.2), max(_f(self.params.get('gfl_lfsm_tau_s'), 0.05), 1e-4))
+                    conv.lfsm_hold_s = _f(self.params.get('gfl_lfsm_resume_hold_s'), 0.0)
                 conv.control_mode = 'grid_following'
             conv.pcs = True
             self._add_vsc(conv, rec['id'])
@@ -660,11 +674,37 @@ class _EmtBuilder:
 
     # --- events and protection ----------------------------------------------------
 
+    def _apply_events(self, t, state):
+        """The run's timed events due by t: a converter blocked ("trip") or resumed ("close"); a load tripped,
+        put back, or scaled to "value" of its load-flow power ("scale")."""
+        changed = False
+        for ev in self.timed:
+            if ev['done'] or t < ev['t'] - 1e-12:
+                continue
+            ev['done'] = True
+            name = ev['element']
+            conv = next((c for c in self.vscs if c.label == name or str(c.label).split(' ')[0] == name), None)
+            if conv is not None:
+                if ev['action'] == 'trip' and conv.blocked_at is None:
+                    conv._block(t, state)
+                    changed = True
+                elif ev['action'] == 'close':
+                    changed = conv.resume(t, state, float(ev.get('ramp_s') or 0.0)) or changed
+                continue
+            ld = self.ac.dyn_load(name)
+            if ld is not None:
+                ld['event'] = {'trip': 0.0, 'close': 1.0}.get(ev['action'], ev.get('value', 1.0))
+                continue
+            self.warnings.append(f"Event at {ev['t']:g} s: no converter or load '{name}'; not applied.")
+        return changed
+
     def controller(self, t, state):
+        changed = bool(self.timed) and self._apply_events(t, state)
+        if self.ac.dyn_loads:
+            self.ac.load_control(t, state)
         # AC loads following a profile: their impedance's change for the next step.
         if self.ac.profiled:
             self.ac.follow_profiles(t, state)
-        changed = False
         if self.ac.island is not None and self.ac.island_control(t, state):
             changed = True
         if self.ac.line_trips and self.ac.line_trip_control(t, state):
@@ -695,6 +735,28 @@ class _EmtBuilder:
                 state.set_switch(brk['sw'], False)
                 changed = True
         return changed
+
+
+def _timed_events(params, warnings_out):
+    """params["events"]: a list (or its JSON) of {"t": s, "action": "trip" | "close" | "scale", "element": name,
+    "value": share, "ramp_s": s} - converters blocked and resumed (a resuming converter's power back over
+    ramp_s), loads switched or scaled, at their times."""
+    raw = params.get('events') or []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw) if raw.strip() else []
+        except ValueError:
+            warnings_out.append('Events: not a JSON list; none applied.')
+            return []
+    out = []
+    for ev in raw:
+        action = str(ev.get('action') or 'trip').lower()
+        if action not in ('trip', 'close', 'scale'):
+            warnings_out.append(f"Event on '{ev.get('element')}': action '{action}' is not trip, close or scale; not applied.")
+            continue
+        out.append({'t': _f(ev.get('t'), 0.0), 'action': action, 'element': str(ev.get('element') or ''),
+                    'value': _f(ev.get('value'), 1.0), 'ramp_s': _f(ev.get('ramp_s'), 0.0), 'done': False})
+    return sorted(out, key=lambda e: e['t'])
 
 
 def _oscillation_verdict(t, v, t_from, vn, min_span=1e-3):
@@ -967,6 +1029,12 @@ def emt_study(net, params, in_data=None):
               'converters_blocked': [{'label': blk['label'], 't_ms': _round(blk['t'] * 1e3)} for blk in b.blockers if blk['t'] is not None]
               + [{'label': c.label, 't_ms': _round(c.blocked_at * 1e3)} for c in b.vscs + b.dcdcs if c.blocked_at is not None],
               'profiled_loads': [_profile_result(plan, sim, net, key, b.ac.w) for key, plan in profiles.items()],
+              'events': [{k: ev[k] for k in ('t', 'action', 'element', 'value', 'done')} for ev in b.timed],
+              'changing_loads': [{'label': ld['label'], 'ups_from_ms': _round(ld['ups_at'] * 1e3) if ld['ups_at'] is not None else None,
+                                  'ups_min': _round(ld['min_ups']), 'ups_end': _round(ld['ups']), 'share_end': _round(ld['scale']),
+                                  'v_end_pu': _round(ld['v_f'])} for ld in b.ac.dyn_loads],
+              'resumed': [{'label': c.label, 'blocks_ms': [[_round(a * 1e3), _round(z * 1e3)] for a, z in c.blocks]}
+                          for c in b.vscs if getattr(c, 'blocks', None)],
               'converters': [_converter_result(c, min(event_times, default=t_end)) for c in b.vscs]
               + [_dcdc_result(c, min(event_times, default=t_end)) for c in b.dcdcs],
               'settings': {'time_step_us': dt * 1e6, 'duration_ms': t_end * 1e3,
@@ -1243,6 +1311,11 @@ def _converter_result(conv, t_event):
         # A rectifier easing off as its island's frequency fell or its voltage dipped: how long, how far.
         out.update(eased_ms=_round(conv.eased_time * 1e3), ease_min_pu=_round(conv.ease_min),
                    pll_f_min_hz=_round(conv.f_min) if conv.ease is not None else None)
+    if getattr(conv, 'lfsm', None) is not None:
+        # Curtailing on over-frequency (LFSM-O): how long, how far, its PLL's filtered frequency's range.
+        out.update(lfsm_ms=_round(conv.eased_time * 1e3), lfsm_min_pu=_round(conv.ease_min),
+                   lfsm_min_at_ms=_round(conv.lfsm_min_at * 1e3) if conv.lfsm_min_at is not None else None, lfsm_end_pu=_round(conv.lfsm_k),
+                   pll_f_min_hz=_round(conv.f_min), pll_f_max_hz=_round(conv.f_max))
     if getattr(conv, 'uv', None) is not None:
         out.update(uv_eased_at_ms=_round(conv.uv_at * 1e3) if conv.uv_at is not None else None,
                    uv_cap_end_pu=_round(conv.uv_cap), v_ac_min_pu=_round(conv.v_ac_min))

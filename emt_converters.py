@@ -361,6 +361,9 @@ class Vsc:
         self.ease_self = getattr(self, 'ease_self', True)    # False: an SST's rectifier, its DC/DC stage easing
         self.f_f = f0
         self.eased_time, self.ease_min, self.f_min = 0.0, 1.0, f0
+        # Over-frequency curtailment (LFSM-O), in power mode: (droop as a share of f0 per its power, start Hz,
+        # filter s) - its power cut by (f - start) / (droop f0) of itself above start; set by its builder.
+        self.lfsm, self.lfsm_k, self.f_max, self.lfsm_min_at = None, 1.0, f0, None
         self.trace = []                                      # (t, P out, Q out, v_dc, |i|) for the results
 
     def _pwm_plan(self, t, e, v_dc):
@@ -404,6 +407,34 @@ class Vsc:
             state.set_switch(up, False)
             state.set_switch(dn, False)
         state.set_source_value(self.k_src, 0.0)
+
+    def resume(self, t, state, ramp_s=0.0):
+        """
+        Back from a block - a converter that blocked in a dip and resumes (a run's event): its switches
+        closed, its bridge at its terminal's voltage so that it starts from no current, its PLL on that
+        voltage's angle, its current loops from zero; its DC voltage loop as it was. Average model only.
+        In power mode, ramp_s > 0 brings its power back from zero over ramp_s instead of at once.
+        """
+        if self.blocked_at is None or not self.k_block:
+            return False
+        v = np.asarray(state.v[self.ac_nodes], dtype=float)
+        alpha, beta = (2.0 * v[0] - v[1] - v[2]) / 3.0, (v[1] - v[2]) / SQ3
+        self.theta, self.w, self.int_pll = math.atan2(beta, alpha), self.w0, 0.0
+        self.int_d = self.int_q = 0.0
+        self.e_held = v.copy()
+        for k in range(3):
+            state.set_emf(self.k_e[k], float(v[k]))
+        for k in self.k_block:
+            state.set_switch(k, True)
+        self.blocks = getattr(self, 'blocks', []) + [(self.blocked_at, t)]
+        self.blocked_at = None
+        self.ramp = (t, ramp_s) if ramp_s > 0 else None
+        self.f_f = self.w0 / (2 * math.pi)                   # its frequency's filter from its PLL's restart, not the dip's
+        self.lfsm_hold_until = t + getattr(self, 'lfsm_hold_s', 0.0)  # LFSM-O held while its PLL settles
+        self.t_last = self.t_step = self.t_next = t
+        self.v_prev = None
+        self.acc_v, self.acc_vdc, self.acc_load, self.acc_p = np.zeros(3), 0.0, 0.0, 0.0
+        return True
 
     def control(self, t, state):
         if self.blocked_at is not None:
@@ -488,6 +519,29 @@ class Vsc:
         else:
             err = 0.0
             p_in = self.p_ref
+            if self.lfsm is not None and (math.hypot(v_d, v_q) < 0.85 * self.v_nom_peak
+                                          or t_s < getattr(self, 'lfsm_hold_until', 0.0)):
+                # Riding through a dip, or its PLL settling after a resume, its frequency measurement means nothing:
+                # LFSM-O suspended, its filter held.
+                self.lfsm_k = 1.0
+            elif self.lfsm is not None:
+                droop, f_start, tau = self.lfsm
+                self.f_f += (self.w / (2 * math.pi) - self.f_f) * min(dt / tau, 1.0)
+                self.f_max = max(self.f_max, self.f_f)
+                self.f_min = min(self.f_min, self.f_f)
+                self.lfsm_k = min(max(1.0 - (self.f_f - f_start) / (droop * self.w0 / (2 * math.pi)), 0.0), 1.0)
+                p_in *= self.lfsm_k
+                if self.lfsm_k < self.ease_min:
+                    self.ease_min, self.lfsm_min_at = self.lfsm_k, t_s
+                if self.lfsm_k < 1.0:
+                    self.eased_time += dt
+            ramp = getattr(self, 'ramp', None)
+            if ramp is not None:
+                k_r = (t_s - ramp[0]) / ramp[1]
+                if k_r >= 1.0:
+                    self.ramp = None
+                else:
+                    p_in *= max(k_r, 0.0)
         id_ref = -p_in / (1.5 * vd_)
         if self.mode_ac.startswith('vm'):
             e_ac = self.v_ac_ref - v_d

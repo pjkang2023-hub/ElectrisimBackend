@@ -365,6 +365,55 @@ def _deenergise_island(ss, out_lines, t: float, out_slacks=(), grid_forming=()) 
     return island, tripped, running
 
 
+def _add_timed_events(ss, params: Dict[str, Any], gen_map: Dict[str, Any], line_map: Dict[str, Any],
+                      warnings: List[str]) -> List[Dict[str, Any]]:
+    """
+    A run's own sequence of switchings, params["events"]: a list (or its JSON) of {"t": s, "action": "trip" |
+    "close", "element": name} - a protection zone's breakers opening at its clearing time, a converter blocked
+    and resuming. The element is a PCS (its converter: a grid-forming PCS's virtual machine, a grid-following
+    one's PVD1 / ESD1), a generator, a line, transformer or breaker's element, or a load. Each an ANDES Toggle
+    at its time: "trip" takes an element in service out, "close" puts one taken out back. The parts must stay
+    energised - a switching that leaves a part with no source stops the run.
+    """
+    raw = params.get("events") or []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw) if raw.strip() else []
+        except ValueError:
+            warnings.append("Events: not a JSON list; none applied.")
+            return []
+    pq = {str(n): i for n, i in zip(ss.PQ.name.v, ss.PQ.idx.v)}
+    done: List[Dict[str, Any]] = []
+    state: Dict[Tuple[str, Any], bool] = {}
+    for n, ev in enumerate(sorted(raw, key=lambda e: _sf(e.get("t"), 0.0)), start=1):
+        name, action, t = str(ev.get("element") or ""), str(ev.get("action") or "trip").lower(), _sf(ev.get("t"), 0.0)
+        g = gen_map.get(name) or next((x for x in gen_map.values() if str(x.get("name")) == name), None)
+        if g is not None and g.get("syn_idx"):
+            target = ("SynGen", g["syn_idx"])
+        elif g is not None and g.get("model_idx"):
+            target = (g["model"], g["model_idx"])
+        elif name in line_map:
+            target = ("Line", line_map[name])
+        elif name in pq:
+            target = ("PQ", pq[name])
+        else:
+            warnings.append(f"Event at {t:g} s: no PCS, generator, branch or load '{name}'; not applied.")
+            continue
+        if action not in ("trip", "close"):
+            warnings.append(f"Event at {t:g} s on '{name}': action '{action}' is neither trip nor close; not applied.")
+            continue
+        mdl = getattr(ss, target[0])
+        u0 = bool(mdl.u.v[list(mdl.idx.v).index(target[1])]) if target[0] != "SynGen" else True
+        on = state.get(target, u0)
+        if on == (action == "close"):
+            warnings.append(f"Event at {t:g} s: '{name}' is already {'in' if on else 'out of'} service; not applied.")
+            continue
+        state[target] = not on
+        ss.add("Toggle", idx=f"Toggle_Event_{n}", model=target[0], dev=target[1], t=t)
+        done.append({"t": t, "action": action, "element": name, "model": target[0]})
+    return done
+
+
 # --- PCS: a battery, flywheel, SOFC system or PV array on an AC bus through its inverter -----------
 
 # A grid-forming PCS's power filter (s), as the EMT study's GridFormingVsc: its droop through that
@@ -483,13 +532,19 @@ def _pcs_store(rec: Dict[str, Any]) -> Optional[Dict[str, float]]:
 
 
 def _add_pcs_dynamics(ss: Any, rec: Dict[str, Any], n: int, bus: Any, static_idx: str, freq: float,
-                      sn_base: float, defaults_applied: List[str]) -> Dict[str, Any]:
+                      sn_base: float, defaults_applied: List[str], low_voltage: str = "cease") -> Dict[str, Any]:
     """
     The PCS's ANDES model. Grid-forming: GENCLS, a virtual machine whose
     damping is its P-f droop and whose inertia its power filter's. Grid-
     following: a battery or flywheel ESD1 (its state of charge between its
     window's ends, the energy it can store), a PV array or an SOFC system
     PVD1 up to its rating.
+
+    A grid-following PCS in a voltage dip (params gfl_low_voltage): "cease" -
+    ANDES's own, momentary cessation below 0.88 pu, its current back in full
+    above 0.9 pu; "ride_through" - its current kept through any dip, within
+    its limit (a converter that blocks or trips after a time is the run's
+    events to switch).
     """
     s, label = rec["s_rated"], f"PCS '{rec['label']}'"
     obj, kind = rec["source"]["obj"], rec["source"]["kind"]
@@ -511,6 +566,9 @@ def _add_pcs_dynamics(ss: Any, rec: Dict[str, Any], n: int, bus: Any, static_idx
     trips = {k: v * freq / 60.0 for k, v in (("ft0", 56.5), ("ft1", 58.5), ("ft2", 61.8), ("ft3", 62.0))}
     common = dict(bus=bus, gen=static_idx, Sn=s, fn=freq, pqflag=0, ialim=max(rec["k"], 0.1),
                   qmx=1.0, qmn=-1.0, **trips)
+    if low_voltage == "ride_through":
+        # (ANDES takes a zero vt0 as unset - its 0.88 pu.)
+        common.update(vt0=1e-3, vt1=2e-3)
     if kind in ("Battery", "Flywheel", "Supercapacitor"):
         st = _pcs_store(rec)
         idx = _add_model_safe(ss, "ESD1", defaults_applied, label, idx=f"ESD1_PCS_{n}",
@@ -590,9 +648,14 @@ def _settle_pcs_set_points(ss, meta: Dict[str, Any], rounds: int = 30) -> bool:
         if g.get("pcs") and g["control"] == "grid_forming" and g["droop_qv"] > 0:
             by_bus.setdefault(g["bus"], []).append(g)
     groups = [grp for b, grp in by_bus.items() if b not in slack_buses and not any(g["on_slack_bus"] for g in grp)]
+    # An island's holding PCS on its own bus follows its droop too, its slack's voltage moved: held at its
+    # set point, it took every Mvar the others' droops left - over its limit with small units.
+    slack_idx = list(ss.Slack.idx.v)
+    holders = [g for b, grp in by_bus.items() for g in grp
+               if len(grp) == 1 and g.get("holds") and g["static_idx"] in slack_idx]
     plants = [g for g in meta["gen_map"].values() if g.get("pcs")
               and g["control"] == "grid_following" and g["q_mode"] == "qv"]
-    if not plants and not groups:
+    if not plants and not groups and not holders:
         return True
     hist: Dict[str, Tuple[float, float]] = {}
 
@@ -620,6 +683,14 @@ def _settle_pcs_set_points(ss, meta: Dict[str, Any], rounds: int = 30) -> bool:
                 v_new = secant(str(grp[0]["bus"]), v_set, err, 0.8, 1.2, 0.05)
                 for g in grp:
                     ss.PV.set("v0", g["static_idx"], v_new, base="device")
+        for g in holders:
+            k = slack_idx.index(g["static_idx"])
+            q = float(ss.Slack.q.v[k]) * sn
+            v_set = float(ss.Slack.v0.v[k])
+            err = v_set - (g["vm_set_pu"] - g["droop_qv"] * q / g["s_rated_mva"])
+            worst = max(worst, abs(err))
+            if abs(err) > 1e-7:
+                ss.Slack.set("v0", g["static_idx"], secant(f"slack {g['bus']}", v_set, err, 0.8, 1.2, 0.05), base="device")
         for g in plants:
             k = pv_idx.index(g["static_idx"])
             q = float(ss.PV.q.v[k]) * sn
@@ -1129,6 +1200,7 @@ def build_system(
     profile_assignments = _lp.load_assignments(in_data) if profile_library else {}
     profile_repeat = params.get("profile_repeat", True) not in (False, "false", "False", 0, "0")
     profiled_loads: List[Dict[str, Any]] = []
+    ups_loads: Dict[str, Dict[str, Any]] = {}
     pq_i = 0
     for _, el, typ in _iter_elements(in_data):
         if not typ.startswith("Load") or typ.startswith("Load DC"):
@@ -1169,6 +1241,12 @@ def build_system(
             Vn=bus_vn.get(bus, 110.0),
             u=u,
         )
+        if _sf(el.get("uv_ease_pu"), 0.0) > 0 and u:
+            # A load behind a UPS: below uv_ease_pu its UPS takes it onto its battery, down to uv_floor_pu
+            # of it (0: all of it), and walks it back in over uv_restore_s once its voltage recovers.
+            ups_loads[load_name] = {"pq": f"PQ_{pq_i}", "uv_ease_pu": _sf(el.get("uv_ease_pu")),
+                                    "uv_floor_pu": _sf(el.get("uv_floor_pu"), 0.0),
+                                    "uv_restore_s": _sf(el.get("uv_restore_s"), 10.0)}
 
     # --- The DC network: each converter the load its AC side is in the load flow ---
     flow, flow_problem = None, None
@@ -1750,7 +1828,8 @@ def build_system(
             kw["a0"] = 0.0
             slack_count += 1
         ss.add("Slack" if holds else "PV", **kw)
-        ids = _add_pcs_dynamics(ss, rec, pcs_count, bus, static_idx, freq, sn_base, defaults_applied)
+        ids = _add_pcs_dynamics(ss, rec, pcs_count, bus, static_idx, freq, sn_base, defaults_applied,
+                                low_voltage=str(params.get("gfl_low_voltage") or "cease").strip().lower())
         if ids.get("model_idx"):
             renewable_count += 1
         gen_map[str(rec["name"])] = {
@@ -1870,6 +1949,8 @@ def build_system(
         else:
             warnings.append(f"Generator trip target '{toggle_gen}' not found; no Toggle applied.")
 
+    timed_events = _add_timed_events(ss, params, gen_map, line_map, warnings)
+
     # The grid's voltage following a profile (IEEE 2800's ride-through envelope, or a table):
     # each step an Alter of its slack's set voltage, which its reactive power holds the bus at.
     points, problems = gvp.profile_points(params)
@@ -1934,6 +2015,8 @@ def build_system(
         "n_pcs": pcs_count,
         "n_buses": len(bus_name_by_idx),
         "islanded_after": islanded_after,
+        "timed_events": timed_events,
+        "ups_loads": ups_loads,
         "free_islands": bool(island_slacks or running_islands),
         "profiled_loads": profiled_loads,
         "profile_repeat": profile_repeat,
@@ -2128,6 +2211,24 @@ _PCS_VF_RANGE = (0.5, 1.6)   # its internal voltage within (pu)
 _PCS_VC_VDIP = 0.8           # below this terminal voltage (pu) its voltage control holds (a fault)
 
 
+def _secondary_voltage(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    The grid-forming PCS's secondary voltage control, when params["secondary_voltage"] is on: each moves its
+    Q-V droop's set point so that its pilot buses (secondary_voltage_pilots, comma separated - the
+    switchboards; none: its own terminal) return to secondary_voltage_pu over secondary_voltage_t_s, its set
+    point within secondary_voltage_band_pu of 1.0. The run starts where its load flow does: a plant run with
+    it has its PCS's set points there already.
+    """
+    if not _sb(params.get("secondary_voltage"), False):
+        return None
+    pilots = params.get("secondary_voltage_pilots") or []
+    if isinstance(pilots, str):
+        pilots = [p.strip() for p in pilots.split(",") if p.strip()]
+    return {"v_pu": _sf(params.get("secondary_voltage_pu"), 1.0),
+            "t_s": max(_sf(params.get("secondary_voltage_t_s"), 10.0), 1e-3),
+            "band": max(_sf(params.get("secondary_voltage_band_pu"), 0.1), 0.0), "pilots": list(pilots)}
+
+
 class _GridFormingLimits:
     """
     A grid-forming PCS within its limits through the run. GENCLS, its virtual
@@ -2144,9 +2245,17 @@ class _GridFormingLimits:
     one check.
     """
 
-    def __init__(self, ss, meta: Dict[str, Any], check_s: float, voltage_control: bool = True):
+    def __init__(self, ss, meta: Dict[str, Any], check_s: float, voltage_control: bool = True,
+                 secondary: Optional[Dict[str, float]] = None):
         self.ss, self.meta, self.check_s = ss, meta, check_s
         self.voltage_control = voltage_control
+        self.secondary = secondary if voltage_control else None
+        # Its pilot buses (the switchboards whose voltage it restores), else each PCS's own terminal.
+        names = (self.secondary or {}).get("pilots") or []
+        self.pilots = [meta["bus_map"][b] for b in names if b in meta["bus_map"]]
+        if self.secondary and len(self.pilots) < len(names):
+            meta["warnings"].append("Secondary voltage control: pilot bus(es) "
+                                    f"{', '.join(b for b in names if b not in meta['bus_map'])} not found.")
         self.units = []
         gencls = list(ss.GENCLS.idx.v) if getattr(ss, "GENCLS", None) is not None and ss.GENCLS.n else []
         for name, g in meta["gen_map"].items():
@@ -2245,6 +2354,15 @@ class _GridFormingLimits:
         v = float(ss.Bus.v.v[ss.Bus.idx2uid(g["bus"])])
         if v < _PCS_VC_VDIP:
             return
+        sec = self.secondary
+        if sec and ss.GENCLS.u.v[i]:
+            # Secondary voltage control: the droop's set point moved slowly until its terminal is back at the
+            # target - the Q-V droop's offset removed over sec["t_s"], held within sec["band"] of the target.
+            pilots = [float(ss.Bus.v.v[ss.Bus.idx2uid(b)]) for b in self.pilots]
+            pilots = [x for x in pilots if x > _PCS_VC_VDIP]
+            v_pilot = sum(pilots) / len(pilots) if pilots else v
+            lo, hi = 1.0 - sec["band"], 1.0 + sec["band"]
+            u["v0"] = min(max(u["v0"] + (sec["v_pu"] - v_pilot) * min(self.check_s / sec["t_s"], 1.0), lo), hi)
         q = float(ss.GENCLS.Qe.v[i]) * float(self.meta["sn_mva"]) / g["s_rated_mva"]
         target = u["v0"] - u["droop_qv"] * (q - u["q0"])
         vf = float(ss.GENCLS.vf0.v[i])
@@ -2313,20 +2431,21 @@ class _RectifierEasing:
         self.ss, self.meta = ss, meta
         self.units: List[Dict[str, Any]] = []
         self.active = False
+        self.sn = float(meta["sn_mva"])
         net = meta.get("dc_flow")
-        if net is None:
+        ups = meta.get("ups_loads") or {}
+        if net is None and not ups:
             return
-        import pandapower_electrisim as pe
         position = {idx: k for k, idx in enumerate(ss.PQ.idx.v)}
         by_idx = {load["idx"]: load for load in profiled}
         candidates = []
 
-        def add(label, bus_dc, s, kind):
+        def add(label, bus_dc, s, kind, pq=None):
             uv = float(s.get("uv_ease_pu") or 0.0)
             f0, f1 = float(s.get("ease_f_start_hz") or 0.0), float(s.get("ease_f_end_hz") or 0.0)
             if uv <= 0 and not (f0 > 0 and f1 > 0 and f0 > f1):
                 return
-            pq = meta.get("converter_pq", {}).get(label)
+            pq = pq or meta.get("converter_pq", {}).get(label)
             if pq is None or pq not in position:
                 return
             k = position[pq]
@@ -2340,6 +2459,20 @@ class _RectifierEasing:
                 "eased_from": None, "min_factor": 1.0, "hist": [],
             })
 
+        # A load behind a UPS: its battery takes all it eases (no DC network to share).
+        for label, s in ups.items():
+            add(label, -1, s, "UPS load", pq=s["pq"])
+            if candidates and candidates[-1]["label"] == label:
+                candidates[-1].update(floor=min(max(float(s["uv_floor_pu"]), 0.0), 1.0), spare_mw=float("inf"))
+        ups_units = [r for r in candidates if r["kind"] == "UPS load"]
+        for r in ups_units:
+            r["lowest"] = r["floor"]
+        if net is None:
+            self.units = [u for u in ups_units if u["p0"] * self.sn > 1e-3]
+            self.active = bool(self.units)
+            return
+        candidates = [r for r in candidates if r["kind"] != "UPS load"]
+        import pandapower_electrisim as pe
         if "vsc" in net and len(net.vsc) and "uv_ease_pu" in net.vsc.columns:
             for i in net.vsc.index:
                 if pe._electrisim_is_aux(net.vsc, i) or not bool(net.vsc.at[i, "in_service"]):
@@ -2352,7 +2485,7 @@ class _RectifierEasing:
         for rec in getattr(net, "electrisim_ssts", None) or []:
             if rec.get("in_service", True) and rec.get("ease"):
                 add(f"{rec['label']} (MV)", rec["bus_lvdc"], rec["ease"], "SST")
-        if not candidates:
+        if not candidates and not ups_units:
             return
         # The stores on each DC bus: its DC/DC converters in droop, by their spare.
         spare: Dict[int, float] = {}
@@ -2369,7 +2502,7 @@ class _RectifierEasing:
                 r["lowest"] = 1.0 if r["spare_mw"] <= 1e-9 else r["floor"]
         self.sn = sn
         # A rectifier with no load to hand over (a catcher's, its bus idle) is left out.
-        self.units = [u for u in candidates if u["p0"] * sn > 1e-3]
+        self.units = [u for u in candidates + ups_units if u["p0"] * sn > 1e-3]
         none = [u["label"] for u in self.units if u["lowest"] >= 1.0 - 1e-9]
         if none:
             warnings.append("Easing: no store on the DC bus of " + ", ".join(none) + " to take its load; it holds.")
@@ -2426,7 +2559,11 @@ class _RectifierEasing:
         sn = float(self.meta["sn_mva"])
         out = []
         for u in self.units:
-            if u["eased_from"] is not None:
+            if u["eased_from"] is not None and u["kind"] == "UPS load":
+                warnings.append(
+                    f"Load '{u['label']}' went onto its UPS at t = {u['eased_from']:.3f} s, down to {u['min_factor']:.3g} "
+                    f"of its {u['p0'] * sn:.3g} MW, and walked back in over {u['restore_s']:g} s once its voltage recovered.")
+            elif u["eased_from"] is not None:
                 warnings.append(
                     f"{u['kind']} '{u['label']}' eased from t = {u['eased_from']:.3f} s to {u['min_factor']:.3g} of its "
                     f"{u['p0'] * sn:.3g} MW, its DC bus's stores taking the rest (at most {u['spare_mw']:.3g} MW).")
@@ -2689,7 +2826,7 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
                 pass
 
         islanded = meta.get("islanded_after")
-        if islanded and islanded[2] or meta.get("free_islands"):
+        if islanded and islanded[2] or meta.get("free_islands") or meta.get("timed_events"):
             # ANDES's rotor-angle stop criterion looks for machines in the
             # largest island and fails when none is left there; and it takes
             # angles against the rated frequency's, which an island off it
@@ -2705,7 +2842,8 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
         if _sb(params.get("pcs_limits"), True):
             # Not finer than the run's own step: a piece shorter than it is one short step.
             check_s = max(_sf(params.get("pcs_check_s"), _PCS_CHECK_S), float(ss.TDS.config.tstep or 0.0))
-            limits = _GridFormingLimits(ss, meta, check_s, voltage_control=_sb(params.get("pcs_voltage_control"), True))
+            limits = _GridFormingLimits(ss, meta, check_s, voltage_control=_sb(params.get("pcs_voltage_control"), True),
+                                        secondary=_secondary_voltage(params))
         meta["pcs_limits"] = limits
         shedding = _LoadShedding(ss, meta, params, limits, profiled, meta["warnings"])
         easing = _RectifierEasing(ss, meta, profiled, meta["warnings"])
@@ -2919,6 +3057,7 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
                 "toggle_t": params.get("toggle_t"),
                 "toggle_gen": params.get("toggle_gen") or params.get("generator_trip"),
                 "toggle_gen_t": params.get("toggle_gen_t"),
+                "timed": meta.get("timed_events") or [],
             },
             "poi_metrics": {
                 "poi_bus": poi_bus_key or None,
