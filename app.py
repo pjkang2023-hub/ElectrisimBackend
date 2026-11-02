@@ -200,6 +200,7 @@ def simulation():
                                 f"with the state {state_request.get('state_id') if isinstance(state_request, dict) else None!r} "
                                 f"among its islands ({type(e).__name__}: {e})."}), 400
             g.mgtwin_state_id = state_id
+            g.mgtwin_site = site
             try:
                 from mgtwin_check import study_label
                 g.mgtwin_label = study_label(site, state_id, (in_data.get('0') or {}).get('typ'))
@@ -1328,6 +1329,36 @@ def simulation():
                     return response
                 else:
                     return response_data
+
+            if "ReliabilityElectrisim" in typ:
+                # Reliability by contingency enumeration over the protection zones (reliability_electrisim):
+                # the drawn network as an mgtwin Site - its operating state's Site lends the states - every
+                # zone fault, stuck breaker, relay failure, maintenance overlap and failed black start priced.
+                import reliability_electrisim
+                p_in = in_data[x]
+                numeric = ('lam_zone', 'lam_tx', 'lam_cab_km', 'p_bf', 'p_rf', 'beta_cc', 'p_vrt', 't_rep_h',
+                           'restore_min', 't_maint_h', 'maint_restore_h', 'lam_bo', 'p_step', 't_man_h', 'p_cold',
+                           't_cold_h', 't_rt_min', 'ups_min', 'recoverable_factor', 'storage_mwh', 'aux_shed_max_h',
+                           'voll_it', 'voll_aux', 'p_forming_mw', 'p_following_mw', 'zone_kv')
+                rel_params = {k: float(p_in[k]) for k in numeric if str(p_in.get(k, '')).strip() not in ('', 'None')}
+                if 'black_start_steps' in p_in and str(p_in['black_start_steps']).strip():
+                    rel_params['black_start_steps'] = int(float(p_in['black_start_steps']))
+                for k in ('dup_87', 'backup_trips_gfl', 'forming_storage_backed', 'include_maintenance'):
+                    if k in p_in:
+                        rel_params[k] = str(p_in[k]).strip().lower() in ('true', '1', 'yes', 'on')
+                split = lambda v: [t.strip() for t in str(v or '').replace(';', ',').split(',') if t.strip()]  # noqa: E731
+                if split(p_in.get('it_loads')):
+                    rel_params['it_loads'] = split(p_in.get('it_loads'))
+                pairs = [[t.strip() for t in grp.split('+') if t.strip()] for grp in split(p_in.get('transfer_groups'))]
+                if pairs:
+                    rel_params['transfer_groups'] = [grp for grp in pairs if len(grp) > 1]
+                try:
+                    result = reliability_electrisim.study(in_data, rel_params, getattr(g, 'mgtwin_site', None),
+                                                          getattr(g, 'mgtwin_state_id', None))
+                except (KeyError, ValueError, TypeError, StopIteration) as e:
+                    return jsonify({'error': True, 'message': f'The reliability study could not read the network: '
+                                    f'{type(e).__name__}: {e}'}), 400
+                return jsonify(result)
 
             if "EconomicAnalysisPandaPower" in typ:
                 # Extract user email for logging
