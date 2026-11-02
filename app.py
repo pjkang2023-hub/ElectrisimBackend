@@ -1339,11 +1339,11 @@ def simulation():
                 numeric = ('lam_zone', 'lam_tx', 'lam_cab_km', 'p_bf', 'p_rf', 'beta_cc', 'p_vrt', 't_rep_h',
                            'restore_min', 't_maint_h', 'maint_restore_h', 'lam_bo', 'p_step', 't_man_h', 'p_cold',
                            't_cold_h', 't_rt_min', 'ups_min', 'recoverable_factor', 'storage_mwh', 'aux_shed_max_h',
-                           'voll_it', 'voll_aux', 'p_forming_mw', 'p_following_mw', 'zone_kv')
+                           'voll_it', 'voll_aux', 'p_forming_mw', 'p_following_mw', 'zone_kv', 'p_fc')
                 rel_params = {k: float(p_in[k]) for k in numeric if str(p_in.get(k, '')).strip() not in ('', 'None')}
                 if 'black_start_steps' in p_in and str(p_in['black_start_steps']).strip():
                     rel_params['black_start_steps'] = int(float(p_in['black_start_steps']))
-                for k in ('dup_87', 'backup_trips_gfl', 'forming_storage_backed', 'include_maintenance'):
+                for k in ('dup_87', 'backup_trips_gfl', 'forming_storage_backed', 'include_maintenance', 'include_second_order'):
                     if k in p_in:
                         rel_params[k] = str(p_in[k]).strip().lower() in ('true', '1', 'yes', 'on')
                 split = lambda v: [t.strip() for t in str(v or '').replace(';', ',').split(',') if t.strip()]  # noqa: E731

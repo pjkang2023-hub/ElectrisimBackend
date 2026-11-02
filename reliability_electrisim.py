@@ -16,14 +16,21 @@ zone fault is followed through its clearing:
   maint     - it faults while a breaker is out for maintenance (t_maint_h per breaker per year): both open
   blackout  - a total blackout (lam_bo) whose black start of black_start_steps steps fails (p_step): all IT for t_man_h
 
+and the second-order events (include_second_order):
+
+  overlap   - a second zone faults while the first is under repair: lam_i lam_j (r_i + r_j) / 8760 per year, both
+              out for r_i r_j / (r_i + r_j) - counted for what the two together cut off beyond each alone
+  close     - the restoration fails: a normally-open tie fails to close (p_fc), so what the zone fault cut off
+              stays out until the repair
+
 Each event's consequence is an island balance after the switching: an island with no forming source is dead; one
 with forming sources serves its load up to its sources' power - grid-following sources run only beside a forming
 one; transfer groups (dual-corded IT) move a dead cord's load to its partner when the partner's island has room. A
 deficit lasts the event's duration, less what the island's storage (storage_mwh per forming source) carries; IT and
 auxiliary unserved energy are priced at their values of lost load.
 
-The rates are IEEE 493-class planning values, every one a parameter. This is the first-order enumeration a planning
-study uses, not a sequential Monte Carlo: it does not follow storage state of charge through a year.
+The rates are IEEE 493-class planning values, every one a parameter. This is the enumeration a planning study uses,
+to second order, not a sequential Monte Carlo: it does not follow storage state of charge through a year.
 """
 import math
 
@@ -36,6 +43,7 @@ DEFAULTS = {
     'forming_storage_backed': True, 'aux_shed_max_h': 4.0, 'maint_restore_h': 4.0,
     'p_forming_mw': None, 'p_following_mw': None, 'voll_it': 50000.0, 'voll_aux': 500.0,
     'it_loads': None, 'transfer_groups': (), 'cable_km': None, 'grid_buses': (), 'include_maintenance': True,
+    'include_second_order': True, 'p_fc': 0.005,
     # per element, by its Site id: {'rate': per year for the whole element, 'repair_h': h, 'p_bf': per demand}
     'element_data': None,
 }
@@ -288,6 +296,12 @@ def enumerate_events(site, params=None, state_id='NORMAL'):
     def extra(a, b):
         return {k: max(0.0, a[k] - b[k]) for k in a}
 
+    def restored(opened, dead):
+        # the islands once the switching is done around what is out: the normally-open ties closed
+        return net.islands(opened=opened, dead_buses=dead) if not normally_open else \
+            _with_ties(net, opened, dead, normally_open)
+
+    outage = []  # per zone: (zone, rate, repair, its breakers, its restored islands)
     by_member = {}
     for z in zs:
         for m in z['members']:
@@ -309,6 +323,18 @@ def enumerate_events(site, params=None, state_id='NORMAL'):
         events.append({**ref, 'also': [], 'class': 'zone', 'zone': z['id'], 'detail': z['kind'], 'freq': lam,
                        'it_mw': first['it_mw'], 'aux_mw': first['aux_mw'], 'it_hot': first['it_mwh'] + after['it_mwh'],
                        'it_cold': cold['it_mwh'] + after['it_mwh'], 'aux': first['aux_mwh'] + after['aux_mwh']})
+        if p['include_second_order']:
+            outage.append((z, lam, h_rep, opened, restored(opened, z['buses'])))
+            # close: the tie fails to close - what was cut off stays out to the repair, not just to the restoration
+            if normally_open and h_rep > h_rest:
+                stuck_open = extra(net.balance(net.islands(opened=opened, dead_buses=z['buses']), h_rep - h_rest,
+                                               storage=False), after)
+                if stuck_open['it_mwh'] > 1e-9 or stuck_open['aux_mwh'] > 1e-9:
+                    events.append({**ref, 'also': sorted(normally_open), 'class': 'close', 'zone': z['id'],
+                                   'detail': 'tie fails to close', 'freq': lam * p['p_fc'],
+                                   'it_mw': stuck_open['it_mw'], 'aux_mw': stuck_open['aux_mw'],
+                                   'it_hot': stuck_open['it_mwh'], 'it_cold': stuck_open['it_mwh'],
+                                   'aux': stuck_open['aux_mwh']})
         # stuck: breaker failure opens the zone beyond each member until it is isolated and re-closed
         for m in z['members']:
             beyond = {x for y in by_member[m] if y is not z for x in y['members']}
@@ -344,6 +370,29 @@ def enumerate_events(site, params=None, state_id='NORMAL'):
                                'freq': lam * p['t_maint_h'] / 8760,
                                'it_mw': hot['it_mw'], 'aux_mw': hot['aux_mw'], 'it_hot': hot['it_mwh'],
                                'it_cold': cold_x['it_mwh'], 'aux': hot['aux_mwh']})
+    # overlap: a second zone faults while the first is under repair; both out for the mean overlap, counted for
+    # what the two together lose beyond what each loses alone (the first-order events count those)
+    for a in range(len(outage)):
+        za, lam_a, r_a, op_a, isl_a = outage[a]
+        for zb, lam_b, r_b, op_b, isl_b in outage[a + 1:]:
+            freq = lam_a * lam_b * (r_a + r_b) / 8760
+            if freq <= 0:
+                continue
+            r_ov = r_a * r_b / (r_a + r_b)
+            both = net.balance(restored(op_a | op_b, za['buses'] + zb['buses']), r_ov, storage=False)
+            alone_a = net.balance(isl_a, r_ov, storage=False)
+            alone_b = net.balance(isl_b, r_ov, storage=False)
+            add = {k: max(0.0, both[k] - alone_a[k] - alone_b[k]) for k in both}
+            if add['it_mwh'] <= 1e-9 and add['aux_mwh'] <= 1e-9:
+                continue
+            own_rate, bus_d, tx_d, km_d = parts(za)
+            events.append({'buses': za['buses'] + zb['buses'], 'breakers': za['members'], 'also': zb['members'],
+                           'n_tx': len(za['tx']), 'cable_km': round(sum(km.get(b, 0.0) for b in za['branches']), 4),
+                           'repair_h': r_a, 'own_rate': own_rate, 'bus_default': bus_d, 'tx_default': tx_d,
+                           'km_default': round(km_d, 4), 'other_rate': lam_b, 'other_repair_h': r_b,
+                           'class': 'overlap', 'zone': za['id'], 'detail': zb['id'], 'freq': freq,
+                           'it_mw': add['it_mw'], 'aux_mw': add['aux_mw'], 'it_hot': add['it_mwh'],
+                           'it_cold': add['it_mwh'], 'aux': add['aux_mwh']})
     it_total = sum(l['p_mw'] for l in site['loads'] if l['id'] in net.it)
     events.append({'buses': [], 'breakers': [], 'also': [], 'n_tx': 0, 'cable_km': 0.0, 'own_rate': 0.0,
                    'bus_default': 0, 'tx_default': 0, 'km_default': 0.0, 'repair_h': None,
@@ -394,7 +443,7 @@ WORKBOOK_INPUTS = {
     'p_vrt': ('', 'share of backup clearances in which the grid-following fleet trips'),
     't_maint_h': ('h/yr', 'maintenance per breaker'), 'lam_bo': ('/yr', 'total blackout'),
     'p_step': ('per step', 'black-start step fails'), 'black_start_steps': ('', 'black-start steps'),
-    'p_cold': ('', 'share of events whose sources cold-restart'), 'voll_it': ('EUR/MWh', 'value of lost IT load'),
+    'p_cold': ('', 'share of events whose sources cold-restart'), 'p_fc': ('per demand', 'a normally-open tie fails to close'), 'voll_it': ('EUR/MWh', 'value of lost IT load'),
     'voll_aux': ('EUR/MWh', 'value of lost auxiliary load'),
 }
 
@@ -436,7 +485,7 @@ def workbook(result, title='Reliability'):
 
     ev = wb.create_sheet('Events')
     cols = ['Class', 'Zone', 'Detail', 'Own rates /yr', 'Bus section at default', 'Transformers at default',
-            'Cable km at default', 'Breaker p_bf (own)', 'Frequency /yr', 'IT if hot MWh', 'IT if cold MWh', 'Aux MWh',
+            'Cable km at default', 'Breaker p_bf (own); overlap: other zone /yr', 'Frequency /yr', 'IT if hot MWh', 'IT if cold MWh', 'Aux MWh',
             'Expected IT MWh/yr', 'Expected aux MWh/yr', 'Zone breakers', 'Also opened']
     for j, h in enumerate(cols, 1):
         c = ev.cell(row=1, column=j, value=h)
@@ -448,9 +497,12 @@ def workbook(result, title='Reliability'):
         freq = {'zone': f'={rate}', 'stuck': f"={rate}*IF(ISNUMBER(H{r}),H{r},{R['p_bf']})",
                 'relay': f"={rate}*{R['p_rf']}*IF({R['dup_87']}=1,{R['beta_cc']}+(1-{R['beta_cc']})*{R['p_rf']},1)*{R['p_vrt']}",
                 'maint': f"={rate}*{R['t_maint_h']}/8760",
+                'close': f"={rate}*{R['p_fc']}",
+                'overlap': f"={rate}*H{r}*({e.get('repair_h') or 0}+{e.get('other_repair_h') or 0})/8760",
                 'blackout': f"={R['lam_bo']}*(1-(1-{R['p_step']})^{R['black_start_steps']})"}[e['class']]
         row = [e['class'], e['zone'], e['detail'], e.get('own_rate', 0.0), e.get('bus_default', 1),
-               e.get('tx_default', e['n_tx']), e.get('km_default', e['cable_km']), e.get('p_bf_own'), freq,
+               e.get('tx_default', e['n_tx']), e.get('km_default', e['cable_km']),
+               e.get('other_rate') if e['class'] == 'overlap' else e.get('p_bf_own'), freq,
                round(e['it_hot'], 6), round(e['it_cold'], 6), round(e['aux'], 6),
                f"=I{r}*((1-{R['p_cold']})*J{r}+{R['p_cold']}*K{r})", f'=I{r}*L{r}',
                ' '.join(e['breakers']), ' '.join(e['also'])]
@@ -469,7 +521,7 @@ def workbook(result, title='Reliability'):
     for j, h in enumerate(['Class', 'Events', 'Expected IT MWh/yr', 'Expected aux MWh/yr', 'Cost kEUR/yr'], 1):
         c = sm.cell(row=3, column=j, value=h)
         c.font, c.fill = head, fill
-    classes = ['zone', 'stuck', 'relay', 'maint', 'blackout']
+    classes = ['zone', 'stuck', 'relay', 'maint', 'close', 'overlap', 'blackout']
     for i, cl in enumerate(classes, 4):
         sm.cell(row=i, column=1, value=cl)
         sm.cell(row=i, column=2, value=f'=COUNTIF(Events!$A$2:$A${last},"{cl}")')
@@ -567,7 +619,8 @@ SWEEPABLE = {
     'p_bf': 'breaker fails to open (per demand)', 'p_rf': 'main protection fails (per demand)',
     'dup_87': 'duplicated main protection (0 / 1)', 'beta_cc': 'common-cause share of main-protection failures',
     't_maint_h': 'maintenance per breaker (h/yr)', 'maint_restore_h': 'breaker back from maintenance (h)',
-    'include_maintenance': 'maintenance overlap counted (0 / 1)', 'storage_mwh': 'storage per grid-forming unit (MWh)',
+    'include_maintenance': 'maintenance overlap counted (0 / 1)', 'include_second_order': 'second-order faults counted (0 / 1)',
+    'p_fc': 'a normally-open tie fails to close (per demand)', 'storage_mwh': 'storage per grid-forming unit (MWh)',
     'forming_storage_backed': 'grid-forming units storage-backed (0 / 1)', 'p_vrt': 'share of backup clearances that trip the fleet',
     'recoverable_factor': 'load the forming units recover (x MVA)', 't_rt_min': 'fleet back from hot standby (min)',
     'p_cold': 'share of events with a cold restart', 't_cold_h': 'cold restart (h)', 'ups_min': 'UPS ride-through (min)',
@@ -577,7 +630,7 @@ SWEEPABLE = {
     'crf': 'capital recovery factor (/yr)',
 }
 PRICING = ('voll_it', 'voll_aux', 'crf')
-BOOLEAN = ('dup_87', 'include_maintenance', 'forming_storage_backed', 'backup_trips_gfl')
+BOOLEAN = ('dup_87', 'include_maintenance', 'forming_storage_backed', 'backup_trips_gfl', 'include_second_order')
 
 
 def sweep_values(name, text, base):

@@ -89,6 +89,42 @@ def test_maintenance_overlap_can_be_switched_off():
     assert not any(e['class'] == 'maint' for e in off)
 
 
+def test_two_group_faults_overlapping():
+    """Both groups lost at once: each alone leaves 5 MW short once the storage is spent, both together 15 MW - the
+    overlap adds 5 MW for the mean overlap of two 48 h repairs (24 h), at lam^2 (48 + 48) / 8760."""
+    events, _, p = _events()
+    (e,) = [x for x in events if x['class'] == 'overlap' and {x['zone'], x['detail']} == {'G1_HV', 'G2_HV'}]
+    lam = p['lam_zone'] + p['lam_tx']
+    assert e['freq'] == pytest.approx(lam * lam * 96 / 8760)
+    assert e['it_mw'] == pytest.approx(5.0)
+    assert e['it_hot'] == pytest.approx(5.0 * 24)
+    assert not any(x['class'] == 'overlap' for x in _events(include_second_order=False)[0])
+
+
+def _with_a_tie():
+    """The island with a third board: a second 5 MW battery station on MV3, joined to the IT board by a
+    normally-open tie."""
+    site = _island()
+    site['buses'] += [{'id': 'MV3', 'v_nom_kv': 33.0}, {'id': 'ST2_HV', 'v_nom_kv': 33.0}, {'id': 'ST2_LV', 'v_nom_kv': 0.69}]
+    site['switches'] += [{'id': 'CB_ST2', 'from_bus': 'ST2_HV', 'to_bus': 'MV3', 'normally_closed': True},
+                         {'id': 'CB_23', 'from_bus': 'MV2', 'to_bus': 'MV3', 'normally_closed': False}]
+    site['transformers'].append({'id': 'T_ST2', 'hv_bus': 'ST2_HV', 'lv_bus': 'ST2_LV'})
+    site['converters'].append({'id': 'PCS2', 'bus': 'ST2_LV', 's_rated_mva': 5.0, 'control': 'grid_forming_vsm'})
+    site['islands'][0]['energized_source_ids'].append('PCS2')
+    return site
+
+
+def test_a_tie_that_fails_to_close():
+    """Board 1 faults: the IT board is left with group 2 and no forming source. Closing the tie to station 2 brings
+    it back short only 5 MW; if the tie fails to close, all 15 MW stay out to the repair - 10 MW more for 48 h less
+    the restoration, at lam_zone x p_fc."""
+    events, _, p = rel.enumerate_events(_with_a_tie(), PARAMS)
+    (e,) = [x for x in events if x['class'] == 'close' and x['zone'] == 'MV1']
+    assert e['freq'] == pytest.approx(p['lam_zone'] * p['p_fc'])
+    assert e['also'] == ['CB_23']
+    assert e['it_hot'] == pytest.approx(10.0 * (48 - H_REST))
+
+
 def test_the_workbook_rebuilds_each_frequency_from_the_inputs():
     result = rel.evaluate(_island(), PARAMS)
     wb = openpyxl.load_workbook(io.BytesIO(rel.workbook(result, 'two boards')))
@@ -157,7 +193,7 @@ def test_c003_reference_through_the_route(client, quiet):
     wb = openpyxl.load_workbook(io.BytesIO(base64.b64decode(out['workbook_xlsx_b64'])))
     ev = wb['Events']
     classes = [ev.cell(row=r, column=1).value for r in range(2, ev.max_row + 1)]
-    assert sum(c in ('zone', 'stuck', 'relay', 'maint', 'blackout') for c in classes) == len(out['events'])
+    assert sum(c in ('zone', 'stuck', 'relay', 'maint', 'close', 'overlap', 'blackout') for c in classes) == len(out['events'])
 
 
 def _two_designs(capex_b=1.0):
@@ -223,7 +259,7 @@ def test_c003_reference_compared_and_swept_through_the_route(client, quiet):
     assert rows[1]['designs']['Copy']['it_mwh_yr'] <= rows[0]['designs']['Copy']['it_mwh_yr']
     wb = openpyxl.load_workbook(io.BytesIO(base64.b64decode(out['workbook_xlsx_b64'])))
     assert wb.sheetnames == ['Inputs', 'Events', 'Summary', 'Comparison', 'Sweep']
-    assert wb['Comparison']['C5'].value == '=Summary!$C$9'
+    assert wb['Comparison']['C5'].value == '=Summary!$C$11'
     assert wb['Comparison']['J6'].value.startswith('=RANK(H6')
 
 
