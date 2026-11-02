@@ -325,3 +325,32 @@ def test_c003_reference_monte_carlo_through_the_route(client, quiet):
     assert mc['expected']['it_mwh_yr'] < mc['analytic']['it_mwh_yr']
     wb = openpyxl.load_workbook(io.BytesIO(base64.b64decode(out['workbook_xlsx_b64'])))
     assert wb.sheetnames[-1] == 'Monte Carlo'
+
+
+def test_monte_carlo_series_from_a_time_series_run():
+    """Series in place of profiles: the IT load at 7.5 MW every hour is the half-loaded island's enumeration; the
+    station's battery at its floor every hour is the enumeration without storage."""
+    half = _island()
+    half['loads'][0]['p_mw'] = 7.5
+    mc = rel.monte_carlo(_island(), PARAMS, years=10, load_series={'IT': [7.5] * 24})
+    assert mc['expected']['it_mwh_yr'] == pytest.approx(rel.evaluate(half, PARAMS)['it_mwh_yr'], rel=1e-9)
+    mc = rel.monte_carlo(_island(), PARAMS, years=10, storage_series={'PCS1': [0.0] * 24})
+    assert mc['expected']['it_mwh_yr'] == pytest.approx(rel.evaluate(_island(), {**PARAMS, 'storage_mwh': 0.0})['it_mwh_yr'],
+                                                        rel=1e-9)
+    assert mc['profiles']['from_time_series'] == ['PCS1']
+
+
+def test_a_time_series_run_mapped_onto_the_drawing():
+    """C003 rev C.2: each battery's charge above its floor lands on the grid-forming PCS it sits behind (635 kWh at
+    65 % with a 10 % floor: 0.349 MWh), each load's MW on its own name; quarter-hour steps averaged to hours; what
+    the drawing does not have is named."""
+    pay, _ = _c003_study()
+    bats = [v for v in pay.values() if isinstance(v, dict) and str(v.get('typ', '')).startswith('Battery')]
+    ts = {'time_step_s': 900,
+          'stores': {b['name']: {'id': b['id'], 'soc': [60.0, 70.0] * 2} for b in bats} | {'mxCell_X': {'soc': [50]}},
+          'loads': {'mxCell_958': {'id': 'mxCell_958', 'p_mw': [10.0, 12.0, 14.0, 16.0]}}}
+    loads, storage, notes = rel.time_series_inputs(ts, pay)
+    assert sorted(storage) == ['PCS1', 'PCS2', 'PCS3', 'PCS4', 'PCS5', 'PCS6']
+    assert storage['PCS1'] == pytest.approx([0.55 * 0.635])
+    assert loads == {'IT_cordA': [13.0]}
+    assert notes == ['store mxCell_X: no battery behind a PCS on this drawing']

@@ -1392,7 +1392,9 @@ def simulation():
                             'repair': 'fixed' if str(p_in.get('mc_repair')) == 'fixed' else 'exponential',
                             'recharge_h': float(p_in.get('mc_recharge_h') or 0),
                             'it_profile': numbers(p_in.get('mc_it_profile')),
-                            'storage_profile': numbers(p_in.get('mc_storage_profile'))})
+                            'storage_profile': numbers(p_in.get('mc_storage_profile')),
+                            # the last time-series run of this drawing, when the dialog takes its profiles from it
+                            'time_series': p_in.get('mc_time_series') if isinstance(p_in.get('mc_time_series'), dict) else None})
                 except (KeyError, ValueError, TypeError, StopIteration) as e:
                     return jsonify({'error': True, 'message': f'The reliability study could not read the network: '
                                     f'{type(e).__name__}: {e}'}), 400

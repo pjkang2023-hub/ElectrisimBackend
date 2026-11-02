@@ -480,7 +480,7 @@ def _profile(values, n=8760):
 
 
 def monte_carlo(site, params=None, state_id='NORMAL', years=10000, seed=1, it_profile=None, storage_profile=None,
-                recharge_h=0.0, repair='exponential'):
+                recharge_h=0.0, repair='exponential', load_series=None, storage_series=None, max_states=400):
     """
     A sequential Monte Carlo of the enumerated events through simulated years. Each event recurs at its frequency
     (a Poisson process); one that falls at hour h meets the IT load of that hour (it_profile: the hourly scale on
@@ -488,6 +488,11 @@ def monte_carlo(site, params=None, state_id='NORMAL', years=10000, seed=1, it_pr
     availability (storage_profile: the state of charge above the set-point, as a share), less what earlier events
     took and recharge_h has not yet put back (0: back at once). Its repair lasts the mean (repair 'fixed') or an
     exponential draw with that mean; its sources cold-restart with probability p_cold.
+
+    From a time-series study instead: load_series (each load's MW by hour, by its Site id: the IT's hourly scale is
+    their IT sum against the drawn IT) and storage_series (each grid-forming unit's MWh by hour above its battery's
+    floor, by its Site id); a unit or load without one keeps the profile. The expectation then runs over the year's
+    distinct (load, storage) states, up to max_states of them (beyond, max_states hours spread over the year).
 
     Returns the exact expected energy not served over the profiles (no sampling: each event averaged over the
     hours' load and storage, full and with its mean repair) beside the enumeration's, and from the simulation the
@@ -504,6 +509,19 @@ def monte_carlo(site, params=None, state_id='NORMAL', years=10000, seed=1, it_pr
     cap = p['storage_mwh']
     units = sorted(x for x in net.forming & net.on if x in net.converter_ids) if p['forming_storage_backed'] else []
     s_prof, f_prof = _profile(it_profile), _profile(storage_profile)
+    series = {u: _profile(v) for u, v in (storage_series or {}).items() if u in units and v}
+    if load_series:
+        drawn = {lid: net.loads[lid]['p_mw'] for lid in net.it if lid in net.loads}
+        given = {lid: _profile(v) for lid, v in load_series.items() if lid in drawn and v}
+        if given and sum(drawn.values()) > 0:
+            s_prof = [sum(given[l][h] if l in given else drawn[l] for l in drawn) / sum(drawn.values())
+                      for h in range(8760)]
+    cap_u = {u: max(series[u]) if u in series else cap for u in units}
+
+    def stored(u, h):
+        # what a unit holds above its floor at hour h, before earlier events' draw
+        return series[u][h] if u in series else cap * f_prof[h]
+
     s_max = max(s_prof)
     zero = {u: 0.0 for u in units}
     # an event that loses nothing at the highest load with no storage at all can never lose anything
@@ -512,22 +530,30 @@ def monte_carlo(site, params=None, state_id='NORMAL', years=10000, seed=1, it_pr
         sum(_replay(net, e['recipe'], 'hot', 3.0, s_max, zero, None)) > 1e-9)]
     p_cold = p['p_cold']
 
-    # exact expectation over the profiles: each event at every (load, storage) pair the year has, weighted by hours
-    pairs = {}
-    for h in range(8760):
-        key = (round(s_prof[h], 3), round(f_prof[h], 3))
-        pairs[key] = pairs.get(key, 0) + 1
+    # exact expectation over the profiles: each event at every (load, storage) state the year has, weighted by hours
+    def states(hours):
+        out = {}
+        for h in hours:
+            key = (round(s_prof[h], 3),) + tuple(round(stored(u, h), 4) for u in units)
+            out[key] = out.get(key, 0) + 1
+        return out
+
+    pairs = states(range(8760))
+    exact = len(pairs) <= max_states
+    if not exact:
+        pairs = states(int(i * 8760 / max_states) for i in range(max_states))
+    weight = sum(pairs.values())
     exp_it = exp_aux = 0.0
     for e in live:
         it = aux = 0.0
-        for (sc, fr), n in pairs.items():
-            avail = {u: cap * fr for u in units}
-            hi, ha = _replay(net, e['recipe'], 'hot', 1.0, sc, avail, None)
-            ci, _ = _replay(net, e['recipe'], 'cold', 1.0, sc, avail, None)
+        for key, n in pairs.items():
+            avail = dict(zip(units, key[1:]))
+            hi, ha = _replay(net, e['recipe'], 'hot', 1.0, key[0], avail, None)
+            ci, _ = _replay(net, e['recipe'], 'cold', 1.0, key[0], avail, None)
             it += n * ((1 - p_cold) * hi + p_cold * ci)
             aux += n * ha
-        exp_it += e['freq'] * it / 8760
-        exp_aux += e['freq'] * aux / 8760
+        exp_it += e['freq'] * it / weight
+        exp_aux += e['freq'] * aux / weight
     analytic = {'it_mwh_yr': sum(e['freq'] * ((1 - p_cold) * e['it_hot'] + p_cold * e['it_cold']) for e in events),
                 'aux_mwh_yr': sum(e['freq'] * e['aux'] for e in events)}
 
@@ -550,11 +576,12 @@ def monte_carlo(site, params=None, state_id='NORMAL', years=10000, seed=1, it_pr
         n_y = 0
         for t in sorted(rng.random() * 8760 for _ in range(n)):
             t_abs = y * 8760 + t
-            back = cap * (t_abs - t_last) / recharge_h if recharge_h and recharge_h > 0 else math.inf
-            deficit = {u: max(0.0, d - back) for u, d in deficit.items()}
+            dt = t_abs - t_last
+            deficit = {u: max(0.0, d - (cap_u[u] * dt / recharge_h if recharge_h and recharge_h > 0 else math.inf))
+                       for u, d in deficit.items()}
             t_last = t_abs
             h = int(t) % 8760
-            avail = {u: max(0.0, cap * f_prof[h] - deficit[u]) for u in units}
+            avail = {u: max(0.0, stored(u, h) - deficit[u]) for u in units}
             e = live[min(bisect.bisect_left(cum, rng.random() * lam_total), len(live) - 1)]
             k = rng.expovariate(1.0) if repair == 'exponential' else 1.0
             used = {}
@@ -593,6 +620,11 @@ def monte_carlo(site, params=None, state_id='NORMAL', years=10000, seed=1, it_pr
     return {
         'years': N, 'seed': seed, 'repair': repair, 'recharge_h': recharge_h, 'units': units,
         'events_that_can_lose': len(live), 'events_enumerated': len(events),
+        'profiles': {'it_scale_min': min(s_prof), 'it_scale_max': max(s_prof),
+                     'from_time_series': sorted(series) + (['IT load'] if load_series else []),
+                     'states': len(pairs), 'states_exact': exact,
+                     'storage_mwh_min': {u: min(series[u]) for u in series},
+                     'storage_mwh_max': {u: max(series[u]) for u in series}},
         'analytic': analytic, 'expected': {'it_mwh_yr': exp_it, 'aux_mwh_yr': exp_aux},
         'simulated': {'it_mwh_yr': mean, 'it_se': (var / N) ** 0.5, 'aux_mwh_yr': sum(year_aux) / N,
                       'p50': pct(0.5), 'p90': pct(0.9), 'p99': pct(0.99), 'p999': pct(0.999), 'worst': srt[-1],
@@ -602,6 +634,62 @@ def monte_carlo(site, params=None, state_id='NORMAL', years=10000, seed=1, it_pr
                       'interruption_p90_mwh': sizes[min(len(sizes) - 1, int(0.9 * len(sizes)))] if sizes else 0.0,
                       'by_class': by_class, 'histogram': hist},
     }
+
+
+def _hourly(values, step_s):
+    """A series at step_s seconds as one value an hour (each hour's mean; a step longer than an hour repeated)."""
+    vals = [float(v) for v in values if v is not None]
+    if not vals:
+        return []
+    step = float(step_s or 3600.0)
+    hours = max(1, int(round(len(vals) * step / 3600.0)))
+    out = []
+    for h in range(hours):
+        a = int(h * 3600.0 / step)
+        b = max(a + 1, int((h + 1) * 3600.0 / step))
+        part = vals[a:b] or [vals[-1]]
+        out.append(sum(part) / len(part))
+    return out
+
+
+def time_series_inputs(ts, payload):
+    """
+    The Monte Carlo's series from a time-series run of the same drawing: ts {'time_step_s', 'stores': {battery cell
+    name: {'id', 'soc': [% at each step's end]}}, 'loads': {load cell name: {'id', 'p_mw': [MW each step]}}}. Each
+    battery's charge above its window's floor (soc_min_percent of capacity_kwh) becomes the storage of the
+    grid-forming PCS it sits behind, by that PCS's Site id; each load's MW its own, by its Site id. Returns
+    (load_series, storage_series, notes) - the notes name what could not be matched.
+    """
+    from mgtwin_site_io import _first, _kind
+
+    step = ts.get('time_step_s') or 3600.0
+    cells = [v for v in payload.values() if isinstance(v, dict) and _kind(v)]
+    key = lambda v: {str(v.get('name')), str(v.get('id'))}  # noqa: E731 - a cell is known by its name or its id
+    batteries = [v for v in cells if _kind(v) == 'Battery']
+    pcs_of = {str(v.get('der')): v for v in cells if _kind(v) == 'PCS' and v.get('der')}
+    storage, notes = {}, []
+    for name, rec in (ts.get('stores') or {}).items():
+        b = next((v for v in batteries if {str(name), str(rec.get('id'))} & key(v)), None)
+        pcs = pcs_of.get(str(b.get('name'))) if b else None
+        if pcs is None:
+            notes.append(f"store {rec.get('label') or name}: no battery behind a PCS on this drawing")
+            continue
+        if str(pcs.get('control')) != 'grid_forming':
+            continue
+        cap = float(b.get('capacity_kwh') or 0) / 1e3
+        floor = float(b.get('soc_min_percent') or 0)
+        storage[_first(pcs.get('userFriendlyName'))] = _hourly(
+            [max(0.0, (float(x) - floor) / 100.0 * cap) for x in rec.get('soc') or [] if x is not None], step)
+    loads = {}
+    for name, rec in (ts.get('loads') or {}).items():
+        v = next((c for c in cells if _kind(c) == 'Load' and {str(name), str(rec.get('id'))} & key(c)), None)
+        if v is None:
+            notes.append(f"load {name}: not on this drawing")
+            continue
+        loads[_first(v.get('userFriendlyName'))] = _hourly(rec.get('p_mw') or [], step)
+    if ts.get('stores') and not storage:
+        notes.append('no grid-forming battery of this drawing was in the time-series run')
+    return loads, storage, notes
 
 
 def _poisson(rng, lam):
@@ -1077,7 +1165,13 @@ def study(payload, params=None, template=None, state_id=None, designs=None, swee
             sweep = {'param': sweep['param'], 'values': sweep_values(sweep['param'], sweep.get('values'), base)}
         result['comparison'] = compare(entries, user, sweep, crf)
     if mc and int(mc.get('years') or 0) > 0:
+        mc = dict(mc)
+        ts = mc.pop('time_series', None)
+        notes = []
+        if ts:
+            mc['load_series'], mc['storage_series'], notes = time_series_inputs(ts, payload)
         result['monte_carlo'] = monte_carlo(site, dict(drawn, **params), state, **mc)
+        result['monte_carlo']['time_series_notes'] = notes
     result['workbook_xlsx_b64'] = base64.b64encode(workbook(result, f'Reliability - {state}')).decode('ascii')
     result['error'] = False
     return result
