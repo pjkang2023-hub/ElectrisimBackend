@@ -1352,9 +1352,38 @@ def simulation():
                 pairs = [[t.strip() for t in grp.split('+') if t.strip()] for grp in split(p_in.get('transfer_groups'))]
                 if pairs:
                     rel_params['transfer_groups'] = [grp for grp in pairs if len(grp) > 1]
+
+                def own_inputs(text):
+                    # a design's own inputs, 'storage_mwh=0.0635; black_start_steps=1; transfer_groups=A1+B1, A2+B2'
+                    # (a switch: true / false; its IT loads and dual-cord pairs as in the dialog)
+                    out = {}
+                    for item in str(text or '').split(';'):
+                        if '=' not in item:
+                            continue
+                        k, v = (t.strip() for t in item.split('=', 1))
+                        if k == 'it_loads':
+                            out[k] = [t.strip() for t in v.split(',') if t.strip()]
+                        elif k == 'transfer_groups':
+                            out[k] = [grp for grp in ([t.strip() for t in pair.split('+') if t.strip()]
+                                                      for pair in v.split(',')) if len(grp) > 1]
+                        elif k in reliability_electrisim.BOOLEAN:
+                            out[k] = v.lower() in ('true', '1', 'yes', 'on')
+                        elif k in reliability_electrisim.SWEEPABLE or k in ('p_forming_mw', 'p_following_mw'):
+                            out[k] = int(float(v)) if k == 'black_start_steps' else float(v)
+                    return out
+
+                sweep = {'param': str(p_in.get('sweep_param') or '').strip(), 'values': p_in.get('sweep_values')}
+                if sweep['param'] and sweep['param'] not in reliability_electrisim.SWEEPABLE:
+                    return jsonify({'error': True, 'message': f"No sweep of '{sweep['param']}'"}), 400
                 try:
-                    result = reliability_electrisim.study(in_data, rel_params, getattr(g, 'mgtwin_site', None),
-                                                          getattr(g, 'mgtwin_state_id', None))
+                    # other pages of the drawing, as designs set beside this one, and one input swept across them
+                    designs = [{'name': d.get('name'), 'payload': d.get('network') or {},
+                                'capex_meur': float(d.get('capex_meur') or 0), 'params': own_inputs(d.get('own_inputs'))}
+                               for d in (p_in.get('designs') or []) if isinstance(d, dict)]
+                    result = reliability_electrisim.study(
+                        in_data, rel_params, getattr(g, 'mgtwin_site', None), getattr(g, 'mgtwin_state_id', None),
+                        designs=designs, sweep=sweep, crf=float(p_in.get('crf') or 0.08),
+                        capex_meur=float(p_in.get('capex_meur') or 0), title=str(p_in.get('page_name') or 'This page'))
                 except (KeyError, ValueError, TypeError, StopIteration) as e:
                     return jsonify({'error': True, 'message': f'The reliability study could not read the network: '
                                     f'{type(e).__name__}: {e}'}), 400

@@ -484,33 +484,226 @@ def workbook(result, title='Reliability'):
     sm.cell(row=t + 2, column=1, value='Events with no energy not served are left out: their rates move nothing.')
     for j, w in enumerate([12, 10, 20, 20, 16], 1):
         sm.column_dimensions[get_column_letter(j)].width = w
+    if result.get('comparison'):
+        _comparison_sheets(wb, result, R, t, head, fill, edit)
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
 
 
-def study(payload, params=None, template=None, state_id=None):
+def _comparison_sheets(wb, result, R, total_row, head, fill, edit):
+    """The comparison (Comparison: the base's energy from Summary, live; its cost, annualised capex, total, rank and
+    break-even capex as formulas on the capital recovery factor and the capexes, both editable) and the sweep
+    (Sweep: the totals, ranking and tie-points as the study found them)."""
+    from openpyxl.styles import Font
+    from openpyxl.utils import get_column_letter
+
+    cmp_ = result['comparison']
+    ws = wb.create_sheet('Comparison')
+    ws['A1'] = 'Designs on one table - lowest total first (blue cells are editable)'
+    ws['A1'].font = Font(bold=True, size=12)
+    ws['A2'] = 'Capital recovery factor /yr'
+    ws['B2'] = cmp_['crf']
+    ws['B2'].font = edit
+    cols = ['Design', 'State', 'IT MWh/yr', 'Aux MWh/yr', 'Cost kEUR/yr', 'Capex MEUR', 'Annualised capex kEUR/yr',
+            'Total kEUR/yr', 'Total vs base kEUR/yr', 'Rank', 'Break-even capex MEUR']
+    for j, h in enumerate(cols, 1):
+        c = ws.cell(row=4, column=j, value=h)
+        c.font, c.fill = head, fill
+    n = len(cmp_['designs'])
+    last = 4 + n
+    for r, d in enumerate(cmp_['designs'], 5):
+        base = r == 5
+        row = [d['name'], d['state'],
+               f'=Summary!$C${total_row}' if base else round(d['it_mwh_yr'], 6),
+               f'=Summary!$D${total_row}' if base else round(d['aux_mwh_yr'], 6),
+               f"=(C{r}*{R['voll_it']}+D{r}*{R['voll_aux']})/1000", d['capex_meur'], f'=F{r}*$B$2*1000',
+               f'=E{r}+G{r}', f'=H{r}-$H$5', f'=RANK(H{r},$H$5:$H${last},1)',
+               f'=IF($B$2>0,($H$5-E{r})/($B$2*1000),"")']
+        for j, v in enumerate(row, 1):
+            c = ws.cell(row=r, column=j, value=v)
+            if j == 6:
+                c.font = edit
+    ws.cell(row=last + 2, column=1, value='The base (first row) takes its energy not served from the Summary sheet, so it '
+            'follows the Inputs; the other designs\' energy is as the study found it at these inputs.')
+    ws.cell(row=last + 3, column=1, value='Break-even capex: the capex at which the design\'s total equals the base\'s.')
+    for j, w in enumerate([22, 12, 12, 12, 14, 12, 16, 14, 16, 8, 18], 1):
+        ws.column_dimensions[get_column_letter(j)].width = w
+
+    sw = cmp_.get('sweep')
+    if not sw:
+        return
+    names = [d['name'] for d in cmp_['designs']]
+    ss = wb.create_sheet('Sweep')
+    ss['A1'] = f"Sensitivity: {sw['param']} - {sw['label']} (base value {sw['base_value']})"
+    ss['A1'].font = Font(bold=True, size=12)
+    cols = [sw['param']] + [f'{n} total vs base kEUR/yr' for n in names] + ['Ranking (lowest total first)'] + \
+           [f'{n} IT MWh/yr' for n in names]
+    for j, h in enumerate(cols, 1):
+        c = ss.cell(row=3, column=j, value=h)
+        c.font, c.fill = head, fill
+    for r, row in enumerate(sw['rows'], 4):
+        vals = [row['value']] + [round(row['designs'][n]['total_vs_base_keur_yr'], 3) for n in names] + \
+               [' < '.join(row['ranking'])] + [round(row['designs'][n]['it_mwh_yr'], 6) for n in names]
+        for j, v in enumerate(vals, 1):
+            ss.cell(row=r, column=j, value=v)
+    t = 4 + len(sw['rows']) + 1
+    ss.cell(row=t, column=1, value='Tie-points (where two designs\' totals cross; linear between the swept values)').font = Font(bold=True)
+    if not sw['tie_points']:
+        ss.cell(row=t + 1, column=1, value='None: the ranking holds over the swept range.')
+    for i, tp in enumerate(sw['tie_points'], t + 1):
+        ss.cell(row=i, column=1, value=round(tp['value'], 6))
+        ss.cell(row=i, column=2, value=f"{tp['below']} is cheaper below, {tp['above']} above")
+    ss.column_dimensions['A'].width = 16
+    for j in range(2, len(cols) + 1):
+        ss.column_dimensions[get_column_letter(j)].width = 18
+
+
+#: the inputs a sensitivity sweep may move, with what they are; the pricing ones (values of lost load, the capital
+#: recovery factor) only re-price the events, every other one re-runs the enumeration
+SWEEPABLE = {
+    'lam_zone': 'bus section of a zone (/yr)', 'lam_tx': 'transformer with its tap (/yr)',
+    'lam_cab_km': 'cable (/km-yr)', 't_rep_h': 'repair time (h)', 'restore_min': 'restoration by switching (min)',
+    'p_bf': 'breaker fails to open (per demand)', 'p_rf': 'main protection fails (per demand)',
+    'dup_87': 'duplicated main protection (0 / 1)', 'beta_cc': 'common-cause share of main-protection failures',
+    't_maint_h': 'maintenance per breaker (h/yr)', 'maint_restore_h': 'breaker back from maintenance (h)',
+    'include_maintenance': 'maintenance overlap counted (0 / 1)', 'storage_mwh': 'storage per grid-forming unit (MWh)',
+    'forming_storage_backed': 'grid-forming units storage-backed (0 / 1)', 'p_vrt': 'share of backup clearances that trip the fleet',
+    'recoverable_factor': 'load the forming units recover (x MVA)', 't_rt_min': 'fleet back from hot standby (min)',
+    'p_cold': 'share of events with a cold restart', 't_cold_h': 'cold restart (h)', 'ups_min': 'UPS ride-through (min)',
+    'aux_shed_max_h': 'auxiliaries shed up to (h)', 'lam_bo': 'total blackouts (/yr)', 'p_step': 'black-start step fails',
+    'black_start_steps': 'black-start steps', 't_man_h': 'manual recovery (h)',
+    'voll_it': 'value of lost IT load (EUR/MWh)', 'voll_aux': 'value of lost auxiliary load (EUR/MWh)',
+    'crf': 'capital recovery factor (/yr)',
+}
+PRICING = ('voll_it', 'voll_aux', 'crf')
+BOOLEAN = ('dup_87', 'include_maintenance', 'forming_storage_backed', 'backup_trips_gfl')
+
+
+def sweep_values(name, text, base):
+    """The values a sweep runs: numbers, or multiples of the base value written x0.5 (blank: x0.5, x1, x2; a
+    switch: off and on)."""
+    if name in BOOLEAN:
+        return [0.0, 1.0]
+    tokens = [t.strip() for t in str(text or '').replace(';', ',').split(',') if t.strip()] or ['x0.5', 'x1', 'x2']
+    out = []
+    for t in tokens:
+        out.append(float(t[1:]) * float(base) if t[0] in 'x*' else float(t))
+    if name == 'black_start_steps':
+        out = [float(round(v)) for v in out]
+    return sorted(set(out))
+
+
+def _priced(r, p, capex_meur):
+    cost = (r['it_mwh_yr'] * p['voll_it'] + r['aux_mwh_yr'] * p['voll_aux']) / 1000
+    capex_keur = (capex_meur or 0.0) * p['crf'] * 1000
+    return {'it_mwh_yr': r['it_mwh_yr'], 'aux_mwh_yr': r['aux_mwh_yr'], 'cost_keur_yr': cost,
+            'capex_keur_yr': capex_keur, 'total_keur_yr': cost + capex_keur}
+
+
+def compare(designs, params=None, sweep=None, crf=0.08):
     """
-    The study on a drawn network: the payload (already in its operating state) as a Site - its template's states
-    and converter classes when one is given, else the state as drawn - its cables' lengths and its grid's bus from
-    the drawing; the evaluation; each event's buses and breakers as the drawing's cell ids; the live workbook as
-    base64. Returns a dict for JSON.
+    Several designs on one table, and one input swept across them. designs: [{'name', 'site', 'state',
+    'capex_meur', 'params'}], the first the base. Each design's expected IT and auxiliary energy not served, their
+    cost, its annualised capex (capex x crf), its total against the base and its rank (lowest total first), and the
+    capex at which it would tie with the base; then, with sweep ({'param', 'values'}), the same totals and ranking at
+    every value and the tie-points - where two designs' totals cross between two values (linear between them).
     """
-    import base64
+    params = dict(params or {})
+    base_p = dict(DEFAULTS, **params, crf=crf)
+    names = [d['name'] for d in designs]
+
+    def run(over):
+        p = dict(base_p, **over)
+        p_eval = {k: v for k, v in p.items() if k != 'crf'}
+        out = {}
+        for d in designs:
+            if all(k in PRICING for k in over):
+                r = first[d['name']]
+            else:
+                # the swept input holds for every design, over the inputs a design has of its own
+                r = evaluate(d['site'], {**p_eval, **d.get('params', {}), **over}, d['state'])
+            out[d['name']] = dict(_priced(r, p, d.get('capex_meur')), zones=r['zones'],
+                                  events_enumerated=r['events_enumerated'])
+        base_total = out[names[0]]['total_keur_yr']
+        order = sorted(names, key=lambda n: out[n]['total_keur_yr'])
+        for n in names:
+            out[n]['total_vs_base_keur_yr'] = out[n]['total_keur_yr'] - base_total
+            out[n]['rank'] = order.index(n) + 1
+        return out, order
+
+    first = {}
+    for d in designs:
+        first[d['name']] = evaluate(d['site'], dict({k: v for k, v in base_p.items() if k != 'crf'},
+                                                    **d.get('params', {})), d['state'])
+    table, order = run({})
+    base = table[names[0]]
+    rows = []
+    for d in designs:
+        t = table[d['name']]
+        # the capex at which this design's total equals the base's
+        t['break_even_capex_meur'] = ((base['total_keur_yr'] - t['cost_keur_yr']) / (crf * 1000)) if crf > 0 else None
+        rows.append(dict(t, name=d['name'], state=d['state'], capex_meur=d.get('capex_meur') or 0.0,
+                         it_loads=d.get('params', {}).get('it_loads'), notes=d.get('notes', [])))
+    out = {'crf': crf, 'base': names[0], 'designs': rows, 'ranking': order}
+    if sweep and sweep.get('param'):
+        name = sweep['param']
+        values = sweep['values']
+        srows = []
+        for v in values:
+            val = bool(v) if name in BOOLEAN else (int(v) if name == 'black_start_steps' else v)
+            res, rk = run({name: val})
+            srows.append({'value': v, 'designs': res, 'ranking': rk})
+        ties = []
+        for a_i, a in enumerate(names):
+            for b in names[a_i + 1:]:
+                for r0, r1 in zip(srows, srows[1:]):
+                    d0 = r0['designs'][a]['total_keur_yr'] - r0['designs'][b]['total_keur_yr']
+                    d1 = r1['designs'][a]['total_keur_yr'] - r1['designs'][b]['total_keur_yr']
+                    if d0 * d1 < 0:
+                        x = r0['value'] + (r1['value'] - r0['value']) * d0 / (d0 - d1)
+                        ties.append({'a': a, 'b': b, 'value': x,
+                                     'below': a if d0 < 0 else b, 'above': b if d0 < 0 else a})
+        out['sweep'] = {'param': name, 'label': SWEEPABLE.get(name, name), 'base_value': base_p.get(name),
+                        'rows': srows, 'tie_points': ties}
+    return out
+
+
+def _design_notes(site, p):
+    """What a design's inputs say that its drawing does not bear out: IT loads or dual-cord pairs it does not have."""
+    have = {l['id'] for l in site['loads']}
+    notes = []
+    if p.get('it_loads') and not set(p['it_loads']) & have:
+        notes.append('none of the IT loads named is on it')
+    groups = p.get('transfer_groups') or ()
+    if groups and not any(len(set(g) & have) > 1 for g in groups):
+        notes.append('its dual-cord pairs name none of its loads: no cord moves to its partner')
+    return notes
+
+
+def _fit_it_loads(site, it_loads):
+    """A design's IT loads: the names given that it has; none of them - its critical loads above 5 MW."""
+    if not it_loads:
+        return None
+    have = {l['id'] for l in site['loads']}
+    mine = [x for x in it_loads if x in have]
+    return mine or None
+
+
+def _drawn(payload, template=None, state_id=None):
+    """A drawn network as a Site - its template's states and converter classes when one is given, else the state as
+    drawn - with what the drawing itself says: its cables' lengths, its grid's buses, each element's own failure
+    data (rel_failure_rate per year for the whole element, rel_repair_h, and a breaker's rel_p_fail_open per
+    demand). Returns (site, state, those params, the payload's element cells, the cell naming)."""
     from mgtwin_site_io import _kind, payload_to_site
 
-    params = dict(params or {})
     site = payload_to_site(payload, 'DRAWN', template=template)
     state = state_id if template is not None and any(i['id'] == state_id for i in site['islands']) else 'AS_DRAWN'
     cells = [v for v in payload.values() if isinstance(v, dict) and _kind(v)]
     name = lambda v: str(v.get('userFriendlyName') or v.get('name'))  # noqa: E731 - the Site's own naming
     bus_id = {v['name']: name(v) for v in cells if _kind(v) == 'Bus'}
-    params.setdefault('cable_km', {name(v): float(v.get('length_km') or 0) for v in cells if _kind(v) == 'Line'})
-    params.setdefault('grid_buses', [bus_id[v['bus']] for v in cells if _kind(v) == 'External Grid' and v.get('bus') in bus_id])
-    if not params.get('it_loads'):
-        params.pop('it_loads', None)
-    # each element's own failure data, where the drawing gives it (rel_failure_rate per year for the whole element,
-    # rel_repair_h, and a breaker's rel_p_fail_open per demand)
+    drawn = {'cable_km': {name(v): float(v.get('length_km') or 0) for v in cells if _kind(v) == 'Line'},
+             'grid_buses': [bus_id[v['bus']] for v in cells if _kind(v) == 'External Grid' and v.get('bus') in bus_id]}
     data = {}
     for v in cells:
         if _kind(v) not in ('Bus', 'Switch', 'Transformer', 'Line'):
@@ -525,13 +718,47 @@ def study(payload, params=None, template=None, state_id=None):
         if d:
             data[name(v)] = d
     if data:
-        params.setdefault('element_data', data)
-    result = evaluate(site, params, state)
-    cell_of = {name(v): v.get('id') for v in cells if _kind(v) in ('Bus', 'Switch', 'Transformer', 'Line')}
+        drawn['element_data'] = data
+    elements = [v for v in cells if _kind(v) in ('Bus', 'Switch', 'Transformer', 'Line')]
+    return site, state, drawn, elements, name
+
+
+def study(payload, params=None, template=None, state_id=None, designs=None, sweep=None, crf=0.08,
+          capex_meur=0.0, title='This page'):
+    """
+    The study on a drawn network: the payload (already in its operating state) evaluated; each event's buses and
+    breakers as the drawing's cell ids; the live workbook as base64. With designs ([{'name', 'payload',
+    'capex_meur', 'params'}], other drawings, each as drawn, params the inputs it has of its own) or a sweep
+    ({'param', 'values'}), the comparison too - this drawing the base (its capex capex_meur), the others against it.
+    Returns a dict for JSON.
+    """
+    import base64
+
+    params = dict(params or {})
+    if not params.get('it_loads'):
+        params.pop('it_loads', None)
+    site, state, drawn, elements, name = _drawn(payload, template, state_id)
+    result = evaluate(site, dict(drawn, **params), state)
+    cell_of = {name(v): v.get('id') for v in elements}
     for e in result['events']:
         e['cells'] = sorted({cell_of[x] for x in e['buses'] + e['breakers'] + e['also'] if cell_of.get(x)})
         e['also_cells'] = sorted({cell_of[x] for x in e['also'] if cell_of.get(x)})
     result['state'] = state
+    if designs or (sweep and sweep.get('param')):
+        user = {k: v for k, v in params.items() if k not in ('cable_km', 'grid_buses', 'element_data')}
+        entries = [{'name': title, 'site': site, 'state': state, 'capex_meur': capex_meur, 'params': drawn}]
+        for i, d in enumerate(designs or []):
+            s, st, dr, _, _ = _drawn(d['payload'])
+            fitted = _fit_it_loads(s, params.get('it_loads'))
+            entries.append({'name': str(d.get('name') or f'Design {i + 2}'), 'site': s, 'state': st,
+                            'capex_meur': float(d.get('capex_meur') or 0.0),
+                            'params': {**dr, 'it_loads': fitted, **(d.get('params') or {})}})
+        for e in entries:
+            e['notes'] = _design_notes(e['site'], {**user, **e['params']})
+        if sweep and sweep.get('param'):
+            base = dict(DEFAULTS, crf=crf, **user).get(sweep['param'])
+            sweep = {'param': sweep['param'], 'values': sweep_values(sweep['param'], sweep.get('values'), base)}
+        result['comparison'] = compare(entries, user, sweep, crf)
     result['workbook_xlsx_b64'] = base64.b64encode(workbook(result, f'Reliability - {state}')).decode('ascii')
     result['error'] = False
     return result

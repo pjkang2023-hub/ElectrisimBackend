@@ -158,3 +158,78 @@ def test_c003_reference_through_the_route(client, quiet):
     ev = wb['Events']
     classes = [ev.cell(row=r, column=1).value for r in range(2, ev.max_row + 1)]
     assert sum(c in ('zone', 'stuck', 'relay', 'maint', 'blackout') for c in classes) == len(out['events'])
+
+
+def _two_designs(capex_b=1.0):
+    """The island as drawn, and the same with twice the storage at a capex: B loses less."""
+    return [{'name': 'A', 'site': _island(), 'state': 'NORMAL', 'capex_meur': 0.0, 'params': {}},
+            {'name': 'B', 'site': _island(), 'state': 'NORMAL', 'capex_meur': capex_b, 'params': {'storage_mwh': 0.508}}]
+
+
+def test_designs_on_one_table():
+    out = rel.compare(_two_designs(), PARAMS, crf=0.08)
+    a, b = out['designs']
+    assert b['it_mwh_yr'] < a['it_mwh_yr']
+    assert b['capex_keur_yr'] == pytest.approx(80.0)
+    assert b['total_vs_base_keur_yr'] == pytest.approx(b['cost_keur_yr'] + 80.0 - a['cost_keur_yr'])
+    assert b['break_even_capex_meur'] == pytest.approx((a['cost_keur_yr'] - b['cost_keur_yr']) / 80.0)
+    assert out['ranking'] == ['A', 'B'] and (a['rank'], b['rank']) == (1, 2)
+
+
+def test_a_sweep_finds_where_two_designs_tie():
+    """Swept on the capital recovery factor - pricing only: B's saving pays its annualised capex at
+    crf = saving / (capex x 1000), and the ranking turns there."""
+    base = rel.compare(_two_designs(), PARAMS, crf=0.08)['designs']
+    saving = base[0]['cost_keur_yr'] - base[1]['cost_keur_yr']
+    out = rel.compare(_two_designs(), PARAMS, {'param': 'crf', 'values': [0.0, 0.08]}, crf=0.08)
+    (tp,) = out['sweep']['tie_points']
+    assert tp['value'] == pytest.approx(saving / 1000)
+    assert (tp['below'], tp['above']) == ('B', 'A')
+    assert [r['ranking'] for r in out['sweep']['rows']] == [['B', 'A'], ['A', 'B']]
+
+
+def test_a_swept_input_holds_for_every_design():
+    out = rel.compare(_two_designs(), PARAMS, {'param': 'storage_mwh', 'values': [0.1, 1.0]}, crf=0.08)
+    for row in out['sweep']['rows']:
+        assert row['designs']['A']['it_mwh_yr'] == pytest.approx(row['designs']['B']['it_mwh_yr'])
+
+
+def test_sweep_values():
+    assert rel.sweep_values('storage_mwh', '', 0.254) == pytest.approx([0.127, 0.254, 0.508])
+    assert rel.sweep_values('lam_tx', '0.02, x0.5, 0.01', 0.01) == pytest.approx([0.005, 0.01, 0.02])
+    assert rel.sweep_values('dup_87', 'anything', True) == [0.0, 1.0]
+
+
+def test_c003_reference_compared_and_swept_through_the_route(client, quiet):
+    """C003 rev C.2 beside a copy of itself at a capex, the storage swept: the copy loses what the base loses, its
+    break-even capex is nil; the workbook gains its Comparison and Sweep sheets, the base's energy from Summary."""
+    pay, site = _c003_study(transfer_groups='IT_cordA+IT_cordB', sweep_param='storage_mwh', sweep_values='x1, x4',
+                            crf=0.1, capex_meur=0)
+    copy = {k: v for k, v in pay.items() if 'Parameters' not in str(v.get('typ', '') if isinstance(v, dict) else '')}
+    key = next(k for k, v in pay.items() if isinstance(v, dict) and 'Parameters' in str(v.get('typ', '')))
+    pay[key]['designs'] = [{'name': 'Copy', 'capex_meur': 2.0, 'network': copy, 'own_inputs': 'black_start_steps=3; transfer_groups=IT_cordA+IT_cordB'}]
+    with quiet():
+        out = json.loads(client.post('/', json={**pay, 'mgtwin_state': {'site': site, 'state_id': 'NORMAL'}})
+                         .get_data(as_text=True))
+    assert out['error'] is False
+    cmp_ = out['comparison']
+    base, other = cmp_['designs']
+    assert base['it_mwh_yr'] == pytest.approx(out['it_mwh_yr'])
+    assert other['name'] == 'Copy' and other['capex_keur_yr'] == pytest.approx(200.0)
+    assert other['it_mwh_yr'] == pytest.approx(base['it_mwh_yr']) and other['notes'] == base['notes'] == []
+    assert other['break_even_capex_meur'] == pytest.approx(0.0, abs=1e-9)
+    rows = cmp_['sweep']['rows']
+    assert [r['value'] for r in rows] == pytest.approx([0.254, 1.016])
+    assert rows[1]['designs']['Copy']['it_mwh_yr'] <= rows[0]['designs']['Copy']['it_mwh_yr']
+    wb = openpyxl.load_workbook(io.BytesIO(base64.b64decode(out['workbook_xlsx_b64'])))
+    assert wb.sheetnames == ['Inputs', 'Events', 'Summary', 'Comparison', 'Sweep']
+    assert wb['Comparison']['C5'].value == '=Summary!$C$9'
+    assert wb['Comparison']['J6'].value.startswith('=RANK(H6')
+
+
+def test_a_design_whose_inputs_name_none_of_its_loads_is_flagged():
+    site = _island()
+    assert rel._design_notes(site, {'transfer_groups': [['X_A', 'X_B']], 'it_loads': ['X_A']}) == [
+        'none of the IT loads named is on it',
+        'its dual-cord pairs name none of its loads: no cord moves to its partner']
+    assert rel._design_notes(site, {'it_loads': ['IT']}) == []
