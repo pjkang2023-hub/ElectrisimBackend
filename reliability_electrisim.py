@@ -36,6 +36,8 @@ DEFAULTS = {
     'forming_storage_backed': True, 'aux_shed_max_h': 4.0, 'maint_restore_h': 4.0,
     'p_forming_mw': None, 'p_following_mw': None, 'voll_it': 50000.0, 'voll_aux': 500.0,
     'it_loads': None, 'transfer_groups': (), 'cable_km': None, 'grid_buses': (), 'include_maintenance': True,
+    # per element, by its Site id: {'rate': per year for the whole element, 'repair_h': h, 'p_bf': per demand}
+    'element_data': None,
 }
 
 
@@ -249,11 +251,35 @@ def enumerate_events(site, params=None, state_id='NORMAL'):
     breakers = sorted({m for z in zs for m in z['members']})
     normally_open = {w['id'] for w in site['switches'] if not w.get('normally_closed', True)} - net.closed0
     p_main = p['p_rf'] * ((p['beta_cc'] + (1 - p['beta_cc']) * p['p_rf']) if p['dup_87'] else 1.0)
-    h_rest, h_rep = p['restore_min'] / 60, p['t_rep_h']
+    h_rest = p['restore_min'] / 60
     events = []
 
+    data = p['element_data'] or {}
+
+    def own(x, key):
+        v = (data.get(x) or {}).get(key)
+        return None if v is None else float(v)
+
+    def parts(z):
+        """A zone's rate in parts: what its elements' own rates give, and what is left at the defaults - its bus
+        section (unless one of its buses has its own rate), its transformers and its cables' km without one."""
+        own_rate = sum(own(x, 'rate') for x in z['buses'] + z['tx'] + z['branches'] if own(x, 'rate') is not None)
+        bus_default = 0 if any(own(b, 'rate') is not None for b in z['buses']) else 1
+        tx_default = sum(1 for t in z['tx'] if own(t, 'rate') is None)
+        km_default = sum(km.get(b, 0.0) for b in z['branches'] if own(b, 'rate') is None)
+        return own_rate, bus_default, tx_default, km_default
+
     def rate(z):
-        return p['lam_zone'] + p['lam_tx'] * len(z['tx']) + p['lam_cab_km'] * sum(km.get(b, 0.0) for b in z['branches'])
+        own_rate, bus_d, tx_d, km_d = parts(z)
+        return own_rate + p['lam_zone'] * bus_d + p['lam_tx'] * tx_d + p['lam_cab_km'] * km_d
+
+    def repair_h(z):
+        given = [own(x, 'repair_h') for x in z['buses'] + z['tx'] + z['branches'] if own(x, 'repair_h') is not None]
+        return max(given) if given else p['t_rep_h']
+
+    def p_bf(m):
+        v = own(m, 'p_bf')
+        return p['p_bf'] if v is None else v
 
     def loss(opened, dead, hours, **kw):
         return net.balance(net.islands(opened=opened, dead_buses=dead, tripped=kw.get('tripped', ())), hours,
@@ -268,10 +294,13 @@ def enumerate_events(site, params=None, state_id='NORMAL'):
             by_member.setdefault(m, []).append(z)
     for z in zs:
         lam = rate(z)
+        h_rep = repair_h(z)
         opened = set(z['members'])
         # what the drawing highlights and what the workbook rebuilds the rate from
+        own_rate, bus_d, tx_d, km_d = parts(z)
         ref = {'buses': z['buses'], 'breakers': z['members'], 'n_tx': len(z['tx']),
-               'cable_km': round(sum(km.get(b, 0.0) for b in z['branches']), 4)}
+               'cable_km': round(sum(km.get(b, 0.0) for b in z['branches']), 4), 'repair_h': h_rep,
+               'own_rate': own_rate, 'bus_default': bus_d, 'tx_default': tx_d, 'km_default': round(km_d, 4)}
         # zone: cut off until restored, the zone itself until repaired
         first = loss(opened, z['buses'], h_rest)
         after = net.balance(net.islands(opened=opened, dead_buses=z['buses']) if not normally_open else
@@ -286,7 +315,7 @@ def enumerate_events(site, params=None, state_id='NORMAL'):
             hot = extra(loss(opened | beyond, z['buses'], h_rest), first)
             cold_x = extra(loss(opened | beyond, z['buses'], p['t_cold_h']), cold)
             events.append({**ref, 'also': sorted(beyond | {m}), 'class': 'stuck', 'zone': z['id'], 'detail': m,
-                           'freq': lam * p['p_bf'],
+                           'freq': lam * p_bf(m), 'p_bf_own': own(m, 'p_bf'),
                            'it_mw': hot['it_mw'], 'aux_mw': hot['aux_mw'], 'it_hot': hot['it_mwh'],
                            'it_cold': cold_x['it_mwh'], 'aux': hot['aux_mwh']})
         # relay: the backup clears it after the ride-through; the grid-following fleet trips; the forming units
@@ -316,7 +345,8 @@ def enumerate_events(site, params=None, state_id='NORMAL'):
                                'it_mw': hot['it_mw'], 'aux_mw': hot['aux_mw'], 'it_hot': hot['it_mwh'],
                                'it_cold': cold_x['it_mwh'], 'aux': hot['aux_mwh']})
     it_total = sum(l['p_mw'] for l in site['loads'] if l['id'] in net.it)
-    events.append({'buses': [], 'breakers': [], 'also': [], 'n_tx': 0, 'cable_km': 0.0,
+    events.append({'buses': [], 'breakers': [], 'also': [], 'n_tx': 0, 'cable_km': 0.0, 'own_rate': 0.0,
+                   'bus_default': 0, 'tx_default': 0, 'km_default': 0.0, 'repair_h': None,
                    'class': 'blackout', 'zone': '-', 'detail': f"black start of {p['black_start_steps']} steps fails",
                    'freq': p['lam_bo'] * (1 - (1 - p['p_step']) ** p['black_start_steps']), 'it_mw': it_total, 'aux_mw': 0.0,
                    'it_hot': it_total * p['t_man_h'], 'it_cold': it_total * p['t_man_h'], 'aux': 0.0})
@@ -405,29 +435,33 @@ def workbook(result, title='Reliability'):
         ws.column_dimensions[get_column_letter(j)].width = w
 
     ev = wb.create_sheet('Events')
-    cols = ['Class', 'Zone', 'Detail', 'Transformers', 'Cable km', 'Frequency /yr', 'IT if hot MWh', 'IT if cold MWh',
-            'Aux MWh', 'Expected IT MWh/yr', 'Expected aux MWh/yr', 'Zone breakers', 'Also opened']
+    cols = ['Class', 'Zone', 'Detail', 'Own rates /yr', 'Bus section at default', 'Transformers at default',
+            'Cable km at default', 'Breaker p_bf (own)', 'Frequency /yr', 'IT if hot MWh', 'IT if cold MWh', 'Aux MWh',
+            'Expected IT MWh/yr', 'Expected aux MWh/yr', 'Zone breakers', 'Also opened']
     for j, h in enumerate(cols, 1):
         c = ev.cell(row=1, column=j, value=h)
         c.font, c.fill = head, fill
         c.alignment = Alignment(wrap_text=True)
     R = ref
     for r, e in enumerate(result['events'], 2):
-        rate = f"({R['lam_zone']}+{R['lam_tx']}*D{r}+{R['lam_cab_km']}*E{r})"
-        freq = {'zone': f'={rate}', 'stuck': f"={rate}*{R['p_bf']}",
+        rate = f"(D{r}+{R['lam_zone']}*E{r}+{R['lam_tx']}*F{r}+{R['lam_cab_km']}*G{r})"
+        freq = {'zone': f'={rate}', 'stuck': f"={rate}*IF(ISNUMBER(H{r}),H{r},{R['p_bf']})",
                 'relay': f"={rate}*{R['p_rf']}*IF({R['dup_87']}=1,{R['beta_cc']}+(1-{R['beta_cc']})*{R['p_rf']},1)*{R['p_vrt']}",
                 'maint': f"={rate}*{R['t_maint_h']}/8760",
                 'blackout': f"={R['lam_bo']}*(1-(1-{R['p_step']})^{R['black_start_steps']})"}[e['class']]
-        row = [e['class'], e['zone'], e['detail'], e['n_tx'], e['cable_km'], freq, round(e['it_hot'], 6),
-               round(e['it_cold'], 6), round(e['aux'], 6),
-               f"=F{r}*((1-{R['p_cold']})*G{r}+{R['p_cold']}*H{r})", f'=F{r}*I{r}',
+        row = [e['class'], e['zone'], e['detail'], e.get('own_rate', 0.0), e.get('bus_default', 1),
+               e.get('tx_default', e['n_tx']), e.get('km_default', e['cable_km']), e.get('p_bf_own'), freq,
+               round(e['it_hot'], 6), round(e['it_cold'], 6), round(e['aux'], 6),
+               f"=I{r}*((1-{R['p_cold']})*J{r}+{R['p_cold']}*K{r})", f'=I{r}*L{r}',
                ' '.join(e['breakers']), ' '.join(e['also'])]
         for j, v in enumerate(row, 1):
             ev.cell(row=r, column=j, value=v)
     last = len(result['events']) + 1
-    for j, w in enumerate([10, 34, 26, 12, 10, 14, 13, 13, 11, 16, 16, 40, 30], 1):
+    for j, w in enumerate([10, 34, 26, 12, 12, 12, 12, 12, 14, 13, 13, 11, 16, 16, 40, 30], 1):
         ev.column_dimensions[get_column_letter(j)].width = w
     ev.freeze_panes = 'D2'
+    ev.cell(row=last + 2, column=1, value='Own rates: the elements\' own failure rates (per year for the whole element) where '
+            'the drawing gives them; the defaults on the Inputs sheet cover the parts counted at default.')
 
     sm = wb.create_sheet('Summary')
     sm['A1'] = f'{title} - expected energy not served and its cost'
@@ -439,8 +473,8 @@ def workbook(result, title='Reliability'):
     for i, cl in enumerate(classes, 4):
         sm.cell(row=i, column=1, value=cl)
         sm.cell(row=i, column=2, value=f'=COUNTIF(Events!$A$2:$A${last},"{cl}")')
-        sm.cell(row=i, column=3, value=f'=SUMIF(Events!$A$2:$A${last},"{cl}",Events!$J$2:$J${last})')
-        sm.cell(row=i, column=4, value=f'=SUMIF(Events!$A$2:$A${last},"{cl}",Events!$K$2:$K${last})')
+        sm.cell(row=i, column=3, value=f'=SUMIF(Events!$A$2:$A${last},"{cl}",Events!$M$2:$M${last})')
+        sm.cell(row=i, column=4, value=f'=SUMIF(Events!$A$2:$A${last},"{cl}",Events!$N$2:$N${last})')
         sm.cell(row=i, column=5, value=f"=(C{i}*{R['voll_it']}+D{i}*{R['voll_aux']})/1000")
     t = 4 + len(classes)
     sm.cell(row=t, column=1, value='Total').font = Font(bold=True)
@@ -475,6 +509,23 @@ def study(payload, params=None, template=None, state_id=None):
     params.setdefault('grid_buses', [bus_id[v['bus']] for v in cells if _kind(v) == 'External Grid' and v.get('bus') in bus_id])
     if not params.get('it_loads'):
         params.pop('it_loads', None)
+    # each element's own failure data, where the drawing gives it (rel_failure_rate per year for the whole element,
+    # rel_repair_h, and a breaker's rel_p_fail_open per demand)
+    data = {}
+    for v in cells:
+        if _kind(v) not in ('Bus', 'Switch', 'Transformer', 'Line'):
+            continue
+        d = {}
+        for attr, key in (('rel_failure_rate', 'rate'), ('rel_repair_h', 'repair_h'), ('rel_p_fail_open', 'p_bf')):
+            try:
+                if str(v.get(attr, '')).strip() != '':
+                    d[key] = float(v[attr])
+            except (TypeError, ValueError):
+                pass
+        if d:
+            data[name(v)] = d
+    if data:
+        params.setdefault('element_data', data)
     result = evaluate(site, params, state)
     cell_of = {name(v): v.get('id') for v in cells if _kind(v) in ('Bus', 'Switch', 'Transformer', 'Line')}
     for e in result['events']:

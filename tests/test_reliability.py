@@ -94,9 +94,43 @@ def test_the_workbook_rebuilds_each_frequency_from_the_inputs():
     wb = openpyxl.load_workbook(io.BytesIO(rel.workbook(result, 'two boards')))
     assert wb.sheetnames == ['Inputs', 'Events', 'Summary']
     ev = wb['Events']
-    rows = {ev.cell(row=r, column=1).value: ev.cell(row=r, column=6).value for r in range(2, ev.max_row + 1)}
-    assert rows['zone'].startswith('=(Inputs!') and 'Inputs!$B$' in rows['stuck']
-    assert ev.cell(row=2, column=10).value.startswith('=F2*((1-Inputs!')
+    rows = {ev.cell(row=r, column=1).value: ev.cell(row=r, column=9).value for r in range(2, ev.max_row + 1)
+            if ev.cell(row=r, column=1).value}
+    assert rows['zone'].startswith('=(D') and 'Inputs!$B$' in rows['zone'] and 'ISNUMBER(H' in rows['stuck']
+    assert ev.cell(row=2, column=13).value.startswith('=I2*((1-Inputs!')
+
+
+def _evaluate_with(data):
+    events, _, p = rel.enumerate_events(_island(), {**PARAMS, 'element_data': data})
+    return {(e['class'], e['zone'], e['detail']): e for e in events}, p
+
+
+def test_an_elements_own_rate_and_repair_replace_the_defaults():
+    """Group 1's transformer at 0.05 /yr and 200 h to repair: its zone fails at the default bus section plus that
+    rate, and stays out 200 h; a bus with its own rate replaces the zone's default bus section."""
+    ev, p = _evaluate_with({'T_G1': {'rate': 0.05, 'repair_h': 200}, 'MV2': {'rate': 0.004}})
+    g1 = ev[('zone', 'G1_HV', '87T')]
+    assert g1['freq'] == pytest.approx(p['lam_zone'] + 0.05)
+    assert (g1['own_rate'], g1['bus_default'], g1['tx_default']) == (0.05, 1, 0)
+    assert g1['it_hot'] == pytest.approx(5 * H_REST - 0.254 + 5 * (200 - H_REST))
+    assert ev[('zone', 'MV2', '87B')]['freq'] == pytest.approx(0.004)
+
+
+def test_a_breakers_own_failure_to_open():
+    ev, p = _evaluate_with({'CB_G1': {'p_bf': 0.02}})
+    lam = p['lam_zone'] + p['lam_tx']
+    assert ev[('stuck', 'G1_HV', 'CB_G1')]['freq'] == pytest.approx(lam * 0.02)
+    assert ev[('stuck', 'MV1', 'CB_ST')]['freq'] == pytest.approx(p['lam_zone'] * p['p_bf'])
+
+
+def test_the_workbook_carries_the_own_rates():
+    result = rel.evaluate(_island(), {**PARAMS, 'element_data': {'T_G1': {'rate': 0.05}, 'CB_G1': {'p_bf': 0.02}}})
+    ev = openpyxl.load_workbook(io.BytesIO(rel.workbook(result)))['Events']
+    rows = [[ev.cell(row=r, column=c).value for c in range(1, 9)] for r in range(2, ev.max_row + 1)]
+    g1 = [r for r in rows if r[0] == 'zone' and r[1] == 'G1_HV']
+    stuck = [r for r in rows if r[0] == 'stuck' and r[2] == 'CB_G1']
+    assert g1 and g1[0][3:7] == [0.05, 1, 0, 0.0]
+    assert stuck and stuck[0][7] == 0.02
 
 
 def _c003_study(**params):
@@ -121,4 +155,6 @@ def test_c003_reference_through_the_route(client, quiet):
     assert all(c in ids for e in out['events'] for c in e['cells'])
     assert any(e['cells'] for e in out['events'])
     wb = openpyxl.load_workbook(io.BytesIO(base64.b64decode(out['workbook_xlsx_b64'])))
-    assert wb['Events'].max_row == len(out['events']) + 1
+    ev = wb['Events']
+    classes = [ev.cell(row=r, column=1).value for r in range(2, ev.max_row + 1)]
+    assert sum(c in ('zone', 'stuck', 'relay', 'maint', 'blackout') for c in classes) == len(out['events'])
