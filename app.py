@@ -1372,6 +1372,10 @@ def simulation():
                             out[k] = int(float(v)) if k == 'black_start_steps' else float(v)
                     return out
 
+                def numbers(text):
+                    # an hourly profile pasted as numbers (24 for a day, 8760 for a year), any separators
+                    return [float(t) for t in re.split(r'[\s,;]+', str(text or '').strip()) if t]
+
                 sweep = {'param': str(p_in.get('sweep_param') or '').strip(), 'values': p_in.get('sweep_values')}
                 if sweep['param'] and sweep['param'] not in reliability_electrisim.SWEEPABLE:
                     return jsonify({'error': True, 'message': f"No sweep of '{sweep['param']}'"}), 400
@@ -1383,7 +1387,12 @@ def simulation():
                     result = reliability_electrisim.study(
                         in_data, rel_params, getattr(g, 'mgtwin_site', None), getattr(g, 'mgtwin_state_id', None),
                         designs=designs, sweep=sweep, crf=float(p_in.get('crf') or 0.08),
-                        capex_meur=float(p_in.get('capex_meur') or 0), title=str(p_in.get('page_name') or 'This page'))
+                        capex_meur=float(p_in.get('capex_meur') or 0), title=str(p_in.get('page_name') or 'This page'),
+                        mc={'years': min(10 ** 6, int(float(p_in.get('mc_years') or 0))), 'seed': int(float(p_in.get('mc_seed') or 1)),
+                            'repair': 'fixed' if str(p_in.get('mc_repair')) == 'fixed' else 'exponential',
+                            'recharge_h': float(p_in.get('mc_recharge_h') or 0),
+                            'it_profile': numbers(p_in.get('mc_it_profile')),
+                            'storage_profile': numbers(p_in.get('mc_storage_profile'))})
                 except (KeyError, ValueError, TypeError, StopIteration) as e:
                     return jsonify({'error': True, 'message': f'The reliability study could not read the network: '
                                     f'{type(e).__name__}: {e}'}), 400

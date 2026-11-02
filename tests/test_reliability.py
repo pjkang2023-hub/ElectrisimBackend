@@ -269,3 +269,59 @@ def test_a_design_whose_inputs_name_none_of_its_loads_is_flagged():
         'none of the IT loads named is on it',
         'its dual-cord pairs name none of its loads: no cord moves to its partner']
     assert rel._design_notes(site, {'it_loads': ['IT']}) == []
+
+
+def test_monte_carlo_with_flat_profiles_is_the_enumeration():
+    """No profile, fixed repairs, storage back at once: the expectation is the enumeration's, exactly, and the
+    simulated mean falls within four standard errors of it; the same seed gives the same years."""
+    a = rel.monte_carlo(_island(), PARAMS, years=20000, seed=7, repair='fixed')
+    assert a['expected']['it_mwh_yr'] == pytest.approx(a['analytic']['it_mwh_yr'], rel=1e-9)
+    assert a['expected']['aux_mwh_yr'] == pytest.approx(a['analytic']['aux_mwh_yr'], rel=1e-9, abs=1e-12)
+    sim = a['simulated']
+    assert abs(sim['it_mwh_yr'] - a['analytic']['it_mwh_yr']) < 4 * sim['it_se']
+    assert rel.monte_carlo(_island(), PARAMS, years=2000, seed=7)['simulated'] == \
+        rel.monte_carlo(_island(), PARAMS, years=2000, seed=7)['simulated']
+    assert sum(b['years'] for b in sim['histogram']) == 20000
+
+
+def test_monte_carlo_profiles_move_the_expectation():
+    """The IT at half its drawn load every hour is the enumeration of a half-loaded island; the storage empty every
+    hour is the enumeration without storage."""
+    half = _island()
+    half['loads'][0]['p_mw'] = 7.5
+    mc = rel.monte_carlo(_island(), PARAMS, years=10, it_profile=[0.5] * 24)
+    assert mc['expected']['it_mwh_yr'] == pytest.approx(rel.evaluate(half, PARAMS)['it_mwh_yr'], rel=1e-9)
+    mc = rel.monte_carlo(_island(), PARAMS, years=10, storage_profile=[0.0])
+    assert mc['expected']['it_mwh_yr'] == pytest.approx(rel.evaluate(_island(), {**PARAMS, 'storage_mwh': 0.0})['it_mwh_yr'],
+                                                        rel=1e-9)
+
+
+def test_monte_carlo_storage_spent_by_one_event_is_missing_for_the_next():
+    """Faults often enough to follow one another, the same years drawn twice (one seed): with the storage never
+    recharged, every event after the first meets it empty, so the years lose more than with it back at once - by
+    what the storage is worth in the enumeration (without storage less with it), within a few per cent."""
+    often = {**PARAMS, 'lam_tx': 2.0, 'lam_zone': 0.5, 'include_maintenance': False, 'include_second_order': False}
+    worth = rel.evaluate(_island(), {**often, 'storage_mwh': 0.0})['it_mwh_yr'] - rel.evaluate(_island(), often)['it_mwh_yr']
+    assert worth > 1.0
+    never = rel.monte_carlo(_island(), often, years=3000, seed=3, repair='fixed', recharge_h=1e12)['simulated']
+    at_once = rel.monte_carlo(_island(), often, years=3000, seed=3, repair='fixed', recharge_h=0)['simulated']
+    assert never['it_mwh_yr'] - at_once['it_mwh_yr'] == pytest.approx(worth, rel=0.05)
+
+
+def test_c003_reference_monte_carlo_through_the_route(client, quiet):
+    """C003 rev C.2 with a year-long Monte Carlo, the IT on a daily profile pasted as numbers: the enumeration it
+    reports is the study's own, the profile lowers the expectation (the IT below its drawn load at night), and the
+    workbook gains its Monte Carlo sheet."""
+    day = ' '.join(['0.8'] * 8 + ['1.0'] * 16)
+    pay, site = _c003_study(transfer_groups='IT_cordA+IT_cordB', mc_years=2000, mc_seed=5, mc_it_profile=day,
+                            mc_recharge_h=2)
+    with quiet():
+        out = json.loads(client.post('/', json={**pay, 'mgtwin_state': {'site': site, 'state_id': 'NORMAL'}})
+                         .get_data(as_text=True))
+    assert out['error'] is False
+    mc = out['monte_carlo']
+    assert mc['years'] == 2000 and mc['recharge_h'] == 2.0
+    assert mc['analytic']['it_mwh_yr'] == pytest.approx(out['it_mwh_yr'], rel=1e-9)
+    assert mc['expected']['it_mwh_yr'] < mc['analytic']['it_mwh_yr']
+    wb = openpyxl.load_workbook(io.BytesIO(base64.b64decode(out['workbook_xlsx_b64'])))
+    assert wb.sheetnames[-1] == 'Monte Carlo'

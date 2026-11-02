@@ -120,6 +120,15 @@ class Network:
             return (conv or next(m for m in self.site['machines'] if m['id'] == sid))['s_rated_mva']
         return self.p['p_following_mw'] if self.p['p_following_mw'] is not None else conv['s_rated_mva']
 
+    def _give(self, island, mwh, held, used):
+        # what an island's storage gave, shared over its forming units as they hold it
+        units = [x for x in island['forming'] if x in self.converter_ids]
+        if used is None or mwh <= 1e-12 or not units:
+            return
+        total = sum(held.get(x, 0.0) for x in units) if held else 0.0
+        for x in units:
+            used[x] = used.get(x, 0.0) + mwh * (held.get(x, 0.0) / total if total > 0 else 1.0 / len(units))
+
     def islands(self, opened=(), dead_buses=(), tripped=()):
         """[{'buses', 'forming': [ids], 'following': [ids], 'loads': [ids]}] after opening switches, losing buses
         (a cleared zone) and tripping sources."""
@@ -150,7 +159,7 @@ class Network:
                 isl[find(l['bus'])]['loads'].append(lid)
         return [i for i in isl.values() if i['loads'] or i['forming'] or i['following']]
 
-    def balance(self, islands, hours, recoverable=None, storage=True):
+    def balance(self, islands, hours, recoverable=None, storage=True, load_scale=1.0, storage_avail=None, used=None):
         """
         What the islands do not serve over ``hours``: {'it_mwh', 'aux_mwh', 'it_mw', 'aux_mw'} (the energy with
         the islands' storage bridging; the MW the gap left, for a cold restart). An island with no forming source
@@ -160,9 +169,11 @@ class Network:
         nothing bridges (the shed is power-limited). storage=False: the storage is already spent (the later part
         of an event). The auxiliaries are shed first when the interruption is
         no longer than aux_shed_max_h; transfer groups move a dead member's load to a live one.
+        For the Monte Carlo: load_scale on the IT loads (the hour's load against the drawing's), storage_avail (MWh
+        each forming unit has at that moment, in place of storage_mwh each) and used (filled with what each gave).
         """
         p = self.p
-        load_mw = {lid: l['p_mw'] for lid, l in self.loads.items()}
+        load_mw = {lid: l['p_mw'] * (load_scale if lid in self.it else 1.0) for lid, l in self.loads.items()}
         isl_of = {lid: i for i in islands for lid in i['loads']}
         for group in p['transfer_groups']:
             live = [l for l in group if l in isl_of and (isl_of[l]['forming'] or isl_of[l].get('grid'))]
@@ -189,7 +200,8 @@ class Network:
                 supply[id(i)] = (recoverable * sum(self._p(x) for x in i['forming']) + following, 0.0, 0.0)
             elif p['forming_storage_backed']:
                 supply[id(i)] = (following + sum(self._p(x) for x in machines), sum(self._p(x) for x in units),
-                                 p['storage_mwh'] * len(units))
+                                 p['storage_mwh'] * len(units) if storage_avail is None else
+                                 sum(storage_avail.get(x, 0.0) for x in units))
             else:
                 supply[id(i)] = (following + sum(self._p(x) for x in i['forming']), 0.0, 0.0)
         # A dual-corded load also shifts from a short island to its partner's island while that one has room.
@@ -227,9 +239,11 @@ class Network:
                 continue
             # storage first: if it carries the whole gap for the whole time, nothing is lost
             if gap <= bridge + 1e-9 and gap * hours <= energy + 1e-9:
+                self._give(i, gap * hours, storage_avail, used)
                 continue
             a = min(gap, demand_aux) if shed_aux else 0.0
             g = gap - a
+            self._give(i, min(energy, min(g, bridge) * hours), storage_avail, used)
             out['aux_mw'] += a
             out['aux_mwh'] += a * hours
             out['it_mw'] += g
@@ -302,6 +316,10 @@ def enumerate_events(site, params=None, state_id='NORMAL'):
             _with_ties(net, opened, dead, normally_open)
 
     outage = []  # per zone: (zone, rate, repair, its breakers, its restored islands)
+    recipes = p.get('_recipes')
+    p['_net'] = net
+    nostore = {'storage': False}
+
     by_member = {}
     for z in zs:
         for m in z['members']:
@@ -317,33 +335,42 @@ def enumerate_events(site, params=None, state_id='NORMAL'):
                'own_rate': own_rate, 'bus_default': bus_d, 'tx_default': tx_d, 'km_default': round(km_d, 4)}
         # zone: cut off until restored, the zone itself until repaired
         first = loss(opened, z['buses'], h_rest)
-        after = net.balance(net.islands(opened=opened, dead_buses=z['buses']) if not normally_open else
-                            _with_ties(net, opened, z['buses'], normally_open), max(h_rep - h_rest, 0.0), storage=False)
+        i_first = net.islands(opened=opened, dead_buses=z['buses'])
+        i_after = i_first if not normally_open else _with_ties(net, opened, z['buses'], normally_open)
+        after = net.balance(i_after, max(h_rep - h_rest, 0.0), storage=False)
         cold = loss(opened, z['buses'], p['t_cold_h'])
+        t_first, t_after = (1, i_first, h_rest, 0.0, {}), (1, i_after, -h_rest, h_rep, nostore)
+        t_cold = (1, i_first, p['t_cold_h'], 0.0, {})
         events.append({**ref, 'also': [], 'class': 'zone', 'zone': z['id'], 'detail': z['kind'], 'freq': lam,
                        'it_mw': first['it_mw'], 'aux_mw': first['aux_mw'], 'it_hot': first['it_mwh'] + after['it_mwh'],
-                       'it_cold': cold['it_mwh'] + after['it_mwh'], 'aux': first['aux_mwh'] + after['aux_mwh']})
+                       'it_cold': cold['it_mwh'] + after['it_mwh'], 'aux': first['aux_mwh'] + after['aux_mwh'],
+                       **({'recipe': _recipe([[t_first], [t_after]], [[t_cold], [t_after]])} if recipes else {})})
         if p['include_second_order']:
-            outage.append((z, lam, h_rep, opened, restored(opened, z['buses'])))
+            outage.append((z, lam, h_rep, opened, i_after))
             # close: the tie fails to close - what was cut off stays out to the repair, not just to the restoration
             if normally_open and h_rep > h_rest:
                 stuck_open = extra(net.balance(net.islands(opened=opened, dead_buses=z['buses']), h_rep - h_rest,
                                                storage=False), after)
                 if stuck_open['it_mwh'] > 1e-9 or stuck_open['aux_mwh'] > 1e-9:
+                    g = [[(1, i_first, -h_rest, h_rep, nostore), (-1, i_after, -h_rest, h_rep, nostore)]]
                     events.append({**ref, 'also': sorted(normally_open), 'class': 'close', 'zone': z['id'],
                                    'detail': 'tie fails to close', 'freq': lam * p['p_fc'],
                                    'it_mw': stuck_open['it_mw'], 'aux_mw': stuck_open['aux_mw'],
                                    'it_hot': stuck_open['it_mwh'], 'it_cold': stuck_open['it_mwh'],
-                                   'aux': stuck_open['aux_mwh']})
+                                   'aux': stuck_open['aux_mwh'], **({'recipe': _recipe(g, g)} if recipes else {})})
         # stuck: breaker failure opens the zone beyond each member until it is isolated and re-closed
         for m in z['members']:
             beyond = {x for y in by_member[m] if y is not z for x in y['members']}
             hot = extra(loss(opened | beyond, z['buses'], h_rest), first)
             cold_x = extra(loss(opened | beyond, z['buses'], p['t_cold_h']), cold)
+            i_b = net.islands(opened=opened | beyond, dead_buses=z['buses']) if recipes else None
             events.append({**ref, 'also': sorted(beyond | {m}), 'class': 'stuck', 'zone': z['id'], 'detail': m,
                            'freq': lam * p_bf(m), 'p_bf_own': own(m, 'p_bf'),
                            'it_mw': hot['it_mw'], 'aux_mw': hot['aux_mw'], 'it_hot': hot['it_mwh'],
-                           'it_cold': cold_x['it_mwh'], 'aux': hot['aux_mwh']})
+                           'it_cold': cold_x['it_mwh'], 'aux': hot['aux_mwh'],
+                           **({'recipe': _recipe([[(1, i_b, h_rest, 0.0, {}), (-1, i_first, h_rest, 0.0, {})]],
+                                                 [[(1, i_b, p['t_cold_h'], 0.0, {}), (-1, i_first, p['t_cold_h'], 0.0, {})]])}
+                              if recipes else {})})
         # relay: the backup clears it after the ride-through; the grid-following fleet trips; the forming units
         # hold recoverable x their MVA until the fleet is back (hot standby, less any UPS ride-through) or cold
         if p['backup_trips_gfl']:
@@ -354,9 +381,17 @@ def enumerate_events(site, params=None, state_id='NORMAL'):
             cold_x = extra(loss(opened, z['buses'], p['t_cold_h'], tripped=following, recoverable=p['recoverable_factor']), cold)
             aux_rt = extra(loss(opened, z['buses'], p['t_rt_min'] / 60, tripped=following, recoverable=p['recoverable_factor']),
                            loss(opened, z['buses'], p['t_rt_min'] / 60))
+            rec = {}
+            if recipes:
+                i_t = net.islands(opened=opened, dead_buses=z['buses'], tripped=following)
+                rf = {'recoverable': p['recoverable_factor']}
+                h_rt_aux = p['t_rt_min'] / 60
+                rec = {'recipe': _recipe([[(1, i_t, h_rt, 0.0, rf), (-1, i_first, h_rt, 0.0, {})]],
+                                         [[(1, i_t, p['t_cold_h'], 0.0, rf), (-1, i_first, p['t_cold_h'], 0.0, {})]],
+                                         [[(1, i_t, h_rt_aux, 0.0, rf), (-1, i_first, h_rt_aux, 0.0, {})]])}
             events.append({**ref, 'also': [], 'class': 'relay', 'zone': z['id'], 'detail': 'backup clears, fleet trips',
                            'freq': lam * p_main * p['p_vrt'], 'it_mw': hot['it_mw'], 'aux_mw': aux_rt['aux_mw'],
-                           'it_hot': hot['it_mwh'], 'it_cold': cold_x['it_mwh'], 'aux': aux_rt['aux_mwh']})
+                           'it_hot': hot['it_mwh'], 'it_cold': cold_x['it_mwh'], 'aux': aux_rt['aux_mwh'], **rec})
         # maint: the zone faults while a breaker elsewhere is out for maintenance, until that breaker is back
         h_m = p['maint_restore_h']
         base_m = loss(opened, z['buses'], h_m) if p['include_maintenance'] else None
@@ -366,10 +401,15 @@ def enumerate_events(site, params=None, state_id='NORMAL'):
             hot = extra(loss(opened | {b}, z['buses'], h_m), base_m)
             if hot['it_mwh'] > 1e-9 or hot['aux_mwh'] > 1e-9:
                 cold_x = extra(loss(opened | {b}, z['buses'], p['t_cold_h']), cold)
+                rec = {}
+                if recipes:
+                    i_m = net.islands(opened=opened | {b}, dead_buses=z['buses'])
+                    rec = {'recipe': _recipe([[(1, i_m, h_m, 0.0, {}), (-1, i_first, h_m, 0.0, {})]],
+                                             [[(1, i_m, p['t_cold_h'], 0.0, {}), (-1, i_first, p['t_cold_h'], 0.0, {})]])}
                 events.append({**ref, 'also': [b], 'class': 'maint', 'zone': z['id'], 'detail': b,
                                'freq': lam * p['t_maint_h'] / 8760,
                                'it_mw': hot['it_mw'], 'aux_mw': hot['aux_mw'], 'it_hot': hot['it_mwh'],
-                               'it_cold': cold_x['it_mwh'], 'aux': hot['aux_mwh']})
+                               'it_cold': cold_x['it_mwh'], 'aux': hot['aux_mwh'], **rec})
     # overlap: a second zone faults while the first is under repair; both out for the mean overlap, counted for
     # what the two together lose beyond what each loses alone (the first-order events count those)
     for a in range(len(outage)):
@@ -379,7 +419,8 @@ def enumerate_events(site, params=None, state_id='NORMAL'):
             if freq <= 0:
                 continue
             r_ov = r_a * r_b / (r_a + r_b)
-            both = net.balance(restored(op_a | op_b, za['buses'] + zb['buses']), r_ov, storage=False)
+            i_both = restored(op_a | op_b, za['buses'] + zb['buses'])
+            both = net.balance(i_both, r_ov, storage=False)
             alone_a = net.balance(isl_a, r_ov, storage=False)
             alone_b = net.balance(isl_b, r_ov, storage=False)
             add = {k: max(0.0, both[k] - alone_a[k] - alone_b[k]) for k in both}
@@ -392,14 +433,188 @@ def enumerate_events(site, params=None, state_id='NORMAL'):
                            'km_default': round(km_d, 4), 'other_rate': lam_b, 'other_repair_h': r_b,
                            'class': 'overlap', 'zone': za['id'], 'detail': zb['id'], 'freq': freq,
                            'it_mw': add['it_mw'], 'aux_mw': add['aux_mw'], 'it_hot': add['it_mwh'],
-                           'it_cold': add['it_mwh'], 'aux': add['aux_mwh']})
+                           'it_cold': add['it_mwh'], 'aux': add['aux_mwh'],
+                           **({'recipe': _recipe(*[[[(1, i_both, 0.0, r_ov, nostore), (-1, isl_a, 0.0, r_ov, nostore),
+                                                     (-1, isl_b, 0.0, r_ov, nostore)]]] * 2)} if recipes else {})})
     it_total = sum(l['p_mw'] for l in site['loads'] if l['id'] in net.it)
     events.append({'buses': [], 'breakers': [], 'also': [], 'n_tx': 0, 'cable_km': 0.0, 'own_rate': 0.0,
                    'bus_default': 0, 'tx_default': 0, 'km_default': 0.0, 'repair_h': None,
                    'class': 'blackout', 'zone': '-', 'detail': f"black start of {p['black_start_steps']} steps fails",
                    'freq': p['lam_bo'] * (1 - (1 - p['p_step']) ** p['black_start_steps']), 'it_mw': it_total, 'aux_mw': 0.0,
-                   'it_hot': it_total * p['t_man_h'], 'it_cold': it_total * p['t_man_h'], 'aux': 0.0})
+                   'it_hot': it_total * p['t_man_h'], 'it_cold': it_total * p['t_man_h'], 'aux': 0.0,
+                   **({'recipe': {'const_it': it_total * p['t_man_h']}} if recipes else {})})
     return events, zs, p
+
+
+def _recipe(hot, cold, aux=None):
+    """An event's recipe: its IT energy with the sources hot and cold, its auxiliary energy (the hot phases unless
+    given), each a list of groups of terms (sign, islands, base hours, hours per unit of repair, balance options)."""
+    return {'hot': hot, 'cold': cold, 'aux': hot if aux is None else aux}
+
+
+def _replay(net, recipe, branch, k, scale, avail, used):
+    """An event's (IT MWh, aux MWh) at an hour's IT load scale, with the units' storage avail (None: storage_mwh
+    each) and its repair k times the mean; what the storage gave goes into used."""
+    if 'const_it' in recipe:
+        return recipe['const_it'] * scale, 0.0
+    memo = {}
+
+    def bal(term, give):
+        sign, isl, base_h, rep_h, kw = term
+        key = id(term)
+        if key not in memo:
+            memo[key] = net.balance(isl, max(0.0, base_h + rep_h * k), recoverable=kw.get('recoverable'),
+                                    storage=kw.get('storage', True), load_scale=scale, storage_avail=avail,
+                                    used=used if give and sign > 0 else None)
+        return memo[key]
+
+    it = sum(max(0.0, sum(t[0] * bal(t, True)['it_mwh'] for t in grp)) for grp in recipe[branch])
+    aux = sum(max(0.0, sum(t[0] * bal(t, False)['aux_mwh'] for t in grp)) for grp in recipe['aux'])
+    return it, aux
+
+
+def _profile(values, n=8760):
+    """An hourly profile from 24 values (a day, repeated), 8760 (a year) or any other length (repeated)."""
+    vals = [float(v) for v in (values or [])]
+    return [vals[h % len(vals)] for h in range(n)] if vals else [1.0] * n
+
+
+def monte_carlo(site, params=None, state_id='NORMAL', years=10000, seed=1, it_profile=None, storage_profile=None,
+                recharge_h=0.0, repair='exponential'):
+    """
+    A sequential Monte Carlo of the enumerated events through simulated years. Each event recurs at its frequency
+    (a Poisson process); one that falls at hour h meets the IT load of that hour (it_profile: the hourly scale on
+    the drawing's IT loads) and the storage of that moment - each grid-forming unit's storage_mwh x its hourly
+    availability (storage_profile: the state of charge above the set-point, as a share), less what earlier events
+    took and recharge_h has not yet put back (0: back at once). Its repair lasts the mean (repair 'fixed') or an
+    exponential draw with that mean; its sources cold-restart with probability p_cold.
+
+    Returns the exact expected energy not served over the profiles (no sampling: each event averaged over the
+    hours' load and storage, full and with its mean repair) beside the enumeration's, and from the simulation the
+    mean per year with its standard error, the percentiles of a year's IT energy not served (to P99.9), the share
+    of years with any, the interruptions per year and their size, the worst year, a histogram and the energy by
+    class.
+    """
+    import bisect
+    import random
+
+    p_in = dict(params or {}, _recipes=True)
+    events, _, p = enumerate_events(site, p_in, state_id)
+    net = p.pop('_net')
+    cap = p['storage_mwh']
+    units = sorted(x for x in net.forming & net.on if x in net.converter_ids) if p['forming_storage_backed'] else []
+    s_prof, f_prof = _profile(it_profile), _profile(storage_profile)
+    s_max = max(s_prof)
+    zero = {u: 0.0 for u in units}
+    # an event that loses nothing at the highest load with no storage at all can never lose anything
+    live = [e for e in events if e['freq'] > 0 and (
+        sum(_replay(net, e['recipe'], 'cold', 3.0, s_max, zero, None)) > 1e-9 or
+        sum(_replay(net, e['recipe'], 'hot', 3.0, s_max, zero, None)) > 1e-9)]
+    p_cold = p['p_cold']
+
+    # exact expectation over the profiles: each event at every (load, storage) pair the year has, weighted by hours
+    pairs = {}
+    for h in range(8760):
+        key = (round(s_prof[h], 3), round(f_prof[h], 3))
+        pairs[key] = pairs.get(key, 0) + 1
+    exp_it = exp_aux = 0.0
+    for e in live:
+        it = aux = 0.0
+        for (sc, fr), n in pairs.items():
+            avail = {u: cap * fr for u in units}
+            hi, ha = _replay(net, e['recipe'], 'hot', 1.0, sc, avail, None)
+            ci, _ = _replay(net, e['recipe'], 'cold', 1.0, sc, avail, None)
+            it += n * ((1 - p_cold) * hi + p_cold * ci)
+            aux += n * ha
+        exp_it += e['freq'] * it / 8760
+        exp_aux += e['freq'] * aux / 8760
+    analytic = {'it_mwh_yr': sum(e['freq'] * ((1 - p_cold) * e['it_hot'] + p_cold * e['it_cold']) for e in events),
+                'aux_mwh_yr': sum(e['freq'] * e['aux'] for e in events)}
+
+    # the simulation
+    rng = random.Random(seed)
+    lam_total = sum(e['freq'] for e in live)
+    cum = []
+    acc = 0.0
+    for e in live:
+        acc += e['freq']
+        cum.append(acc)
+    deficit = {u: 0.0 for u in units}  # MWh each unit is below its normal state of charge, from earlier events
+    t_last = 0.0
+    year_it, year_aux, year_n = [], [], []
+    by_class = {}
+    sizes = []
+    for y in range(int(years)):
+        n = _poisson(rng, lam_total)
+        it_y = aux_y = 0.0
+        n_y = 0
+        for t in sorted(rng.random() * 8760 for _ in range(n)):
+            t_abs = y * 8760 + t
+            back = cap * (t_abs - t_last) / recharge_h if recharge_h and recharge_h > 0 else math.inf
+            deficit = {u: max(0.0, d - back) for u, d in deficit.items()}
+            t_last = t_abs
+            h = int(t) % 8760
+            avail = {u: max(0.0, cap * f_prof[h] - deficit[u]) for u in units}
+            e = live[min(bisect.bisect_left(cum, rng.random() * lam_total), len(live) - 1)]
+            k = rng.expovariate(1.0) if repair == 'exponential' else 1.0
+            used = {}
+            it, aux = _replay(net, e['recipe'], 'cold' if rng.random() < p_cold else 'hot', k, s_prof[h], avail, used)
+            for u, mwh in used.items():
+                deficit[u] = deficit.get(u, 0.0) + mwh
+            it_y += it
+            aux_y += aux
+            if it > 1e-9:
+                n_y += 1
+                sizes.append(it)
+            c = by_class.setdefault(e['class'], {'events': 0, 'it_mwh_yr': 0.0, 'aux_mwh_yr': 0.0})
+            c['events'] += 1
+            c['it_mwh_yr'] += it
+            c['aux_mwh_yr'] += aux
+        year_it.append(it_y)
+        year_aux.append(aux_y)
+        year_n.append(n_y)
+    N = len(year_it)
+    mean = sum(year_it) / N
+    var = sum((x - mean) ** 2 for x in year_it) / max(1, N - 1)
+    srt = sorted(year_it)
+
+    def pct(q):
+        return srt[min(N - 1, int(q * N))]
+
+    for c in by_class.values():
+        c['it_mwh_yr'] /= N
+        c['aux_mwh_yr'] /= N
+    # years by their IT energy not served: none, then by decade of MWh
+    edges = [1e-9, 0.1, 1.0, 10.0, 100.0, 1000.0, math.inf]
+    hist = [{'lo': 0.0, 'hi': 0.0, 'years': sum(1 for x in year_it if x <= 1e-9)}]
+    hist += [{'lo': lo if lo > 1e-6 else 0.0, 'hi': hi if hi < math.inf else None,
+              'years': sum(1 for x in year_it if lo < x <= hi)} for lo, hi in zip(edges, edges[1:])]
+    sizes.sort()
+    return {
+        'years': N, 'seed': seed, 'repair': repair, 'recharge_h': recharge_h, 'units': units,
+        'events_that_can_lose': len(live), 'events_enumerated': len(events),
+        'analytic': analytic, 'expected': {'it_mwh_yr': exp_it, 'aux_mwh_yr': exp_aux},
+        'simulated': {'it_mwh_yr': mean, 'it_se': (var / N) ** 0.5, 'aux_mwh_yr': sum(year_aux) / N,
+                      'p50': pct(0.5), 'p90': pct(0.9), 'p99': pct(0.99), 'p999': pct(0.999), 'worst': srt[-1],
+                      'share_of_years_with_it_loss': sum(1 for x in year_it if x > 1e-9) / N,
+                      'it_interruptions_per_yr': sum(year_n) / N,
+                      'interruption_p50_mwh': sizes[len(sizes) // 2] if sizes else 0.0,
+                      'interruption_p90_mwh': sizes[min(len(sizes) - 1, int(0.9 * len(sizes)))] if sizes else 0.0,
+                      'by_class': by_class, 'histogram': hist},
+    }
+
+
+def _poisson(rng, lam):
+    """A Poisson draw (Knuth; the rates here are well under one a year)."""
+    if lam <= 0:
+        return 0
+    if lam > 30:
+        return max(0, int(round(rng.gauss(lam, lam ** 0.5))))
+    L, k, prod = math.exp(-lam), 0, rng.random()
+    while prod > L:
+        k += 1
+        prod *= rng.random()
+    return k
 
 
 def _with_ties(net, opened, dead, normally_open):
@@ -538,9 +753,58 @@ def workbook(result, title='Reliability'):
         sm.column_dimensions[get_column_letter(j)].width = w
     if result.get('comparison'):
         _comparison_sheets(wb, result, R, t, head, fill, edit)
+    if result.get('monte_carlo'):
+        _monte_carlo_sheet(wb, result['monte_carlo'], head, fill)
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def _monte_carlo_sheet(wb, mc, head, fill):
+    """The Monte Carlo as the simulation found it (values): the means beside the enumeration's, the spread of the
+    years, the histogram and the energy by class."""
+    from openpyxl.styles import Font
+
+    ws = wb.create_sheet('Monte Carlo')
+    ws['A1'] = f"Year-long Monte Carlo - {mc['years']} years, seed {mc['seed']}, repairs {mc['repair']}, " \
+               f"storage back in {mc['recharge_h']} h"
+    ws['A1'].font = Font(bold=True, size=12)
+    sim = mc['simulated']
+    rows = [('IT energy not served, MWh/yr', 'Enumeration', mc['analytic']['it_mwh_yr']),
+            ('', 'Expected over the profiles', mc['expected']['it_mwh_yr']),
+            ('', 'Simulated mean', sim['it_mwh_yr']),
+            ('', 'Standard error of the mean', sim['it_se']),
+            ('Auxiliary energy not served, MWh/yr', 'Enumeration', mc['analytic']['aux_mwh_yr']),
+            ('', 'Expected over the profiles', mc['expected']['aux_mwh_yr']),
+            ('', 'Simulated mean', sim['aux_mwh_yr']),
+            ('A year\'s IT energy not served, MWh', 'P50', sim['p50']), ('', 'P90', sim['p90']), ('', 'P99', sim['p99']),
+            ('', 'P99.9', sim['p999']), ('', 'Worst year', sim['worst']),
+            ('Years with any IT energy not served', 'Share', sim['share_of_years_with_it_loss']),
+            ('IT interruptions', 'Per year', sim['it_interruptions_per_yr']),
+            ('', 'Size P50, MWh', sim['interruption_p50_mwh']), ('', 'Size P90, MWh', sim['interruption_p90_mwh'])]
+    for j, h in enumerate(['Quantity', '', 'Value'], 1):
+        c = ws.cell(row=3, column=j, value=h)
+        c.font, c.fill = head, fill
+    for r, row in enumerate(rows, 4):
+        for j, v in enumerate(row, 1):
+            ws.cell(row=r, column=j, value=v)
+    r = 4 + len(rows) + 1
+    for j, h in enumerate(['Years by IT energy not served, MWh: above', 'up to', 'Years'], 1):
+        c = ws.cell(row=r, column=j, value=h)
+        c.font, c.fill = head, fill
+    for i, b in enumerate(sim['histogram'], r + 1):
+        ws.cell(row=i, column=1, value=b['lo'])
+        ws.cell(row=i, column=2, value='none' if b['hi'] == 0 else ('' if b['hi'] is None else b['hi']))
+        ws.cell(row=i, column=3, value=b['years'])
+    r = r + len(sim['histogram']) + 2
+    for j, h in enumerate(['Class', 'Events simulated', 'IT MWh/yr', 'Aux MWh/yr'], 1):
+        c = ws.cell(row=r, column=j, value=h)
+        c.font, c.fill = head, fill
+    for i, (cl, c) in enumerate(sim['by_class'].items(), r + 1):
+        for j, v in enumerate([cl, c['events'], c['it_mwh_yr'], c['aux_mwh_yr']], 1):
+            ws.cell(row=i, column=j, value=v)
+    for col, w in zip('ABCD', (40, 30, 16, 14)):
+        ws.column_dimensions[col].width = w
 
 
 def _comparison_sheets(wb, result, R, total_row, head, fill, edit):
@@ -777,13 +1041,13 @@ def _drawn(payload, template=None, state_id=None):
 
 
 def study(payload, params=None, template=None, state_id=None, designs=None, sweep=None, crf=0.08,
-          capex_meur=0.0, title='This page'):
+          capex_meur=0.0, title='This page', mc=None):
     """
     The study on a drawn network: the payload (already in its operating state) evaluated; each event's buses and
     breakers as the drawing's cell ids; the live workbook as base64. With designs ([{'name', 'payload',
     'capex_meur', 'params'}], other drawings, each as drawn, params the inputs it has of its own) or a sweep
     ({'param', 'values'}), the comparison too - this drawing the base (its capex capex_meur), the others against it.
-    Returns a dict for JSON.
+    With mc (monte_carlo's options, years > 0), the year-long Monte Carlo of this drawing. Returns a dict for JSON.
     """
     import base64
 
@@ -812,6 +1076,8 @@ def study(payload, params=None, template=None, state_id=None, designs=None, swee
             base = dict(DEFAULTS, crf=crf, **user).get(sweep['param'])
             sweep = {'param': sweep['param'], 'values': sweep_values(sweep['param'], sweep.get('values'), base)}
         result['comparison'] = compare(entries, user, sweep, crf)
+    if mc and int(mc.get('years') or 0) > 0:
+        result['monte_carlo'] = monte_carlo(site, dict(drawn, **params), state, **mc)
     result['workbook_xlsx_b64'] = base64.b64encode(workbook(result, f'Reliability - {state}')).decode('ascii')
     result['error'] = False
     return result
