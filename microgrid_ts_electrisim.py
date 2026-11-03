@@ -20,7 +20,8 @@ supply, until the grid's exchange is zero or they reach their limits;
 islanded, when the grid-forming PCS's batteries cannot supply or absorb what
 the island asks, load is shed, or PV curtailed and then the SOFCs turned down
 toward their minimum load (their inverters' answer to the frequency rising as
-the stores fill). Then each store's state is
+the stores fill). With secondary control, the SOFCs also bring the grid-forming
+stations' batteries back toward a set-point. Then each store's state is
 advanced by what it delivered over the step: a battery's charge, a
 supercapacitor's and a flywheel's energy, an SOFC's fuel.
 
@@ -203,6 +204,12 @@ class MicrogridTs:
         self.pe, self.net, self.dt, self.n = pe, net, float(step_s), int(time_steps)
         self.dispatch = params.get('microgrid_dispatch') in (True, 'true', 'True', 1, '1')
         self.sofc_tau = max(_f(params.get('sofc_tau_s'), SOFC_DISPATCH_TAU_S), 1e-6)
+        # Secondary control (C003's R-9): under the dispatch the SOFCs also make up what the grid-forming
+        # stations' batteries hold short of a set-point, over a restore time. Blank: off, the batteries drift.
+        sp = params.get('secondary_soc_percent')
+        self.secondary_soc = min(max(_f(sp, None), 0.0), 100.0) if sp not in (None, '') and _f(sp, None) is not None else None
+        self.secondary_restore_s = max(_f(params.get('secondary_restore_h'), 1.0), 0.0) * 3600.0
+        self.secondary_mw = []
         self.notes = []
         self.library, problems = lp.library_from_params(params)
         self.notes += problems
@@ -283,6 +290,9 @@ class MicrogridTs:
                                            'rated': conv['rated_mw'] if conv['rated_mw'] > 0 else 1.0})
         for b in self.batteries:
             b['set_mw'] = b['conv']['p_set_mw'] if b['kind'] == 'conv' else b['item']['rec']['p_set_ac']
+        # The grid-forming stations' batteries: what secondary control holds at its set-point.
+        self.gfm_stores = [it for it in self.items if it['via'] == 'pcs' and it['rec']['table'] == 'gen'
+                           and it['obj'].kind == 'Battery']
         # The hand-over: each store behind a converter in droop on an 800 V bus, and what feeds that
         # bus from the AC network - its rectifiers, its SSTs. In an island short of power the stores
         # take their buses' load from them before any is shed; held at their 800 V by the rectifiers
@@ -981,6 +991,15 @@ class MicrogridTs:
                        if g in net.res_ext_grid.index and bool(net.ext_grid.at[g, 'in_service'])
                        and not ('electrisim_aux' in net.ext_grid.columns and net.ext_grid.at[g, 'electrisim_aux'] == True))
             d_total = grid + demand + unserved
+            # Secondary control: what the stations' batteries hold short of the set-point (over it: negative),
+            # over the restore time - a step at the least - on top of the demand.
+            secondary = 0.0
+            if self.secondary_soc is not None and self.gfm_stores:
+                short_j = sum(energy_at_soc_j(it['obj'], self.secondary_soc) - stored_energy_j(it['obj'])
+                              for it in self.gfm_stores if it['obj'].in_service)
+                secondary = short_j / max(self.secondary_restore_s, dt) / 1e6
+                self.secondary_mw.append(secondary)
+                d_total += secondary
             sofcs = [it for it in self.items if it['obj'].kind == 'SOFC']
             if sofcs:
                 cap = sum(it['obj'].p_rated for it in sofcs)
@@ -991,7 +1010,8 @@ class MicrogridTs:
                     prev = self.demand_lpf.get(id(it), it['obj'].p_set)
                     self.demand_lpf[id(it)] = prev + (target - prev) * a
         self.balance.append({'time_step': t, 'converged': bool(converged), 'unserved_mw': unserved,
-                             'curtailed_mw': curtailed, 'load_mw': loads})
+                             'curtailed_mw': curtailed, 'load_mw': loads, 'demand_mw': base,
+                             'secondary_mw': secondary if self.dispatch else 0.0})
 
     # --- Results --------------------------------------------------------------------------
 
@@ -1035,6 +1055,20 @@ class MicrogridTs:
         if self.handover_steps:
             self.notes.append(f'The island was short of power at {len(self.handover_steps)} steps: the 800 V stores '
                               f'took their buses\' load from the rectifiers, up to {max(self.handover_steps.values()):.3g} MW.')
+        if self.secondary_soc is not None:
+            if not self.dispatch or not self.gfm_stores:
+                self.notes.append('Secondary control needs the microgrid dispatch and a battery behind a grid-forming '
+                                  'PCS; it did nothing.')
+            else:
+                socs = [r['soc_percent_end'] for r in self.rows if r['kind'] == 'Battery'
+                        and any(r['label'] == it['obj'].label for it in self.gfm_stores)]
+                last = [soc_percent(it['obj']) for it in self.gfm_stores]
+                self.notes.append(f'Secondary control held the grid-forming stations\' batteries toward '
+                                  f'{self.secondary_soc:.3g} % over {self.secondary_restore_s / 3600.0:.3g} h: the SOFCs '
+                                  f'gave up to {max(self.secondary_mw, default=0.0):.3g} MW more and '
+                                  f'{-min(self.secondary_mw, default=0.0):.3g} MW less than the demand; the batteries ran '
+                                  f'{min(socs, default=0.0):.3g} to {max(socs, default=0.0):.3g} % and ended at '
+                                  f'{min(last):.3g} to {max(last):.3g} %.')
         if self.unserved_steps:
             self.notes.append(f'The island ran short at {len(self.unserved_steps)} steps: '
                               f'{self.unserved_j / 3.6e9:.4g} MWh of load was not served.')
@@ -1079,4 +1113,5 @@ class MicrogridTs:
                 'sofc_turned_down_mwh': self.turned_down_j / 3.6e9,
                 'sofc_offline_steps': len(self.offline_steps), 'sofc_offline_mw_max': self.offline_mw,
                 'surplus_steps': len(self.surplus_steps),
+                'secondary_soc_percent': self.secondary_soc,
                 'notes': self.notes}

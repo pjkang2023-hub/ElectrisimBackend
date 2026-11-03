@@ -15507,6 +15507,8 @@ def time_series_simulation(net, timeseries_params):
                 'gen_results': net.res_gen.copy() if len(net.gen) > 0 else None,
                 'sgen_results': _electrisim_res_without_aux(net, 'sgen') if len(net.sgen) > 0 else None,
                 'load_results': _electrisim_res_without_aux(net, 'load') if len(net.load) > 0 else None,
+                # each load's demand this step, before any the microgrid dispatch shed
+                'load_demand': {i: p for i, (p, _) in mg.base_ac.items()} if mg is not None else {},
                 'trafo_results': net.res_trafo.copy() if len(net.trafo) > 0 else None,
                 'trafo3w_results': net.res_trafo3w.copy() if len(net.trafo3w) > 0 else None,
                 'ext_grid_results': _electrisim_res_without_aux(net, 'ext_grid') if len(net.ext_grid) > 0 else None,
@@ -15611,13 +15613,16 @@ def time_series_simulation(net, timeseries_params):
                 for idx, load in load_results.iterrows():
                     load_name = net.load.loc[idx, 'name']
                     user_friendly_name = getattr(net, 'user_friendly_names', {}).get(load_name, load_name)
-                    all_loads.append(TimeSeriesLoadOut(
+                    row = TimeSeriesLoadOut(
                         name=get_display_name(user_friendly_name, load_name, 'Load', idx, 'timeseries'),
                         id=str(load_name),
                         time_step=t,
                         p_mw=safe_float(load['p_mw']),
                         q_mvar=safe_float(load['q_mvar'])
-                    ))
+                    )
+                    # its demand, served or not (under the microgrid dispatch; otherwise what it drew)
+                    row.p_demand_mw = safe_float(result.get('load_demand', {}).get(idx, load['p_mw']))
+                    all_loads.append(row)
 
             if result.get('gen_results') is not None:
                 all_gens.extend(_element_rows('gen', result['gen_results'], 'Generator', t, (

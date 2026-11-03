@@ -275,3 +275,42 @@ def test_shed_load_comes_back_as_the_sofc_ramps(client, quiet):
     unserved = [s['unserved_mw'] for s in mg['steps']]
     assert unserved[0] > 0.3
     assert unserved[-1] < 0.01 * unserved[0]
+
+
+def test_shed_load_reports_its_demand(client, quiet):
+    """The same island short at first: each load's row carries its demand beside what it was served, so a study
+    reading the run (the reliability Monte Carlo) takes the load as asked for, not as shed."""
+    out = _post(client, quiet, _two_buses(
+        _der('Battery', 'ba', capacity_kwh=60, soc_percent=10), _pcs('ga', 'a', 'ba', control='grid_forming', s_rated_mva=1.0),
+        _der('SOFC', 'fc', p_rated_kw=1000, p_set_kw=200, ramp_percent_s=1.0), _pcs('pf', 'b', 'fc', s_rated_mva=1.2),
+        grid=False, params=_ts(2, 60, dispatch=True, sofc_tau_s=60)))
+    first = next(r for r in out['loads'] if r['time_step'] == 0)
+    assert first['p_demand_mw'] == pytest.approx(0.6)
+    assert first['p_mw'] < 0.3
+    assert out['microgrid']['steps'][0]['demand_mw'] == pytest.approx(0.6)
+
+
+@pytest.mark.parametrize('soc0', [30.0, 75.0])
+def test_secondary_control_holds_the_station_at_its_set_point(client, quiet, soc0):
+    """
+    C003's R-9: an island whose SOFC already carries its 0.6 MW load, its station's battery away from 50 %. With
+    no secondary control the SOFC follows the load and the battery stays where it was; with the set-point at 50 %
+    and a 1 h restore, the SOFC gives the battery's shortfall (or takes its excess) on top, and the battery comes
+    back to 50 % within a few hours, never past its window.
+    """
+    def run(**extra):
+        return _post(client, quiet, _two_buses(
+            _der('Battery', 'ba', capacity_kwh=500, soc_percent=soc0),
+            _pcs('ga', 'a', 'ba', control='grid_forming', s_rated_mva=1.0),
+            _der('SOFC', 'fc', p_rated_kw=1000, p_set_kw=600), _pcs('pf', 'b', 'fc', s_rated_mva=1.2),
+            grid=False, params=_ts(16, 900, dispatch=True, **extra)))['microgrid']
+
+    drift = [r['soc_percent_end'] for r in _rows(run(), 'BA')]
+    assert abs(drift[-1] - soc0) < 3.0
+    mg = run(secondary_soc_percent=50, secondary_restore_h=1)
+    held = [r['soc_percent_end'] for r in _rows(mg, 'BA')]
+    assert held[-1] == pytest.approx(50.0, abs=2.0)
+    assert all(10.0 - 1e-6 <= s <= 90.0 + 1e-6 for s in held)
+    assert mg['secondary_soc_percent'] == 50.0 and mg['unserved_mwh'] == 0
+    assert any(n.startswith('Secondary control held') for n in mg['notes'])
+    assert (max(s['secondary_mw'] for s in mg['steps']) > 0.05) == (soc0 < 50)

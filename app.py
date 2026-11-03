@@ -1482,6 +1482,8 @@ def simulation():
                     'dc_load_profile_assignments': load_profiles_electrisim.dc_load_assignments(in_data),
                     'microgrid_dispatch': in_data[x].get('microgrid_dispatch', False),
                     'sofc_tau_s': in_data[x].get('sofc_tau_s'),
+                    'secondary_soc_percent': in_data[x].get('secondary_soc_percent'),
+                    'secondary_restore_h': in_data[x].get('secondary_restore_h'),
                 }
 
                 # Create network
