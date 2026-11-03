@@ -354,3 +354,13 @@ def test_a_time_series_run_mapped_onto_the_drawing():
     assert storage['PCS1'] == pytest.approx([0.55 * 0.635])
     assert loads == {'IT_cordA': [13.0]}
     assert notes == ['store mxCell_X: no battery behind a PCS on this drawing']
+
+
+def test_a_time_series_run_past_its_window_is_read_at_its_ceiling():
+    """A run that pushed a battery past its 90 % ceiling (a surplus the plant could not absorb) gives the Monte Carlo
+    no more than its window holds: 635 kWh from 10 to 90 %, 0.508 MWh."""
+    pay, _ = _c003_study()
+    bats = [v for v in pay.values() if isinstance(v, dict) and str(v.get('typ', '')).startswith('Battery')]
+    ts = {'time_step_s': 3600, 'stores': {b['name']: {'id': b['id'], 'soc': [100.0]} for b in bats}, 'loads': {}}
+    _, storage, _ = rel.time_series_inputs(ts, pay)
+    assert storage['PCS1'] == pytest.approx([0.8 * 0.635])

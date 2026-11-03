@@ -28,6 +28,7 @@ import math
 
 TX_X_OWN_MAX = 0.25            # mgtwin's PLAUSIBLE["tx_x_pu"] upper bound: an x above it is on the system base
 LOSS_ALLOWANCE = 0.01          # dispatch only; the load flow computes the real losses
+C003_SOFC_MIN_LOAD_PERCENT = 40  # the C003 owner basis, register A20 (vendor guide), where a Site gives no p_min_pu
 
 
 # --- Site -> spec -------------------------------------------------------------------------------------------------
@@ -128,9 +129,15 @@ def site_to_spec(site, profile='generic', life='eol', p_group_eol=1.91, it_bank=
                             'current_limit_pu': float(prm.get('i_limit_transient_pu') or 1.1)})
         elif profile == 'c003':
             fc = f"{c['id']}_FC"
+            # Its minimum load and hot standby from the Site's converter data where it gives them (params p_min_pu,
+            # hot_standby); else the C003 owner basis: 40 % (register A20, the vendor guide), and no hot standby
+            # until the vendor confirms it (A11).
+            p_min = prm.get('p_min_pu')
             sofcs.append({'id': fc, 'name': f"{c['id']} SOFC", 'p_rated_kw': round(p_group * 1e3, 1), 'v_rated': 800,
-                          'p_set_kw': round(p_share * 1e3, 1), 'min_load_percent': 30, 'ramp_percent_s': 1,
-                          'aux_load_percent': 0})
+                          'p_set_kw': round(p_share * 1e3, 1),
+                          'min_load_percent': round(100 * float(p_min), 3) if p_min is not None else C003_SOFC_MIN_LOAD_PERCENT,
+                          'hot_standby': 'yes' if prm.get('hot_standby') is True else 'no',
+                          'ramp_percent_s': 1, 'aux_load_percent': 0})
             pcs.append({'id': c['id'], 'name': f"{c['id']} inverter", 'bus': c['bus'], 'source': fc,
                         'control': 'grid_following', 's_rated_mva': float(c['s_rated_mva']), 'vn_ac_kv': buses[c['bus']],
                         'efficiency_percent': 100, 'current_limit_pu': float(prm.get('i_limit_transient_pu') or 1.2)})
@@ -177,7 +184,7 @@ def site_to_spec(site, profile='generic', life='eol', p_group_eol=1.91, it_bank=
 def _kind(cell):
     t = str(cell.get('typ', ''))
     for k in ('Grounding Transformer', 'Transformer', 'Bus', 'Line', 'Switch', 'Load', 'Generator', 'PCS', 'Battery',
-              'Static Generator', 'External Grid'):
+              'Static Generator', 'External Grid', 'SOFC'):
         if t.startswith(k):
             return k
     return None
@@ -264,6 +271,10 @@ def payload_to_site(payload, site_id='DRAWN', s_base_mva=50.0, template=None):
                                    'q_v_droop_pu': float(v.get('droop_qv_percent') or 5) / 100} if gfm else {})}}
             if _kind(src) == 'Battery':
                 conv['energy_mwh'] = float(src.get('capacity_kwh') or 0) / 1e3
+            elif _kind(src) == 'SOFC':
+                # its minimum load and hot standby, read back by site_to_spec (mgtwin itself ignores them)
+                conv['params']['p_min_pu'] = float(src.get('min_load_percent') or 30) / 100
+                conv['params']['hot_standby'] = str(src.get('hot_standby', 'yes')).strip().lower() not in ('no', 'false', '0')
             site['converters'].append(conv)
         elif k == 'Grounding Transformer':
             site['grounding'].append({'id': _first(v.get('userFriendlyName')), 'bus': bus_id[v['bus']],

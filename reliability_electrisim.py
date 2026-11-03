@@ -677,9 +677,12 @@ def time_series_inputs(ts, payload):
         if str(pcs.get('control')) != 'grid_forming':
             continue
         cap = float(b.get('capacity_kwh') or 0) / 1e3
-        floor = float(b.get('soc_min_percent') or 0)
+        # its window as the battery model takes it (der_electrisim: 10 to 90 % when not given); a run that pushed it
+        # past its ceiling (a surplus the plant could not absorb) is read at the ceiling
+        floor = float(b.get('soc_min_percent') or 10)
+        ceiling = float(b.get('soc_max_percent') or 90)
         storage[_first(pcs.get('userFriendlyName'))] = _hourly(
-            [max(0.0, (float(x) - floor) / 100.0 * cap) for x in rec.get('soc') or [] if x is not None], step)
+            [max(0.0, (min(float(x), ceiling) - floor) / 100.0 * cap) for x in rec.get('soc') or [] if x is not None], step)
     loads = {}
     for name, rec in (ts.get('loads') or {}).items():
         v = next((c for c in cells if _kind(c) == 'Load' and {str(name), str(rec.get('id'))} & key(c)), None)

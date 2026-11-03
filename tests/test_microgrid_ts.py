@@ -314,3 +314,15 @@ def test_secondary_control_holds_the_station_at_its_set_point(client, quiet, soc
     assert mg['secondary_soc_percent'] == 50.0 and mg['unserved_mwh'] == 0
     assert any(n.startswith('Secondary control held') for n in mg['notes'])
     assert (max(s['secondary_mw'] for s in mg['steps']) > 0.05) == (soc0 < 50)
+
+
+def test_sofcs_without_hot_standby_stay_at_their_minimum_load(client, quiet):
+    """The same 3 MW SOFC above the load at its 30 % minimum, but one that cannot come back from hot standby: it is
+    never taken off line, and the surplus past its minimum is reported as one the plant cannot absorb."""
+    mg = _post(client, quiet, _two_buses(
+        _der('Battery', 'ba', capacity_kwh=500, soc_percent=90), _pcs('ga', 'a', 'ba', control='grid_forming', s_rated_mva=1.0),
+        _der('SOFC', 'fc', p_rated_kw=3000, p_set_kw=3000, hot_standby='no'), _pcs('pf', 'b', 'fc', s_rated_mva=3.5),
+        grid=False, params=_ts(3, 60, dispatch=True)))['microgrid']
+    assert mg['sofc_offline_steps'] == 0 and mg['surplus_steps'] == 3
+    assert all(r['p_mw'] == pytest.approx(0.9, rel=1e-3) for r in _rows(mg, 'FC'))
+    assert any('cannot go to hot standby' in n for n in mg['notes'])

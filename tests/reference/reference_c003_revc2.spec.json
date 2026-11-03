@@ -1728,7 +1728,8 @@
    "p_rated_kw": 1936.0,
    "v_rated": 800,
    "p_set_kw": 1594.7,
-   "min_load_percent": 30,
+   "min_load_percent": 40,
+   "hot_standby": "no",
    "ramp_percent_s": 1,
    "aux_load_percent": 0
   },
@@ -1738,7 +1739,8 @@
    "p_rated_kw": 1936.0,
    "v_rated": 800,
    "p_set_kw": 1594.7,
-   "min_load_percent": 30,
+   "min_load_percent": 40,
+   "hot_standby": "no",
    "ramp_percent_s": 1,
    "aux_load_percent": 0
   },
@@ -1748,7 +1750,8 @@
    "p_rated_kw": 1936.0,
    "v_rated": 800,
    "p_set_kw": 1594.7,
-   "min_load_percent": 30,
+   "min_load_percent": 40,
+   "hot_standby": "no",
    "ramp_percent_s": 1,
    "aux_load_percent": 0
   },
@@ -1758,7 +1761,8 @@
    "p_rated_kw": 1936.0,
    "v_rated": 800,
    "p_set_kw": 1594.7,
-   "min_load_percent": 30,
+   "min_load_percent": 40,
+   "hot_standby": "no",
    "ramp_percent_s": 1,
    "aux_load_percent": 0
   },
@@ -1768,7 +1772,8 @@
    "p_rated_kw": 1936.0,
    "v_rated": 800,
    "p_set_kw": 1594.7,
-   "min_load_percent": 30,
+   "min_load_percent": 40,
+   "hot_standby": "no",
    "ramp_percent_s": 1,
    "aux_load_percent": 0
   },
@@ -1778,7 +1783,8 @@
    "p_rated_kw": 1936.0,
    "v_rated": 800,
    "p_set_kw": 1594.7,
-   "min_load_percent": 30,
+   "min_load_percent": 40,
+   "hot_standby": "no",
    "ramp_percent_s": 1,
    "aux_load_percent": 0
   },
@@ -1788,7 +1794,8 @@
    "p_rated_kw": 1936.0,
    "v_rated": 800,
    "p_set_kw": 1594.7,
-   "min_load_percent": 30,
+   "min_load_percent": 40,
+   "hot_standby": "no",
    "ramp_percent_s": 1,
    "aux_load_percent": 0
   },
@@ -1798,7 +1805,8 @@
    "p_rated_kw": 1936.0,
    "v_rated": 800,
    "p_set_kw": 1594.7,
-   "min_load_percent": 30,
+   "min_load_percent": 40,
+   "hot_standby": "no",
    "ramp_percent_s": 1,
    "aux_load_percent": 0
   },
@@ -1808,7 +1816,8 @@
    "p_rated_kw": 1936.0,
    "v_rated": 800,
    "p_set_kw": 1594.7,
-   "min_load_percent": 30,
+   "min_load_percent": 40,
+   "hot_standby": "no",
    "ramp_percent_s": 1,
    "aux_load_percent": 0
   },
@@ -1818,7 +1827,8 @@
    "p_rated_kw": 1936.0,
    "v_rated": 800,
    "p_set_kw": 1594.7,
-   "min_load_percent": 30,
+   "min_load_percent": 40,
+   "hot_standby": "no",
    "ramp_percent_s": 1,
    "aux_load_percent": 0
   },
@@ -1828,7 +1838,8 @@
    "p_rated_kw": 1936.0,
    "v_rated": 800,
    "p_set_kw": 1594.7,
-   "min_load_percent": 30,
+   "min_load_percent": 40,
+   "hot_standby": "no",
    "ramp_percent_s": 1,
    "aux_load_percent": 0
   },
@@ -1838,7 +1849,8 @@
    "p_rated_kw": 1936.0,
    "v_rated": 800,
    "p_set_kw": 1594.7,
-   "min_load_percent": 30,
+   "min_load_percent": 40,
+   "hot_standby": "no",
    "ramp_percent_s": 1,
    "aux_load_percent": 0
   },
@@ -1848,7 +1860,8 @@
    "p_rated_kw": 1936.0,
    "v_rated": 800,
    "p_set_kw": 1594.7,
-   "min_load_percent": 30,
+   "min_load_percent": 40,
+   "hot_standby": "no",
    "ramp_percent_s": 1,
    "aux_load_percent": 0
   },
@@ -1858,7 +1871,8 @@
    "p_rated_kw": 1936.0,
    "v_rated": 800,
    "p_set_kw": 1594.7,
-   "min_load_percent": 30,
+   "min_load_percent": 40,
+   "hot_standby": "no",
    "ramp_percent_s": 1,
    "aux_load_percent": 0
   },
@@ -1868,7 +1882,8 @@
    "p_rated_kw": 1936.0,
    "v_rated": 800,
    "p_set_kw": 1594.7,
-   "min_load_percent": 30,
+   "min_load_percent": 40,
+   "hot_standby": "no",
    "ramp_percent_s": 1,
    "aux_load_percent": 0
   },
@@ -1878,7 +1893,8 @@
    "p_rated_kw": 1936.0,
    "v_rated": 800,
    "p_set_kw": 1594.7,
-   "min_load_percent": 30,
+   "min_load_percent": 40,
+   "hot_standby": "no",
    "ramp_percent_s": 1,
    "aux_load_percent": 0
   },
@@ -1888,7 +1904,8 @@
    "p_rated_kw": 1936.0,
    "v_rated": 800,
    "p_set_kw": 1594.7,
-   "min_load_percent": 30,
+   "min_load_percent": 40,
+   "hot_standby": "no",
    "ramp_percent_s": 1,
    "aux_load_percent": 0
   },
@@ -1898,7 +1915,8 @@
    "p_rated_kw": 1936.0,
    "v_rated": 800,
    "p_set_kw": 1594.7,
-   "min_load_percent": 30,
+   "min_load_percent": 40,
+   "hot_standby": "no",
    "ramp_percent_s": 1,
    "aux_load_percent": 0
   },
@@ -1908,7 +1926,8 @@
    "p_rated_kw": 1936.0,
    "v_rated": 800,
    "p_set_kw": 1594.7,
-   "min_load_percent": 30,
+   "min_load_percent": 40,
+   "hot_standby": "no",
    "ramp_percent_s": 1,
    "aux_load_percent": 0
   }

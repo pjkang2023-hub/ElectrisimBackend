@@ -333,6 +333,9 @@ class Sofc(_Der):
         self.u = min(max(_f(el.get('fuel_utilisation_percent'), 85.0) / 100.0, 0.5), 0.95)
         self.ramp = _pos(el.get('ramp_percent_s'), 1.0) / 100.0
         self.p_min_frac = min(max(_f(el.get('min_load_percent'), 30.0) / 100.0, 0.0), 1.0)
+        # Whether a unit taken off line below its minimum load comes back from hot standby: if not, the fleet is
+        # never turned off, and a surplus past its minimum is one the plant cannot absorb.
+        self.hot_standby = str(el.get('hot_standby', 'yes')).strip().lower() not in ('no', 'false', '0')
         self.aux_frac = min(max(_f(el.get('aux_load_percent'), 5.0) / 100.0, 0.0), 0.5)
         self.p_set = _f(el.get('p_set_kw'), 0.8 * self.p_rated / 1e3) * 1e3
         i_col = self._i_at(self.P0)

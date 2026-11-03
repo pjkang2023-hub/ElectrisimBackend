@@ -344,6 +344,7 @@ class MicrogridTs:
         self.surplus_steps = {}
         self.offline_steps = []
         self.offline_mw = 0.0
+        self.no_standby = False
         self._t = 0
 
     def _profile_values(self, pid, what):
@@ -517,16 +518,20 @@ class MicrogridTs:
         """
         An SOFC's output this step (W). sofc_cut from 1 to 0 turns each down from its operating point to its
         minimum load; below 0, to -1, that share of the fleet is off line (each at its minimum less the share,
-        the fleet's equivalent of whole units shut down).
+        the fleet's equivalent of whole units shut down) - of the units that can go to hot standby; the others
+        stay at their minimum.
         """
         p = obj.p_operating()
         p_min = min(obj.p_min_frac * obj.p_rated, p)
         if self.sofc_cut >= 0.0:
             return p_min + (p - p_min) * self.sofc_cut
-        return p_min * (1.0 + self.sofc_cut)
+        return p_min * (1.0 + self.sofc_cut) if obj.hot_standby else p_min
 
     def _sofc_spans_mw(self):
-        """What the SOFCs behind PCS give above their minimum load, and at it (AC MW, at no cut)."""
+        """
+        What the SOFCs behind PCS give above their minimum load, and at it (AC MW, at no cut) - at it, only those
+        that can go to hot standby: the share of the fleet that can be taken off line.
+        """
         pe, above, floor = self.pe, 0.0, 0.0
         for it in self.items:
             obj, rec = it['obj'], it['rec']
@@ -536,7 +541,10 @@ class MicrogridTs:
             lo = min(pe._electrisim_stage_output(min(obj.p_min_frac * obj.p_rated, obj.p_operating()) / 1e6,
                                                  rec['eta'], rec['p_nl_mw']), rec['s_rated'])
             above += max(0.0, hi - lo)
-            floor += max(0.0, lo)
+            if obj.hot_standby:
+                floor += max(0.0, lo)
+            else:
+                self.no_standby = True
         return above, floor
 
     def _set_battery(self, b, p_mw):
@@ -1080,9 +1088,11 @@ class MicrogridTs:
                               f'more than the island used: up to {self.offline_mw:.3g} MW of them was taken off line '
                               '(as an equal share of the fleet; a unit off line is taken to restart at once).')
         if self.surplus_steps:
+            why = (' (SOFCs that cannot go to hot standby are never taken off line: this is a limit on the surplus '
+                   'the plant can absorb, not a dispatch choice)' if self.no_standby else '')
             self.notes.append(f'At {len(self.surplus_steps)} steps the island had a surplus nothing could take - stores '
-                              f'full, no PV, the SOFCs at their minimum load - up to {max(self.surplus_steps.values()):.3g} '
-                              "MW: the grid-forming PCS's battery took it past its window.")
+                              f'full, no PV, the SOFCs at their minimum load{why} - up to '
+                              f"{max(self.surplus_steps.values()):.3g} MW: the grid-forming PCS's battery took it past its window.")
         rectifiers = []
         names = getattr(self.net, 'user_friendly_names', {}) or {}
         for r in self.rectifiers:

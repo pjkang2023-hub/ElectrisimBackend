@@ -120,3 +120,22 @@ def test_a_state_read_onto_the_diagram():
     load = next(v for v in p.values() if isinstance(v, dict) and str(v.get('typ', '')).startswith('Load')
                 and str(v.get('userFriendlyName', '')).startswith('IT_cordB'))
     assert float(load['p_mw']) == pytest.approx(12.5)
+
+
+def test_sofc_minimum_and_hot_standby_from_the_site():
+    """
+    A C003 Site gives no fuel-cell minimum: the owner basis is taken, 40 % (register A20), and no hot standby until
+    the vendor confirms it (A11). A Site whose converter gives p_min_pu and hot_standby is taken at its word, and a
+    drawn diagram exports them back onto its converters.
+    """
+    site = _json(SPECS, 'c003_revC2_site_corrected.json')
+    spec, _ = site_to_spec(site, 'c003', 'eol', 1.936, 1)
+    assert {(f['min_load_percent'], f['hot_standby']) for f in spec['sofcs']} == {(40, 'no')}
+    sofc = next(c for c in site['converters'] if c['id'] == 'SOFC01')
+    sofc['params'].update(p_min_pu=0.35, hot_standby=True)
+    spec, _ = site_to_spec(site, 'c003', 'eol', 1.936, 1)
+    first = next(f for f in spec['sofcs'] if f['id'] == 'SOFC01_FC')
+    assert (first['min_load_percent'], first['hot_standby']) == (35.0, 'yes')
+    got = payload_to_site(_json(REF, 'reference_c003_revc2.diagram_payload.json'), site['id'], template=site)
+    params = next(c for c in got['converters'] if c['id'] == 'SOFC02')['params']
+    assert (params['p_min_pu'], params['hot_standby']) == (0.4, False)

@@ -154,13 +154,14 @@ def test_genset_black_start_as_declared_and_corrected(client, design, extra_open
 @pytest.mark.parametrize('design', ['ring10', 'revc2'])
 def test_idle_below_the_sofc_minimum_load(client, design):
     """
-    Idle, 11.05 MW: nineteen groups dispatched to it run at 587 kW, 26.7 % - under the 30 % minimum load the study
-    assumes (A20) - and Electrisim says so for each. Sixteen groups would hold 31.7 %.
+    Idle, 11.05 MW: nineteen groups dispatched to it would run at 587 kW, 30 % of their 1936 kW - under the 40 %
+    minimum load of the owner basis (register A20, the vendor guide; 30 % before) - so each is held at its 774 kW
+    minimum and Electrisim says so for each. Fourteen groups would hold 41 %.
     """
     lf = _post(client, _edit(_state(design, 'NORMAL', load_scale=IDLE), sofc_kw=round(11.05 * 1.01 / 19 * 1e3, 1)))
     low = [w for w in lf['warnings'] if 'below its minimum load' in w]
-    assert len(low) == GROUPS and all('587.4 kW' in w for w in low)
-    assert 11.05 * 1.01 / 16 / 2.2 > 0.30
+    assert len(low) == GROUPS and all('774.4 kW' in w for w in low)
+    assert 11.05 * 1.01 / 15 / 1.936 < 0.40 < 11.05 * 1.01 / 14 / 1.936
 
 
 @pytest.mark.parametrize('design, n_pcs, each, loading', [('ring10', 4, 3.117, 67.1), ('revc2', 5, 2.496, 53.4)])
@@ -262,18 +263,21 @@ def test_ring_feeders_through_fault_both_ways(client):
 
 # --- Phase 5: the bridging peak at 45 C -----------------------------------------------------------------------------
 @pytest.mark.parametrize('design, state, pf, loading, f_hz', [
-    ('ring10', 'N1_PCS', None, 100.0, 48.43), ('ring10', 'N1_PCS', 0.96, 87.8, 48.43),
-    ('revc2', 'N1_PCS', None, 76.5, 48.75), ('revc2', 'BESS1_BUS_FAULT', None, 96.3, 48.44)])
+    ('ring10', 'N1_PCS', None, 98.8, 48.46), ('ring10', 'N1_PCS', 0.96, 86.2, 48.46),
+    ('revc2', 'N1_PCS', None, 75.5, 48.77), ('revc2', 'BESS1_BUS_FAULT', None, 95.0, 48.46)])
 def test_bridging_peak_at_45c(client, design, state, pf, loading, f_hz):
     """
-    15.58 MW of bridging at 45 C (5.0 MVA each). The ring with one PCS out: four carry 3.94 MW and, the SOFC at unity
-    power factor, 3.08 Mvar each - over their rating (103 % at their bus's 0.969 pu); at 0.96 on the SOFC, 88 %. Rev
-    C.2 with one out: 77 %; with a BESS board lost, its four at 96 %. The droop's frequency: 48.43 Hz on four PCS.
+    15.58 MW of bridging at 45 C (5.0 MVA each) would leave the 19 SOFCs at 759 kW, 39.2 %: below their 40 % minimum
+    (A20) they are held at 774.4 kW, and the gap is 15.29 MW. The ring with one PCS out: four carry 3.86 MW and, the
+    SOFC at unity power factor, 3.08 Mvar each - over their rating, 101.9 % at their bus's 0.969 pu (at 30 %, 103 %);
+    at 0.96 on the SOFC, 86 %.
+    Rev C.2 with one out: 76 %; with a BESS board lost, its four at 95 %. The droop's frequency: 48.46 Hz on four PCS.
     """
     out, gfm = _bridging(client, design, state, 45, sofc_pf=pf)
     assert all(g['loading_percent'] == pytest.approx(loading, abs=0.6) for g in gfm)
     assert gfm[0]['frequency_hz'] == pytest.approx(f_hz, abs=0.03)
-    assert any('loaded to 103' in w for w in out.get('warnings') or []) == (design == 'ring10' and pf is None)
+    assert any('loaded to 101.9' in w for w in out.get('warnings') or []) == (design == 'ring10' and pf is None)
+    assert sum('held to 774.4 kW' in w for w in out.get('warnings') or []) == 19
 
 
 def test_revc2_mva_lost_halls_on_cord_b(client):
@@ -364,14 +368,15 @@ def _ramp(client, design, load_model, tf=20.0):
     return out, np.asarray(gfm[0]['frequency_hz'], dtype=float), sofc
 
 
-@pytest.mark.parametrize('design, f_min, sofc_lost', [('ring10', 48.26, 1.71), ('revc2', 48.75, 0.0)])
+@pytest.mark.parametrize('design, f_min, sofc_lost', [('ring10', 48.25, 1.84), ('revc2', 48.75, 0.0)])
 def test_andes_bridging_ramp_reaches_the_sofc_under_frequency_trip(client, design, f_min, sofc_lost):
     """
     The bridging ramp in ANDES, the IT at constant power, each PCS holding its Q-V droop: the island's frequency is
     the droop's, 48.4 Hz at the ring's peak with four PCS - past the SOFC inverters' under-frequency trip (48.75 Hz,
     IEEE 1547 Category III at 50 Hz, ASSUMED): some 1.7 MW of SOFC trips and the ring settles at 48.26 Hz, its PCS at
     their 45 C rating. Rev C.2's five PCS reach 48.75 Hz, the trip point itself. Without secondary control acting
-    within the ramp (R2) the SOFC's frequency ride-through must reach below the droop's excursion.
+    within the ramp (R2) the SOFC's frequency ride-through must reach below the droop's excursion. (The SOFCs start at
+    their 40 % minimum, 774.4 kW, not the 759 kW the 15.58 MW gap would put them at: 1.84 MW trips on the ring.)
     """
     _, f, sofc = _ramp(client, design, 'power')
     assert f.min() == pytest.approx(f_min, abs=0.03)
@@ -408,19 +413,21 @@ def _step(client, design, state, tf=10.0, dt=0.05):
     return out, f, sofc, cur
 
 
-@pytest.mark.parametrize('design, state, f_end, i_peak', [('ring10', 'NORMAL', 48.46, 0.92), ('revc2', 'NORMAL', 48.74, 0.72),
-                                                         ('revc2', 'N1_PCS', 48.47, 0.89)])
+@pytest.mark.parametrize('design, state, f_end, i_peak', [('ring10', 'NORMAL', 48.45, 0.75), ('revc2', 'NORMAL', 48.74, 0.58),
+                                                         ('revc2', 'N1_PCS', 48.46, 0.71)])
 def test_andes_65_percent_step_carried(client, design, state, f_end, i_peak):
     """
     The owner's 65 % step taken at once - 18.95 MW on the PCS, the SOFC still at idle: the ring with its five PCS and
     Rev C.2 with five or six carry it at 45 C, the frequency on their droop (48.46, 48.74 and 48.47 Hz), the PCS's
-    current at most 0.92 pu, the batteries giving some 1.5 % of their charge in 9 s. (The workload's own ramp, 8 %/s,
-    is the bridging case.)
+    current at most 0.75 pu. (The workload's own ramp, 8 %/s, is the bridging case.) At idle the 19 SOFCs would run at
+    30.3 %, below their 40 % minimum (A20): they are held at 774.4 kW, 14.71 MW against the idle's 11.05 MW, so the
+    PCS charge their batteries by 3.7 MW before the step and take 15.3 MW of it rather than 19 MW (at 30 %: 0.92 pu).
+    Idle with all 19 on is not a state the island can hold without hot standby (A11): see the idle test.
     """
     out, f, sofc, cur = _step(client, design, state)
     assert out['time'][-1] == pytest.approx(10.0)
     assert f[-1] == pytest.approx(f_end, abs=0.03) and cur.max() == pytest.approx(i_peak, abs=0.03)
-    assert sofc[-1] > sofc[0] - 0.3
+    assert sofc[-1] > 0.96 * sofc[0]       # none trips (one is 5 %): their output follows the voltage, 2-3 %
 
 
 def test_andes_65_percent_step_ring_with_a_pcs_out_collapses(client):
