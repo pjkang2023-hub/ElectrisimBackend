@@ -18,7 +18,9 @@ Each step, before its load flow:
 After it - under the dispatch - the batteries take what the grid would
 supply, until the grid's exchange is zero or they reach their limits;
 islanded, when the grid-forming PCS's batteries cannot supply or absorb what
-the island asks, load is shed or PV curtailed. Then each store's state is
+the island asks, load is shed, or PV curtailed and then the SOFCs turned down
+toward their minimum load (their inverters' answer to the frequency rising as
+the stores fill). Then each store's state is
 advanced by what it delivered over the step: a battery's charge, a
 supercapacitor's and a flywheel's energy, an SOFC's fuel.
 
@@ -324,6 +326,15 @@ class MicrogridTs:
         self.unserved_steps = []
         self.shed = 1.0
         self.curtail = 1.0
+        # SOFCs turned down by a surplus the stores could not take: the share of their output above their
+        # minimum load they keep this step, and what it came to over the run
+        self.sofc_cut = 1.0
+        self.turned_down_j = 0.0
+        self.turned_down_steps = []
+        self.surplus_steps = {}
+        self.offline_steps = []
+        self.offline_mw = 0.0
+        self._t = 0
 
     def _profile_values(self, pid, what):
         """A library profile's value at each step (its mean over a step longer than its samples), or None."""
@@ -348,7 +359,7 @@ class MicrogridTs:
             self._set_dc_load(i, p * scale)
         self.base_ac = {i: (float(net.load.at[i, 'p_mw']), float(net.load.at[i, 'q_mvar'])) for i in self.real_ac}
         self.base_dc = {i: float(net.load_dc.at[i, 'p_dc_mw']) for i in self.dc_loads}
-        self.shed, self.curtail = 1.0, 1.0
+        self.shed, self.curtail, self.sofc_cut = 1.0, 1.0, 1.0
         for h in self.handover:              # each step from its droop: handed over again if short
             self._release(h['conv'])
         for it in self.items:
@@ -486,11 +497,37 @@ class MicrogridTs:
                         if c['bus_in'] == rec['bus'] and c['output_load'] is not None and c['control'] == 'mppt':
                             net.load_dc.at[c['output_load'], 'p_dc_mw'] *= self.curtail
             elif rec['table'] == 'sgen':
-                p_dc = (obj.mpp()[2] if obj.kind == 'PV Array' else obj.p_operating()) / 1e6
+                p_dc = (obj.mpp()[2] if obj.kind == 'PV Array' else self._sofc_dc_w(obj)) / 1e6
                 p_ac = min(pe._electrisim_stage_output(p_dc, rec['eta'], rec['p_nl_mw']), rec['s_rated'])
                 if obj.kind == 'PV Array':
                     p_ac *= self.curtail
                 net.sgen.at[rec['index'], 'p_mw'] = p_ac
+
+    def _sofc_dc_w(self, obj):
+        """
+        An SOFC's output this step (W). sofc_cut from 1 to 0 turns each down from its operating point to its
+        minimum load; below 0, to -1, that share of the fleet is off line (each at its minimum less the share,
+        the fleet's equivalent of whole units shut down).
+        """
+        p = obj.p_operating()
+        p_min = min(obj.p_min_frac * obj.p_rated, p)
+        if self.sofc_cut >= 0.0:
+            return p_min + (p - p_min) * self.sofc_cut
+        return p_min * (1.0 + self.sofc_cut)
+
+    def _sofc_spans_mw(self):
+        """What the SOFCs behind PCS give above their minimum load, and at it (AC MW, at no cut)."""
+        pe, above, floor = self.pe, 0.0, 0.0
+        for it in self.items:
+            obj, rec = it['obj'], it['rec']
+            if obj.kind != 'SOFC' or it['via'] != 'pcs' or rec['table'] != 'sgen' or not obj.in_service:
+                continue
+            hi = min(pe._electrisim_stage_output(obj.p_operating() / 1e6, rec['eta'], rec['p_nl_mw']), rec['s_rated'])
+            lo = min(pe._electrisim_stage_output(min(obj.p_min_frac * obj.p_rated, obj.p_operating()) / 1e6,
+                                                 rec['eta'], rec['p_nl_mw']), rec['s_rated'])
+            above += max(0.0, hi - lo)
+            floor += max(0.0, lo)
+        return above, floor
 
     def _set_battery(self, b, p_mw):
         """A dispatched battery's output (AC side behind a PCS, its converter's output) held to what it can give."""
@@ -636,6 +673,7 @@ class MicrogridTs:
 
     def solve(self, t, run_pf):
         """The step's load flow; under the dispatch, the batteries' powers and any shedding or curtailment settled."""
+        self._t = t
         converged = run_pf()
         if not self.dispatch or not converged:
             return converged
@@ -674,7 +712,7 @@ class MicrogridTs:
         back first, then PV is curtailed. True when something changed.
         """
         net, pe = self.net, self.pe
-        actual = target = 0.0
+        actual = target = room = 0.0
         for rec in self.pcs:
             if rec['table'] != 'gen' or not rec['in_service'] or rec['index'] not in net.res_gen.index:
                 continue
@@ -692,6 +730,15 @@ class MicrogridTs:
             # stayed shed. Charging, what its store can take at its present output, as before.
             can = pe._electrisim_stage_output(avail, rec['eta'], rec['p_nl_mw'])
             target += rec['p_max_step'] if rec.get('p_max_step') is not None and p_ac >= 0 else can
+            # What its store could take this step at its rating: in a surplus, the island's limit. An idle
+            # PCS (0 MW) counted its discharge window, so a full set of stations read as room to spare and
+            # the slack PCS's battery took the surplus past its window.
+            probe = pe._electrisim_dc_dc_input_power(-rec['p_max_mw'], rec['eta'], rec['p_nl_mw'])
+            room += min(0.0, pe._electrisim_stage_output(available_w(obj, probe * 1e6, self.dt) / 1e6,
+                                                         rec['eta'], rec['p_nl_mw']))
+        if actual < 0 and all(r['source']['obj'] is not None for r in self.pcs
+                              if r['table'] == 'gen' and r['in_service'] and r['index'] in net.res_gen.index):
+            target = room
         # Settled just inside the window, between 3 and 1 tolerances under it: settled on it, within
         # a tolerance either side, a battery left at its floor ran some joules past it over a minute.
         tol = 1e-7
@@ -707,11 +754,29 @@ class MicrogridTs:
             # Room again: the stores give back what the PCS can carry.
             return True
         elif actual < target - tol and target <= 0:
-            # Surplus they cannot take: curtail PV.
+            # Surplus they cannot take: curtail PV, then turn the SOFCs down toward their minimum load. With
+            # PV alone, an island of fuel cells whose stores were full had nothing to give, and the slack
+            # PCS's battery took the surplus past its window.
+            excess = target - actual
             pv = sum(self._pv_output_mw())
-            if pv <= 1e-12:
+            if pv > 1e-12:
+                self.curtail = max(min(self.curtail * (pv - excess) / pv, 1.0), 0.0)
+                self._apply_sources()
+                return True
+            above, floor = self._sofc_spans_mw()
+            cut = self.sofc_cut
+            if cut > 0.0 and above > 1e-12:
+                cut -= excess / above
+                if cut < 0.0:           # past their minimum load: the rest from units off line
+                    cut = -min(-cut * above / floor, 1.0) if floor > 1e-12 else 0.0
+            elif cut > -1.0 and floor > 1e-12:
+                # nothing above their minimum load: straight to units off line (a cut above 0 does nothing there)
+                cut = max(min(cut, 0.0) - excess / floor, -1.0)
+            else:
+                self.surplus_steps[self._t] = excess
                 return False
-            self.curtail = max(min(self.curtail * (pv - (target - actual)) / pv, 1.0), 0.0)
+            self.sofc_cut = cut
+            self.offline_mw = max(self.offline_mw, -cut * floor if cut < 0 else 0.0)
             self._apply_sources()
             return True
         else:
@@ -852,6 +917,10 @@ class MicrogridTs:
         pv_now = sum(self._pv_output_mw())
         curtailed = pv_now / self.curtail - pv_now if 0 < self.curtail < 1 else 0.0
         self.curtailed_j += curtailed * 1e6 * dt
+        if self.sofc_cut < 1.0:
+            self.turned_down_steps.append(t)
+        if self.sofc_cut < 0.0:
+            self.offline_steps.append(t)
         # PCS on a DC network (a UPS's inverters): their power and, sharing by charge, their offset.
         for rec in self.pcs:
             if rec.get('dc_bus') is None or rec['table'] != 'gen' or not rec['in_service'] \
@@ -892,6 +961,10 @@ class MicrogridTs:
                 state['target_kw'] = it['target_now_w'] / 1e3
             if obj.kind in ('Battery', 'Flywheel', 'SOFC'):
                 demand += p / 1e6          # the dispatchable sources' share of the demand
+            if obj.kind == 'SOFC' and self.sofc_cut < 1.0:
+                given_up = max(0.0, obj.p_operating() - p)
+                self.turned_down_j += given_up * dt
+                obj.p_set = max(p, obj.p_min_frac * obj.p_rated)   # it turned down: the next step ramps from here
             drawn = advance(obj, p, v, dt)
             it['drawn_j'] += drawn
             it['delivered_j'] += p * dt
@@ -900,12 +973,14 @@ class MicrogridTs:
                    'label': obj.label, 'kind': obj.kind, 'p_mw': p / 1e6, 'v_kv': v / 1e3,
                    'soc_percent_end': soc_percent(obj), **state}
             self.rows.append(row)
-        # Under the dispatch the SOFCs follow the demand on the dispatchable sources, averaged.
+        # Under the dispatch the SOFCs follow the demand on the dispatchable sources, averaged - with the load
+        # shed this step in it: following only what was served, they settled at the shed island's load and the
+        # shedding never ended.
         if self.dispatch:
             grid = sum(float(net.res_ext_grid.at[g, 'p_mw']) for g in net.ext_grid.index
                        if g in net.res_ext_grid.index and bool(net.ext_grid.at[g, 'in_service'])
                        and not ('electrisim_aux' in net.ext_grid.columns and net.ext_grid.at[g, 'electrisim_aux'] == True))
-            d_total = grid + demand
+            d_total = grid + demand + unserved
             sofcs = [it for it in self.items if it['obj'].kind == 'SOFC']
             if sofcs:
                 cap = sum(it['obj'].p_rated for it in sofcs)
@@ -963,6 +1038,17 @@ class MicrogridTs:
         if self.unserved_steps:
             self.notes.append(f'The island ran short at {len(self.unserved_steps)} steps: '
                               f'{self.unserved_j / 3.6e9:.4g} MWh of load was not served.')
+        if self.turned_down_steps:
+            self.notes.append(f'The grid-forming stores were full at {len(self.turned_down_steps)} steps: the SOFCs '
+                              f'turned down toward their minimum load, {self.turned_down_j / 3.6e9:.4g} MWh less.')
+        if self.offline_steps:
+            self.notes.append(f'At {len(self.offline_steps)} of those steps the SOFCs at their minimum load still gave '
+                              f'more than the island used: up to {self.offline_mw:.3g} MW of them was taken off line '
+                              '(as an equal share of the fleet; a unit off line is taken to restart at once).')
+        if self.surplus_steps:
+            self.notes.append(f'At {len(self.surplus_steps)} steps the island had a surplus nothing could take - stores '
+                              f'full, no PV, the SOFCs at their minimum load - up to {max(self.surplus_steps.values()):.3g} '
+                              "MW: the grid-forming PCS's battery took it past its window.")
         rectifiers = []
         names = getattr(self.net, 'user_friendly_names', {}) or {}
         for r in self.rectifiers:
@@ -990,4 +1076,7 @@ class MicrogridTs:
         return {'dispatch': self.dispatch, 'time_step_s': dt, 'ders': self.rows, 'pcs': self.pcs_rows,
                 'stores': stores, 'smoothing': smoothing, 'rectifiers': rectifiers, 'steps': self.balance,
                 'unserved_mwh': self.unserved_j / 3.6e9, 'curtailed_mwh': self.curtailed_j / 3.6e9,
+                'sofc_turned_down_mwh': self.turned_down_j / 3.6e9,
+                'sofc_offline_steps': len(self.offline_steps), 'sofc_offline_mw_max': self.offline_mw,
+                'surplus_steps': len(self.surplus_steps),
                 'notes': self.notes}

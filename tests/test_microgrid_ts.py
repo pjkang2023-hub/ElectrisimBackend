@@ -228,3 +228,50 @@ def test_island_curtails_pv_when_its_battery_is_full(client, quiet):
     assert mg['curtailed_mwh'] > 0
     assert all(r['soc_percent_end'] <= 90.0 + 1e-6 for r in _rows(mg, 'BA'))
     assert mg['unserved_mwh'] == 0
+
+
+def test_island_turns_its_sofc_down_when_the_stores_are_full(client, quiet):
+    """
+    Islanded on fuel cells, no PV: two grid-forming stations full at 90 % (one the slack, one idle at 0 MW) and a
+    1 MW SOFC set to 1 MW against the 0.6 MW load. With PV the only relief, the slack station's battery took the
+    0.4 MW surplus past its window, and the idle station's discharge window read as room to spare. Now the SOFC
+    turns down - not below its 30 % minimum - and both batteries stay at 90 %.
+    """
+    mg = _post(client, quiet, _two_buses(
+        _der('Battery', 'ba', capacity_kwh=500, soc_percent=90), _pcs('ga', 'a', 'ba', control='grid_forming', s_rated_mva=1.0),
+        _der('Battery', 'bb', capacity_kwh=500, soc_percent=90), _pcs('gb', 'a', 'bb', control='grid_forming', s_rated_mva=1.0),
+        _der('SOFC', 'fc', p_rated_kw=1000, p_set_kw=1000), _pcs('pf', 'b', 'fc', s_rated_mva=1.2),
+        grid=False, params=_ts(3, 60, dispatch=True)))['microgrid']
+    for label in ('BA', 'BB'):
+        assert all(r['soc_percent_end'] <= 90.0 + 1e-6 for r in _rows(mg, label))
+    assert all(0.3 - 1e-9 <= r['p_mw'] < 0.99 for r in _rows(mg, 'FC'))
+    assert mg['sofc_turned_down_mwh'] > 0 and mg['sofc_offline_steps'] == 0 and mg['surplus_steps'] == 0
+    assert mg['unserved_mwh'] == 0
+    assert any('turned down' in n for n in mg['notes'])
+
+
+def test_island_takes_sofcs_off_line_below_their_minimum_load(client, quiet):
+    """A 3 MW SOFC whose 30 % minimum (0.9 MW) is more than the 0.6 MW load: past its minimum, part of it is taken
+    off line, reported; the full station's battery stays at 90 %."""
+    mg = _post(client, quiet, _two_buses(
+        _der('Battery', 'ba', capacity_kwh=500, soc_percent=90), _pcs('ga', 'a', 'ba', control='grid_forming', s_rated_mva=1.0),
+        _der('SOFC', 'fc', p_rated_kw=3000, p_set_kw=3000), _pcs('pf', 'b', 'fc', s_rated_mva=3.5),
+        grid=False, params=_ts(3, 60, dispatch=True)))['microgrid']
+    assert all(r['soc_percent_end'] <= 90.0 + 1e-6 for r in _rows(mg, 'BA'))
+    assert mg['sofc_offline_steps'] == 3 and mg['sofc_offline_mw_max'] > 0.25
+    assert any('taken off line' in n for n in mg['notes'])
+
+
+def test_shed_load_comes_back_as_the_sofc_ramps(client, quiet):
+    """
+    An island short at first - its SOFC at 0.2 MW, its station's battery at its floor - sheds load. The SOFC then
+    follows the demand with the shed load in it and ramps to the 0.6 MW load: the shedding ends. Following only
+    what was served, it had settled at the shed island's load and the shedding never ended.
+    """
+    mg = _post(client, quiet, _two_buses(
+        _der('Battery', 'ba', capacity_kwh=60, soc_percent=10), _pcs('ga', 'a', 'ba', control='grid_forming', s_rated_mva=1.0),
+        _der('SOFC', 'fc', p_rated_kw=1000, p_set_kw=200, ramp_percent_s=1.0), _pcs('pf', 'b', 'fc', s_rated_mva=1.2),
+        grid=False, params=_ts(8, 60, dispatch=True, sofc_tau_s=60)))['microgrid']
+    unserved = [s['unserved_mw'] for s in mg['steps']]
+    assert unserved[0] > 0.3
+    assert unserved[-1] < 0.01 * unserved[0]
