@@ -350,7 +350,7 @@ def test_emt_ring_recovers_with_the_sofc_carrying_reactive_power(client, monkeyp
 from test_reference_c003 import _site      # noqa: E402
 
 
-def _ramp(client, design, load_model, tf=20.0):
+def _ramp(client, design, load_model, tf=20.0, gap=None):
     """The bridging ramp in ANDES: one PCS out at 45 C, the SOFC at 0.96 pf and at their 40 % minimum, the IT ramping
     1.272 MW/s net of the SOFC from there to full load. The 15.93 MW gap would start the IT below that minimum: the
     stations would start charging, and a run takes its first moment as 50 Hz, so the droop would start lower for no
@@ -361,7 +361,7 @@ def _ramp(client, design, load_model, tf=20.0):
         'sn_mva': '100', 'tf': str(tf), 'tstep': '0', 'fault_enabled': 'false', 'load_model': load_model})
     n_on = len([x for x in next(st for st in _site(design)['islands'] if st['id'] == 'N1_PCS')['energized_source_ids']
                 if x.startswith('SOFC')])
-    gap = min(GAP, LOAD_MW - n_on * 0.4 * 1.936)
+    gap = gap or min(GAP, LOAD_MW - n_on * 0.4 * 1.936)
     f0 = (LOAD_MW - gap) / LOAD_MW
     p['0']['load_profiles'] = {'ramp': {'name': 'ramp', 'kind': 'power', 'dt': dt, 't0': 0,
                                         'p': [min(f0 + (1 - f0) * k * dt / (gap / rate), 1.0) for k in range(int(tf / dt) + 2)]}}
@@ -396,6 +396,20 @@ def test_andes_bridging_ramp_reaches_the_sofc_under_frequency_trip(client, desig
     _, f, sofc = _ramp(client, design, 'power')
     assert f.min() == pytest.approx(f_min, abs=0.03)
     assert sofc[0] - sofc[-1] == pytest.approx(sofc_lost, abs=0.1)
+
+
+def test_andes_warns_of_a_run_that_starts_charging(client):
+    """
+    A run's first moment reads 50 Hz whatever the PCS are doing, so a start that has them charging lowers the droop for
+    the whole run: the warning says so. The 15.93 MW gap starts the IT below the SOFC minimum, the stations at -0.62 MW
+    and 0.05 Hz; the same ramp from the minimum starts them at zero, and says nothing.
+    """
+    says = lambda out: [w for w in out['warnings'] if 'start this run charging' in w]
+    out, _, _ = _ramp(client, 'revc2', 'power', tf=2.0, gap=GAP)
+    (w,) = says(out)
+    assert 'charging at 0.6' in w and 'reads 0.05 Hz below' in w
+    out, _, _ = _ramp(client, 'revc2', 'power', tf=2.0)
+    assert not says(out)
 
 
 def _step(client, design, state, tf=10.0, dt=0.05):

@@ -2078,6 +2078,38 @@ def _pcs_series(ss, meta: Dict[str, Any], idx: np.ndarray) -> List[Dict[str, Any
     return out
 
 
+def _warn_island_starts_charging(ss, meta: Dict[str, Any], pcs: List[Dict[str, Any]], min_hz: float = 0.02) -> None:
+    """
+    A grid-forming PCS's droop is measured from the power it starts at (P0 of
+    GENCLS's swing equation), so a run's first moment reads the rated frequency
+    whatever the PCS are doing. An island whose PCS start charging below their
+    set points therefore runs lower than the load flow's droop, by that
+    charge's share of it: the rev C.2 ramp peak read 48.73 Hz starting at
+    -0.62 MW, 48.78 Hz starting at zero, for the same 15.30 MW. Right if
+    secondary control has trimmed the island to the rated frequency while it
+    charges; otherwise the start says something about the case. Starting
+    discharging is the same convention, and every island's ordinary dispatch.
+    """
+    rows = {r["name"]: r for r in pcs if r.get("p_mw") and r["p_mw"][0] is not None}
+    gen_map, freq = meta["gen_map"], meta["frequency"]
+    for island in _islands(ss):
+        members = [(gen_map[n], r) for n, r in rows.items()
+                   if gen_map[n].get("control") == "grid_forming" and gen_map[n]["bus"] in island]
+        if not any(g.get("holds") for g, _ in members):
+            continue
+        charging = [(g, r["p_mw"][0]) for g, r in members if r["p_mw"][0] < min(g["p_set_mw"], 0.0)]
+        offset = max((g["droop_pf"] * freq * (g["p_set_mw"] - p0) / g["s_rated_mva"] for g, p0 in charging), default=0.0)
+        if offset < min_hz:
+            continue
+        mw = -sum(p0 for _, p0 in charging)
+        meta["warnings"].append(
+            f"The grid-forming PCS holding {charging[0][0]['name']}'s island start this run charging at {mw:.2f} MW. "
+            f"ANDES takes a run's first moment as {freq:g} Hz and measures each droop from there, so the frequency "
+            f"reads {offset:.2f} Hz below the load flow's droop throughout. That is right if secondary control has "
+            f"trimmed the island to {freq:g} Hz while it charges; if not, start the run with the load where the PCS "
+            f"are at zero (a ramp that starts below the sources' minimum output starts them charging).")
+
+
 def _extract_syn_series(ss, model_name: str, var_name: str, names: List[str]) -> List[Dict[str, Any]]:
     if not hasattr(ss, model_name):
         return []
@@ -2939,6 +2971,7 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
                 })
 
         pcs = _pcs_series(ss, meta, idx)
+        _warn_island_starts_charging(ss, meta, pcs)
         swing_metrics = _swing_metrics(ss, t, meta, params)
 
         # Frequency estimate from mean omega (pu → Hz); without a machine, the grid-forming PCS's
