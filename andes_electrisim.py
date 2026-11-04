@@ -508,6 +508,26 @@ def _pcs_plants(in_data: Dict[str, Any], warnings: List[str]) -> List[Dict[str, 
     return out
 
 
+def _hold_sofc_standby(plants: List[Dict[str, Any]], params: Dict[str, Any], warnings: List[str]) -> None:
+    """
+    The SOFC groups in hot standby when a run follows its load at the groups' ramp rates (params["sofc_ramp"]):
+    params["sofc_standby"], their PCS by name, comma separated. Each starts at nothing, below its minimum load.
+    """
+    if not _sb(params.get("sofc_ramp"), False):
+        return
+    names = params.get("sofc_standby") or []
+    if isinstance(names, str):
+        names = [n.strip() for n in names.split(",") if n.strip()]
+    found = set()
+    for rec in plants:
+        hit = {str(rec["name"]), rec["label"]} & set(names)
+        if hit and rec["source"]["kind"] == "SOFC" and rec["control"] != "grid_forming":
+            rec["standby"], rec["p_ac"], rec["q"] = True, 0.0, 0.0
+            found |= hit
+    for name in sorted(set(names) - found):
+        warnings.append(f"SOFC standby: no grid-following PCS '{name}' on an SOFC system; not applied.")
+
+
 def _pcs_store(rec: Dict[str, Any]) -> Optional[Dict[str, float]]:
     """
     A PCS's store: its energy (MWh), its state of charge at the start and its
@@ -1807,6 +1827,7 @@ def build_system(
     # --- PCS ---
     pcs_count = 0
     pcs_plants = _pcs_plants(in_data, warnings)
+    _hold_sofc_standby(pcs_plants, params, warnings)
     if any(r["control"] == "grid_following" for r in pcs_plants):
         # Its Q as set: its static generator a PV bus held at that Q, which the power flow turns to PQ.
         ss.PV.config.pv2pq = 1
@@ -1841,7 +1862,8 @@ def build_system(
             "static_idx": static_idx, "syn_idx": None, "plant_kind": "PCS", "name": rec["label"], "bus": bus,
             "pcs": True, "id": rec["id"], "control": rec["control"], "source_kind": rec["source"]["kind"],
             "source": rec["source"]["label"], "s_rated_mva": rec["s_rated"], "p_mw": rec["p_ac"], "p_set_mw": rec["p_set_mw"],
-            "q_mvar": rec["q"], "p_max_mw": rec["p_max_ac"], "p_min_mw": rec["p_min_ac"],
+            "q_mvar": rec["q"], "p_max_mw": rec["p_max_ac"], "p_min_mw": rec["p_min_ac"], "pf": rec["pf"],
+            "standby": rec.get("standby", False),
             "vm_set_pu": rec["vm_set_pu"], "droop_qv": rec["droop_qv"], "q_mode": rec["q_mode"],
             "qv_droop": rec["qv_droop"], "q_max_mvar": rec["q_max"], "on_slack_bus": bus in slack_v0 or holds,
             "current_limit_pu": rec["k"], "overload": rec.get("overload") or [], "droop_pf": rec["droop_pf"], "holds": holds, "eta": rec["eta"], "p_nl_mw": rec["p_nl_mw"], "store": _pcs_store(rec),
@@ -2023,6 +2045,7 @@ def build_system(
         "timed_events": timed_events,
         "ups_loads": ups_loads,
         "free_islands": bool(island_slacks or running_islands),
+        "pcs_plants": pcs_plants,
         "profiled_loads": profiled_loads,
         "profile_repeat": profile_repeat,
         "converter_pq": converter_pq,
@@ -2756,10 +2779,70 @@ class _LoadShedding:
         }
 
 
+_SOFC_FOLLOW_T = 1.0     # how fast the groups take up what their stations carry, within their ramp rates (s): ASSUMED
+
+
+class _SofcRamp:
+    """
+    SOFC groups following their island's load, when params["sofc_ramp"] is on: each piece of the run every group
+    moves its power order towards taking its share of what the island's grid-forming PCS carry, no faster than its
+    ramp rate, between its minimum load and its rating, its Q at its power factor. A group in hot standby holds at
+    nothing until params["sofc_return_s"] (120 s, ASSUMED) after the stations first carry anything, and comes back
+    from there. Only ANDES's power order moves, so a low frequency's cut in a group's output and the IT's own Q
+    stay in the result. Without a grid-forming PCS in its island a group has nothing to follow, and holds.
+    """
+
+    def __init__(self, ss, meta: Dict[str, Any], plants: List[Dict[str, Any]], params: Dict[str, Any]):
+        self.ss, self.sn, self.islands = ss, meta["sn_mva"], []
+        self.return_s = _sf(params.get("sofc_return_s"), 120.0)
+        if not _sb(params.get("sofc_ramp"), False) or not ss.PVD1.n or not ss.GENCLS.n:
+            return
+        recs = {str(r["name"]): r for r in plants}
+        gen_map = meta["gen_map"]
+        for island in _islands(ss):
+            stations, units = [], []
+            for name, g in gen_map.items():
+                if not g.get("pcs") or not g.get("model_idx") or g["bus"] not in island:
+                    continue
+                if g["model"] == "GENCLS":
+                    stations.append(list(ss.GENCLS.idx.v).index(g["model_idx"]))
+                elif g["model"] == "PVD1" and g["source_kind"] == "SOFC":
+                    obj, eta = recs[name]["source"]["obj"], recs[name]["eta"]
+                    pf = min(max(abs(g["pf"]), 1e-3), 1.0)
+                    units.append({"k": list(ss.PVD1.idx.v).index(g["model_idx"]), "p": g["p_mw"], "standby": g["standby"],
+                                  "p_min": g["p_min_mw"], "p_max": g["p_max_mw"],
+                                  "up": obj.ramp * obj.p_rated / 1e6 * eta, "down": obj.ramp_down * obj.p_rated / 1e6 * eta,
+                                  "q_per_p": (math.copysign(math.tan(math.acos(pf)), g["pf"])
+                                              if g["q_mode"] == "pf" else None)})
+            if stations and units:
+                self.islands.append({"stations": stations, "units": units, "t_first": None})
+
+    @property
+    def active(self) -> bool:
+        return bool(self.islands)
+
+    def step(self, t0: float, t1: float) -> None:
+        """Set each group's power order for the piece t0..t1, from what its stations carry at t0."""
+        ss, dt = self.ss, t1 - t0
+        for isl in self.islands:
+            carried = sum(float(ss.GENCLS.Pe.v[k]) * float(ss.GENCLS.u.v[k]) for k in isl["stations"]) * self.sn
+            if isl["t_first"] is None and carried > 1e-3:
+                isl["t_first"] = t0
+            back = isl["t_first"] is not None and t0 >= isl["t_first"] + self.return_s
+            moving = [u for u in isl["units"] if back or not u["standby"]]
+            for u in moving:
+                move = min(max(carried / len(moving) * dt / _SOFC_FOLLOW_T, -u["down"] * dt), u["up"] * dt)
+                u["p"] = min(max(u["p"] + move, min(u["p"], u["p_min"])), u["p_max"])
+                ss.PVD1.pref0.v[u["k"]] = u["p"] / self.sn
+                if u["q_per_p"] is not None:
+                    ss.PVD1.qref0.v[u["k"]] = u["p"] * u["q_per_p"] / self.sn
+
+
 def _run_tds_following_profiles(ss, profiled: List[Dict[str, Any]], tf: float, repeat: bool,
                                 warnings: List[str], limits: Optional[_GridFormingLimits] = None,
                                 shedding: Optional[_LoadShedding] = None,
-                                easing: Optional[_RectifierEasing] = None) -> bool:
+                                easing: Optional[_RectifierEasing] = None,
+                                sofc_ramp: Optional[_SofcRamp] = None) -> bool:
     """
     Run the time-domain simulation in short pieces, setting each profiled
     load's power before each piece.
@@ -2795,6 +2878,8 @@ def _run_tds_following_profiles(ss, profiled: List[Dict[str, Any]], tf: float, r
         limits.check(0.0)
     if easing is not None and easing.active:
         step = min(step, _PCS_CHECK_S)
+    if sofc_ramp is not None and sofc_ramp.active:
+        step = min(step, _PCS_CHECK_S * 5)
     # The pieces' ends on a grid of the step, none near an event (an Alter of
     # the grid's voltage, a fault, a trip): a piece ending on one stopped the
     # run there - ANDES resumed on the event's time with no step to take - or
@@ -2815,6 +2900,8 @@ def _run_tds_following_profiles(ss, profiled: List[Dict[str, Any]], tf: float, r
             if load["q_mode"] == "pf":
                 q = load["q_rated"] * f * load.get("kept", 1.0) * load.get("eased", 1.0)
                 ss.PQ.Qpf.v[i], ss.PQ.Iqeq.v[i], ss.PQ.Xeq.v[i] = q, q / v0, q / v0 ** 2
+        if sofc_ramp is not None and sofc_ramp.active:
+            sofc_ramp.step(t0, t1)
         ss.TDS.config.tf = t1
         if not ss.TDS.run():
             return False
@@ -2887,9 +2974,10 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
         meta["pcs_limits"] = limits
         shedding = _LoadShedding(ss, meta, params, limits, profiled, meta["warnings"])
         easing = _RectifierEasing(ss, meta, profiled, meta["warnings"])
-        if profiled or (limits is not None and limits.active) or easing.active:
+        sofc_ramp = _SofcRamp(ss, meta, meta.get("pcs_plants") or [], params)
+        if profiled or (limits is not None and limits.active) or easing.active or sofc_ramp.active:
             tds_ok = _run_tds_following_profiles(ss, profiled, tf, meta.get("profile_repeat", True),
-                                                 meta["warnings"], limits, shedding, easing)
+                                                 meta["warnings"], limits, shedding, easing, sofc_ramp)
         else:
             tds_ok = bool(ss.TDS.run())
         if limits is not None:

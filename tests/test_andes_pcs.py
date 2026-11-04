@@ -114,6 +114,62 @@ def test_each_pcs_model_carries_its_source(quiet):
     assert vin('GENCLS', 'D', gf) == pytest.approx(25.0) and vin('GENCLS', 'M', gf) == pytest.approx(0.5)
 
 
+def _sofc_island(ramp, tf, set_kw=120, **params):
+    """An island: a 1 MVA grid-forming PCS, a running 400 kW SOFC group and one that may stand by; the 0.6 MW load."""
+    fc = dict(p_rated_kw=400, ramp_percent_s=ramp, min_load_percent=30, aux_load_percent=0)
+    return _two_buses(_der('Battery', 'ba', capacity_kwh=1000), _pcs('ga', 'a', 'ba', control='grid_forming', s_rated_mva=1.0),
+                      _der('SOFC', 'f1', p_set_kw=set_kw, **fc), _pcs('p1', 'b', 'f1', q_mode='pf', pf=0.96, efficiency_percent=100),
+                      _der('SOFC', 'f2', p_set_kw=set_kw, **fc), _pcs('p2', 'b', 'f2', q_mode='pf', pf=0.96, efficiency_percent=100),
+                      grid=False, params={**TDS, 'tf': str(tf), 'fault_enabled': 'false', **params})
+
+
+def _series(result, name, key='p_mw'):
+    t = np.asarray(result['time'], dtype=float)
+    return t, np.asarray(next(r for r in result['pcs'] if r['name'] == name)[key], dtype=float)
+
+
+def test_sofc_groups_hold_their_power_without_the_ramp(client, quiet):
+    """Unasked for, nothing moves: ANDES holds a grid-following inverter's power."""
+    result = _post(client, quiet, _sofc_island(2, 4))
+    _, p1 = _series(result, 'p1')
+    assert p1[-1] == pytest.approx(p1[0], abs=1e-4) and p1[0] == pytest.approx(0.12, abs=1e-3)
+
+
+def test_sofc_ramp_moves_at_its_rate_and_standby_returns_late(client, quiet):
+    """
+    The stations carry the load's 0.36 MW, more than the groups can take up in the run: the running group climbs at
+    its 2 %/s of 400 kW, 8 kW/s, at its 0.96 power factor. The one in hot standby starts at nothing, below its minimum
+    load, and climbs at the same rate from 3 s.
+    """
+    result = _post(client, quiet, _sofc_island(2, 8, sofc_ramp='true', sofc_standby='p2', sofc_return_s='3'))
+    t, p1 = _series(result, 'p1')
+    _, p2 = _series(result, 'p2')
+    _, q1 = _series(result, 'p1', 'q_mvar')
+    assert p1[-1] - p1[0] == pytest.approx(0.008 * 8, abs=0.002)
+    assert q1[-1] / p1[-1] == pytest.approx(math.tan(math.acos(0.96)), abs=0.01)
+    assert np.abs(p2[t < 2.9]).max() < 1e-4
+    assert p2[-1] == pytest.approx(0.008 * 5, abs=0.002)
+
+
+def test_sofc_ramp_stops_when_it_has_caught_the_load(client, quiet):
+    """At 20 %/s the groups take the whole load and the stations end at nothing: their droop is measured from what they started carrying, so the island ends that far above 50 Hz (2 %)."""
+    result = _post(client, quiet, _sofc_island(20, 20, sofc_ramp='true'))
+    _, ga = _series(result, 'ga')
+    _, f = _series(result, 'ga', 'frequency_hz')
+    assert ga[0] > 0.3 and abs(ga[-1]) < 2e-3 and f[-1] == pytest.approx(50.0 + 0.02 * 50.0 * ga[0], abs=5e-3)
+    assert _series(result, 'p1')[1][-1] == pytest.approx(_series(result, 'p2')[1][-1], abs=1e-3)
+
+
+def test_sofc_ramp_keeps_a_group_at_its_minimum_load(client, quiet):
+    """Above the load the groups stay at their 30 % minimum, 240 kW between them against a 100 kW load: the stations charge."""
+    request = _sofc_island(20, 5, sofc_ramp='true')
+    next(v for v in request.values() if isinstance(v, dict) and v.get('typ', '').startswith('Load'))['p_mw'] = '0.1'
+    result = _post(client, quiet, request)
+    _, p1 = _series(result, 'p1')
+    _, ga = _series(result, 'ga')
+    assert p1.min() == pytest.approx(0.12, abs=1e-3) and ga[-1] < -0.1
+
+
 def test_an_island_held_only_by_pcs_rides_through_a_fault(client, quiet):
     """
     An island its grid-forming PCS alone holds: its virtual machine is the
