@@ -430,6 +430,36 @@ def test_andes_65_percent_step_carried(client, design, state, f_end, i_peak):
     assert sofc[-1] > 0.96 * sofc[0]       # none trips (one is 5 %): their output follows the voltage, 2-3 %
 
 
+def test_andes_stations_share_from_their_set_points_not_the_load_flows_split(client):
+    """
+    The ring with a PCS out and nine SOFC groups on: at its drawn 30 MW the load flow caps three of the four stations
+    at their 5 MW and leaves the holder over its own. The run starts at idle: the four share what is left equally -
+    that split, kept, had the holder 3 MW above the others from the start, and at its current limit alone in a step.
+    """
+    import numpy as np
+    p = _state('ring10', 'N1_PCS', 'TransientStabilityAndes Parameters', {
+        'sn_mva': '100', 'tf': '0.5', 'tstep': '0', 'fault_enabled': 'false', 'load_model': 'power'})
+    p['0']['load_profiles'] = {'idle': {'name': 'idle', 'kind': 'power', 'dt': 0.25, 't0': 0, 'p': [7.5 / LOAD_MW] * 4}}
+    groups = 0
+    for v in p.values():
+        if not isinstance(v, dict):
+            continue
+        name, t = str(v.get('userFriendlyName', '')), str(v.get('typ', ''))
+        if 'PCST5500' in name:
+            v['inlet_c'] = '45'
+        if name.endswith(' inverter'):
+            groups += 1
+            v['in_service'] = 'true' if groups <= 9 else 'false'
+        if name.endswith(' SOFC'):
+            v['p_set_kw'] = '774.4'
+        if t.startswith('Load') and not t.startswith('Load DC'):
+            v['load_profile_id'], v['load_profile_q_mode'] = 'idle', 'pf'
+    gfm = [x for x in _post(client, p)['pcs'] if x['control'] == 'grid_forming']
+    assert len(gfm) == 4
+    start = [float(np.asarray(x['p_mw'], dtype=float)[0]) for x in gfm]
+    assert max(start) - min(start) < 0.05
+
+
 def test_andes_65_percent_step_ring_with_a_pcs_out_collapses(client):
     """
     The ring with a PCS out at 45 C: four PCS take the 19 MW step through their virtual machines' 0.2 pu, and the

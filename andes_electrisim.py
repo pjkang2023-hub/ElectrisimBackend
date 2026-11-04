@@ -593,6 +593,10 @@ def _share_island_imbalance(ss, meta: Dict[str, Any], rounds: int = 3) -> bool:
     (S / droop), as the load flow shares an island's load, and the power flow
     rerun. Left to the holder alone, a UPS block's PCS absorbed 1.2 MW at the
     start of a training cycle and sat at its current limit through the run.
+    Each from its own set point: the load flow's split is not kept, since at
+    its loads its PCS may stand capped at their ratings and the holder over
+    its own - a difference that stayed through a run that started far below
+    them, and put the holder at its limit alone.
     """
     sn = meta["sn_mva"]
     pcs = [g for g in meta["gen_map"].values() if g.get("pcs") and g.get("control") == "grid_forming"
@@ -616,8 +620,9 @@ def _share_island_imbalance(ss, meta: Dict[str, Any], rounds: int = 3) -> bool:
             members = [g for g in pcs if g["bus"] in island]
             w = {id(g): g["s_rated_mva"] / g["droop_pf"] for g in members}
             total = sum(w.values())
+            shared = sum(g["p_mw"] for g in members) + delta - sum(g["p_set_mw"] for g in members)
             for g in members:
-                g["p_mw"] += delta * w[id(g)] / total
+                g["p_mw"] = g["p_set_mw"] + shared * w[id(g)] / total
                 if g is hold:
                     ss.Slack.set("p0", g["static_idx"], g["p_mw"] / sn, base="device")
                 else:
@@ -1835,7 +1840,7 @@ def build_system(
         gen_map[str(rec["name"])] = {
             "static_idx": static_idx, "syn_idx": None, "plant_kind": "PCS", "name": rec["label"], "bus": bus,
             "pcs": True, "id": rec["id"], "control": rec["control"], "source_kind": rec["source"]["kind"],
-            "source": rec["source"]["label"], "s_rated_mva": rec["s_rated"], "p_mw": rec["p_ac"],
+            "source": rec["source"]["label"], "s_rated_mva": rec["s_rated"], "p_mw": rec["p_ac"], "p_set_mw": rec["p_set_mw"],
             "q_mvar": rec["q"], "p_max_mw": rec["p_max_ac"], "p_min_mw": rec["p_min_ac"],
             "vm_set_pu": rec["vm_set_pu"], "droop_qv": rec["droop_qv"], "q_mode": rec["q_mode"],
             "qv_droop": rec["qv_droop"], "q_max_mvar": rec["q_max"], "on_slack_bus": bus in slack_v0 or holds,
