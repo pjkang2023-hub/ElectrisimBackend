@@ -1812,6 +1812,14 @@ def test_nine_blocks_carry_30_mw(spec9, inlet, out_block, pcs_loading, battery_m
 # tests/reference/reference_pcs3750_mv_9blocks.diagram_payload.json: the nine-block spec drawn through the
 # MCP server (875 cells) and its load-flow request captured from the page (prepareNetworkData).
 
+def _emt9(client, quiet, p):
+    """The nine blocks in EMT. These are the largest runs here: when one gives no result, say what the study answered."""
+    with quiet():
+        out = json.loads(client.post('/', json=p).get_data(as_text=True))
+    assert 'emt' in out, f"No EMT result: {json.dumps(out)[:2000]}"
+    return out['emt']
+
+
 def _payload9(inlet):
     with open(os.path.join(HERE, 'reference', f'{GRID}_9blocks.diagram_payload.json'), encoding='utf-8') as fh:
         p = json.load(fh)
@@ -1901,8 +1909,7 @@ def test_emt_nine_blocks_lose_one_at_45c(client, quiet):
     t2['hv_bus'] = row('Block 9 T2 HV breaker')['bus'] = 't2hv9'
     p['0'] = {'typ': 'EmtStudy Parameters', 'frequency': '60', 'time_step_us': '20', 'user_email': 't@t',
               'duration_ms': '100', 'ac_trip_lines': 'Block 9 T2 feeder', 'ac_trip_time_ms': '30'}
-    with quiet():
-        emt = json.loads(client.post('/', json=p).get_data(as_text=True))['emt']
+    emt = _emt9(client, quiet, p)
     (trip,) = emt['line_trips']
     assert all(30 <= t < 36 for t in trip['opened_ms'])
     assert not emt['converters_blocked']
@@ -2247,8 +2254,7 @@ def test_nine_blocks_energising_one_of_three_filters(client, quiet, controlled, 
     p['0'] = {'typ': 'EmtStudy Parameters', 'frequency': '60', 'time_step_us': '20', 'user_email': 't@t',
               'duration_ms': '200', 'ac_energise_shunt': 'HF1', 'ac_energise_time_ms': '40',
               'ac_energise_controlled': 'true' if controlled else 'false'}
-    with quiet():
-        emt = json.loads(client.post('/', json=p).get_data(as_text=True))['emt']
+    emt = _emt9(client, quiet, p)
     e = emt['energise']
     assert e['bus'] == 'Load backbone 5' and e['i_peak_ka'] * 1e3 == pytest.approx(i_peak_a, abs=3)
     assert 0.99 < e['v_rms_min_pu'] and e['v_rms_max_pu'] < 1.01
@@ -2271,8 +2277,7 @@ def test_emt_nine_blocks_a_shed_step_at_45c(client, quiet):
             v['in_service'] = 'false'
     p['0'] = {'typ': 'EmtStudy Parameters', 'frequency': '60', 'time_step_us': '20', 'user_email': 't@t',
               'duration_ms': '200', 'step_load': 'Hall 5: 90 DGX H100 racks', 'step_percent': '-45', 'step_time_ms': '30'}
-    with quiet():
-        emt = json.loads(client.post('/', json=p).get_data(as_text=True))['emt']
+    emt = _emt9(client, quiet, p)
     assert not emt['converters_blocked']
     pcs = [c for c in emt['converters'] if c['kind'] == 'PCS' and not c['label'].startswith('Block 9')]
     assert len(pcs) == 32
