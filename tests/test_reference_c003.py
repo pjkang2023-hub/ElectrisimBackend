@@ -391,12 +391,14 @@ def test_ring_carries_through_fault_both_ways(client):
 
 
 # --- Phase 5: ramp bridging -------------------------------------------------------------------------------------
-GAP = 15.58          # the bridging requirement: the workload ramp (1.64 MW/s) against the SOFC fleet's (0.396 MW/s)
+# the bridging requirement: the workload ramp (1.64 MW/s) against the SOFC fleet's (0.396 MW/s, this rev's record:
+# 1 %/s of 18 x 2.2 MW)
+GAP = 15.58
 
 
-def _bridging(client, design, state, inlet_c, sofc_pf=None):
+def _bridging(client, design, state, inlet_c, sofc_pf=None, gap=GAP):
     """
-    The bridging peak as a load-flow snapshot: the halls at full load, the SOFC groups lagging by GAP, the PCS at
+    The bridging peak as a load-flow snapshot: the halls at full load, the SOFC groups lagging by gap, the PCS at
     the inlet temperature carrying the gap and (unless the SOFC inverters run at a power factor) the halls' Q.
     """
     p = _state(design, state)
@@ -411,7 +413,7 @@ def _bridging(client, design, state, inlet_c, sofc_pf=None):
         if 'PCST5500' in name:
             v['inlet_c'] = str(inlet_c)
         if name.endswith(' SOFC'):
-            v['p_set_kw'] = str(round((load - GAP) / n_on * 1e3, 3))
+            v['p_set_kw'] = str(round((load - gap) / n_on * 1e3, 3))
         if name.endswith(' inverter') and sofc_pf:
             v['q_mode'], v['pf'] = 'pf', str(sofc_pf)
     out = _post(client, p)
@@ -595,7 +597,7 @@ def test_andes_bridging_ramp_with_the_pcs_voltage_control(client, voltage_contro
     operating point) RING_A holds 0.974 pu and the frequency is the droop's, 48.61 Hz - what ANDES's WECC REGF1 gives.
     """
     import numpy as np
-    gap, rate, dt, tf = 15.58, 1.64 - 0.396, 0.25, 16.0
+    gap, rate, dt, tf = 15.58, 1.64 - 0.396, 0.25, 16.0      # 0.396 MW/s: this rev's record, 1 %/s of 18 x 2.2 MW
     p = _state('ring', 'N1_PCS', 'TransientStabilityAndes Parameters', {
         'sn_mva': '100', 'tf': str(tf), 'tstep': '0', 'fault_enabled': 'false', 'load_model': 'impedance',
         'pcs_voltage_control': 'true' if voltage_control else 'false'})

@@ -164,14 +164,20 @@ def test_idle_below_the_sofc_minimum_load(client, design):
     assert 11.05 * 1.01 / 15 / 1.936 < 0.40 < 11.05 * 1.01 / 14 / 1.936
 
 
-@pytest.mark.parametrize('design, n_pcs, each, loading', [('ring10', 4, 3.117, 67.1), ('revc2', 5, 2.496, 53.4)])
+# The owner's step, 20.54 MW at 0.82 MW/s, against this fleet's ramp-down: 0.806 %/s of nineteen groups at 1936 kW. (The
+# owner's 12.55 MW is the same step against 0.319 MW/s, an older fleet of 18 x 2.2 MW.)
+FLEET_RAMP_DOWN = 19 * 0.00806 * 1.936
+CHARGE = round(20.54 / 0.82 * (0.82 - FLEET_RAMP_DOWN), 2)     # 13.11 MW
+
+
+@pytest.mark.parametrize('design, n_pcs, each, loading', [('ring10', 4, 3.257, 69.8), ('revc2', 5, 2.608, 55.6)])
 def test_ramp_down_charge_peak_at_45c_with_a_pcs_out(client, design, n_pcs, each, loading):
     """
-    The workload falls 0.82 MW/s, the SOFC 0.319 MW/s: at the end of the ramp-down the PCS absorb 12.55 MW. At 45 C
-    with one PCS out they take it within rating - the ring's four at 67 %, Rev C.2's five at 53 % - each battery at
+    The workload falls 0.82 MW/s, the SOFC 0.296 MW/s: at the end of the ramp-down the PCS absorb 13.11 MW. At 45 C
+    with one PCS out they take it within rating - the ring's four at 70 %, Rev C.2's five at 56 % - each battery at
     about 4-5 C.
     """
-    lf = _post(client, _edit(_state(design, 'N1_PCS', load_scale=IDLE), sofc_kw=round((11.05 + 12.55) / 19 * 1e3, 1),
+    lf = _post(client, _edit(_state(design, 'N1_PCS', load_scale=IDLE), sofc_kw=round((11.05 + CHARGE) / 19 * 1e3, 1),
                              pcs_inlet=45))
     gfm = [x for x in lf['pcs'] if x['source_kind'] == 'Battery' and x['in_service']]
     assert len(gfm) == n_pcs and all(x['p_mw'] == pytest.approx(-each, abs=0.01) for x in gfm)
@@ -262,18 +268,24 @@ def test_ring_feeders_through_fault_both_ways(client):
 
 
 # --- Phase 5: the bridging peak at 45 C -----------------------------------------------------------------------------
+# The owner's step, 20.54 MW at 1.64 MW/s, against this fleet's ramp: 1 %/s of nineteen groups at 1936 kW. (The owner's
+# 15.58 MW is the same step against 0.396 MW/s, an older fleet of 18 x 2.2 MW.)
+FLEET_RAMP = 19 * 0.01936
+GAP = round(20.54 * (1 - FLEET_RAMP / 1.64), 2)     # 15.93 MW
+
+
 @pytest.mark.parametrize('design, state, pf, loading, f_hz', [
     ('ring10', 'N1_PCS', None, 98.8, 48.46), ('ring10', 'N1_PCS', 0.96, 86.2, 48.46),
     ('revc2', 'N1_PCS', None, 75.5, 48.77), ('revc2', 'BESS1_BUS_FAULT', None, 95.0, 48.46)])
 def test_bridging_peak_at_45c(client, design, state, pf, loading, f_hz):
     """
-    15.58 MW of bridging at 45 C (5.0 MVA each) would leave the 19 SOFCs at 759 kW, 39.2 %: below their 40 % minimum
+    15.93 MW of bridging at 45 C (5.0 MVA each) would leave the 19 SOFCs at 740 kW, 38.2 %: below their 40 % minimum
     (A20) they are held at 774.4 kW, and the gap is 15.29 MW. The ring with one PCS out: four carry 3.86 MW and, the
     SOFC at unity power factor, 3.08 Mvar each - over their rating, 101.9 % at their bus's 0.969 pu (at 30 %, 103 %);
     at 0.96 on the SOFC, 86 %.
     Rev C.2 with one out: 76 %; with a BESS board lost, its four at 95 %. The droop's frequency: 48.46 Hz on four PCS.
     """
-    out, gfm = _bridging(client, design, state, 45, sofc_pf=pf)
+    out, gfm = _bridging(client, design, state, 45, sofc_pf=pf, gap=GAP)
     assert all(g['loading_percent'] == pytest.approx(loading, abs=0.6) for g in gfm)
     assert gfm[0]['frequency_hz'] == pytest.approx(f_hz, abs=0.03)
     assert any('loaded to 101.9' in w for w in out.get('warnings') or []) == (design == 'ring10' and pf is None)
@@ -339,14 +351,17 @@ from test_reference_c003 import _site      # noqa: E402
 
 
 def _ramp(client, design, load_model, tf=20.0):
-    """The bridging ramp in ANDES: one PCS out at 45 C, the SOFC at 0.96 pf and at load - 15.58 MW, the IT ramping
-    1.244 MW/s net of the SOFC for 12.5 s."""
+    """The bridging ramp in ANDES: one PCS out at 45 C, the SOFC at 0.96 pf and at their 40 % minimum, the IT ramping
+    1.272 MW/s net of the SOFC from there to full load. The 15.93 MW gap would start the IT below that minimum: the
+    stations would start charging, and a run takes its first moment as 50 Hz, so the droop would start lower for no
+    more power at the peak."""
     import numpy as np
-    gap, rate, dt = 15.58, 1.64 - 0.396, 0.25
+    rate, dt = 1.64 - FLEET_RAMP, 0.25
     p = _state(design, 'N1_PCS', 'TransientStabilityAndes Parameters', {
         'sn_mva': '100', 'tf': str(tf), 'tstep': '0', 'fault_enabled': 'false', 'load_model': load_model})
     n_on = len([x for x in next(st for st in _site(design)['islands'] if st['id'] == 'N1_PCS')['energized_source_ids']
                 if x.startswith('SOFC')])
+    gap = min(GAP, LOAD_MW - n_on * 0.4 * 1.936)
     f0 = (LOAD_MW - gap) / LOAD_MW
     p['0']['load_profiles'] = {'ramp': {'name': 'ramp', 'kind': 'power', 'dt': dt, 't0': 0,
                                         'p': [min(f0 + (1 - f0) * k * dt / (gap / rate), 1.0) for k in range(int(tf / dt) + 2)]}}
@@ -368,15 +383,15 @@ def _ramp(client, design, load_model, tf=20.0):
     return out, np.asarray(gfm[0]['frequency_hz'], dtype=float), sofc
 
 
-@pytest.mark.parametrize('design, f_min, sofc_lost', [('ring10', 48.25, 1.84), ('revc2', 48.75, 0.0)])
+@pytest.mark.parametrize('design, f_min, sofc_lost', [('ring10', 48.36, 1.02), ('revc2', 48.78, 0.0)])
 def test_andes_bridging_ramp_reaches_the_sofc_under_frequency_trip(client, design, f_min, sofc_lost):
     """
     The bridging ramp in ANDES, the IT at constant power, each PCS holding its Q-V droop: the island's frequency is
     the droop's, 48.4 Hz at the ring's peak with four PCS - past the SOFC inverters' under-frequency trip (48.75 Hz,
-    IEEE 1547 Category III at 50 Hz, ASSUMED): some 1.7 MW of SOFC trips and the ring settles at 48.26 Hz, its PCS at
-    their 45 C rating. Rev C.2's five PCS reach 48.75 Hz, the trip point itself. Without secondary control acting
+    IEEE 1547 Category III at 50 Hz, ASSUMED): 1.0 MW of SOFC trips and the ring settles at 48.36 Hz. Rev C.2's five
+    PCS stop at 48.78 Hz, just above the trip point, as the load flow's droop does. Without secondary control acting
     within the ramp (R2) the SOFC's frequency ride-through must reach below the droop's excursion. (The SOFCs start at
-    their 40 % minimum, 774.4 kW, not the 759 kW the 15.58 MW gap would put them at: 1.84 MW trips on the ring.)
+    their 40 % minimum, 774.4 kW, not the 740 kW the 15.93 MW gap would put them at.)
     """
     _, f, sofc = _ramp(client, design, 'power')
     assert f.min() == pytest.approx(f_min, abs=0.03)
