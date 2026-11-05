@@ -513,11 +513,13 @@ def _hold_sofc_standby(plants: List[Dict[str, Any]], params: Dict[str, Any], war
     The SOFC groups in hot standby when a run follows its load at the groups' ramp rates (params["sofc_ramp"]):
     params["sofc_standby"], their PCS by name, comma separated. Each starts at nothing, below its minimum load.
     """
-    if not _sb(params.get("sofc_ramp"), False):
-        return
     names = params.get("sofc_standby") or []
     if isinstance(names, str):
         names = [n.strip() for n in names.split(",") if n.strip()]
+    if not _sb(params.get("sofc_ramp"), False):
+        if names:
+            warnings.append("SOFC standby: the groups are not following the load in this run, so hot standby was not applied.")
+        return
     found = set()
     for rec in plants:
         hit = {str(rec["name"]), rec["label"]} & set(names)
@@ -2975,6 +2977,8 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
         shedding = _LoadShedding(ss, meta, params, limits, profiled, meta["warnings"])
         easing = _RectifierEasing(ss, meta, profiled, meta["warnings"])
         sofc_ramp = _SofcRamp(ss, meta, meta.get("pcs_plants") or [], params)
+        if _sb(params.get("sofc_ramp"), False) and not sofc_ramp.active:
+            meta["warnings"].append("SOFC groups following the load: no island has both a grid-following SOFC group and a grid-forming PCS, so nothing moved.")
         if profiled or (limits is not None and limits.active) or easing.active or sofc_ramp.active:
             tds_ok = _run_tds_following_profiles(ss, profiled, tf, meta.get("profile_repeat", True),
                                                  meta["warnings"], limits, shedding, easing, sofc_ramp)

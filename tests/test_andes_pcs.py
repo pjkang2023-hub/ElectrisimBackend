@@ -170,6 +170,22 @@ def test_sofc_ramp_keeps_a_group_at_its_minimum_load(client, quiet):
     assert p1.min() == pytest.approx(0.12, abs=1e-3) and ga[-1] < -0.1
 
 
+def test_sofc_standby_without_the_ramp_says_it_was_not_applied(client, quiet):
+    """The dialog takes the names whatever the switch says: with the ramp off the group runs, and the result says why."""
+    result = _post(client, quiet, _sofc_island(2, 4, sofc_standby='p2'))
+    assert _series(result, 'p2')[1][0] == pytest.approx(0.12, abs=1e-3)
+    assert any('hot standby was not applied' in w for w in result['warnings'])
+
+
+def test_sofc_ramp_with_nothing_to_follow_says_so(client, quiet):
+    """A group with no grid-forming PCS in its island holds, and a switch left on does not pass for a result."""
+    request = _two_buses(_der('SOFC', 'f1', p_set_kw=120, p_rated_kw=400, ramp_percent_s=2, min_load_percent=30, aux_load_percent=0),
+                         _pcs('p1', 'b', 'f1', q_mode='pf', pf=0.96, efficiency_percent=100),
+                         params={**TDS, 'tf': '2', 'fault_enabled': 'false', 'sofc_ramp': 'true'})
+    result = _post(client, quiet, request)
+    assert any('nothing moved' in w for w in result['warnings'])
+
+
 def test_an_island_held_only_by_pcs_rides_through_a_fault(client, quiet):
     """
     An island its grid-forming PCS alone holds: its virtual machine is the
