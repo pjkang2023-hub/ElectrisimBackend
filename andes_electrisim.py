@@ -277,6 +277,34 @@ def _iter_elements(in_data: Dict[str, Any]):
         yield key, el, typ
 
 
+def _stub_lone_sources(ss, next_bus: int, sn_base: float, freq: float) -> int:
+    """
+    An unloaded stub line, to a bus results never list, on each bus holding a machine or a grid-forming PCS that has no
+    branch left in service, at the start or after a timed outage. ANDES pins a bus without a branch at 1 pu and 0 degrees
+    and drops its power balance: the machine and the load ran flat, whatever the load did, with no error. A machine switched
+    off in the run gets none: a stub with no source left on it would leave the solver with a floating bus. Returns the next
+    free bus number.
+    """
+    toggles = list(zip(ss.Toggle.model.v, ss.Toggle.dev.v)) if ss.Toggle.n else []
+    out = {d for m, d in toggles if m == "Line"}
+    tripped = {d for m, d in toggles if m == "SynGen"}
+    branches: Dict[Any, int] = {}
+    for idx, a, b, u in zip(ss.Line.idx.v, ss.Line.bus1.v, ss.Line.bus2.v, ss.Line.u.v):
+        if u and idx not in out:
+            branches[a] = branches.get(a, 0) + 1
+            branches[b] = branches.get(b, 0) + 1
+    in_service = {b for b, u in zip(ss.Bus.idx.v, ss.Bus.u.v) if u}
+    sources = [b for m in (ss.GENROU, ss.GENCLS) for i, b in zip(m.idx.v, m.bus.v) if i not in tripped]
+    for bus in dict.fromkeys(sources):
+        if bus in in_service and not branches.get(bus):
+            vn = float(ss.Bus.Vn.v[list(ss.Bus.idx.v).index(bus)])
+            ss.add("Bus", idx=next_bus, name=f"stub of bus {bus}", Vn=vn, v0=1.0, a0=0.0)
+            ss.add("Line", idx=f"Stub_{bus}", name=f"stub of bus {bus}", bus1=bus, bus2=next_bus, r=0.0, x=0.01, b=0.0, g=0.0,
+                   Vn1=vn, Vn2=vn, Sn=sn_base, fn=freq)
+            next_bus += 1
+    return next_bus
+
+
 def _islands(ss, out_lines=()) -> List[set]:
     """The buses as islands: each set joined by in-service lines and transformers, out_lines left out."""
     adjacency: Dict[Any, set] = {b: set() for b in ss.Bus.idx.v}
@@ -2017,6 +2045,7 @@ def build_system(
                 ss.Bus.u.v[k] = 0
         shown = ", ".join(dead_names[:12]) + (f" and {len(dead_names) - 12} more" if len(dead_names) > 12 else "")
         warnings.append(f"No source reaches {len(dead_names)} bus(es), set aside and reported at 0 V: {shown}.")
+    bus_counter = _stub_lone_sources(ss, bus_counter, sn_base, freq)
 
     if ss.PQ.n:
         warnings.append(
@@ -2653,8 +2682,9 @@ class _LoadShedding:
     shed_trigger 'loading': the most loaded running grid-forming PCS's current,
     in per unit of its rating at its inlet temperature, above shed_pickup
     (default 1.0) - the overload state a PCS can signal. 'frequency': the
-    island's frequency, the PCS's mean, below shed_pickup (default 59.5 Hz at
-    60 Hz, 49.5 at 50) - seen at every load, needing no signal, but droop sets
+    frequency of the loads' island, the mean of the PCS still joined to them,
+    below shed_pickup (default 59.5 Hz at 60 Hz, 49.5 at 50) - seen at every
+    load, needing no signal, but droop sets
     it by power, not by rating, so it cannot tell a hot day from a cool one.
 
     shed_loads: the loads it may shed, by name, comma-separated (a converter
@@ -2715,7 +2745,11 @@ class _LoadShedding:
             return None
         if self.trigger == "loading":
             return max(_GridFormingLimits._current_pu(self, u)[1] for u in running)
-        return float(np.mean([float(ss.GENCLS.omega.v[u["i"]]) for u in running])) * float(self.meta["frequency"])
+        # A PCS an outage has parted from the loads runs at its own frequency, which they do not see.
+        buses = {ss.PQ.bus.v[load["i"]] for load in self.loads}
+        joined = set().union(*[part for part in _islands(ss) if part & buses])
+        watched = [u for u in running if u["g"]["bus"] in joined] or running
+        return float(np.mean([float(ss.GENCLS.omega.v[u["i"]]) for u in watched])) * float(self.meta["frequency"])
 
     def check(self, t: float) -> None:
         value = self._value()

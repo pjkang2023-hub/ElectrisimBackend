@@ -12,7 +12,7 @@ import pytest
 
 import andes_electrisim
 from test_dc_elements import _drawn_request, _with
-from test_pcs import LF, _der, _lv, _pcs, _post, _two_buses
+from test_pcs import LF, LINE, LOAD, _bus, _der, _lv, _pcs, _post, _two_buses
 
 TDS = {'typ': 'TransientStabilityAndes Parameters', 'frequency': '50', 'sn_mva': '100', 'user_email': 't@t'}
 
@@ -184,6 +184,39 @@ def test_sofc_ramp_with_nothing_to_follow_says_so(client, quiet):
                          params={**TDS, 'tf': '2', 'fault_enabled': 'false', 'sofc_ramp': 'true'})
     result = _post(client, quiet, request)
     assert any('nothing moved' in w for w in result['warnings'])
+
+
+def _one_bus_island(tied, **params):
+    """A battery's grid-forming PCS and a 0.6 MW load following a half-then-full profile: on one bus, or the PCS on its own bus through a short line."""
+    profile = {'P': {'name': 'P', 'kind': 'power', 'dt': 0.1, 't0': 0, 'p': [0.5] * 20 + [1.0] * 21}}
+    request = {'0': {**TDS, 'tf': '4', 'fault_enabled': 'false', 'load_model': 'power', 'profile_repeat': 'false', 'load_profiles': profile, **params},
+               '1': _bus('a', 0.4), '2': {**LOAD, 'bus': 'a', 'load_profile_id': 'P', 'load_profile_q_mode': 'pf'}}
+    pcs = 'c' if tied else 'a'
+    elements = [_der('Battery', 'ba', capacity_kwh=1000), _pcs('ga', pcs, 'ba', control='grid_forming', s_rated_mva=1.0)]
+    if tied:
+        elements += [_bus('c', 0.4), {**LINE, 'name': 'tie', 'id': 'cell-tie', 'userFriendlyName': 'TIE', 'busFrom': 'c', 'busTo': 'a', 'length_km': '0.001'}]
+    return _with(request, *elements)
+
+
+def test_a_one_bus_island_runs_as_the_same_island_with_a_tie(client, quiet):
+    """ANDES pins a bus without a branch: this one ran flat at the load's set power and 50 Hz, with no error."""
+    lone, tied = _post(client, quiet, _one_bus_island(False)), _post(client, quiet, _one_bus_island(True))
+    t, p = _series(lone, 'ga')
+    _, f = _series(lone, 'ga', 'frequency_hz')
+    assert p[t < 1.9].max() == pytest.approx(0.3, abs=2e-3) and p[-1] == pytest.approx(0.6, abs=2e-3)
+    assert f[t < 1.9].min() == pytest.approx(50.0, abs=1e-3) and f[-1] < 49.8      # its droop, from where it started
+    assert np.interp(t, *_series(tied, 'ga')) == pytest.approx(p, abs=5e-3)
+    assert [b['name'] for b in lone['bus_voltage']] == ['A']
+
+
+def test_an_outage_leaving_one_bus_keeps_its_load_on_the_pcs(client, quiet):
+    """The grid's line out: the load's bus, with the PCS on it and no branch left, stays an island, and the PCS takes the load."""
+    request = _two_buses(_der('Battery', 'bb', capacity_kwh=1000), _pcs('gb', 'b', 'bb', control='grid_forming', s_rated_mva=1.0),
+                         params={**TDS, 'tf': '3', 'fault_enabled': 'false', 'load_model': 'power', 'toggle_line': 'l1', 'toggle_t': '1'})
+    result = _post(client, quiet, request)
+    t, p = _series(result, 'gb')
+    assert abs(p[t < 0.9]).max() < 0.1 and p[-1] == pytest.approx(0.6, abs=5e-3)
+    assert any('as an island' in w for w in result['warnings'])
 
 
 def test_an_island_held_only_by_pcs_rides_through_a_fault(client, quiet):
