@@ -76,6 +76,33 @@ def test_a_grid_and_a_load_in_parallel(client, quiet):
         assert mag == pytest.approx(abs(exact), rel=0.03), f
 
 
+def test_the_low_band_down_to_a_tenth_of_a_hertz(client, quiet):
+    """
+    0.1 to 20 Hz, a 10 s window at a coarser step: the exact answer, where the grid's R is most of it. It settles over the load's L
+    against that R, 2.7 s here: a 200 ms settling read 10 % low at the lowest tones.
+    """
+    z = _run(client, quiet, _system(time_step_us=100, scan_f_min_hz=0.1, scan_f_max_hz=20, scan_points_per_decade=5, scan_settle_ms=14000))
+    assert z['f_hz'][0] == pytest.approx(0.1) and z['window_s'] == pytest.approx(10.0)
+    v2 = (KV * 1e3) ** 2
+    for f, mag, ang in zip(z['f_hz'], z['z_ohm'], z['angle_deg']):
+        y_load = MW * 1e6 / v2 - 1j * MVAR * 1e6 / v2 * F1 / f
+        exact = 1.0 / (1.0 / _grid_z(f) + y_load)
+        assert mag == pytest.approx(abs(exact), rel=0.03), f
+        assert ang == pytest.approx(math.degrees(math.atan2(exact.imag, exact.real)), abs=3.0), f
+
+
+def test_an_inverter_in_the_low_band(client, quiet):
+    """
+    1 to 40 Hz at the double-conversion system's critical bus: stiff, under its transformer. Not a figure to quote: the lowest tones still
+    move with the settling, and the small negative R it reads at 40 Hz, next to the fundamental, moves with the tone's size.
+    """
+    request = DC._system(time_step_us=50, duration_ms=5, scan_bus='crit', scan_f_min_hz=1, scan_f_max_hz=40, scan_points_per_decade=5, scan_settle_ms=100, scan_base_mva=100, gfm_voltage_loop_pcs='inv', frequency=50)
+    z = _run(client, quiet, request)
+    zb = DC.KV ** 2 / DC.MVA
+    assert z['f_hz'][0] == pytest.approx(1.0)
+    assert np.all(np.array(z['z_ohm']) < 0.5 * zb)
+
+
 def test_the_scan_does_not_disturb_the_bus(client, quiet):
     """Small tones: the same answer at half the current."""
     a = _run(client, quiet, _system(scan_f_min_hz=20, scan_f_max_hz=1000, scan_settle_ms=250, scan_amp_pu=0.01))

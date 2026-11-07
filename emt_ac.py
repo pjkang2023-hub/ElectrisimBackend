@@ -124,6 +124,8 @@ class AcBuilder:
         self.event_loads = set() # loads a run's event switches or scales
         self.dyn_loads = []      # those changing through the run: behind a UPS, at constant power, or by events
         self.gen_rows = {}       # generator name -> its diagram row (its rotor, governor and exciter data)
+        self.line_rows = {}      # line name -> its diagram row (its frequency-dependent line's geometry)
+        self.fd_lines = []       # emt_fd_line.FdLine, one per line modelled so
         self.machines = []       # emt_machine.SynchronousMachine, one per generator modelled as a machine
         t_island = _f(params.get('island_time_ms'), -1.0) if str(params.get('island_time_ms') or '').strip() else -1.0
         # Islanding: {'t', 'switches': per grid phase, 'opened': its time, 'last': its last current}.
@@ -366,6 +368,42 @@ class AcBuilder:
                     changed = True
         return changed
 
+    def _fd_line(self, li, start, stop, km, par, label):
+        """
+        Line li as a frequency-dependent line (emt_fd_line) if its row or the study says so: True if it now is.
+        Its geometry from its row's fd_ fields, or the study's; pi sections, with a warning, if it cannot be.
+        """
+        import emt_fd_line
+        row = self.line_rows.get(str(self.net.line.at[li, 'name'])) or {}
+        if str(row.get('fd_line') or self.params.get('fd_line') or '').strip().lower() not in ('true', '1', 'yes'):
+            return False
+        geometry = {k: _f(row.get(f'fd_{k}'), _f(self.params.get(f'fd_{k}'), 0.0)) for k in emt_fd_line.FIELDS}
+        why = None
+        missing = [k for k, v in geometry.items() if v <= 0]
+        if missing:
+            why = 'it needs ' + ', '.join(f'fd_{k}' for k in missing)
+        elif par != 1.0:
+            why = 'parallel circuits are not modelled'
+        elif self.fault_line is not None and self.fault_line[0] == li:
+            why = 'a fault along it is not modelled'
+        if why is None:
+            dt = max(_f(self.params.get('time_step_us'), 1.0), 0.01) * 1e-6
+            try:
+                line = emt_fd_line.FdLine(self.ckt, start, stop, geometry, km, dt, self.w, label)
+            except ValueError as exc:
+                why = str(exc)
+        if why is not None:
+            self.warnings.append(f'Line {label} runs as pi sections, not frequency-dependent: {why}.')
+            return False
+        self.ckt.add_controller(line.control)
+        self.fd_lines.append(line)
+        z1, _, _, _ = emt_fd_line.per_km(np.array([self.f_hz]), geometry)
+        r1, x1 = _f(self.net.line.at[li, 'r_ohm_per_km'], 0.0), _f(self.net.line.at[li, 'x_ohm_per_km'], 0.0)
+        if abs(complex(r1, x1) - z1[0]) > 0.1 * abs(z1[0]):
+            self.warnings.append(f'Line {label}: its geometry gives {z1[0].real:.3f} + j{z1[0].imag:.3f} ohm/km at the fundamental, its row {r1:.3f} + j{x1:.3f}: '
+                                 'the load flow and this line disagree, so the run starts with a transient.')
+        return True
+
     def _lines(self):
         net, ckt, w = self.net, self.ckt, self.w
         max_km = max(_f(self.params.get('ac_max_section_km'), 50.0), 1e-3)
@@ -409,6 +447,8 @@ class AcBuilder:
                 ups['bypass'] = [ckt.add_switch(self.nodes[fb][ph], self.nodes[tb][ph], closed=False) for ph in range(3)]
                 ups['source_bus'], ups['critical_bus'] = fb, tb
                 start = end
+            if self._fd_line(li, start, stop, km, par, label):
+                continue
             # Its length in parts: at a fault along it, two, either side of the fault point.
             parts = [(start, stop, km)]
             if self.fault_line is not None and self.fault_line[0] == li:

@@ -67,6 +67,7 @@ class Circuit:
         self.isrc = []            # current sources: [a, b, i0, amp, om, ph, on]
         self.events = []          # (t, action(state))
         self.controllers = []     # fn(t, state) -> True when it changed something
+        self.ac_blocks = []       # (nodes, Y, on_solved(V at those nodes)): added to the phasor solve only
 
     # --- building -----------------------------------------------------------------
 
@@ -151,6 +152,10 @@ class Circuit:
         """
         self.events.append((float(t), action, soft))
 
+    def add_ac_block(self, nodes, y, on_solved):
+        """An admittance ``y`` among ``nodes`` for the phasor solve alone; ``on_solved`` gets their phasors after it."""
+        self.ac_blocks.append((list(nodes), np.asarray(y, dtype=complex), on_solved))
+
     def add_controller(self, fn):
         """``fn(t, state)`` after every step; it returns True when it changed a switch or a load."""
         self.controllers.append(fn)
@@ -214,8 +219,12 @@ class Circuit:
                 i_ac = ac_phasor(amp, om, ph)
                 rhs[b] += i_ac
                 rhs[a] -= i_ac
+        for nodes, y, _ in self.ac_blocks:
+            Y[np.ix_(nodes, nodes)] += y
         V = np.zeros(n, dtype=complex)
         V[1:] = np.linalg.solve(Y[1:, 1:], rhs[1:])
+        for nodes, _, on_solved in self.ac_blocks:
+            on_solved(V[nodes])
         for k in range(1, n):
             self.v0[k] += V[k].real
         for k, (a, b, r, l, i0, e0, amp, om, ph) in enumerate(self.rl):

@@ -46,6 +46,7 @@ import emt_double_conversion
 import emt_harmonics
 import emt_impedance_scan
 import emt_machine
+import emt_mmc
 import emt_series_ups
 from emt_converters import DcDc, GridFormingVsc, Vsc
 from emt_solver import DEFAULT_INPUT_WARNING, R_BIAS, Circuit, dc_load_current, default_input_capacitance
@@ -110,6 +111,8 @@ class _EmtBuilder:
         ac.skip = self.skip
         ac.gen_rows = {str(r.get('name')): r for r in (self.in_data or {}).values()
                        if isinstance(r, dict) and str(r.get('typ', '')).startswith('Generator')}
+        ac.line_rows = {str(r.get('name')): r for r in (self.in_data or {}).values()
+                        if isinstance(r, dict) and str(r.get('typ', '')).startswith('Line')}
         ac.profiles = {i: plan for (table, i), plan in self.profiles.items() if table == 'load'}
         # Loads that change through the run: behind a UPS, at constant power, or switched by an event.
         self.timed = _timed_events(self.params, self.warnings)
@@ -532,7 +535,10 @@ class _EmtBuilder:
             r_dc = max(_f(net.vsc.at[vi, 'r_dc_ohm']), 1e-6)
             term = self._terminal('vsc', vi, bus, -i0)
             if not aux and int(net.vsc.at[vi, 'bus']) in self.ac.nodes:
-                # On the AC network: its average-value model, with its controls.
+                # On the AC network: its average-value model, with its controls; or modular multilevel.
+                if 'emt_model' in net.vsc.columns and str(net.vsc.at[vi, 'emt_model']) == 'mmc':
+                    self._add_mmc(vi, label, bus, term, r_dc)
+                    continue
                 self._add_vsc(Vsc.from_net(self, vi, label, bus, term, r_dc, block), _row_id(net, 'vsc', vi))
                 continue
             # Its controlled stage: a stiff source at its DC voltage, until it blocks.
@@ -718,6 +724,37 @@ class _EmtBuilder:
         self.series.append(('VSC', conv.label, row_id, f'{conv.label} (DC side)', ('i_rl', conv.k_dc_out), -1.0))
         self.ac.series.append(('VSC', conv.label, row_id, f'{conv.label} (AC side)',
                                [[('i_rl', k, None, 1.0)] for k in conv.k_e]))
+
+    def _add_mmc(self, vi, label, bus, term, r_dc):
+        """A VSC as a modular multilevel converter (emt_mmc): between its AC bus and its DC terminal, from its load-flow state."""
+        net, ckt, ac = self.net, self.ckt, self.ac
+        col = lambda c, d: _f(net.vsc.at[vi, c], d) if c in net.vsc.columns else d
+        ac_bus = int(net.vsc.at[vi, 'bus'])
+        p, q = (_f(net.res_vsc.at[vi, 'p_mw']), _f(net.res_vsc.at[vi, 'q_mvar'])) if vi in net.res_vsc.index else (0.0, 0.0)
+        rated = col('rated_mva', 0.0)
+        rated = rated if rated > 0 else max(math.hypot(p, q), 1e-3) * 1.2
+        vn = ac.vn[ac_bus]
+        z = vn * vn / (rated * 1e6)
+        v_dc = self.v_bus[bus]
+        p_node = ckt.node(f'{label} DC+', v_dc)
+        k_dc = ckt.add_rl(p_node, term, r_dc, 0.0)
+        holds_dc = str(net.vsc.at[vi, 'control_mode_dc'] if 'control_mode_dc' in net.vsc.columns else 'vm_pu') == 'vm_pu'
+        conv = emt_mmc.Mmc(ckt, label, ac.nodes[ac_bus], p_node, ac.w, ac._v_phasor(ac_bus), ac._injection_phasor(ac_bus, -p, -q), rated * 1e6, vn, v_dc,
+                           x_t_pu=col('x_ohm', 0.0) / z if col('x_ohm', 0.0) > 0 else 0.15, r_t_pu=col('r_ohm', 0.0) / z if col('r_ohm', 0.0) > 0 else 0.005,
+                           x_arm_pu=col('mmc_x_arm_pu', 0.0) or 0.15, energy_kj_per_mva=col('mmc_energy_kj_per_mva', 0.0) or 30.0, levels=int(col('mmc_levels', 0.0)),
+                           mode='vdc' if holds_dc else 'p', limit_pu=col('current_limit_pu', 1.2))
+        if holds_dc:
+            # Its DC bus is held across a capacitor: as much as its arms' own in series, unless drawn.
+            c_dc = col('dc_link_mf', 0.0) * 1e-3 or 2.0 * conv.c_arm
+            ckt.add_c(p_node, 0, c_dc, v_dc)
+            conv.set_dc_capacitance(c_dc)
+        conv.id = _row_id(net, 'vsc', vi)
+        conv.k_dc_out = k_dc
+        self.vscs.append(conv)
+        self.series.append(('VSC', label, conv.id, f'{label} (DC side)', ('i_rl', k_dc), -1.0))
+        self.ac.series.append(('VSC', label, conv.id, f'{label} (AC side)',
+                               [[('i_rl', u, None, 1.0), ('i_rl', d, None, -1.0)] for u, d in zip(conv.k_u, conv.k_l)]))
+        self.warnings.append(f'VSC {label} is modular multilevel: it has no blocking, so a trip event or a DC fault does not stop it.')
 
     def _vsc_on_ac_network(self, vi, label, bus, term, r_dc, blocker):
         """
@@ -934,6 +971,39 @@ def _plan_profiles(net, params, in_data, warnings_out):
     return plan
 
 
+def _start_load_flow(net):
+    """
+    The load flow the run starts from, with the Load Flow study's fallbacks
+    (more iterations, then a flat start): (the solved network, None), or
+    (net, why not). Each plan from the network as built: a failed one leaves its
+    DC loads where it gave up. pandapower's Newton-Raphson leaves a load's
+    voltage dependence out of its Jacobian, so a constant-impedance load settles
+    slowly: 100 MW down 200 km of 230 kV line takes 13 iterations, its default
+    allows 10. Heavier still it can converge on the other root of the same
+    equations, the load's bus at 0 V drawing nothing, which no run can start
+    from: that one is refused here.
+    """
+    built = copy.deepcopy(net)
+    why = ''
+    for k, plan in enumerate(({}, {'max_iteration': 50}, {'init': 'flat', 'max_iteration': 100})):
+        attempt = net if k == 0 else copy.deepcopy(built)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                pe._electrisim_runpp(attempt, algorithm='nr', calculate_voltage_angles=True, **{'init': 'auto', **plan})
+        except Exception as exc:   # noqa: BLE001
+            why = str(exc)
+            continue
+        dead = attempt.res_bus.index[attempt.res_bus.vm_pu < 1e-3]
+        if not len(dead):
+            return attempt, None
+        names = ', '.join(str(attempt.bus.at[i, 'name']) for i in dead)
+        why = (f'it only reached a false solution with bus {names} at 0 V. Constant-impedance and constant-current '
+               'loads this heavy for the network are beyond its Newton-Raphson: set const_z_percent and '
+               'const_i_percent to 0, or lighten the load.')
+    return net, why
+
+
 def emt_study(net, params, in_data=None):
     params = params or {}
     warnings_out = []
@@ -962,12 +1032,9 @@ def emt_study(net, params, in_data=None):
         else:
             net.trafo.at[hit[0], 'in_service'] = False
             net['_electrisim_energise_trafo'] = hit[0]
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            pe._electrisim_runpp(net, algorithm='nr', calculate_voltage_angles=True, init='auto')
-    except Exception as exc:   # noqa: BLE001
-        return json.dumps({'error': True, 'message': f'The load flow the EMT study starts from did not solve: {exc}'})
+    net, why = _start_load_flow(net)
+    if why:
+        return json.dumps({'error': True, 'message': f'The load flow the EMT study starts from did not solve: {why}'})
     warnings_out.extend(getattr(net, 'warnings', []) or [])
     if not len(net.bus) and ('bus_dc' not in net or not len(net.bus_dc)):
         return json.dumps({'error': True, 'message': 'There is no network to study.', 'warnings': warnings_out})
@@ -1110,8 +1177,8 @@ def emt_study(net, params, in_data=None):
         # A switching converter keeps its fine step throughout: fifty to its switching period at most.
         t_sw = min((1.0 / c.f_sw for c in b.vscs + b.dcdcs if c.model == "switching"), default=None)
         dt_coarse = min(10 * dt, 2e-5) if t_sw is None else max(dt, min(10 * dt, 2e-5, t_sw / 50))
-        if scan is not None:
-            dt_coarse = dt                  # its tones are read at one step
+        if scan is not None or b.ac.fd_lines:
+            dt_coarse = dt                  # its tones are read at one step; a travelling wave's history is kept at one
         record_every = max(1, int(_f(params.get('record_every'), max(1.0, 2e-4 / dt) if t_end > 2.0 else 1.0)))
         sim = ckt.simulate(t_end, dt, dt_coarse=dt_coarse, t_fine=t_fine, record_every=record_every)
     t = sim['t']
@@ -1204,6 +1271,8 @@ def emt_study(net, params, in_data=None):
                                 'lengthen the run or shorten harmonics_cycles.')
     if b.ac.machines:
         result['machines'] = [_machine_result(m) for m in b.ac.machines]
+    if b.ac.fd_lines:
+        result['fd_lines'] = [{'label': x.label, 'travel_ground_ms': _round(x.tau_ms[0]), 'travel_aerial_ms': _round(x.tau_ms[1])} for x in b.ac.fd_lines]
     result['ders'] = [_der_result(rec, m) for rec, m in b.ders]
     if b.ac.energise is not None:
         result['energise'] = _energise_result(sim, b.ac, net)

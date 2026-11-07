@@ -16,7 +16,9 @@ Settings (the study's parameters):
 - scan_settle_ms: how long before the correlation starts.
 
 A low frequency takes a long run: 1 / f_min of simulated time. Scan a band at a time.
-Linear only as far as the injection is small: raise and lower scan_amp_pu to check.
+Linear only as far as the injection is small: raise and lower scan_amp_pu to check. scan_settle_ms
+must outlast the slowest thing in the network, not the lowest tone: a load's L against a grid's R can
+take seconds, and a slow control longer. Raise it until the low tones stop moving.
 """
 import math
 

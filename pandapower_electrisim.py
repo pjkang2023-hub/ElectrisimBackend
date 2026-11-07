@@ -8029,7 +8029,11 @@ def create_other_elements(in_data,net,x, Busbars):
                 net.vsc.at[vsc_idx, col] = safe_float(in_data[x].get(col, default), default)
             if 'emt_model' not in net.vsc.columns:
                 net.vsc['emt_model'] = 'average'
-            net.vsc.at[vsc_idx, 'emt_model'] = 'switching' if in_data[x].get('emt_model') == 'switching' else 'average'
+            net.vsc.at[vsc_idx, 'emt_model'] = in_data[x].get('emt_model') if in_data[x].get('emt_model') in ('switching', 'mmc') else 'average'
+            for mmc_field in ('mmc_levels', 'mmc_energy_kj_per_mva', 'mmc_x_arm_pu'):
+                if mmc_field not in net.vsc.columns:
+                    net.vsc[mmc_field] = 0.0
+                net.vsc.at[vsc_idx, mmc_field] = safe_float(in_data[x].get(mmc_field), 0.0)
             # Its rating where it runs: derated by its inlet air and altitude (converter_rating); its
             # short-time overload; following its bus's load, the charge it adds.
             derate = converter_rating.derating(in_data[x])

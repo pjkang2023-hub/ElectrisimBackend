@@ -3403,6 +3403,43 @@ def _participation(As, mu, x_names, mode_indices, labels, top=5):
     return out
 
 
+def _mode_shapes(As, mu, x_names, mode_indices, ss):
+    """
+    Each mode's shape on the machines' speeds: the right eigenvector's speed
+    components, the largest 1 and at 0 degrees, and the machines split into
+    the groups that swing against each other. speed_participation says how much
+    the mode is a rotor mode at all: near 0, the shape means little.
+    """
+    As = As.toarray() if hasattr(As, "toarray") else np.asarray(As, dtype=float)
+    lam, right = np.linalg.eig(As)
+    left = np.linalg.inv(right)
+    pf = np.abs(left * right.T)
+    pf = pf / pf.sum(axis=1, keepdims=True)
+    names = list(ss.dae.x_name)
+    position = {str(x): j for j, x in enumerate(x_names)}
+    speeds = []
+    for model in (ss.GENROU, ss.GENCLS):
+        for device, addr in zip(model.name.v, np.asarray(model.omega.a).ravel()):
+            j = position.get(str(names[int(addr)]))
+            if j is not None:
+                speeds.append((str(device), j))
+    out = []
+    for mi in mode_indices:
+        k = int(np.argmin(np.abs(lam - mu[mi])))
+        if not speeds:
+            continue
+        values = np.array([right[j, k] for _, j in speeds])
+        big = values[int(np.argmax(np.abs(values)))]
+        shape = values / big
+        rows = [{"machine": device, "magnitude": _clean_num(float(abs(z))), "angle_deg": _clean_num(math.degrees(float(np.angle(z))))}
+                for (device, _), z in zip(speeds, shape)]
+        with_big = [d for (d, _), z in zip(speeds, shape) if z.real >= 0.0]
+        against = [d for (d, _), z in zip(speeds, shape) if z.real < 0.0]
+        out.append({"mode_index": int(mi), "speed_participation": _clean_num(float(sum(pf[k, j] for _, j in speeds))),
+                    "machines": rows, "groups": [g for g in (with_big, against) if g]})
+    return out
+
+
 def run_eig(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
     """Run power flow + eigenvalue analysis; return JSON string."""
     try:
@@ -3482,6 +3519,11 @@ def run_eig(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
         except Exception as e:
             participation = []
             meta["warnings"].append(f"Participation factors could not be computed: {e}")
+        try:
+            mode_shapes = _mode_shapes(ss.EIG.As, mu, list(ss.EIG.x_name), [m["index"] for m in least_damped], ss)
+        except Exception as e:
+            mode_shapes = []
+            meta["warnings"].append(f"Mode shapes could not be computed: {e}")
 
         result = {
             "error": False,
@@ -3495,6 +3537,7 @@ def run_eig(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
             "eigenvalues": eigenvalues,
             "least_damped_modes": least_damped,
             "participation": participation,
+            "mode_shapes": mode_shapes,
             "defaults_applied": meta["defaults_applied"],
             "warnings": meta["warnings"],
             "n_generators": meta["n_generators"],
