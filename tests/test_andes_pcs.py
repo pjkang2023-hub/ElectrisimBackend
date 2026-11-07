@@ -219,6 +219,40 @@ def test_an_outage_leaving_one_bus_keeps_its_load_on_the_pcs(client, quiet):
     assert any('as an island' in w for w in result['warnings'])
 
 
+@pytest.mark.parametrize('typ', ['Load0', 'Storage0', 'Motor0', 'Capacitor0', 'Static Generator0', 'External Grid0'])
+def test_an_element_with_no_bus_is_named(client, quiet, typ):
+    """It is left out, so the network reads smaller: it says so, on the grid as on an island. Out of service, it has nothing to say."""
+    missing = {'typ': typ, 'name': 'lost', 'id': 'cell-lost', 'userFriendlyName': 'LOST', 'bus': 'nowhere', 'p_mw': '0.5', 'in_service': 'true'}
+    params = {**TDS, 'tf': '0.5', 'fault_enabled': 'false', 'load_model': 'power'}
+    source = _der('Battery', 'bb', capacity_kwh=1000), _pcs('gb', 'b', 'bb', control='grid_forming', s_rated_mva=1.0)
+    result = _post(client, quiet, _two_buses(missing, *source, params=params))
+    assert any("'LOST'" in w and 'not connected to a bus' in w for w in result['warnings']), result['warnings']
+    result = _post(client, quiet, _two_buses({**missing, 'in_service': 'false'}, *source, params=params))
+    assert not any("'LOST'" in w for w in result['warnings']), result['warnings']
+
+
+def test_the_frequency_result_is_the_island_with_the_load(client, quiet):
+    """The line between two PCS out: the one left unloaded rises on its droop, and the mean of the two is neither island's."""
+    request = _two_buses(_der('Battery', 'ba', capacity_kwh=1000), _pcs('ga', 'a', 'ba', control='grid_forming', s_rated_mva=1.0),
+                         _der('Battery', 'bb', capacity_kwh=1000), _pcs('gb', 'b', 'bb', control='grid_forming', s_rated_mva=1.0),
+                         grid=False, params={**TDS, 'tf': '3', 'fault_enabled': 'false', 'load_model': 'power', 'toggle_line': 'l1', 'toggle_t': '1'})
+    result = _post(client, quiet, request)
+    _, f_load = _series(result, 'gb', 'frequency_hz')
+    _, f_apart = _series(result, 'ga', 'frequency_hz')
+    assert f_apart[-1] > 50 > f_load[-1]
+    assert result['frequency_hz'][-1] == pytest.approx(f_load[-1], abs=1e-6)
+    assert any('island with the most load' in w and 'GA' in w for w in result['warnings']), result['warnings']
+
+
+def test_a_lone_machine_switched_off_later_says_it_ran_flat(client, quiet):
+    """It gets no stub, which its trip would leave floating; it says what that means."""
+    machine = {'typ': 'Generator0', 'name': 'm', 'id': 'cell-m', 'userFriendlyName': 'M', 'bus': 'b', 'p_mw': '0.6', 'vm_pu': '1', 'sn_mva': '1', 'vn_kv': '0.4', 'in_service': 'true'}
+    request = _two_buses(machine, grid=False, params={**TDS, 'tf': '2', 'fault_enabled': 'false', 'load_model': 'power', 'toggle_gen': 'm', 'toggle_gen_t': '1'})
+    request = {k: v for k, v in request.items() if v.get('name') not in ('l1', 'a')}
+    result = _post(client, quiet, request)
+    assert any("'M' has no branch" in w for w in result['warnings']), result['warnings']
+
+
 def test_an_island_held_only_by_pcs_rides_through_a_fault(client, quiet):
     """
     An island its grid-forming PCS alone holds: its virtual machine is the
