@@ -1003,7 +1003,7 @@ class AcBuilder:
         # Synchronous: their voltage behind their subtransient reactance; or, as machines, with their rotor,
         # governor and exciter (emt_machine) - by the study's generator_model, the machine when it islands.
         mode = str(self.params.get('generator_model') or 'auto').strip().lower()
-        as_machine = mode == 'machine' or (mode == 'auto' and self.island is not None)
+        as_machine = mode in ('machine', 'detailed') or (mode == 'auto' and self.island is not None)
         for i in net.gen.index:
             b = int(net.gen.at[i, 'bus'])
             if not bool(net.gen.at[i, 'in_service']) or b not in self.nodes or i not in net.res_gen.index:
@@ -1032,16 +1032,21 @@ class AcBuilder:
     def _machine(self, i, b):
         """Generator i as a synchronous machine with its rotor, governor and exciter."""
         import emt_machine
-        from andes_electrisim import _EXCITER_DEFAULTS, _GOVERNOR_DEFAULTS
+        from andes_electrisim import _DEFAULT_GENROU, _EXCITER_DEFAULTS, _GOVERNOR_DEFAULTS
         net = self.net
         name = str(net.gen.at[i, 'name'])
         sn = _f(net.gen.at[i, 'sn_mva'], 0.0) if 'sn_mva' in net.gen.columns else 0.0
         sn = sn if sn > 0 else max(abs(_f(net.res_gen.at[i, 'p_mw'])), 1.0) * 1.2
-        data = emt_machine.machine_data(self.gen_rows.get(name), _GOVERNOR_DEFAULTS, _EXCITER_DEFAULTS)
         label = _label(net, 'gen', i)
         i_ph = self._injection_phasor(b, _f(net.res_gen.at[i, 'p_mw']), _f(net.res_gen.at[i, 'q_mvar']))
-        m = emt_machine.SynchronousMachine(self.ckt, label, self.nodes[b], self.w, self._v_phasor(b), i_ph,
-                                           sn * 1e6, self.vn[b], r_bias=R_BIAS, **data)
+        if str(self.params.get('generator_model') or '').strip().lower() == 'detailed':
+            data, notes = emt_machine.park_data(self.gen_rows.get(name), _GOVERNOR_DEFAULTS, _EXCITER_DEFAULTS, _DEFAULT_GENROU)
+            self.warnings.extend(f'Generator {label}: {note}.' for note in notes)
+            model = emt_machine.ParkMachine
+        else:
+            data = emt_machine.machine_data(self.gen_rows.get(name), _GOVERNOR_DEFAULTS, _EXCITER_DEFAULTS)
+            model = emt_machine.SynchronousMachine
+        m = model(self.ckt, label, self.nodes[b], self.w, self._v_phasor(b), i_ph, sn * 1e6, self.vn[b], r_bias=R_BIAS, **data)
         m.row_id = _row_id(net, 'gen', i)
         self.ckt.add_controller(m.control)
         self.machines.append(m)

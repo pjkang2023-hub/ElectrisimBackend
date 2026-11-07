@@ -45,6 +45,7 @@ import emt_der
 import emt_double_conversion
 import emt_harmonics
 import emt_impedance_scan
+import emt_machine
 import emt_series_ups
 from emt_converters import DcDc, GridFormingVsc, Vsc
 from emt_solver import DEFAULT_INPUT_WARNING, R_BIAS, Circuit, dc_load_current, default_input_capacitance
@@ -1510,6 +1511,8 @@ def _machine_result(m):
     """A synchronous machine: its power, frequency, rotor angle, internal voltage and mechanical power."""
     tr = np.array(m.trace) if m.trace else np.zeros((0, 7))
     out = {'label': m.label, 'id': m.row_id, 'governor': bool(m.gov), 'exciter': bool(m.exc)}
+    if isinstance(m, emt_machine.ParkMachine):
+        out.update(model='detailed', efd_start_pu=_round(m.efd0), efd_end_pu=_round(m.efd))
     if not len(tr):
         return out
     out.update(p_start_mw=_round(tr[0, 1]), p_end_mw=_round(tr[-1, 1]), q_end_mvar=_round(tr[-1, 2]),
