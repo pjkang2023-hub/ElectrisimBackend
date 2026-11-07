@@ -375,7 +375,9 @@ class AcBuilder:
         """
         import emt_fd_line
         row = self.line_rows.get(str(self.net.line.at[li, 'name'])) or {}
-        if str(row.get('fd_line') or self.params.get('fd_line') or '').strip().lower() not in ('true', '1', 'yes'):
+        # On if the line's own EMT tab or the study says so: a line saved as pi sections stores 'false', which must not
+        # hide the study's switch.
+        if not any(str(x or '').strip().lower() in ('true', '1', 'yes') for x in (row.get('fd_line'), self.params.get('fd_line'))):
             return False
         geometry = {k: _f(row.get(f'fd_{k}'), _f(self.params.get(f'fd_{k}'), 0.0)) for k in emt_fd_line.FIELDS}
         why = None

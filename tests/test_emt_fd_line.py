@@ -201,3 +201,11 @@ def test_a_line_it_cannot_model_stays_pi_and_says_why(client, quiet):
     next(v for v in request.values() if v.get('typ') == 'Line0').pop('fd_rho_ohm_m')
     emt, warnings = _emt(client, quiet, request)
     assert 'fd_lines' not in emt and any('fd_rho_ohm_m' in w for w in warnings)
+
+
+def test_the_studys_switch_reaches_a_line_saved_as_pi_sections(client, quiet):
+    """The line dialog stores fd_line 'false' on a line left as pi sections; the study's 'true' still turns it on."""
+    request = _request(fd_line='true')
+    next(v for v in request.values() if v.get('typ') == 'Line0')['fd_line'] = 'false'
+    emt, _ = _emt(client, quiet, request)
+    assert emt['fd_lines'][0]['label']
