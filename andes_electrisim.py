@@ -277,17 +277,25 @@ def _iter_elements(in_data: Dict[str, Any]):
         yield key, el, typ
 
 
-def _stub_lone_sources(ss, next_bus: int, sn_base: float, freq: float) -> int:
+def _warn_no_bus(warnings: List[str], el: Dict[str, Any], typ: str) -> None:
+    """An element in service whose bus is not in the study is left out, which would read as a smaller network."""
+    if _sb(el.get("in_service"), True):
+        warnings.append(f"Skipped {typ.rstrip('0123456789')} '{el.get('userFriendlyName') or el.get('name')}': "
+                        "not connected to a bus, so the study runs without it.")
+
+
+def _stub_lone_sources(ss, next_bus: int, sn_base: float, freq: float, warnings: List[str]) -> int:
     """
     An unloaded stub line, to a bus results never list, on each bus holding a machine or a grid-forming PCS that has no
     branch left in service, at the start or after a timed outage. ANDES pins a bus without a branch at 1 pu and 0 degrees
     and drops its power balance: the machine and the load ran flat, whatever the load did, with no error. A machine switched
-    off in the run gets none: a stub with no source left on it would leave the solver with a floating bus. Returns the next
-    free bus number.
+    off in the run gets none: a stub with no source left on it would leave the solver with a floating bus, so it is flat until
+    then, and says so, unless its trip is the outage's that cut it off. Returns the next free bus number.
     """
-    toggles = list(zip(ss.Toggle.model.v, ss.Toggle.dev.v)) if ss.Toggle.n else []
-    out = {d for m, d in toggles if m == "Line"}
-    tripped = {d for m, d in toggles if m == "SynGen"}
+    toggles = list(zip(ss.Toggle.idx.v, ss.Toggle.model.v, ss.Toggle.dev.v)) if ss.Toggle.n else []
+    out = {d for _, m, d in toggles if m == "Line"}
+    tripped = {d for _, m, d in toggles if m == "SynGen"}
+    with_outage = {d for i, m, d in toggles if m == "SynGen" and str(i).startswith("Toggle_Island")}
     branches: Dict[Any, int] = {}
     for idx, a, b, u in zip(ss.Line.idx.v, ss.Line.bus1.v, ss.Line.bus2.v, ss.Line.u.v):
         if u and idx not in out:
@@ -302,6 +310,11 @@ def _stub_lone_sources(ss, next_bus: int, sn_base: float, freq: float) -> int:
             ss.add("Line", idx=f"Stub_{bus}", name=f"stub of bus {bus}", bus1=bus, bus2=next_bus, r=0.0, x=0.01, b=0.0, g=0.0,
                    Vn1=vn, Vn2=vn, Sn=sn_base, fn=freq)
             next_bus += 1
+    for m in (ss.GENROU, ss.GENCLS):
+        for i, b, name in zip(m.idx.v, m.bus.v, m.name.v):
+            if i in tripped - with_outage and b in in_service and not branches.get(b) and b not in sources:
+                warnings.append(f"'{name}' has no branch on its bus and is switched off in the run: ANDES holds the bus at "
+                                "1 pu and 0 degrees, so it and the bus's load run flat until then. A short line to it gives a real result.")
     return next_bus
 
 
@@ -324,6 +337,17 @@ def _islands(ss, out_lines=()) -> List[set]:
         seen |= island
         out.append(island)
     return out
+
+
+def _main_island(ss, buses: set) -> set:
+    """The island as the run ends with the most load, of those holding one of these buses; all of them if none has a load."""
+    load: Dict[Any, float] = {}
+    for b, u, p in zip(ss.PQ.bus.v, ss.PQ.u.v, ss.PQ.p0.v):
+        if u:
+            load[b] = load.get(b, 0.0) + abs(float(p))
+    parts = [part for part in _islands(ss) if part & buses]
+    held = [sum(load.get(b, 0.0) for b in part) for part in parts]
+    return parts[int(np.argmax(held))] if any(held) else buses
 
 
 def _dead_at_start(ss) -> set:
@@ -1265,6 +1289,7 @@ def build_system(
             continue
         bus = bus_map.get(el.get("bus"))
         if bus is None:
+            _warn_no_bus(warnings, el, typ)
             continue
         pq_i += 1
         scaling = _sf(el.get("scaling"), 1.0)
@@ -1362,6 +1387,8 @@ def build_system(
         if not typ.startswith("Storage"):
             continue
         bus = bus_map.get(el.get("bus"))
+        if bus is None:
+            _warn_no_bus(warnings, el, typ)
         if bus is None or not _sb(el.get("in_service"), True):
             continue
         pq_i += 1
@@ -1380,6 +1407,8 @@ def build_system(
         if exclude_motors and str(el.get("name")) in exclude_motors:
             continue
         bus = bus_map.get(el.get("bus"))
+        if bus is None:
+            _warn_no_bus(warnings, el, typ)
         if bus is None or not _sb(el.get("in_service"), True):
             continue
         eff = _sf(el.get("efficiency_percent"), 100.0) or 100.0
@@ -1407,6 +1436,7 @@ def build_system(
             continue
         bus = bus_map.get(el.get("bus"))
         if bus is None:
+            _warn_no_bus(warnings, el, typ)
             continue
         sh_i += 1
         q_mvar = _sf(el.get("q_mvar"))
@@ -1436,6 +1466,7 @@ def build_system(
             continue
         bus = bus_map.get(el.get("bus"))
         if bus is None:
+            _warn_no_bus(warnings, el, typ)
             continue
         if not _sb(el.get("in_service"), True):
             continue
@@ -1714,6 +1745,8 @@ def build_system(
         if not (typ.startswith("Static Generator") or typ.startswith("Wind Turbine")):
             continue
         bus = bus_map.get(el.get("bus"))
+        if bus is None:
+            _warn_no_bus(warnings, el, typ)
         if bus is None or not _sb(el.get("in_service"), True):
             continue
         # Wind Turbine: derive p_mw from power curve when present
@@ -2045,7 +2078,7 @@ def build_system(
                 ss.Bus.u.v[k] = 0
         shown = ", ".join(dead_names[:12]) + (f" and {len(dead_names) - 12} more" if len(dead_names) > 12 else "")
         warnings.append(f"No source reaches {len(dead_names)} bus(es), set aside and reported at 0 V: {shown}.")
-    bus_counter = _stub_lone_sources(ss, bus_counter, sn_base, freq)
+    bus_counter = _stub_lone_sources(ss, bus_counter, sn_base, freq, warnings)
 
     if ss.PQ.n:
         warnings.append(
@@ -3105,12 +3138,24 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
         # The machines still running: a tripped one keeps its last speed, and pulled the mean to it.
         running = {str(i) for m in ("GENROU", "GENCLS") for i, u in zip(getattr(ss, m).idx.v, getattr(ss, m).u.v) if u}
         spinning = [s for s in omega if s["id"] in running] or omega
+        gen_of = {r["name"]: meta["gen_map"][r["name"]] for r in pcs if r.get("frequency_hz")}
+        forming = [r for r in pcs if r["name"] in gen_of and str(gen_of[r["name"]]["model_idx"]) in running] \
+            or [r for r in pcs if r["name"] in gen_of]
+        # An island parted from the others runs at its own frequency: the mean of them all is no bus's.
+        machine_bus = {str(i): b for m in ("GENROU", "GENCLS") for i, b in zip(getattr(ss, m).idx.v, getattr(ss, m).bus.v)}
+        main = _main_island(ss, {machine_bus[s["id"]] for s in spinning} | {gen_of[r["name"]]["bus"] for r in forming})
+        apart = [str(s.get("name") or s["id"]) for s in spinning if machine_bus[s["id"]] not in main] \
+            + [str(r["label"]) for r in forming if gen_of[r["name"]]["bus"] not in main]
+        if apart:
+            spinning = [s for s in spinning if machine_bus[s["id"]] in main]
+            forming = [r for r in forming if gen_of[r["name"]]["bus"] in main]
+            meta["warnings"].append("More than one island runs: the frequency result is that of the island with the most load. "
+                                    f"Running apart at their own frequency: {', '.join(apart)}.")
         if spinning:
             mean_w = np.mean([np.asarray(s["values"], dtype=float) for s in spinning], axis=0)
             freq_hz = (mean_w * meta["frequency"]).tolist()
-        elif any(r.get("frequency_hz") for r in pcs):
-            freq_hz = np.mean([np.asarray(r["frequency_hz"], dtype=float) for r in pcs if r.get("frequency_hz")],
-                              axis=0).tolist()
+        elif forming:
+            freq_hz = np.mean([np.asarray(r["frequency_hz"], dtype=float) for r in forming], axis=0).tolist()
 
         # Losing synchronism did not show in the result, only in the plots. A
         # pole slip runs the rotor angle more than 180 degrees from where it
