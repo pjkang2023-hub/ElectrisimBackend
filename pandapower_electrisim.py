@@ -2020,6 +2020,26 @@ def _electrisim_runpp(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, **kwargs)
     return out
 
 
+def _electrisim_false_zero_volt(net):
+    """
+    Why a converged load flow is false, or None. pandapower's Newton-Raphson leaves a
+    load's voltage dependence out of its Jacobian, and constant-impedance or
+    constant-current loads have a second root of the same equations: their bus at 0 V,
+    drawing nothing. Heavy enough, it converges there. (A dead bus is NaN, not 0.)
+    """
+    res = getattr(net, 'res_bus', None)
+    if res is None or not len(res):
+        return None
+    dead = res.index[res.vm_pu < 1e-3]
+    if not len(dead):
+        return None
+    names = getattr(net, 'user_friendly_names', {}) or {}
+    labels = ', '.join(str(names.get(net.bus.at[i, 'name'], net.bus.at[i, 'name'])) for i in dead)
+    return (f'Newton-Raphson only reached a false solution with bus {labels} at 0 V. Constant-impedance and '
+            'constant-current loads this heavy for the network are beyond it: set const_z_percent and '
+            'const_i_percent to 0, or lighten the load.')
+
+
 def _electrisim_drop_dc_dc_without_input(net):
     """Each in-service DC/DC converter whose input bus has no voltage, out, said so. True if any."""
     res = getattr(net, 'res_bus_dc', None)
@@ -9717,6 +9737,7 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
 
                 pf_plan_used = None
                 pf_last_error = None
+                pf_false_solution = None
                 pf_attempt_log = []
                 for plan_label, plan_kwargs, plan_run_control in solve_plans:
                     if not plan_run_control and run_pp_control:
@@ -9729,6 +9750,10 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                     try:
                         _electrisim_runpp(net, calculate_voltage_angles=calculate_voltage_angles,
                                           run_control=plan_run_control, **plan_kwargs, **pf_kwargs)
+                        false_solution = _electrisim_false_zero_volt(net)
+                        if false_solution:
+                            pf_false_solution = pp.LoadflowNotConverged(false_solution)
+                            raise pf_false_solution
                         pf_plan_used = plan_label
                         break
                     except Exception as plan_err:
@@ -9757,7 +9782,7 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                             "Attempts: " + " | ".join(pf_attempt_log) + "." + ssc_desc +
                             (" " + ssc_diag if ssc_diag else "")
                         ) from pf_last_error
-                    raise pf_last_error
+                    raise pf_false_solution or pf_last_error
 
                 # A park controller that never settled leaves machines outside their capability
                 # curve; report it instead of returning those values as a valid operating point.

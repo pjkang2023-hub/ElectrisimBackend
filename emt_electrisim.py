@@ -980,11 +980,10 @@ def _start_load_flow(net):
     voltage dependence out of its Jacobian, so a constant-impedance load settles
     slowly: 100 MW down 200 km of 230 kV line takes 13 iterations, its default
     allows 10. Heavier still it can converge on the other root of the same
-    equations, the load's bus at 0 V drawing nothing, which no run can start
-    from: that one is refused here.
+    equations, which no run can start from: that one is refused here.
     """
     built = copy.deepcopy(net)
-    why = ''
+    why = false_solution = ''
     for k, plan in enumerate(({}, {'max_iteration': 50}, {'init': 'flat', 'max_iteration': 100})):
         attempt = net if k == 0 else copy.deepcopy(built)
         try:
@@ -994,14 +993,11 @@ def _start_load_flow(net):
         except Exception as exc:   # noqa: BLE001
             why = str(exc)
             continue
-        dead = attempt.res_bus.index[attempt.res_bus.vm_pu < 1e-3]
-        if not len(dead):
+        false_here = pe._electrisim_false_zero_volt(attempt)
+        if not false_here:
             return attempt, None
-        names = ', '.join(str(attempt.bus.at[i, 'name']) for i in dead)
-        why = (f'it only reached a false solution with bus {names} at 0 V. Constant-impedance and constant-current '
-               'loads this heavy for the network are beyond its Newton-Raphson: set const_z_percent and '
-               'const_i_percent to 0, or lighten the load.')
-    return net, why
+        false_solution = false_here
+    return net, false_solution or why
 
 
 def emt_study(net, params, in_data=None):
