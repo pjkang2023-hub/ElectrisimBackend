@@ -1006,6 +1006,23 @@ def simulation():
                 else:
                     return response_data
 
+            if "ParameterSweep" in typ:
+                import sweep_electrisim
+                return jsonify({'sweep': sweep_electrisim.run(app, in_data, x)})
+
+            if "VoltageStabilityPandaPower" in typ:
+                import voltage_stability_electrisim
+                net = pp.create_empty_network(f_hz=float(in_data[x].get('frequency') or 50))
+                Busbars = pandapower_electrisim.create_busbars(in_data, net)
+                pandapower_electrisim.create_other_elements(in_data, net, x, Busbars)
+                return jsonify({'voltage_stability': voltage_stability_electrisim.study(net, in_data[x])})
+
+            if "CriticalClearingAndes" in typ or "ContingencyBatchAndes" in typ:
+                import dynamic_studies_electrisim as dyn
+                if "CriticalClearingAndes" in typ:
+                    return jsonify({'critical_clearing': dyn.critical_clearing(in_data, in_data[x])})
+                return jsonify({'contingency_batch': dyn.contingency_batch(in_data, in_data[x])})
+
             if "TransientStabilityAndes" in typ:
                 user_email = in_data[x].get('user_email', 'unknown@user.com')
                 print(f"=== TRANSIENT STABILITY (ANDES) REQUESTED BY USER: {user_email} ===")

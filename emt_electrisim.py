@@ -43,6 +43,7 @@ import grid_voltage_profile as gvp
 from emt_ac import AcBuilder
 import emt_der
 import emt_double_conversion
+import emt_harmonics
 import emt_impedance_scan
 import emt_series_ups
 from emt_converters import DcDc, GridFormingVsc, Vsc
@@ -1193,6 +1194,13 @@ def emt_study(net, params, in_data=None):
             warnings_out.append(f"DC breaker {rec['label']} opened but its current had not reached zero by the end of the run.")
         result['breakers'].append(out)
     result['ac'] = _ac_results(sim, b.ac, net, t_fine, ac_fault)
+    cycles = int(_f(params.get('harmonics_cycles'), 0.0))
+    if cycles > 0 and b.ac.nodes:
+        result['harmonics'] = _ac_harmonics(sim, b.ac, net, cycles, int(_f(params.get('harmonics_h_max'), 50.0)))
+        window_from = t_end - cycles / b.ac.f_hz
+        if any(window_from < x <= t_end for x in event_times):
+            warnings_out.append(f'Harmonics: an event falls inside the last {cycles} cycles, so the window is not settled: '
+                                'lengthen the run or shorten harmonics_cycles.')
     if b.ac.machines:
         result['machines'] = [_machine_result(m) for m in b.ac.machines]
     result['ders'] = [_der_result(rec, m) for rec, m in b.ders]
@@ -1304,6 +1312,25 @@ def _vuf_end(t, v, f_hz):
     v1 = (ph[0] + a * ph[1] + a * a * ph[2]) / 3.0
     v2 = (ph[0] + a * a * ph[1] + a * ph[2]) / 3.0
     return _round(100.0 * abs(v2) / abs(v1)) if abs(v1) > 1e-9 else None
+
+
+def _ac_harmonics(sim, ac, net, cycles, h_max):
+    """Each bus's phase voltage and each branch's current over the run's last cycles (emt_harmonics): kV and kA rms."""
+    t = sim['t']
+    buses = [{'name': str(net.bus.at[b, 'name']), 'id': _row_id(net, 'bus', b), 'label': _label(net, 'bus', b),
+              **(emt_harmonics.worst_phase(t, [sim['v'][:, n] for n in nodes], ac.f_hz, cycles, h_max, 1e-3) or {})}
+             for b, nodes in ac.nodes.items()]
+    branches = []
+    for kind, name, cid, label, phases in ac.series:
+        waves = []
+        for terms in phases:
+            terms = terms if isinstance(terms, list) else [terms]
+            i = np.zeros(len(t))
+            for arr, g, col, sign in terms:
+                i = i + sign * (sim[arr][g][:, col] if arr == 'i_cp' else sim[arr][:, g])
+            waves.append(i)
+        branches.append({'kind': kind, 'name': name, 'id': cid, 'label': label, **(emt_harmonics.worst_phase(t, waves, ac.f_hz, cycles, h_max, 1e-3) or {})})
+    return {'cycles': cycles, 'buses': buses, 'branches': branches}
 
 
 def _ac_results(sim, ac, net, t_fine, fault):
