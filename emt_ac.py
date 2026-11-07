@@ -137,6 +137,8 @@ class AcBuilder:
         self.energise = None
         # A transformer energised during the run (ac_energise_trafo): its breaker, cores and closing.
         self.energise_trafo = None
+        # A series-reactor UPS (emt_series_ups): its line index -> its disconnect's and bypass's switches.
+        self.series_ups = {}
         # Every transformer's saturable cores (trafo_saturation=all).
         self.sat_cores = []
 
@@ -162,6 +164,7 @@ class AcBuilder:
             return self
         self._open_switches = self._switches()
         self._line_events()
+        self._series_ups()
         self._phase_offsets()
         self._grids()
         self._lines()
@@ -334,6 +337,17 @@ class AcBuilder:
                 self.line_trips.append({'line': li, 'label': _label(self.net, 'line', li), 'switches': [],
                                         'opened': [], 'last': []})
 
+    def _series_ups(self):
+        """The line series_ups_line names is a series-reactor UPS's reactor, from its source bus to its critical bus."""
+        name = str(self.params.get('series_ups_line') or '').strip()
+        if not name or name == 'none':
+            return
+        li = self._find_line(name)
+        if li is None:
+            self.warnings.append(f'No line {name} for the series-reactor UPS: the study runs without one.')
+        else:
+            self.series_ups[li] = {'line': li, 'label': _label(self.net, 'line', li), 'disconnect': [], 'bypass': []}
+
     def line_trip_control(self, t, state):
         """From the trip time, each line breaker's phase opens as its current passes zero; True if one did."""
         if self.t_trip is None or t < self.t_trip - 1e-12:
@@ -382,6 +396,19 @@ class AcBuilder:
                         trip['last'].append(None)
                     own_ends.append(end)
                 start, stop = own_ends
+            ups = self.series_ups.get(li)
+            if ups is not None:
+                # A series-reactor UPS: its static disconnect before the reactor, its bypass around both.
+                end = [ckt.node(f'{label} disconnect {p}') for p in 'abc']
+                ups['disconnect'] = [ckt.add_switch(start[ph], end[ph], closed=True) for ph in range(3)]
+                if str(self.params.get('series_ups_opening') or '').strip().lower() == 'forced':
+                    # A turn-off switch: its arrester clamps the reactor's voltage at twice the phase's peak.
+                    clamp = 2.0 * self.vn[fb] * math.sqrt(2.0 / 3.0)
+                    for ph in range(3):
+                        ckt.add_arrester(start[ph], end[ph], clamp)
+                ups['bypass'] = [ckt.add_switch(self.nodes[fb][ph], self.nodes[tb][ph], closed=False) for ph in range(3)]
+                ups['source_bus'], ups['critical_bus'] = fb, tb
+                start = end
             # Its length in parts: at a fault along it, two, either side of the fault point.
             parts = [(start, stop, km)]
             if self.fault_line is not None and self.fault_line[0] == li:
@@ -586,10 +613,15 @@ class AcBuilder:
     def _impedance_load(self, b, p_mw, q_mvar, label, profile=None):
         """
         Constant impedance at its load-flow power, ungrounded star. Following a
-        profile, its impedance changes with it: a current source per phase
-        carries the change in its conductance and susceptance from their
-        starting values, by its phase voltage and (for the susceptance) the
-        line voltage a quarter cycle behind it.
+        profile, its impedance changes with it: current sources per phase carry
+        the change in its conductance and susceptance from their starting values,
+        by its phase voltage and the line voltage a quarter cycle behind it, taken
+        from the last step. These are stable only while the change is smaller than
+        the conductance solved with the step: an increase as large as the load
+        itself overshot each step, and a load doubling blew up. So a rise in
+        conductance is a branch per phase solved with the step instead. A fall
+        stays a source, or the susceptance's source would lose the conductance
+        that keeps it stable, as the load falls to nothing.
         """
         ckt, w = self.ckt, self.w
         v_ll = float(self.net.res_bus.at[b, 'vm_pu']) * self.vn[b]
@@ -613,7 +645,8 @@ class AcBuilder:
             ld = {'nodes': self.nodes[b], 'star': star, 'v2': v_ll * v_ll, 'label': str(label),
                   'names': {str(label), str(label).split(' (')[0], str(row.get('name') or '')} - {''},
                   'p0': p_mw * 1e6, 'q0': q_mvar * 1e6, 'plan': profile, 'ks': parts['i_src'], 'parts': parts,
-                  'v_nom': self.vn[b], 'scale': 1.0}
+                  'v_nom': self.vn[b], 'scale': 1.0, 'dg': 0.0}
+            parts['i_nl'] = [ckt.add_nonlinear(self.nodes[b][k], star, lambda v, t, ld=ld: (ld['dg'] * v, ld['dg'])) for k in range(3)]
             self.profiled.append(ld)
             if profile is not None:
                 profile['measure'] = ('ac', self.nodes[b], star, parts)
@@ -668,10 +701,11 @@ class AcBuilder:
             s = ld.get('scale', 1.0)
             p, q = p * s, q * s
             dg, db = (p - ld['p0']) / ld['v2'], (q - ld['q0']) / ld['v2']
+            ld['dg'] = max(dg, 0.0)
             v = state.v[ld['nodes']]
             phase = v - state.v[ld['star']]
             behind = np.array([v[1] - v[2], v[2] - v[0], v[0] - v[1]]) / math.sqrt(3.0)
-            i = dg * phase + db * behind
+            i = min(dg, 0.0) * phase + db * behind
             for k in range(3):
                 state.set_source_value(ld['ks'][k], float(i[k]))
 

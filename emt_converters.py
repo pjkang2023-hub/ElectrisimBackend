@@ -157,8 +157,10 @@ class Vsc:
                  limit_pu=1.2, c_link_mf=0.0, c_link_esr_mohm=0.0, c_link_esl_uh=0.0, r_ohm=0.0, x_ohm=0.0,
                  mode_dc='vm_pu', mode_ac='q_mvar', model='average', switching_khz=5.0, eta=1.0, p_nl_mw=0.0,
                  input_side='dc', current_loop_hz=CURRENT_LOOP_HZ, ease_f_start_hz=0.0, ease_f_end_hz=0.0,
-                 uv_ease_pu=0.0, uv_floor_pu=0.5, uv_restore_s=5.0):
+                 uv_ease_pu=0.0, uv_floor_pu=0.5, uv_restore_s=5.0, filter_c_pu=0.0):
         """
+        ``filter_c_pu`` > 0: a capacitor per phase on its AC bus, that many per unit of its rating, behind
+        a small series resistance whose branch measures its current (for a voltage loop).
         ``p``, ``q``: its load-flow power at its AC bus (the load convention);
         ``p_dc``: at its DC bus (the load convention). ``eta``, ``p_nl_mw``: a
         converter stage's efficiency and no-load loss, its input on its
@@ -214,6 +216,15 @@ class Vsc:
         # Its steady state: the AC current it delivers, and the voltage behind its reactor.
         i_ph = ac._injection_phasor(ac_bus, -p, -q)        # its results use the load convention
         v_ph = ac._v_phasor(ac_bus)
+        self.c_f, self.k_cf = 0.0, []
+        if filter_c_pu > 0:
+            z_b = v_ll * v_ll / self.s_rated
+            self.c_f = filter_c_pu / (self.w0 * z_b)
+            for k in range(3):
+                x = ckt.node(f'{label} filter {"abc"[k]}')
+                self.k_cf.append(ckt.add_rl(self.ac_nodes[k], x, 0.005 * z_b, 0.0))
+                ckt.add_c(x, 0, self.c_f)
+            i_ph = i_ph + 1j * self.w0 * self.c_f * v_ph     # its bridge carries the capacitor's current too
         e_ph = v_ph + complex(self.r, self.w0 * self.l) * i_ph
         # Its DC current, as its load flow has it at its DC bus: what its AC side
         # takes, less its reactor's losses.
@@ -655,7 +666,52 @@ class GridFormingVsc(Vsc):
         self._gf_start(droop_pf, droop_qv, tau_f, unbalance_control, i2_limit_pu)
         return self
 
+    def use_voltage_loop(self, voltage_loop_hz, ff_gain=0.7):
+        """
+        Hold its AC bus's voltage (its filter capacitor's) rather than the voltage behind its reactor: the droops' E and
+        angle become that bus's reference, a PI on it and part of the measured output current give a current reference, held
+        within its limit, and a PI on the current sets the bridge. All of the current fed forward, with the sampling's delay, makes the
+        capacitor and an inductive source resonate at a few hundred hertz, so ff_gain is below 1. Its negative-sequence and per-phase limits are not used.
+        """
+        a_v = 2 * math.pi * voltage_loop_hz
+        self.v_loop = {'kp': self.c_f * a_v, 'ki': self.c_f * a_v * a_v / 10.0, 'int_d': 0.0, 'int_q': 0.0, 'ff': ff_gain}
+        self.th_e = float(np.angle(self.v_ph0))
+        self.e0 = abs(self.v_ph0)
+        self.int_d = self.int_q = 0.0
+        # Its integrators start holding the output current the feed-forward leaves out.
+        i_o = (self.i_ph0 - 1j * self.w0 * self.c_f * self.v_ph0) * np.exp(-1j * self.th_e)
+        self.v_loop.update(int_d=(1.0 - ff_gain) * float(i_o.real), int_q=(1.0 - ff_gain) * float(i_o.imag))
+
+    def _voltage_loop(self, state, theta, v, i, e_mag, v_dc, dt):
+        loop = self.v_loop
+        w = self.w_gf
+        v_d, v_q = park(v, theta)
+        i_d, i_q = park(i, theta)
+        i_c = np.array([state.i_rl[k] for k in self.k_cf])
+        io_d, io_q = park(i - i_c, theta)
+        err_d, err_q = e_mag - v_d, -v_q
+        ref_d = loop['ff'] * io_d - w * self.c_f * v_q + loop['kp'] * err_d + loop['int_d']
+        ref_q = loop['ff'] * io_q + w * self.c_f * v_d + loop['kp'] * err_q + loop['int_q']
+        mag = math.hypot(ref_d, ref_q)
+        if mag > self.i_max:
+            ref_d, ref_q = ref_d * self.i_max / mag, ref_q * self.i_max / mag
+            self.limited_time += dt
+        else:
+            loop['int_d'] += loop['ki'] * err_d * dt
+            loop['int_q'] += loop['ki'] * err_q * dt
+        ed = v_d + self.r * i_d - w * self.l * i_q + self.kp_i * (ref_d - i_d) + self.int_d
+        eq = v_q + self.r * i_q + w * self.l * i_d + self.kp_i * (ref_q - i_q) + self.int_q
+        e_max = max(v_dc, 0.0) / SQ3
+        mag = math.hypot(ed, eq)
+        if mag > e_max:
+            ed, eq = ed * e_max / mag, eq * e_max / mag
+        else:
+            self.int_d += self.ki_i * (ref_d - i_d) * dt
+            self.int_q += self.ki_i * (ref_q - i_q) * dt
+        return inverse_park(ed, eq, theta + 0.5 * w * (self.t_sample or dt))
+
     def _gf_start(self, droop_pf, droop_qv, tau_f, unbalance_control=False, i2_limit_pu=0.3):
+        self.v_loop = None
         # Its negative-sequence control: off, or holding its bus's V2 at zero.
         self.unbalance_control = bool(unbalance_control)
         self.i2_max = min(max(i2_limit_pu, 0.0), 1.0) * self.i_max
@@ -732,6 +788,19 @@ class GridFormingVsc(Vsc):
             v0 = abs(self.v_ph0) / self.v_nom_peak
             e0 *= 1.0 + (to / max(v0, 1e-3) - 1.0) * min(t_s / t_r, 1.0)
         e_mag = e0 - self.n_q * (self.q_f - self.q_set)
+        if self.v_loop is not None:
+            e = self._voltage_loop(state, theta, v, i, e_mag, v_dc, dt)
+            self.th_e = theta
+            for k_ in range(3):
+                state.set_emf(self.k_e[k_], float(e[k_]))
+            self.e_held = e
+            state.set_source_value(self.k_src, -self._dc_drawn(float(np.dot(e, i))) / max(float(state.v[self.p_node]), 1.0))
+            if self.t_sample is not None:
+                self.t_next = t_s + self.t_sample
+                state.at(self.t_next, _breakpoint, soft=None)
+            self.trace.append((t_s, p_now, q_now, v_dc, math.hypot(*park(i, theta))))
+            self.freq_trace.append((t_s, self.w_gf / (2 * math.pi)))
+            return False
         e_d, e_q = e_mag, 0.0
         # Its current limit: the voltage across its reactor scaled back to what drives its limit through it -
         # the current its reference would drive, |e - v| / |r + j w l|, not the one it measured (which the last

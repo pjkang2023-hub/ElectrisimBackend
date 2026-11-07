@@ -231,10 +231,11 @@ class Circuit:
 
     # --- simulating ---------------------------------------------------------------
 
-    def simulate(self, t_end, dt, dt_coarse=None, t_fine=None, max_switch_iter=40, nl_tol=1e-6):
+    def simulate(self, t_end, dt, dt_coarse=None, t_fine=None, max_switch_iter=40, nl_tol=1e-6, record_every=1):
         """
         Returns times and, at each, node voltages and branch currents (i_rl,
         i_c, i_r, i_d, i_sw, i_arr, i_nl), and each switch's state (sw_closed).
+        ``record_every`` > 1 keeps one step in that many, for a long run; its controllers still see every step.
         """
         n = len(self.labels)
         rl = np.array(self.rl, dtype=float).reshape(-1, 9)
@@ -346,6 +347,7 @@ class Circuit:
         out['sw_closed'].append(state.sw_closed.copy())
         out['i_src'].append(np.zeros(len(ia_)))
         cache = {}
+        kept = 0
 
         def stamp(a, b, g, Y):
             np.add.at(Y, (a, a), g)
@@ -558,6 +560,10 @@ class Circuit:
                 elif changed:
                     be_next = True
             out['sw_closed'].append(state.sw_closed)
+            kept += 1
+            if record_every > 1 and kept % record_every:
+                for series in out.values():
+                    series.pop()
         widths = {'v': n, 'i_rl': len(R), 'i_c': len(C), 'i_r': len(Gr), 'i_d': len(da), 'i_sw': len(sa),
                   'i_arr': len(aa), 'i_nl': len(self.nl), 'sw_closed': len(sa), 'i_cp_all': M, 'i_src': len(ia_)}
         for key, width in widths.items():

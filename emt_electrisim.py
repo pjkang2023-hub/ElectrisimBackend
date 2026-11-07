@@ -42,6 +42,9 @@ from dc_fault_electrisim import _ac_thevenin, _f, _label, _row_id, _waveform
 import grid_voltage_profile as gvp
 from emt_ac import AcBuilder
 import emt_der
+import emt_double_conversion
+import emt_impedance_scan
+import emt_series_ups
 from emt_converters import DcDc, GridFormingVsc, Vsc
 from emt_solver import DEFAULT_INPUT_WARNING, R_BIAS, Circuit, dc_load_current, default_input_capacitance
 
@@ -73,6 +76,8 @@ class _EmtBuilder:
         self.skip = set()       # (table, index): load-flow elements a converter's EMT model stands for
         self.ders = []          # (load-flow record, its EMT model): batteries, supercapacitors, flywheels, SOFCs, PV
         self.smoothers = []     # (DC/DC converter, its smoothing controller)
+        self.upss = []          # emt_series_ups.SeriesUps: a drawn reactor and grid-forming PCS run as one UPS
+        self.doubles = []       # emt_double_conversion.DoubleConversion: a rectifier and grid-forming PCS on one DC link
         self._breakers_by_target = {}
         self.default_filters = []
 
@@ -95,6 +100,10 @@ class _EmtBuilder:
             if rec['closed'] and rec['target'] is not None:
                 self._breakers_by_target.setdefault(rec['target'], []).append(rec)
         self._plan_converters()
+        rect_load = emt_double_conversion.plan_load(net, self.params)
+        if rect_load is not None:
+            self.skip.add(('load', rect_load))     # the rectifier stands for it
+        self.rect_load = rect_load
         ac = AcBuilder(ckt, net, self.params, self.warnings, self.f_hz)
         ac.skip = self.skip
         ac.gen_rows = {str(r.get('name')): r for r in (self.in_data or {}).values()
@@ -117,6 +126,8 @@ class _EmtBuilder:
         self._ders()
         self._converters()
         self._pcs()
+        self._series_ups()
+        self._double_conversion()
         self._dc_dc_converters()
         self._ssts()
         if 'b2b_vsc' in net and len(net.b2b_vsc):
@@ -412,12 +423,21 @@ class _EmtBuilder:
                       input_side='dc', current_loop_hz=rec.get('current_loop_hz', 500.0),
                       c_link_mf=rec.get('dc_link_mf', 0.0), c_link_esr_mohm=rec.get('dc_link_esr_mohm', 0.0),
                       c_link_esl_uh=rec.get('dc_link_esl_uh', 0.0))
+            # Named in gfm_voltage_loop_pcs: a filter capacitor and a fast voltage loop, on a faster sampling.
+            names = {x.strip() for x in str(self.params.get('gfm_voltage_loop_pcs') or '').split(',') if x.strip()}
+            looped = rec['table'] == 'gen' and bool(names & {str(rec['name']), str(rec['label'])})
+            if looped:
+                kw.update(filter_c_pu=_f(self.params.get('gfm_filter_c_pu'), 0.1),
+                          current_loop_hz=_f(self.params.get('gfm_current_loop_hz'), 2000.0),
+                          switching_khz=_f(self.params.get('gfm_switching_khz'), 20.0))
             if rec['table'] == 'gen':
                 conv = GridFormingVsc(self, rec['label'], rec['bus'], key, term, 1e-4, block, mode_dc='p_mw',
                                       droop_pf=rec['droop_pf'], droop_qv=rec['droop_qv'],
                                       unbalance_control=rec.get('unbalance_control', False),
                                       i2_limit_pu=rec.get('i2_limit_pu', 0.3), **kw)
                 conv.control_mode = 'grid_forming'
+                if looped:
+                    conv.use_voltage_loop(_f(self.params.get('gfm_voltage_loop_hz'), 1000.0), _f(self.params.get('gfm_voltage_loop_ff'), 0.7))
                 if _f(self.params.get('gfm_voltage_ramp_s'), 0.0) > 0:
                     # Its voltage ramped from the load flow's (a black start's: set low) to the target.
                     conv.v_ramp = (_f(self.params.get('gfm_voltage_ramp_s')),
@@ -436,7 +456,58 @@ class _EmtBuilder:
                     conv.lfsm_hold_s = _f(self.params.get('gfl_lfsm_resume_hold_s'), 0.0)
                 conv.control_mode = 'grid_following'
             conv.pcs = True
+            conv.pcs_name = rec['name']
+            conv.ac_bus, conv.dc_key, conv.dc_term = rec['bus'], key, term
             self._add_vsc(conv, rec['id'])
+
+    def _series_ups(self):
+        """The reactor series_ups_line names and the grid-forming PCS series_ups_pcs names, as one UPS."""
+        for plan in self.ac.series_ups.values():
+            name = str(self.params.get('series_ups_pcs') or '').strip()
+            conv = next((c for c in self.vscs if getattr(c, 'pcs', False) and name
+                         and name in (str(c.label), str(c.pcs_name))), None)
+            if conv is None or getattr(conv, 'control_mode', None) != 'grid_forming':
+                self.warnings.append(f"Series-reactor UPS on {plan['label']}: no grid-forming PCS '{name}'; "
+                                     'its reactor runs as a plain line, its disconnect closed.')
+                continue
+            if conv.v_dc_nom / math.sqrt(3.0) < conv.v_nom_peak:
+                self.warnings.append(f"Series-reactor UPS on {plan['label']}: {conv.label}'s DC link "
+                                     f'({conv.v_dc_nom / 1e3:.3g} kV) cannot reach the critical bus, which needs at least '
+                                     f'{conv.v_nom_peak * math.sqrt(3.0) / 1e3:.3g} kV. Put the PCS behind a step-up transformer.')
+            crit = plan['critical_bus']
+            self.upss.append(emt_series_ups.SeriesUps(
+                f"{plan['label']} + {conv.label}", plan, self.ac.nodes[plan['source_bus']], self.ac.nodes[crit],
+                self.ac.vn[crit], conv, self.f_hz, _f(self.net.res_bus.at[crit, 'vm_pu'], 1.0),
+                emt_series_ups.settings(self.params)))
+
+    def _double_conversion(self):
+        """The grid-forming PCS double_conversion_pcs names and a rectifier in place of its stand-in load, as one UPS."""
+        name = str(self.params.get('double_conversion_pcs') or '').strip()
+        if not name or name == 'none':
+            return
+        net = self.net
+        inv = next((c for c in self.vscs if getattr(c, 'pcs', False) and name in (str(c.label), str(c.pcs_name))), None)
+        bus_of = lambda key: next((b for b in net.bus.index if str(net.bus.at[b, 'name']) == str(self.params.get(key) or '')), None)
+        source, critical = bus_of('double_conversion_source_bus'), bus_of('double_conversion_critical_bus')
+        if inv is None or getattr(inv, 'control_mode', None) != 'grid_forming' or self.rect_load is None \
+                or source not in self.ac.nodes or critical not in self.ac.nodes or getattr(inv, 'dc_term', None) is None:
+            self.warnings.append(f"Double-conversion UPS: it needs a grid-forming PCS '{name}' with its own store, its rectifier's "
+                                 'stand-in load, and its source and critical buses; the study runs without it.')
+            return
+        i = self.rect_load
+        bus = int(net.load.at[i, 'bus'])
+        p, q = _f(net.res_load.at[i, 'p_mw']), _f(net.res_load.at[i, 'q_mvar'])
+        z = self.ac.vn[bus] ** 2 / (inv.s_rated)
+        rect = Vsc(self, f'{inv.label} rectifier', bus, inv.dc_key, inv.dc_term, 1e-4, _f(self.params.get('vsc_block_pu'), 0.8), p=p, q=q, p_dc=-p,
+                   rated_mva=inv.s_rated / 1e6, limit_pu=inv.i_max / (math.sqrt(2.0) * inv.s_rated / (math.sqrt(3.0) * self.ac.vn[inv.ac_bus])),
+                   r_ohm=0.01 * z, x_ohm=0.15 * z, mode_dc='p_mw', mode_ac='q_mvar', model='average', input_side='ac',
+                   current_loop_hz=_f(self.params.get('double_conversion_current_loop_hz'), 150.0),
+                   switching_khz=_f(self.params.get('double_conversion_switching_khz'), 10.0))
+        self._add_vsc(rect, _row_id(net, 'load', i))
+        self.doubles.append(emt_double_conversion.DoubleConversion(
+            f'{inv.label} double conversion', rect, inv, self.ac.nodes[source], self.ac.nodes[critical], self.ac.vn[critical],
+            self.ac.vn[bus] / self.ac.vn[source], self.f_hz, _f(net.res_bus.at[critical, 'vm_pu'], 1.0),
+            emt_double_conversion.settings(self.params)))
 
     def _der_on(self, bus):
         return next((m for r, m in self.ders if r['bus'] == bus and r['coupling'] == 'converter'), None)
@@ -715,6 +786,9 @@ class _EmtBuilder:
             changed = True
         for _, model in self.ders:
             model.control(t, state)
+        for ups in self.upss + self.doubles:
+            if ups.control(t, state):
+                changed = True
         for conv in self.vscs + self.dcdcs:
             r = conv.control(t, state)
             if r == 'soft':
@@ -1018,12 +1092,26 @@ def emt_study(net, params, in_data=None):
             warnings_out.append('Grid voltage profile: the network has no External Grid to apply it to.')
 
     ckt.add_controller(b.controller)
+    # An impedance scan at a bus: its sources, and the run's length from its lowest frequency.
+    scan = None
+    scan_bus = str(params.get('scan_bus') or '').strip()
+    if scan_bus and scan_bus != 'none':
+        hit = [k for k in b.ac.nodes if scan_bus in (str(net.bus.at[k, 'name']), str(_row_id(net, 'bus', k)))]
+        if not hit:
+            warnings_out.append(f'No AC bus {scan_bus} to scan: the study runs without a scan.')
+        else:
+            scan = emt_impedance_scan.ImpedanceScan(ckt, b.ac.nodes[hit[0]], b.ac.vn[hit[0]], params, b.f_hz, dt, _label(net, 'bus', hit[0]))
+            t_end = max(t_end, scan.t_end + dt)
+            ckt.add_controller(scan.control)
     t_fine = min(t_end, (max(event_times) if event_times else 0.0) + 0.01)
     with np.errstate(all='ignore'):
         # A switching converter keeps its fine step throughout: fifty to its switching period at most.
         t_sw = min((1.0 / c.f_sw for c in b.vscs + b.dcdcs if c.model == "switching"), default=None)
         dt_coarse = min(10 * dt, 2e-5) if t_sw is None else max(dt, min(10 * dt, 2e-5, t_sw / 50))
-        sim = ckt.simulate(t_end, dt, dt_coarse=dt_coarse, t_fine=t_fine)
+        if scan is not None:
+            dt_coarse = dt                  # its tones are read at one step
+        record_every = max(1, int(_f(params.get('record_every'), max(1.0, 2e-4 / dt) if t_end > 2.0 else 1.0)))
+        sim = ckt.simulate(t_end, dt, dt_coarse=dt_coarse, t_fine=t_fine, record_every=record_every)
     t = sim['t']
     t_last = max(event_times) if event_times else 0.0
 
@@ -1053,6 +1141,9 @@ def emt_study(net, params, in_data=None):
                                   'v_end_pu': _round(ld['v_f'])} for ld in b.ac.dyn_loads],
               'resumed': [{'label': c.label, 'blocks_ms': [[_round(a * 1e3), _round(z * 1e3)] for a, z in c.blocks]}
                           for c in b.vscs if getattr(c, 'blocks', None)],
+              'impedance_scan': scan.result() if scan is not None else None,
+              'series_ups': [ups.result() for ups in b.upss],
+              'double_conversion': [ups.result() for ups in b.doubles],
               'converters': [_converter_result(c, min(event_times, default=t_end)) for c in b.vscs]
               + [_dcdc_result(c, min(event_times, default=t_end)) for c in b.dcdcs],
               'settings': {'time_step_us': dt * 1e6, 'duration_ms': t_end * 1e3,
