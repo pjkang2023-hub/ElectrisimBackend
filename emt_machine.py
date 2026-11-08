@@ -186,7 +186,7 @@ class ParkMachine(SynchronousMachine):
 
     def __init__(self, ckt, label, nodes, w0, v_ph, i_ph, s_rated, vn, *, xd_pu, xq_pu, xd1_pu, xq1_pu, xd2_pu, xl_pu,
                  td10_s, td20_s, tq10_s, tq20_s, ra_pu=0.0, s10=0.0, s12=0.0, h=3.0, d=0.0, gov=None, exc=None,
-                 r_bias=1e6):
+                 controls=None, r_bias=1e6):
         self.label, self.w0, self.s, self.nodes = label, w0, s_rated, nodes
         self.h, self.d = h, d
         self.e_base = SQ2 * vn / math.sqrt(3.0)
@@ -232,6 +232,17 @@ class ParkMachine(SynchronousMachine):
         self.exc = dict(exc) if exc else None
         self.v0 = abs(v_ph)
         self.e0 = abs(e2)
+        # ANDES's own exciter and governor models (emt_controls), where ``controls`` names one; else the simplified ones above.
+        import emt_controls
+        controls = controls or {}
+        self.exc_name = self.gov_name = None
+        self.exc_model = self.gov_model = None
+        if controls.get('exc'):
+            self.exc_name, params = controls['exc']
+            self.exc_model = emt_controls.exciter(self.exc_name, params, self.efd0, abs(v_ph) / self.e_base)
+        if controls.get('gov'):
+            self.gov_name, params = controls['gov']
+            self.gov_model = emt_controls.governor(self.gov_name, params, self.pm)
         self.r = self.ra * z_base
         self.l = xd2_pu * z_base / w0
         star = ckt.node(f'{label} star point')
@@ -264,12 +275,17 @@ class ParkMachine(SynchronousMachine):
         i_d, i_q = cur.real, cur.imag
         psi_d, psi_q = self._flux()
         # Its governor, then its rotor.
-        self._governor(dt)
+        if self.gov_model is not None:
+            self.pm = self.gov_model.step(dt, self.w)
+        else:
+            self._governor(dt)
         self.w += dt / (2.0 * self.h) * (self.pm - (psi_d * i_q - psi_q * i_d) - self.d * (self.w - 1.0))
         self.delta += self.w0 * (self.w - 1.0) * dt
         # Its exciter, on its terminal voltage's magnitude (the space vector's).
         v_mag = math.sqrt(2.0 / 3.0 * float(np.dot(v, v)))
-        if self.exc:
+        if self.exc_model is not None:
+            self.efd = self.exc_model.step(dt, v_mag / self.e_base, self.w)
+        elif self.exc:
             self._regulator(dt, v_mag)
         # Its rotor's circuits.
         se = self._se(math.hypot(psi_d, psi_q))
@@ -333,6 +349,21 @@ def park_data(row, gov_defaults, exc_defaults, genrou):
                 td10_s=f('dyn_Td10', genrou['Td10']), td20_s=f('dyn_Td20', genrou['Td20']),
                 tq10_s=f('dyn_Tq10', genrou['Tq10']), tq20_s=f('dyn_Tq20', genrou['Tq20']),
                 s10=f('dyn_S10', 0.0), s12=f('dyn_S12', 0.0))
+    # Its exciter and governor as ANDES's study has them (its defaults EXDC2 and TGOV1), where the EMT has the model;
+    # else the simplified ones, said so.
+    import emt_controls
+    controls = {}
+    for kind, known, simple in (('exc', emt_controls.EXCITERS, 'exciter'), ('gov', emt_controls.GOVERNORS, 'governor')):
+        chosen = emt_controls.parameters(kind, row)
+        if chosen is None:
+            data[kind] = None
+        elif chosen[0] in known:
+            controls[kind] = chosen
+            data[kind] = None
+        else:
+            notes.append(f"its {simple} {chosen[0]} runs as the EMT's simplified {simple}: only "
+                         f"{' and '.join(known)} are modelled as ANDES has them")
+    data['controls'] = controls
     return data, notes
 
 

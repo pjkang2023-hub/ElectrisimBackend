@@ -379,7 +379,9 @@ class AcBuilder:
         # hide the study's switch.
         if not any(str(x or '').strip().lower() in ('true', '1', 'yes') for x in (row.get('fd_line'), self.params.get('fd_line'))):
             return False
-        geometry = {k: _f(row.get(f'fd_{k}'), _f(self.params.get(f'fd_{k}'), 0.0)) for k in emt_fd_line.FIELDS}
+        cable = str(row.get('fd_kind') or self.params.get('fd_kind') or '').strip().lower() == 'cable'
+        fields = emt_fd_line.CABLE_FIELDS if cable else emt_fd_line.FIELDS
+        geometry = {k: _f(row.get(f'fd_{k}'), _f(self.params.get(f'fd_{k}'), 0.0)) for k in fields}
         why = None
         missing = [k for k, v in geometry.items() if v <= 0]
         if missing:
@@ -388,8 +390,12 @@ class AcBuilder:
             why = 'parallel circuits are not modelled'
         elif self.fault_line is not None and self.fault_line[0] == li:
             why = 'a fault along it is not modelled'
+        elif cable and geometry['insulation_radius_m'] <= geometry['core_radius_m']:
+            why = 'its insulation radius must be above its core radius'
         if why is None:
             dt = max(_f(self.params.get('time_step_us'), 1.0), 0.01) * 1e-6
+            if cable:
+                geometry['kind'] = 'cable'
             try:
                 line = emt_fd_line.FdLine(self.ckt, start, stop, geometry, km, dt, self.w, label)
             except ValueError as exc:
@@ -399,7 +405,8 @@ class AcBuilder:
             return False
         self.ckt.add_controller(line.control)
         self.fd_lines.append(line)
-        z1, _, _, _ = emt_fd_line.per_km(np.array([self.f_hz]), geometry)
+        z1 = (emt_fd_line.per_km_cable(np.array([self.f_hz]), geometry)[0] if cable
+              else emt_fd_line.per_km(np.array([self.f_hz]), geometry)[0])
         r1, x1 = _f(self.net.line.at[li, 'r_ohm_per_km'], 0.0), _f(self.net.line.at[li, 'x_ohm_per_km'], 0.0)
         if abs(complex(r1, x1) - z1[0]) > 0.1 * abs(z1[0]):
             self.warnings.append(f'Line {label}: its geometry gives {z1[0].real:.3f} + j{z1[0].imag:.3f} ohm/km at the fundamental, its row {r1:.3f} + j{x1:.3f}: '

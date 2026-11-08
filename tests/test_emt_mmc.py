@@ -172,11 +172,65 @@ def _post(client, quiet, request):
 
 
 def test_as_a_vsc_row_it_holds_the_same_state_as_the_average_model(client, quiet):
-    """The converter benchmark's rectifier holding its DC bus: its load-flow power, unity power factor, its DC voltage, and it says what it lacks."""
+    """The converter benchmark's rectifier holding its DC bus: its load-flow power, unity power factor, its DC voltage, and how it blocks."""
     out = _post(client, quiet, _mmc_request())
     (conv,) = out['emt']['converters']
     assert conv['model'] == 'mmc'
     assert conv['p_end_mw'] == pytest.approx(-0.1503, rel=0.02)
     assert abs(conv['q_end_mvar']) < 0.01
     assert conv['v_dc_end_kv'] == pytest.approx(0.8, rel=2e-3)
-    assert any('no blocking' in w for w in out['warnings'])
+    assert conv['blocked_ms'] is None
+    assert any('bypass diodes' in w for w in out['warnings'])
+
+
+# --- Blocking ----------------------------------------------------------------------------------
+
+def _fundamental(t, i3):
+    """The AC current's fundamental, its last cycle's mean on the rotating frame (a DC offset averages out)."""
+    sel = t > t[-1] - 1.0 / F1
+    s = (2.0 / 3.0) * (i3[sel, 0] + i3[sel, 1] * cmath.exp(2j * math.pi / 3) + i3[sel, 2] * cmath.exp(-2j * math.pi / 3))
+    return abs(np.mean(s * np.exp(-1j * W0 * t[sel])))
+
+
+def test_blocked_on_a_healthy_grid_it_stops_conducting_and_keeps_its_charge():
+    """Its AC side's line-to-line peak, 27 kV, is under its arms' 70 kV: blocked, no diode conducts, and nothing discharges."""
+    ckt, m, ac, dc, _ = _build(p_pu=0.5, q_pu=0.0)
+    ckt.at(0.04, lambda st: m._block(0.04, st))
+    ckt.start_in_ac_steady_state(W0)
+    sim = ckt.simulate(0.12, 2e-5)
+    t = sim['t']
+    arms = np.array([sim['i_rl'][:, k] for k in m.k_u + m.k_l]).T
+    assert m.blocked_at == pytest.approx(0.04, abs=1e-4)
+    assert np.max(np.abs(arms[t > 0.06])) < 0.01 * I_PK
+    tr = np.array(m.trace)
+    w_block = float(np.interp(0.0405, tr[:, 0], tr[:, 5]))
+    assert tr[-1, 5] == pytest.approx(w_block, rel=1e-3)
+
+
+def test_a_dc_fault_blocks_it_and_the_ac_side_feeds_the_fault_through_its_diodes():
+    """
+    A pole-to-pole fault at its DC terminals: its arms' current passes the block threshold and it blocks. Its
+    capacitors keep their charge, and only the bypass diodes conduct: no arm current ever flows into a stack.
+    While every bypass diode conducts, each midpoint sits at the shorted poles, a three-phase short behind the
+    grid, the transformer and half an arm. That holds as the DC loop's resistance goes to nothing: with some,
+    the DC current settles where the diodes take turns, and the AC current is less (84 % of it at 0.01 ohm).
+    So at 0.001 ohm, within 3 % of the short-circuit current, and never above it.
+    """
+    ckt, m, ac, dc, i_ph = _build(p_pu=0.8, q_pu=0.2, s_grid=500e6)
+    sw = ckt.add_switch(dc, 0, closed=False, r_on=0.001)
+    ckt.at(0.02, lambda st: st.set_switch(sw, True))
+    ckt.start_in_ac_steady_state(W0)
+    sim = ckt.simulate(0.3, 2e-5)
+    t = sim['t']
+    assert m.blocked_at is not None and 0.02 < m.blocked_at < 0.03
+    tr = np.array(m.trace)
+    w_block = float(np.interp(m.blocked_at + 1e-4, tr[:, 0], tr[:, 5]))
+    assert tr[-1, 5] >= 0.999 * w_block
+    x_g = VLL * VLL / 500e6
+    e_g = abs(complex(V_PK, 0.0) - complex(0.1 * x_g, x_g) * i_ph)
+    z = complex(0.1 * x_g + 0.005 * Z + 0.005 * Z / 2.0, x_g + (XT + XA / 2.0) * Z)
+    i_ac = np.array([sim['i_rl'][:, u] - sim['i_rl'][:, d] for u, d in zip(m.k_u, m.k_l)]).T
+    got = _fundamental(t, i_ac)
+    assert got == pytest.approx(e_g / abs(z), rel=0.03) and got <= 1.005 * e_g / abs(z)
+    arms = np.array([sim['i_rl'][:, k] for k in m.k_u + m.k_l]).T
+    assert np.max(arms[t > m.blocked_at + 0.005]) < 0.001 * I_PK

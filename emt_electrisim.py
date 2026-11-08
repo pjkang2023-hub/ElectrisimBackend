@@ -754,7 +754,8 @@ class _EmtBuilder:
         self.series.append(('VSC', label, conv.id, f'{label} (DC side)', ('i_rl', k_dc), -1.0))
         self.ac.series.append(('VSC', label, conv.id, f'{label} (AC side)',
                                [[('i_rl', u, None, 1.0), ('i_rl', d, None, -1.0)] for u, d in zip(conv.k_u, conv.k_l)]))
-        self.warnings.append(f'VSC {label} is modular multilevel: it has no blocking, so a trip event or a DC fault does not stop it.')
+        self.warnings.append(f'VSC {label} is modular multilevel with half-bridge submodules: it blocks on arm overcurrent or a trip, '
+                             'and a DC fault is still fed from its AC side through the bypass diodes.')
 
     def _vsc_on_ac_network(self, vi, label, bus, term, r_dc, blocker):
         """
@@ -1577,7 +1578,12 @@ def _machine_result(m):
     tr = np.array(m.trace) if m.trace else np.zeros((0, 7))
     out = {'label': m.label, 'id': m.row_id, 'governor': bool(m.gov), 'exciter': bool(m.exc)}
     if isinstance(m, emt_machine.ParkMachine):
-        out.update(model='detailed', efd_start_pu=_round(m.efd0), efd_end_pu=_round(m.efd))
+        out.update(model='detailed', efd_start_pu=_round(m.efd0), efd_end_pu=_round(m.efd),
+                   exciter_model=m.exc_name, governor_model=m.gov_name)
+        if m.exc_name:
+            out['exciter'] = True
+        if m.gov_name:
+            out['governor'] = True
     if not len(tr):
         return out
     out.update(p_start_mw=_round(tr[0, 1]), p_end_mw=_round(tr[-1, 1]), q_end_mvar=_round(tr[-1, 2]),

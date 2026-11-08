@@ -21,6 +21,19 @@ each convolution runs recursively by the trapezoid rule. So each end is a conduc
 current source the controller sets each step, as long as tau is over a step: refused otherwise.
 
 It starts in its own steady state at the fundamental (emt_solver's AC block).
+
+A cable (fd_kind 'cable'): each phase a coaxial core inside its sheath, the sheath at ground potential, as
+with solid bonding on a run short against the sheath's own impedance. The phases are then uncoupled, each one
+mode, so the same model runs with the identity for its transform:
+
+    Z = Z core internal + j w u0 / 2 pi  ln(r_sheath / r_core) + Z sheath inner surface,   Y = j w 2 pi e0 er / ln(r_sheath / r_core)
+
+the sheath a thin tube, its inner surface's impedance rho m / (2 pi r) coth(m t), m = sqrt(j w u0 / rho): its
+DC resistance at low frequency, the surface impedance at high. So the sheath carries each core's whole
+return: right for the coaxial waves of energising and switching, but at the fundamental it overstates the
+loss of cables whose sheaths are cross-bonded or bonded at one end, which carry little sheath current; the
+study warns where the row's own impedance disagrees. Left out: sheath voltages, cross-bonding, the phases'
+coupling through the ground, and semiconducting screens.
 """
 import math
 
@@ -36,6 +49,7 @@ T = np.array([[1.0 / SQ3, 1.0 / SQ3, 1.0 / SQ3],
               [math.sqrt(2.0 / 3.0), -1.0 / math.sqrt(6.0), -1.0 / math.sqrt(6.0)],
               [0.0, 1.0 / math.sqrt(2.0), -1.0 / math.sqrt(2.0)]])
 FIELDS = ('height_m', 'spacing_m', 'radius_m', 'rdc_ohm_per_km', 'rho_ohm_m')
+CABLE_FIELDS = ('core_radius_m', 'core_rdc_ohm_per_km', 'insulation_radius_m', 'sheath_thickness_m', 'sheath_rdc_ohm_per_km', 'eps_r')
 
 
 def _internal(w, r, rdc_per_m):
@@ -58,6 +72,18 @@ def per_km(f, geometry):
     pm = sum(math.log(math.sqrt(4.0 * h * h + x * x) / x) for x in (d, d, 2.0 * d)) / 3.0 / (2.0 * math.pi * E0)
     y1, y0 = 1j * w / (ps - pm), 1j * w / (ps + 2.0 * pm)
     return (zs - zm) * 1e3, y1 * 1e3, (zs + 2.0 * zm) * 1e3, y0 * 1e3
+
+
+def per_km_cable(f, g):
+    """Z and Y per km of a coaxial core and sheath at frequencies ``f``."""
+    w = 2.0 * math.pi * np.asarray(f, dtype=float)
+    rc, rs, t = g['core_radius_m'], g['insulation_radius_m'], g['sheath_thickness_m']
+    rho_s = g['sheath_rdc_ohm_per_km'] * 1e-3 * 2.0 * math.pi * rs * t
+    m = np.sqrt(1j * w * U0 / rho_s)
+    sheath = rho_s * m / (2.0 * math.pi * rs) / np.tanh(m * t)
+    z = _internal(w, rc, g['core_rdc_ohm_per_km'] * 1e-3) + 1j * w * U0 / (2.0 * math.pi) * math.log(rs / rc) + sheath
+    y = 1j * w * 2.0 * math.pi * E0 * g['eps_r'] / math.log(rs / rc)
+    return z * 1e3, y * 1e3
 
 
 def _poles(lo_hz, hi_hz, n):
@@ -198,7 +224,15 @@ class FdLine:
 
     def __init__(self, ckt, a, b, geometry, km, dt, w0, label):
         self.label, self.a, self.b = label, list(a), list(b)
-        fit0, fit1 = fits(geometry, km)
+        self.kind = 'cable' if geometry.get('kind') == 'cable' else 'overhead'
+        if self.kind == 'cable':
+            f = np.logspace(-3, 6, 361)
+            z, y = per_km_cable(f, geometry)
+            fit0 = fit1 = ModeFit(z, y, km, f)
+            self.T = np.eye(3)                 # its phases uncoupled: each its own mode
+        else:
+            fit0, fit1 = fits(geometry, km)
+            self.T = T
         self.tau_ms = (fit0.tau * 1e3, fit1.tau * 1e3)
         if min(fit0.tau, fit1.tau) <= dt:
             raise ValueError(f'its travel time, {min(fit0.tau, fit1.tau) * 1e6:.1f} us, is not over the {dt * 1e6:g} us step')
@@ -222,34 +256,34 @@ class FdLine:
         modal = [m.admittance(w) for m in self.modes]
         for e1 in range(2):
             for e2 in range(2):
-                block = T.T @ np.diag([modal[m][e1, e2] for m in range(3)]) @ T
+                block = self.T.T @ np.diag([modal[m][e1, e2] for m in range(3)]) @ self.T
                 y[3 * e1:3 * e1 + 3, 3 * e2:3 * e2 + 3] = block
         return y
 
     def _ac_correction(self):
         """What the phasor solve must add to the Norton resistors to make them the whole line at the fundamental."""
         y = self._phase_y(self.w0)
-        norton = T.T @ np.diag([1.0 / self.modes[m].req for m in range(3)]) @ T
+        norton = self.T.T @ np.diag([1.0 / self.modes[m].req for m in range(3)]) @ self.T
         y[:3, :3] -= norton
         y[3:, 3:] -= norton
         return y
 
     def _start(self, v):
         """The phasor solve's end voltages ``v``: the state at t = 0, and the sources for the first step."""
-        va, vb = T @ v[:3], T @ v[3:]
+        va, vb = self.T @ v[:3], self.T @ v[3:]
         for m, mode in enumerate(self.modes):
             mode.start(np.array([va[m], vb[m]]), self.w0)
         self._set(lambda k, value: self.ckt.isrc[k].__setitem__(2, value))
 
     def _set(self, setter):
         for e in range(2):
-            i_ph = T.T @ np.array([mode.source(e) for mode in self.modes])
+            i_ph = self.T.T @ np.array([mode.source(e) for mode in self.modes])
             for ph in range(3):
                 # add_isrc(node, 0): a current from the node into the line.
                 setter(self.ks[e][ph], float(i_ph[ph]))
 
     def control(self, t, state):
-        va, vb = T @ state.v[self.a], T @ state.v[self.b]
+        va, vb = self.T @ state.v[self.a], self.T @ state.v[self.b]
         for m, mode in enumerate(self.modes):
             mode.step((va[m], vb[m]))
         self._set(state.set_source_value)
@@ -257,4 +291,4 @@ class FdLine:
 
     def currents(self):
         """Its present current into the line at each end, phases, in A."""
-        return [T.T @ np.array([mode.i[e] for mode in self.modes]) for e in range(2)]
+        return [self.T.T @ np.array([mode.i[e] for mode in self.modes]) for e in range(2)]

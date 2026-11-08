@@ -15,8 +15,17 @@ otherwise.
 Controls: a PLL on its AC bus; dq current control behind its reactances (current_loop_hz); its active power
 set, or its DC voltage held (mode 'vdc'); the energy in its arms held by the balance between its two sides:
 in mode 'p' by what it draws from the DC side, in mode 'vdc' by what it takes from the AC side. A limit on
-its AC current. Not modelled: blocking, so a DC-side fault's diode path is not here; submodule failures;
-balancing within an arm.
+its AC current.
+
+Blocking, on an arm's current past block_pu of its AC current limit or a trip event: every switch off, so each
+arm is what a blocked half-bridge stack is, its diodes. A current into the stack (P to midpoint in an upper arm,
+midpoint to N in a lower) charges its capacitors through their upper diodes, so the arm stands at vS against it;
+a current the other way passes the lower diodes at no voltage. So a DC fault is still fed from the AC side
+through the bypass diodes, as an uncontrolled rectifier, and the capacitors keep their charge. Each arm carries
+that path beside its controlled voltage: a switch, shut while it runs, bypasses it; the solver's own diodes
+decide which way current flows once it is open.
+
+Not modelled: submodule failures; balancing within an arm; a full-bridge stack's fault blocking.
 
 It starts in its load-flow steady state, its arms' energy ripple included. ``v_ph``, ``i_ph``: its AC bus's
 voltage and the current it delivers there, phase a peak phasors.
@@ -37,7 +46,8 @@ def _space(x):
 
 class Mmc:
     def __init__(self, ckt, label, ac_nodes, p_node, w0, v_ph, i_ph, s_rated, vn_ac, v_dc, *, x_t_pu=0.15, r_t_pu=0.005, x_arm_pu=0.15, r_arm_pu=0.005,
-                 energy_kj_per_mva=30.0, levels=0, mode='p', limit_pu=1.2, current_loop_hz=200.0, circulating_hz=300.0, pll_hz=20.0, feed_forward_hz=200.0, r_bias=1e6):
+                 energy_kj_per_mva=30.0, levels=0, mode='p', limit_pu=1.2, current_loop_hz=200.0, circulating_hz=300.0, pll_hz=20.0, feed_forward_hz=200.0,
+                 block_pu=2.0, r_bias=1e6):
         self.label, self.model, self.w0, self.s_rated = label, 'mmc', w0, s_rated
         self.ac_nodes, self.p_node, self.levels, self.mode = list(ac_nodes), p_node, int(levels), str(mode)
         z = vn_ac * vn_ac / s_rated
@@ -68,13 +78,26 @@ class Mmc:
         l_m = np.array([[l_mag, l_mag], [l_mag, l_mag + self.l_t]])
         self.mid = []
         self.k_u, self.k_l = [], []
+        self.k_sw, self.k_src = [[], []], [[], []]      # each arm's bypass switch and its blocked stack's source, upper then lower
+        self.ckt = ckt
+        r_src = 1e-3 * z
         for k in range(3):
             x = ckt.node(f'{label} midpoint {"abc"[k]}', v_dc / 2.0)
             self.mid.append(x)
             ckt.add_coupled([self.ac_nodes[k], x], [0, star], r_m, l_m)
             phase = cmath.phase(self.e_ph) - k * A120
-            self.k_u.append(ckt.add_rl(p_node, x, self.r_arm, self.l_arm, i0=i_dc / 3.0, e0=-v_arm_dc, ac=(abs(self.e_ph), w0, phase), controlled=True))
-            self.k_l.append(ckt.add_rl(x, 0, self.r_arm, self.l_arm, i0=i_dc / 3.0, e0=-v_arm_dc, ac=(abs(self.e_ph), w0, phase + math.pi), controlled=True))
+            for side, (a, b, v_b, sign) in enumerate(((p_node, x, v_dc / 2.0, 0.0), (x, 0, 0.0, math.pi))):
+                inner = ckt.node(f'{label} arm {"ul"[side]}{"abc"[k]}', v_b)
+                stack = ckt.node(f'{label} stack {"ul"[side]}{"abc"[k]}', v_b + v_dc)
+                arm = ckt.add_rl(a, inner, self.r_arm, self.l_arm, i0=i_dc / 3.0, e0=-v_arm_dc, ac=(abs(self.e_ph), w0, phase + sign), controlled=True)
+                (self.k_u if side == 0 else self.k_l).append(arm)
+                self.k_sw[side].append(ckt.add_switch(inner, b, closed=True))
+                # Blocked: into the stack through its upper diodes, against its capacitors; out of it through its lower ones.
+                # A volt forward: with none they would switch with every zero of the current beside the shut switch, and each
+                # switching makes the solver's next step a damped one.
+                ckt.add_diode(inner, stack, v_f=1.0)
+                self.k_src[side].append(ckt.add_rl(stack, b, r_src, 0.0, e0=-v_dc, controlled=True))
+                ckt.add_diode(b, inner, v_f=1.0)
         self.p_set_now = self.p_set
         self.w_u = np.zeros(3)
         self.w_l = np.zeros(3)
@@ -106,6 +129,7 @@ class Mmc:
         self.vdc_int = i_dc
         self.t_last = 0.0
         self.limited_time, self.blocked_at, self.f_sw = 0.0, None, None
+        self.block_i = block_pu * self.i_max
         self.trace = []              # (t, P W, Q var, v_dc V, i_dc-side current A, W J)
         self.i_dc_now = i_dc
 
@@ -147,6 +171,10 @@ class Mmc:
         i_l = np.array([state.i_rl[k] for k in self.k_l])
         v = state.v[self.ac_nodes]
         v_dc = float(state.v[self.p_node])
+        if self.blocked_at is not None:
+            return self._blocked(t, h, state, i_u, i_l, v, v_dc)
+        if max(float(np.max(np.abs(i_u))), float(np.max(np.abs(i_l)))) > self.block_i:
+            return self._block(t, state)
         # Its arms' energy: what each has taken over the step, its voltage held and its current the trapezoid's.
         mean_u, mean_l = 0.5 * (i_u + self.i_u_prev), 0.5 * (i_l + self.i_l_prev)
         self.w_u = np.maximum(self.w_u + h * self.v_u * mean_u, 1.0)
@@ -206,14 +234,54 @@ class Mmc:
         for k in range(3):
             state.set_emf(self.k_u[k], float(-self.v_u[k]))
             state.set_emf(self.k_l[k], float(-self.v_l[k]))
+        self._hold_stacks(state)
         self.i_dc_now = float(np.sum(i_c))
         q = ((v[1] - v[2]) * i_ac[0] + (v[2] - v[0]) * i_ac[1] + (v[0] - v[1]) * i_ac[2]) / SQ3
         self.trace.append((t, float(np.dot(v, i_ac)), q, v_dc, self.i_dc_now, w_total))
         return False
 
-    def _block(self, t, state):
-        """Not modelled: see the docstring."""
+    def _hold_stacks(self, state):
+        """Each blocked-stack source at its arm's capacitor voltage, so that it is ready the moment the arm blocks."""
+        for side, vs in enumerate((self.vs_u, self.vs_l)):
+            for k in range(3):
+                state.set_emf(self.k_src[side][k], float(-vs[k]))
+
+    def _blocked(self, t, h, state, i_u, i_l, v, v_dc):
+        """Blocked: only the current into each stack charges it, at its capacitors' voltage."""
+        for side, w in enumerate((self.w_u, self.w_l)):
+            vs = self.vs_u if side == 0 else self.vs_l
+            charging = np.array([max(float(state.i_rl[self.k_src[side][k]]), 0.0) for k in range(3)])
+            w += h * vs * charging
+        self.vs_u = np.sqrt(2.0 * self.w_u / self.c_arm)
+        self.vs_l = np.sqrt(2.0 * self.w_l / self.c_arm)
+        self._hold_stacks(state)
+        i_ac = i_u - i_l
+        self.i_dc_now = float(np.sum(i_u + i_l)) / 2.0
+        q = ((v[1] - v[2]) * i_ac[0] + (v[2] - v[0]) * i_ac[1] + (v[0] - v[1]) * i_ac[2]) / SQ3
+        self.trace.append((t, float(np.dot(v, i_ac)), q, v_dc, self.i_dc_now, float(np.sum(self.w_u) + np.sum(self.w_l))))
         return False
 
+    def _block(self, t, state):
+        """Every switch off: its controlled voltages to nothing, each arm left to its stack's diodes."""
+        if self.blocked_at is not None:
+            return False
+        self.blocked_at = t
+        for k in range(3):
+            state.set_emf(self.k_u[k], 0.0)
+            state.set_emf(self.k_l[k], 0.0)
+        for side in range(2):
+            for k in range(3):
+                state.set_switch(self.k_sw[side][k], False)
+        self._hold_stacks(state)
+        return True
+
     def resume(self, t, state, ramp_s=0.0):
-        return False
+        """Deblocked: its arms back under control, its current loop starting afresh."""
+        if self.blocked_at is None:
+            return False
+        self.blocked_at = None
+        self.int_dq = 0j
+        for side in range(2):
+            for k in range(3):
+                state.set_switch(self.k_sw[side][k], True)
+        return True

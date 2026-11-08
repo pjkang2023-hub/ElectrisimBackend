@@ -209,3 +209,84 @@ def test_the_studys_switch_reaches_a_line_saved_as_pi_sections(client, quiet):
     next(v for v in request.values() if v.get('typ') == 'Line0')['fd_line'] = 'false'
     emt, _ = _emt(client, quiet, request)
     assert emt['fd_lines'][0]['label']
+
+
+# --- Cables --------------------------------------------------------------------------------------
+
+CABLE = {'kind': 'cable', 'core_radius_m': 0.0105, 'core_rdc_ohm_per_km': 0.0601, 'insulation_radius_m': 0.0225, 'sheath_thickness_m': 0.0012,
+         'sheath_rdc_ohm_per_km': 0.15, 'eps_r': 2.5}
+CABLE_KM = 30.0
+
+
+def _cable_exact(f):
+    z, y = fd.per_km_cable(np.asarray(f, dtype=float), CABLE)
+    return np.sqrt(z / y), np.sqrt(z * y)
+
+
+def test_a_cables_wave_is_its_insulations():
+    """High in frequency, the lossless coax: Zc = 60 / sqrt(er) ln(rs / rc) ohm, and its waves at c / sqrt(er)."""
+    zc, gamma = _cable_exact([1e6])
+    assert abs(zc[0]) == pytest.approx(60.0 / math.sqrt(CABLE['eps_r']) * math.log(CABLE['insulation_radius_m'] / CABLE['core_radius_m']), rel=0.02)
+    assert 2.0 * math.pi * 1e6 / gamma[0].imag == pytest.approx(C_KM_S / math.sqrt(CABLE['eps_r']), rel=0.02)
+
+
+def test_its_sheath_is_a_thin_tube():
+    """At a low frequency the loop's resistance is the core's and the sheath's DC resistance; high, the sheath's surface impedance."""
+    z, _ = fd.per_km_cable(np.array([0.01]), CABLE)
+    assert z[0].real == pytest.approx(CABLE['core_rdc_ohm_per_km'] + CABLE['sheath_rdc_ohm_per_km'], rel=0.01)
+    rs, t = CABLE['insulation_radius_m'], CABLE['sheath_thickness_m']
+    rho = CABLE['sheath_rdc_ohm_per_km'] * 1e-3 * 2.0 * math.pi * rs * t
+    w = 2.0 * math.pi * 1e6
+    surface = math.sqrt(w * fd.U0 * rho / 2.0) / (2.0 * math.pi * rs) * 1e3
+    core = fd._internal(np.array([w]), CABLE['core_radius_m'], CABLE['core_rdc_ohm_per_km'] * 1e-3)[0].real * 1e3
+    z, _ = fd.per_km_cable(np.array([1e6]), CABLE)
+    assert z[0].real == pytest.approx(surface + core, rel=0.02)
+
+
+def test_a_cables_fit_and_its_steady_state():
+    """Its fit against the exact Zc and A; energised open at the far end, its rise is 1 / cosh(gamma l), flat from the start."""
+    band = np.logspace(-3, 6, 361)       # the band FdLine fits over
+    fit = fd.ModeFit(*fd.per_km_cable(band, CABLE), CABLE_KM, band)
+    f = np.logspace(0, 5, 101)
+    zc, gamma = _cable_exact(f)
+    s = 2j * math.pi * f
+    assert np.max(np.abs(fit.zc(s) / zc - 1.0)) < 0.02
+    assert np.max(np.abs(fit.a(s) - np.exp(-gamma * CABLE_KM))) < 0.015
+    dt = 1e-5
+    ckt = es.Circuit()
+    a = [ckt.node(f'a{p}') for p in 'abc']
+    b = [ckt.node(f'b{p}') for p in 'abc']
+    line = fd.FdLine(ckt, a, b, CABLE, CABLE_KM, dt, W0, 'C')
+    ckt.add_controller(line.control)
+    v_pk = math.sqrt(2.0 / 3.0) * 33e3
+    for k, n in enumerate(a):
+        ckt.add_rl(0, n, 1e-3, 1e-6, ac=(v_pk, W0, -k * 2.0 * math.pi / 3.0))
+    for n in b:
+        ckt.add_r(n, 0, 1e8)
+    ckt.start_in_ac_steady_state(W0)
+    sim = ckt.simulate(0.1, dt)
+    _, g50 = _cable_exact([F1])
+    rise = abs(1.0 / np.cosh(g50[0] * CABLE_KM))
+    v = np.sqrt(2.0 / 3.0 * np.sum(sim['v'][:, b] ** 2, axis=1)) / v_pk
+    assert rise > 1.0005
+    assert np.min(v) == pytest.approx(rise, rel=0.002) and np.max(v) == pytest.approx(rise, rel=0.002)
+    assert line.tau_ms[1] == pytest.approx(CABLE_KM / (C_KM_S / math.sqrt(CABLE['eps_r'])) * 1e3, rel=0.03)
+
+
+def test_a_cable_through_the_study_agrees_with_pi_sections(client, quiet):
+    from test_pcs import GRID, LINE, LOAD, _bus
+    z, y = fd.per_km_cable(np.array([F1]), CABLE)
+    line = {**LINE, 'length_km': str(CABLE_KM), 'r_ohm_per_km': str(z[0].real), 'x_ohm_per_km': str(z[0].imag), 'c_nf_per_km': str(y[0].imag / W0 * 1e9),
+            'r0_ohm_per_km': str(z[0].real), 'x0_ohm_per_km': str(z[0].imag), 'c0_nf_per_km': str(y[0].imag / W0 * 1e9), 'max_i_ka': '1', 'type': 'cs',
+            'fd_line': 'true', 'fd_kind': 'cable', **{f'fd_{k}': str(v) for k, v in CABLE.items() if k != 'kind'}}
+    def request(**params):
+        study = {'typ': 'EmtStudy Parameters', 'user_email': 't@t', 'frequency': str(F1), 'time_step_us': '10', 'duration_ms': '60', **params}
+        return {'0': {k: str(v) for k, v in study.items()}, '1': _bus('a', 33), '2': _bus('b', 33), '3': dict(line),
+                '4': {**GRID, 'bus': 'a', 's_sc_max_mva': '2000', 's_sc_min_mva': '2000'}, '5': {**LOAD, 'bus': 'b', 'p_mw': '10', 'q_mvar': '2', 'const_z_percent': '100', 'const_i_percent': '0'}}
+    fine, warnings = _emt(client, quiet, request())
+    r = request(ac_max_section_km=1)
+    r['3']['fd_line'] = 'false'
+    pi, _ = _emt(client, quiet, r)
+    assert fine['fd_lines'][0]['travel_aerial_ms'] == pytest.approx(CABLE_KM / (C_KM_S / math.sqrt(CABLE['eps_r'])) * 1e3, rel=0.03)
+    assert not [w for w in warnings if 'pi sections' in w or 'disagree' in w]
+    assert _rms_end(fine, 'B') == pytest.approx(_rms_end(pi, 'B'), abs=0.003)
