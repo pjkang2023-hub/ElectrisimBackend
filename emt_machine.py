@@ -186,7 +186,7 @@ class ParkMachine(SynchronousMachine):
 
     def __init__(self, ckt, label, nodes, w0, v_ph, i_ph, s_rated, vn, *, xd_pu, xq_pu, xd1_pu, xq1_pu, xd2_pu, xl_pu,
                  td10_s, td20_s, tq10_s, tq20_s, ra_pu=0.0, s10=0.0, s12=0.0, h=3.0, d=0.0, gov=None, exc=None,
-                 controls=None, r_bias=1e6):
+                 controls=None, shaft=None, xq2_pu=None, neutral_ohm=None, x0_pu=None, r_bias=1e6):
         self.label, self.w0, self.s, self.nodes = label, w0, s_rated, nodes
         self.h, self.d = h, d
         self.e_base = SQ2 * vn / math.sqrt(3.0)
@@ -196,9 +196,13 @@ class ParkMachine(SynchronousMachine):
         self.td1, self.td2, self.tq1, self.tq2 = td10_s, td20_s, tq10_s, tq20_s
         self.ra = max(ra_pu, 0.01 * xd2_pu)
         self.gd1 = (xd2_pu - xl_pu) / (xd1_pu - xl_pu)
-        self.gq1 = (xd2_pu - xl_pu) / (xq1_pu - xl_pu)
+        # Its subtransient saliency: x''q apart from x''d. Its branch carries their mean; the difference, half each way,
+        # goes into the voltage behind it, from the current on each axis.
+        self.x2q = xq2_pu if xq2_pu and xq2_pu > 0 else xd2_pu
+        self.x_avg, self.dx = 0.5 * (xd2_pu + self.x2q), 0.5 * (xd2_pu - self.x2q)
+        self.gq1 = (self.x2q - xl_pu) / (xq1_pu - xl_pu)
         self.gd2 = (xd1_pu - xd2_pu) / (xd1_pu - xl_pu) ** 2
-        self.gq2 = (xq1_pu - xd2_pu) / (xq1_pu - xl_pu) ** 2
+        self.gq2 = (xq1_pu - self.x2q) / (xq1_pu - xl_pu) ** 2
         self.gqd = (xq_pu - xl_pu) / (xd_pu - xl_pu)
         # Its saturation, GENROU's quadratic: Se psi = B (psi - A)^2 above A, through its two points.
         self.sat_a, self.sat_b = 1.0, 0.0
@@ -209,22 +213,27 @@ class ParkMachine(SynchronousMachine):
             self.sat_b = 1.2 * s12 / (1.2 - self.sat_a) ** 2
         # Its start, the load flow's steady state: delta the q axis, from psi''(1 + Se xq/xd) = -(xq - x'') iq on q.
         v, i = v_ph / self.e_base, i_ph / self.i_base
-        e2 = v + complex(self.ra, xd2_pu) * i
+        e2 = v + complex(self.ra, self.x2q) * i                # behind x''q: on the q axis, as the steady state has it
         se = self._se(abs(e2))
-        a, b = abs(e2) * (1.0 + se * self.gqd), (xq_pu - xd2_pu) * abs(i)
+        a, b = abs(e2) * (1.0 + se * self.gqd), (xq_pu - self.x2q) * abs(i)
         beta, gamma = float(np.angle(e2)), float(np.angle(i))
         self.delta = math.atan2(a * math.sin(beta) + b * math.cos(gamma), a * math.cos(beta) - b * math.sin(gamma))
         rot = complex(math.cos(self.delta), -math.sin(self.delta))
-        psi2, cur = e2 * rot, 1j * i * rot
+        cur = 1j * i * rot
         id0, iq0 = cur.real, cur.imag
+        # psi'' on each axis behind its own x'': psi''d = vq + ra iq + x''d id, psi''q = -vd - ra id + x''q iq.
+        behind = (v + self.ra * i) * rot
+        psi2 = complex(behind.real + xd2_pu * id0, behind.imag + self.x2q * iq0)
         self.pd1 = psi2.real + (xd1_pu - xd2_pu) * id0     # psi'd
         self.pd2 = self.pd1 - (xd1_pu - xl_pu) * id0       # psi1d
-        self.pq1 = psi2.imag + (xq1_pu - xd2_pu) * iq0     # psi'q
+        self.pq1 = psi2.imag + (xq1_pu - self.x2q) * iq0   # psi'q
         self.pq2 = self.pq1 - (xq1_pu - xl_pu) * iq0       # psi1q
         self.efd0 = self.pd1 + (xd_pu - xd1_pu) * id0 + se * psi2.real
         self.efd, self.lead = self.efd0, 0.0
         self.w = 1.0
-        self.pm = psi2.real * iq0 - psi2.imag * id0
+        self.pm = psi2.real * iq0 - psi2.imag * id0 - (xd2_pu - self.x2q) * id0 * iq0
+        self.i_dq_prev = complex(id0, iq0)
+        e_branch = v + complex(self.ra, self.x_avg) * i       # what its branch, at x'' mean, starts behind
         self.p_set = self.pm
         self.gov = dict(gov) if gov else None
         if self.gov:
@@ -243,15 +252,57 @@ class ParkMachine(SynchronousMachine):
         if controls.get('gov'):
             self.gov_name, params = controls['gov']
             self.gov_model = emt_controls.governor(self.gov_name, params, self.pm)
+        # Its exciter's limiters (over- and under-excitation), through ANDES's exciter.
+        self.limiters = None
+        if controls.get('lim') and self.exc_model is not None:
+            self.limiters = emt_controls.Limiters(controls['lim'])
+        self.vref0 = self.exc_model.vref if self.exc_model is not None else None
+        self.pss_vs = 0.0
+        # Its stabiliser (IEEEST), through ANDES's exciter: its output adds to the exciter's reference.
+        self.pss_model, self.pss_name = None, None
+        if controls.get('pss') and self.exc_model is not None:
+            self.pss_name, params = controls['pss']
+            self.pss_te0 = self.pm
+            self.pss_v_prev, self.pss_theta, self.pss_f = abs(v_ph) / self.e_base, None, 1.0
+            # Its inputs' steady values (ANDES's): power for MODE 3, voltage for MODE 5, nought for the rest.
+            u0 = {3: self.pm, 5: abs(v_ph) / self.e_base}.get(int(params['MODE']), 0.0)
+            self.pss_model = emt_controls.Ieeest(params, u0)
+        # Its shaft as masses and springs (emt_shaft), where its row gives one; else one rotor of inertia h.
+        self.shaft = None
+        if shaft:
+            import emt_shaft
+            self.shaft = emt_shaft.Shaft(shaft['h'], shaft['k'], shaft['f'], shaft['gen'], w0, self.pm, shaft.get('d'))
         self.r = self.ra * z_base
-        self.l = xd2_pu * z_base / w0
+        self.l = self.x_avg * z_base / w0
         star = ckt.node(f'{label} star point')
-        ckt.add_r(star, 0, r_bias)
-        e_mag = abs(e2) * self.e_base
-        self.k_e = [ckt.add_rl(star, nodes[k], self.r, self.l, ac=(e_mag, w0, beta - k * A120), controlled=True)
+        # Its star point: floating, or grounded through neutral_ohm plus what makes its zero sequence x0 where that is
+        # above x'' (below it, the grounding cannot take it lower: x0 = x'' then).
+        if neutral_ohm is None:
+            ckt.add_r(star, 0, r_bias)
+            self.neutral = None
+        else:
+            x_n = max(((x0_pu if x0_pu is not None else self.x_avg) - self.x_avg) / 3.0, 0.0) * z_base
+            self.neutral = ckt.add_rl(star, 0, max(neutral_ohm, 1e-6), x_n / w0)
+        e_mag = abs(e_branch) * self.e_base
+        self.k_e = [ckt.add_rl(star, nodes[k], self.r, self.l, ac=(e_mag, w0, float(np.angle(e_branch)) - k * A120), controlled=True)
                     for k in range(3)]
         self.t_last = 0.0
         self.trace = []                       # (t, P MW, Q Mvar, f Hz, delta rad, psi'' pu, Pm MW)
+
+    def _stabiliser(self, dt, v, v_pu, te):
+        """IEEEST's input by its MODE, then its output onto the exciter's reference."""
+        mode = self.pss_model.mode
+        if mode == 2:
+            # The bus frequency, from the voltage's space vector turning, through a 20 ms lag (ANDES's BusFreq's).
+            th = float(np.angle(v[0] + v[1] * np.exp(1j * A120) + v[2] * np.exp(-1j * A120)))
+            if self.pss_theta is not None:
+                f_now = 1.0 + ((th - self.pss_theta + math.pi) % (2.0 * math.pi) - math.pi) / (dt * self.w0)
+                self.pss_f += (f_now - self.pss_f) * (1.0 - math.exp(-dt / 0.02))
+            self.pss_theta = th
+        u = {1: self.w - 1.0, 2: self.pss_f - 1.0, 3: te, 4: (self.pm - self.pss_te0) * self.s / 100e6,
+             5: v_pu, 6: (v_pu - self.pss_v_prev) / dt}[mode]
+        self.pss_v_prev = v_pu
+        self.pss_vs = self.pss_model.step(dt, u, v_pu)
 
     def _se(self, psi):
         return self.sat_b * (psi - self.sat_a) ** 2 / psi if psi > self.sat_a and self.sat_b > 0.0 else 0.0
@@ -274,19 +325,34 @@ class ParkMachine(SynchronousMachine):
         cur = i_s * complex(math.cos(th_d), -math.sin(th_d))
         i_d, i_q = cur.real, cur.imag
         psi_d, psi_q = self._flux()
+        te = psi_d * i_q - psi_q * i_d - (self.x2 - self.x2q) * i_d * i_q
         # Its governor, then its rotor.
         if self.gov_model is not None:
             self.pm = self.gov_model.step(dt, self.w)
         else:
             self._governor(dt)
-        self.w += dt / (2.0 * self.h) * (self.pm - (psi_d * i_q - psi_q * i_d) - self.d * (self.w - 1.0))
-        self.delta += self.w0 * (self.w - 1.0) * dt
+        if self.shaft is not None:
+            self.w, turned = self.shaft.step(dt, self.pm, psi_d * i_q - psi_q * i_d - (self.x2 - self.x2q) * i_d * i_q)
+            self.delta += turned
+        else:
+            self.w += dt / (2.0 * self.h) * (self.pm - (psi_d * i_q - psi_q * i_d - (self.x2 - self.x2q) * i_d * i_q)
+                                             - self.d * (self.w - 1.0))
+            self.delta += self.w0 * (self.w - 1.0) * dt
         # Its exciter, on its terminal voltage's magnitude (the space vector's).
         v_mag = math.sqrt(2.0 / 3.0 * float(np.dot(v, v)))
+        if self.pss_model is not None:
+            self._stabiliser(dt, v, v_mag / self.e_base, te)
         if self.exc_model is not None:
             # Its field current as GENROU's XadIfd: what holds its transient flux, Efd in the steady state.
             xadifd = (self.pd1 + (self.xd - self.xd1) * (self.gd1 * i_d + self.gd2 * (self.pd1 - self.pd2))
                       + self._se(math.hypot(psi_d, psi_q)) * psi_d)
+            self.ifd = xadifd
+            lim = 0.0
+            if self.limiters is not None:
+                p_pu = float(np.dot(v, i)) / self.s
+                q_pu = ((v[1] - v[2]) * i[0] + (v[2] - v[0]) * i[1] + (v[0] - v[1]) * i[2]) / math.sqrt(3.0) / self.s
+                lim = self.limiters.step(dt, xadifd, p_pu, q_pu, v_mag / self.e_base)
+            self.exc_model.vref = self.vref0 + self.pss_vs + lim
             self.efd = self.exc_model.step(dt, v_mag / self.e_base, self.w, xadifd)
         elif self.exc:
             self._regulator(dt, v_mag)
@@ -305,6 +371,13 @@ class ParkMachine(SynchronousMachine):
         psi_d, psi_q = self._flux()
         rate = complex(self.gd1 * d_pd1 + (1.0 - self.gd1) * d_pd2, self.gq1 * d_pq1 + (1.0 - self.gq1) * d_pq2)
         # Its voltage behind x'' over the next step, at the step's middle.
+        # Behind its branch's mean x'': each axis's flux less its share of the saliency, from its current.
+        i_dq = complex(i_d, i_q)
+        if self.dx != 0.0:
+            d_i = (i_dq - self.i_dq_prev) / dt
+            rate += complex(-self.dx * d_i.real, self.dx * d_i.imag)
+            psi_d, psi_q = psi_d - self.dx * i_d, psi_q + self.dx * i_q
+        self.i_dq_prev = i_dq
         mid = complex(psi_d, psi_q) + 0.5 * dt * rate
         th_next = self.w0 * (t + 0.5 * dt) + self.delta - 0.5 * math.pi + 0.5 * self.w0 * (self.w - 1.0) * dt
         e_s = (1j * (self.w if self.speed_voltage else 1.0) * mid + rate / self.w0) * self.e_base * complex(math.cos(th_next), math.sin(th_next))
@@ -338,24 +411,50 @@ def park_data(row, gov_defaults, exc_defaults, genrou):
     xd, xq = f('dyn_xd', genrou['xd']), f('dyn_xq', genrou['xq'])
     xd1, xq1 = f('dyn_xd1', genrou['xd1']), f('dyn_xq1', genrou['xq1'])
     xl = f('dyn_xl', genrou['xl'])
-    if xl >= xd2:
-        notes.append(f"xl {xl:g} is not below x'' {xd2:g}: used {0.8 * xd2:g}")
-        xl = 0.8 * xd2
+    # x''q: its own where given (a salient-pole machine's, without a q-axis damper's full screen), else x''d.
+    xq2 = f('dyn_xq2', xd2)
+    if xl >= min(xd2, xq2):
+        notes.append(f"xl {xl:g} is not below x'' {min(xd2, xq2):g}: used {0.8 * min(xd2, xq2):g}")
+        xl = 0.8 * min(xd2, xq2)
     for axis, x, x1 in (('d', xd, xd1), ('q', xq, xq1)):
         if not xd2 < x1 <= x:
             notes.append(f"x{axis} {x:g}, x'{axis} {x1:g} and x'' {xd2:g} are not in order: used x'{axis} {min(max(x1, 1.01 * xd2), max(x, 1.01 * xd2)):g}")
     xd = max(xd, 1.01 * xd2)
-    xq = max(xq, 1.01 * xd2)
+    if not xq2 < xq1:
+        notes.append(f"x'q {xq1:g} is not above x''q {xq2:g}: used {1.01 * xq2:g}")
+    xq = max(xq, 1.01 * xd2, 1.01 * xq2)
     xd1 = min(max(xd1, 1.01 * xd2), xd)
-    xq1 = min(max(xq1, 1.01 * xd2), xq)
+    xq1 = min(max(xq1, 1.01 * xd2, 1.01 * xq2), xq)
     data.update(xd_pu=xd, xq_pu=xq, xd1_pu=xd1, xq1_pu=xq1, xd2_pu=xd2, xl_pu=xl,
                 td10_s=f('dyn_Td10', genrou['Td10']), td20_s=f('dyn_Td20', genrou['Td20']),
                 tq10_s=f('dyn_Tq10', genrou['Tq10']), tq20_s=f('dyn_Tq20', genrou['Tq20']),
-                s10=f('dyn_S10', 0.0), s12=f('dyn_S12', 0.0))
+                s10=f('dyn_S10', 0.0), s12=f('dyn_S12', 0.0), xq2_pu=xq2)
+    # Its star point: grounded through dyn_neutral_ohm (0 solidly) where that is given, else floating; dyn_x0 its
+    # zero-sequence reactance (pu), x'' where not given.
+    raw = (row or {}).get('dyn_neutral_ohm')
+    try:
+        neutral = float(raw) if raw not in (None, '', 'null', 'None') else None
+    except (TypeError, ValueError):
+        neutral = None
+    if neutral is not None and neutral >= 0.0:
+        data['neutral_ohm'] = neutral
+        data['x0_pu'] = f('dyn_x0', 0.0) or None
     # Its exciter and governor as ANDES's study has them (its defaults EXDC2 and TGOV1), where the EMT has the model;
     # else the simplified ones, said so.
     import emt_controls
     controls = {}
+    pss, exc = emt_controls.parameters('pss', row), emt_controls.parameters('exc', row)
+    lim = emt_controls.limiter_parameters(row)
+    if lim is not None:
+        if exc is not None and exc[0] in emt_controls.EXCITERS:
+            controls['lim'] = lim
+        else:
+            notes.append('its excitation limiters need one of the modelled exciters to act through: left out')
+    if pss is not None:
+        if exc is not None and exc[0] in emt_controls.EXCITERS:
+            controls['pss'] = pss
+        else:
+            notes.append(f'its PSS {pss[0]} needs one of the modelled exciters to act through: left out')
     for kind, known, simple in (('exc', emt_controls.EXCITERS, 'exciter'), ('gov', emt_controls.GOVERNORS, 'governor')):
         chosen = emt_controls.parameters(kind, row)
         if chosen is None:
@@ -367,6 +466,18 @@ def park_data(row, gov_defaults, exc_defaults, genrou):
             notes.append(f"its {simple} {chosen[0]} runs as the EMT's simplified {simple}: only "
                          f"{' and '.join(known)} are modelled as ANDES has them")
     data['controls'] = controls
+    # Its shaft: masses' inertias, springs, shares of the turbine's torque, damping, and which mass is the generator.
+    import emt_shaft
+    h_list = emt_shaft.parse(row, 'dyn_shaft_H')
+    if h_list:
+        k_list, f_list = emt_shaft.parse(row, 'dyn_shaft_K'), emt_shaft.parse(row, 'dyn_shaft_F')
+        gen = int(f('dyn_shaft_gen', 0.0)) if (row or {}).get('dyn_shaft_gen') not in (None, '') else len(h_list) - 1
+        shaft = {'h': h_list, 'k': k_list or [], 'f': f_list or [], 'gen': gen, 'd': emt_shaft.parse(row, 'dyn_shaft_D')}
+        try:
+            emt_shaft.Shaft(shaft['h'], shaft['k'], shaft['f'], shaft['gen'], 1.0, 0.0, shaft['d'])
+            data['shaft'] = shaft
+        except ValueError as exc:
+            notes.append(f'its shaft is left as one rotor: {exc}')
     return data, notes
 
 

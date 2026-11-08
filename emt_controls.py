@@ -86,8 +86,16 @@ def andes_defaults(model):
 
 
 def parameters(kind, row):
-    """(model, its parameters) for kind 'exc' or 'gov' as ANDES's study sets them up; None for none."""
-    from andes_electrisim import _EXCITER_DEFAULTS, _GOVERNOR_DEFAULTS, _model_kwargs, governor_kwargs
+    """(model, its parameters) for kind 'exc', 'gov' or 'pss' as ANDES's study sets them up; None for none."""
+    from andes_electrisim import _EXCITER_DEFAULTS, _GOVERNOR_DEFAULTS, _PSS_DEFAULTS, _model_kwargs, governor_kwargs
+    if kind == 'pss':
+        model = str((row or {}).get('dyn_pss_model') or 'NONE').strip().upper()
+        if model not in _PSS_DEFAULTS:
+            return None
+        params = dict(andes_defaults(model))
+        params.update(_model_kwargs(row or {}, 'dyn_pss_', _PSS_DEFAULTS[model]))
+        params['MODE'] = int(round(params['MODE'])) if 1 <= round(params['MODE']) <= 6 else 1
+        return model, params
     field, prefix, table, default = (('dyn_exciter_model', 'dyn_exc_', _EXCITER_DEFAULTS, 'EXDC2') if kind == 'exc'
                                      else ('dyn_governor_model', 'dyn_gov_', _GOVERNOR_DEFAULTS, 'TGOV1'))
     model = str((row or {}).get(field) or default).strip().upper()
@@ -412,6 +420,154 @@ class Hygov:
         self.q += (1.0 - (self.q / g) ** 2) * dt / max(p['Tw'], 1e-6)
         h = (self.q / g) ** 2
         return p['At'] * h * (self.q - p['qNL']) - p['Dt'] * wd * g
+
+
+class Linear2:
+    """
+    A second-order block, (1 + n1 s + n2 s^2) / (1 + d1 s + d2 s^2), stepped exactly for its input held (its
+    matrices for each step length kept); first order where d2 is 0, its input where d1 is 0 too.
+    """
+
+    def __init__(self, u0, d1, d2, n1=0.0, n2=0.0):
+        import numpy as np
+        self.np = np
+        self.u = u0
+        if d2 > 1e-9:
+            self.a = np.array([[0.0, 1.0], [-1.0 / d2, -d1 / d2]])
+            self.b = np.array([0.0, 1.0 / d2])
+            self.c = np.array([1.0 - n2 / d2, n1 - n2 * d1 / d2])
+            self.d = n2 / d2
+            self.x = np.array([u0, 0.0])
+        elif d1 > 1e-9:
+            self.a = np.array([[-1.0 / d1]])
+            self.b = np.array([1.0 / d1])
+            self.c = np.array([1.0 - n1 / d1])
+            self.d = n1 / d1
+            self.x = np.array([u0])
+        else:
+            self.a = None
+        self.cache = {}
+
+    def step(self, dt, u):
+        if self.a is None:
+            return u
+        key = round(dt, 12)
+        if key not in self.cache:
+            from scipy.linalg import expm
+            n = len(self.x)
+            m = expm(self.np.block([[self.a, self.b[:, None]], [self.np.zeros((1, n + 1))]]) * dt)
+            self.cache[key] = (m[:n, :n], m[:n, n])
+        ad, bd = self.cache[key]
+        self.x = ad @ self.x + bd * u
+        return float(self.c @ self.x + self.d * u)
+
+
+class Ieeest:
+    """
+    IEEEST as ANDES has it: its input by MODE (1 speed deviation, 2 bus frequency deviation, 3 electrical power,
+    4 mechanical power's change, 5 bus voltage, 6 its rate of change), the filters 1 / (1 + A1 s + A2 s^2) and
+    (1 + A5 s + A6 s^2) / (1 + A3 s + A4 s^2) (left out where A4 is 0, as ANDES does), two lead-lags T1/T2 and
+    T3/T4, the gain KS, the washout T5 s / (1 + T6 s) (a lag T6 where T5 is 0), held within LSMIN/LSMAX, and out
+    only while the bus voltage is within VCL..VCU (0 there meaning no bound). Its output adds to its exciter's
+    input, as ANDES adds it to the exciter's vi.
+    """
+
+    def __init__(self, p, u0):
+        self.p, self.mode = p, int(p['MODE'])
+        self.f1 = Linear2(u0, p['A1'], p['A2'])
+        self.f2 = Linear2(u0, p['A3'], p['A4'], p['A5'], p['A6']) if p['A4'] > 0 else None
+        self.ll1 = LeadLag(u0, p['T1'], p['T2'])
+        self.ll2 = LeadLag(u0, p['T3'], p['T4'])
+        self.wo = Washout(p['KS'] * u0, p['T6'], p['T5']) if p['T5'] != 0 else Lag(p['KS'] * u0, p['T6'])
+        self.vcu = p['VCU'] if p['VCU'] != 0 else 999.0
+        self.vcl = p['VCL'] if p['VCL'] != 0 else -999.0
+        self.vs = 0.0
+
+    def step(self, dt, u, v):
+        p = self.p
+        x = self.f1.step(dt, u)
+        if self.f2 is not None:
+            x = self.f2.step(dt, x)
+        x = self.wo.step(dt, p['KS'] * self.ll2.step(dt, self.ll1.step(dt, x)))
+        x = min(max(x, p['LSMIN']), p['LSMAX'])
+        self.vs = x if self.vcl < v < self.vcu else 0.0
+        return self.vs
+
+
+def _num(row, key, default=None):
+    raw = (row or {}).get(key)
+    try:
+        return float(raw) if raw not in (None, '', 'null', 'None') else default
+    except (TypeError, ValueError):
+        return default
+
+
+def limiter_parameters(row):
+    """
+    Its excitation limiters from its row, None where it has neither: the over-excitation limiter where
+    dyn_oel_ifd_pu (its field's continuous rating, as XadIfd) is given, the under-excitation limiter where
+    dyn_uel_q0_pu is.
+    """
+    p = {}
+    ifd = _num(row, 'dyn_oel_ifd_pu')
+    if ifd and ifd > 0:
+        p['oel'] = {'ifd': ifd, 'k': max(_num(row, 'dyn_oel_k_s', 33.75), 1e-3),
+                    'kp': _num(row, 'dyn_oel_kp', 0.5), 'ki': _num(row, 'dyn_oel_ki', 5.0)}
+    q0 = _num(row, 'dyn_uel_q0_pu')
+    if q0 is not None:
+        p['uel'] = {'q0': q0, 'q1': _num(row, 'dyn_uel_q1_pu', q0), 'kp': _num(row, 'dyn_uel_kp', 0.5),
+                    'ki': _num(row, 'dyn_uel_ki', 5.0)}
+    return p or None
+
+
+class Limiters:
+    """
+    Its exciter's limiters, each adding to its exciter's reference as ANDES's exciters take OEL and UEL:
+
+    - over-excitation: its field current's heating, the integral of (Ifd / Ifd_rated)^2 - 1 (falling again when
+      below 1, not under 0), reaching k (s; 33.75 by default, IEEE C50.13's 209 % for 10 s ... 113 % for 120 s)
+      before it acts: then a PI, never positive, brings its field current to its rating, and lets go once its
+      heating falls back below k;
+    - under-excitation: a straight line in the P-Q plane, q0 at no power and q1 at rated, scaled by V^2 (as
+      UEL2C with k 2): while its Q is below that, a PI, never negative, raises its excitation.
+    """
+
+    def __init__(self, p):
+        self.oel, self.uel = p.get('oel'), p.get('uel')
+        self.heat, self.i_oel, self.i_uel = 0.0, 0.0, 0.0
+        self.oel_on, self.oel_picked_s, self.uel_acted_s = False, None, None
+        self.t = 0.0
+
+    def step(self, dt, ifd, p_pu, q_pu, v_pu):
+        self.t += dt
+        out = 0.0
+        o = self.oel
+        if o is not None:
+            r = ifd / o['ifd']
+            self.heat = max(self.heat + (r * r - 1.0) * dt, 0.0)
+            if self.heat >= o['k'] - 1e-9:
+                if not self.oel_on and self.oel_picked_s is None:
+                    self.oel_picked_s = self.t
+                self.oel_on = True
+                self.heat = min(self.heat, o['k'])
+            elif self.oel_on and self.i_oel >= 0.0:
+                self.oel_on = False
+            if self.oel_on:
+                e = o['ifd'] - ifd
+                self.i_oel = min(self.i_oel + o['ki'] * e * dt, 0.0)
+                out += min(o['kp'] * e + self.i_oel, 0.0)
+            else:
+                self.i_oel = 0.0
+        u = self.uel
+        if u is not None:
+            q_lim = v_pu * v_pu * (u['q0'] + (u['q1'] - u['q0']) * p_pu / max(v_pu * v_pu, 1e-3))
+            e = q_lim - q_pu
+            self.i_uel = max(self.i_uel + u['ki'] * e * dt, 0.0)
+            y = max(u['kp'] * e + self.i_uel, 0.0)
+            if y > 0.0 and self.uel_acted_s is None:
+                self.uel_acted_s = self.t
+            out += y
+        return out
 
 
 def exciter(model, p, efd0, v0, xadifd0):

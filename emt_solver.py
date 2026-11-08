@@ -68,6 +68,7 @@ class Circuit:
         self.events = []          # (t, action(state))
         self.controllers = []     # fn(t, state) -> True when it changed something
         self.ac_blocks = []       # (nodes, Y, on_solved(V at those nodes)): added to the phasor solve only
+        self.gm = []              # (nodes, G): constant conductance matrices among nodes, in every solve
 
     # --- building -----------------------------------------------------------------
 
@@ -152,6 +153,14 @@ class Circuit:
         """
         self.events.append((float(t), action, soft))
 
+    def add_gmatrix(self, nodes, g):
+        """
+        A constant conductance matrix ``g`` among ``nodes`` (distinct, not ground): i = g v into it from each node.
+        For what a network of positive resistors cannot be, such as a multiconductor line's Norton conductances.
+        """
+        self.gm.append((np.asarray(nodes, dtype=int), np.asarray(g, dtype=float)))
+        return len(self.gm) - 1
+
     def add_ac_block(self, nodes, y, on_solved):
         """An admittance ``y`` among ``nodes`` for the phasor solve alone; ``on_solved`` gets their phasors after it."""
         self.ac_blocks.append((list(nodes), np.asarray(y, dtype=complex), on_solved))
@@ -221,6 +230,10 @@ class Circuit:
                 rhs[a] -= i_ac
         for nodes, y, _ in self.ac_blocks:
             Y[np.ix_(nodes, nodes)] += y
+        for nodes, g in self.gm:
+            Y[np.ix_(nodes, nodes)] += g
+        lone = np.where(np.all(Y == 0.0, axis=1))[0]
+        Y[lone[lone > 0], lone[lone > 0]] = 1.0
         V = np.zeros(n, dtype=complex)
         V[1:] = np.linalg.solve(Y[1:, 1:], rhs[1:])
         for nodes, _, on_solved in self.ac_blocks:
@@ -375,8 +388,14 @@ class Circuit:
                 stamp(da, db, np.where(d_state, 1.0 / R_ON, 1.0 / R_OFF), Y)
                 stamp(sa, sb, np.where(sw_state, s_on, s_off), Y)
                 stamp(aa, ab, np.where(a_state != 0, a_gon, a_goff), Y)
+                for nodes_g, g_m in self.gm:
+                    Y[np.ix_(nodes_g, nodes_g)] += g_m
                 if M:
                     _stamp_block(Y, A_cp, B_cp, coupled_g(method, h))
+                # A node nothing reaches (no element at all - a nonlinear branch's nodes are reached, by it): pinned at 0 V,
+                # which is what it is, rather than a singular matrix.
+                lone = np.setdiff1d(np.where(np.all(Y == 0.0, axis=1))[0], np.concatenate([[0], na_, nb_]))
+                Y[lone, lone] = 1.0
                 if len(cache) > 512:
                     cache.clear()
                 # Sparse: a dense LU of the campus's 319 nodes took 7 ms, and far more beside another

@@ -25,7 +25,18 @@ through the bypass diodes, as an uncontrolled rectifier, and the capacitors keep
 that path beside its controlled voltage: a switch, shut while it runs, bypasses it; the solver's own diodes
 decide which way current flows once it is open.
 
-Not modelled: submodule failures; balancing within an arm; a full-bridge stack's fault blocking.
+Full-bridge submodules (cell 'full'): each can be inserted either way, so an arm's voltage runs from -vS to vS;
+blocked, a current either way charges its capacitors through its diodes, so each arm stands at vS against it
+both ways: a DC fault is no longer fed from the AC side (whose line-to-line peak is under 2 vS) and its current
+dies away.
+
+Submodule by submodule (submodules N > 0), the detailed equivalent model: each arm's N capacitors kept apart,
+nearest-level insertion (round(order / their mean voltage) of them), and sorting to balance them as is usual -
+with the arm's current charging, its least charged inserted, discharging, its most charged; with balancing off,
+always the same ones, so they drift apart. Each submodule's capacitance is the arm's times N. Its switching (each
+submodule's insertions and removals) is counted.
+
+Not modelled: submodule failures; each switch's own on-state and switching losses.
 
 It starts in its load-flow steady state, its arms' energy ripple included. ``v_ph``, ``i_ph``: its AC bus's
 voltage and the current it delivers there, phase a peak phasors.
@@ -47,8 +58,10 @@ def _space(x):
 class Mmc:
     def __init__(self, ckt, label, ac_nodes, p_node, w0, v_ph, i_ph, s_rated, vn_ac, v_dc, *, x_t_pu=0.15, r_t_pu=0.005, x_arm_pu=0.15, r_arm_pu=0.005,
                  energy_kj_per_mva=30.0, levels=0, mode='p', limit_pu=1.2, current_loop_hz=200.0, circulating_hz=300.0, pll_hz=20.0, feed_forward_hz=200.0,
-                 block_pu=2.0, r_bias=1e6):
+                 block_pu=2.0, cell='half', submodules=0, balancing=True, sm_spread=0.0, r_bias=1e6):
         self.label, self.model, self.w0, self.s_rated = label, 'mmc', w0, s_rated
+        self.full = str(cell).strip().lower() == 'full'
+        self.n_sm, self.balancing = max(int(submodules), 0), bool(balancing)
         self.ac_nodes, self.p_node, self.levels, self.mode = list(ac_nodes), p_node, int(levels), str(mode)
         z = vn_ac * vn_ac / s_rated
         self.r_arm, self.l_arm = r_arm_pu * z, x_arm_pu * z / w0
@@ -81,6 +94,7 @@ class Mmc:
         self.k_sw, self.k_src = [[], []], [[], []]      # each arm's bypass switch and its blocked stack's source, upper then lower
         self.ckt = ckt
         r_src = 1e-3 * z
+        self.k_src2 = [[], []]          # a full-bridge stack's other way, against its capacitors too
         for k in range(3):
             x = ckt.node(f'{label} midpoint {"abc"[k]}', v_dc / 2.0)
             self.mid.append(x)
@@ -97,7 +111,13 @@ class Mmc:
                 # switching makes the solver's next step a damped one.
                 ckt.add_diode(inner, stack, v_f=1.0)
                 self.k_src[side].append(ckt.add_rl(stack, b, r_src, 0.0, e0=-v_dc, controlled=True))
-                ckt.add_diode(b, inner, v_f=1.0)
+                if self.full:
+                    # Out of the stack: through the other diodes, against its capacitors as well.
+                    back = ckt.node(f'{label} stack back {"ul"[side]}{"abc"[k]}', v_b + v_dc)
+                    ckt.add_diode(b, back, v_f=1.0)
+                    self.k_src2[side].append(ckt.add_rl(back, inner, r_src, 0.0, e0=-v_dc, controlled=True))
+                else:
+                    ckt.add_diode(b, inner, v_f=1.0)
         self.p_set_now = self.p_set
         self.w_u = np.zeros(3)
         self.w_l = np.zeros(3)
@@ -106,6 +126,19 @@ class Mmc:
         self.v_u = np.full(3, v_arm_dc)
         self.v_l = np.full(3, v_arm_dc)
         self._start_energy(i_ph, i_dc, v_dc)
+        if self.n_sm:
+            # Each submodule's capacitor, its share of its arm's voltage (spread by sm_spread, to show the balancing).
+            self.c_sm = self.c_arm * self.n_sm
+            spread = 1.0 + sm_spread * np.linspace(-1.0, 1.0, self.n_sm)
+            spread /= spread.mean()
+            self.vc = [np.outer(vs / self.n_sm, spread) for vs in (self.vs_u, self.vs_l)]
+            self.pol = [np.zeros((3, self.n_sm)), np.zeros((3, self.n_sm))]
+            for side, vs in enumerate((self.vs_u, self.vs_l)):
+                for k in range(3):
+                    self.pol[side][k], _ = self._choose(v_arm_dc, self.vc[side][k], 1.0, self.pol[side][k])
+            self.switchings = 0
+            self.spread_max = 0.0
+            self._sm_state()
         # Controls.
         self.theta0 = cmath.phase(v_ph)
         self.pll_angle = self.theta0
@@ -157,10 +190,46 @@ class Mmc:
 
     def _insert(self, order, vs):
         """Its arm's actual voltage for an ordered one: the share inserted, in levels if it has them."""
-        n = np.clip(order / np.maximum(vs, 1.0), 0.0, 1.0)
+        n = np.clip(order / np.maximum(vs, 1.0), -1.0 if self.full else 0.0, 1.0)
         if self.levels > 0:
             n = np.round(n * self.levels) / self.levels
         return n * vs
+
+    def _choose(self, order, vc, current, before):
+        """
+        One arm's submodules for an ordered voltage: how many, nearest level; which, by sorting. Returns their
+        insertion (+1, -1 the other way round in a full bridge, 0 bypassed) and its voltage.
+        """
+        n = int(round(order / max(float(vc.mean()), 1e-9)))
+        n = max(min(n, self.n_sm), -self.n_sm if self.full else 0)
+        pol = np.zeros(self.n_sm)
+        m, sign = abs(n), (1.0 if n >= 0 else -1.0)
+        if m:
+            if self.balancing:
+                order_by = np.argsort(vc)
+                # Charging (its current into them as inserted): the least charged; discharging: the most.
+                chosen = order_by[:m] if current * sign > 0 else order_by[::-1][:m]
+            else:
+                chosen = np.arange(m)
+            pol[chosen] = sign
+        return pol, float(np.dot(pol, vc))
+
+    def _sm_state(self):
+        """Its arms' sums and energies from their submodules'."""
+        self.vs_u, self.vs_l = self.vc[0].sum(axis=1), self.vc[1].sum(axis=1)
+        self.w_u = 0.5 * self.c_sm * (self.vc[0] ** 2).sum(axis=1)
+        self.w_l = 0.5 * self.c_sm * (self.vc[1] ** 2).sum(axis=1)
+        mean = np.concatenate([x.mean(axis=1) for x in self.vc])
+        spread = np.concatenate([np.ptp(x, axis=1) for x in self.vc]) / np.maximum(mean, 1.0)
+        self.spread_now = float(np.max(spread))
+
+    def sm_result(self, t_run):
+        """Its submodules at the end: their voltages' widest spread in an arm (share of its mean), the widest
+        through the run after its first cycle, and each submodule's mean switching frequency."""
+        if not self.n_sm:
+            return None
+        return {'submodules': self.n_sm, 'balancing': self.balancing, 'spread_end': self.spread_now, 'spread_max': self.spread_max,
+                'switching_hz': self.switchings / 2.0 / (6.0 * self.n_sm) / max(t_run, 1e-9)}
 
     def control(self, t, state):
         h = t - self.t_last
@@ -177,11 +246,19 @@ class Mmc:
             return self._block(t, state)
         # Its arms' energy: what each has taken over the step, its voltage held and its current the trapezoid's.
         mean_u, mean_l = 0.5 * (i_u + self.i_u_prev), 0.5 * (i_l + self.i_l_prev)
-        self.w_u = np.maximum(self.w_u + h * self.v_u * mean_u, 1.0)
-        self.w_l = np.maximum(self.w_l + h * self.v_l * mean_l, 1.0)
+        if self.n_sm:
+            # Each inserted submodule's capacitor charged by its arm's current, the way it is inserted.
+            for side, mean_i in enumerate((mean_u, mean_l)):
+                self.vc[side] = np.maximum(self.vc[side] + h * self.pol[side] * mean_i[:, None] / self.c_sm, 1e-3)
+            self._sm_state()
+            if t > 1.0 / (self.w0 / (2.0 * math.pi)):
+                self.spread_max = max(self.spread_max, self.spread_now)
+        else:
+            self.w_u = np.maximum(self.w_u + h * self.v_u * mean_u, 1.0)
+            self.w_l = np.maximum(self.w_l + h * self.v_l * mean_l, 1.0)
+            self.vs_u = np.sqrt(2.0 * self.w_u / self.c_arm)
+            self.vs_l = np.sqrt(2.0 * self.w_l / self.c_arm)
         self.i_u_prev, self.i_l_prev = i_u, i_l
-        self.vs_u = np.sqrt(2.0 * self.w_u / self.c_arm)
-        self.vs_l = np.sqrt(2.0 * self.w_l / self.c_arm)
         w_total = float(np.sum(self.w_u) + np.sum(self.w_l))
         # Its PLL.
         v_s = _space(v)
@@ -229,8 +306,20 @@ class Mmc:
             i_dc_ref = (p_ac + self.k_w * (self.w_nom - w_total)) / max(v_dc, 1.0)
         i_c = (mean_u + mean_l) / 2.0
         common = v_dc / 2.0 - self.r_arm * i_dc_ref / 3.0 + self.kc * (i_c - i_dc_ref / 3.0)
-        self.v_u = self._insert(common - e, self.vs_u)
-        self.v_l = self._insert(common + e, self.vs_l)
+        if self.n_sm:
+            for side, (order, i_now) in enumerate(((common - e, i_u), (common + e, i_l))):
+                volts = np.zeros(3)
+                for k in range(3):
+                    pol, volts[k] = self._choose(order[k], self.vc[side][k], i_now[k], self.pol[side][k])
+                    self.switchings += int(np.count_nonzero(pol != self.pol[side][k]))
+                    self.pol[side][k] = pol
+                if side == 0:
+                    self.v_u = volts
+                else:
+                    self.v_l = volts
+        else:
+            self.v_u = self._insert(common - e, self.vs_u)
+            self.v_l = self._insert(common + e, self.vs_l)
         for k in range(3):
             state.set_emf(self.k_u[k], float(-self.v_u[k]))
             state.set_emf(self.k_l[k], float(-self.v_l[k]))
@@ -245,15 +334,26 @@ class Mmc:
         for side, vs in enumerate((self.vs_u, self.vs_l)):
             for k in range(3):
                 state.set_emf(self.k_src[side][k], float(-vs[k]))
+                if self.full:
+                    state.set_emf(self.k_src2[side][k], float(-vs[k]))
 
     def _blocked(self, t, h, state, i_u, i_l, v, v_dc):
         """Blocked: only the current into each stack charges it, at its capacitors' voltage."""
         for side, w in enumerate((self.w_u, self.w_l)):
             vs = self.vs_u if side == 0 else self.vs_l
             charging = np.array([max(float(state.i_rl[self.k_src[side][k]]), 0.0) for k in range(3)])
-            w += h * vs * charging
-        self.vs_u = np.sqrt(2.0 * self.w_u / self.c_arm)
-        self.vs_l = np.sqrt(2.0 * self.w_l / self.c_arm)
+            if self.full:
+                charging += np.array([max(float(state.i_rl[self.k_src2[side][k]]), 0.0) for k in range(3)])
+            if self.n_sm:
+                # Blocked, every submodule of the arm in the current's path: each charged alike.
+                self.vc[side] += h * charging[:, None] / self.c_sm
+            else:
+                w += h * vs * charging
+        if self.n_sm:
+            self._sm_state()
+        else:
+            self.vs_u = np.sqrt(2.0 * self.w_u / self.c_arm)
+            self.vs_l = np.sqrt(2.0 * self.w_l / self.c_arm)
         self._hold_stacks(state)
         i_ac = i_u - i_l
         self.i_dc_now = float(np.sum(i_u + i_l)) / 2.0

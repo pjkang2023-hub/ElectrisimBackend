@@ -86,3 +86,54 @@ def test_the_qv_margin_falls_as_the_load_rises(client, quiet):
 def test_a_qv_curve_needs_a_real_bus(client, quiet):
     r = _post(client, quiet, _system(10.0, 2.0, curve='qv', qv_bus='nowhere'))
     assert r['error'] is True
+
+
+def _lower_root(p, q):
+    """The lower root of V^4 + (2 Q X - E^2) V^2 + X^2 (P^2 + Q^2) = 0 (kV), or None past the nose."""
+    c = 2.0 * q * X - KV ** 2
+    d = c * c - 4.0 * X * X * (p * p + q * q)
+    return None if d < 0 else math.sqrt((-c - math.sqrt(d)) / 2.0)
+
+
+def test_the_lower_branch_is_the_exact_one(client, quiet):
+    r = _post(client, quiet, _system(20.0, 4.0, curve='pv', step=0.25, tolerance=0.002, lower_v_step_pu=0.05))
+    low = r['lower_branch']
+    assert low and len(low['lambda']) >= 6, low
+    b = next(x for x in low['buses'] if x['name'] == 'B')
+    nose_v = r['nose']['weakest_vm_pu']
+    assert all(v < nose_v for v in b['vm_pu'])
+    assert all(x > y for x, y in zip(low['lambda'], low['lambda'][1:]))
+    for p, v in zip(low['p_total_mw'], b['vm_pu']):
+        assert v * KV == pytest.approx(_lower_root(p, 0.2 * p), rel=0.01), v
+    assert low['stopped']
+
+
+def test_the_lower_branch_can_be_left_out(client, quiet):
+    r = _post(client, quiet, _system(20.0, 4.0, curve='pv', step=0.25, lower_branch='false'))
+    assert r['lower_branch'] is None
+
+
+def _with_gen(request, q_max):
+    request['6'] = {'typ': 'Generator0', 'name': 'g', 'id': 'cell-g', 'userFriendlyName': 'G', 'bus': 'b', 'p_mw': '0', 'vm_pu': '1.0',
+                    'sn_mva': '50', 'vn_kv': str(KV), 'in_service': 'true', 'min_q_mvar': str(-q_max), 'max_q_mvar': str(q_max),
+                    'xdss_pu': '0.2', 'rdss_ohm': '', 'cos_phi': '0.9', 'scaling': '1', 'slack': 'false', 'controllable': 'true',
+                    'min_p_mw': '', 'max_p_mw': '', 'pg_percent': '', 'power_station_trafo': ''}
+    return request
+
+
+def test_a_generator_at_its_reactive_limit_brings_the_nose_in(client, quiet):
+    """A machine at B holding 1 pu until its 10 Mvar run out: from there a fixed 10 Mvar, and the nose where
+    the quartic's discriminant vanishes with Q = 0.2 P - 10."""
+    held = _post(client, quiet, _with_gen(_system(20.0, 4.0, curve='pv', step=0.25, tolerance=0.001, lower_branch='false'), 10.0))
+    free = _post(client, quiet, _with_gen(_system(20.0, 4.0, curve='pv', step=0.25, tolerance=0.001, lower_branch='false', q_limits='false'), 10.0))
+    assert held['nose']['p_total_mw'] < free['nose']['p_total_mw']
+    (g,) = held['q_limited']
+    assert g['generator'] == 'G' and g['limit'] == 'max' and 1.0 < g['lambda'] < held['nose']['lambda']
+    assert free['q_limited'] == []
+    lo, hi = 1.0, 200.0
+    for _ in range(80):
+        p = 0.5 * (lo + hi)
+        q = 0.2 * p - 10.0
+        c = 2.0 * q * X - KV ** 2
+        lo, hi = (p, hi) if c * c - 4.0 * X * X * (p * p + q * q) >= 0 else (lo, p)
+    assert held['nose']['p_total_mw'] == pytest.approx(lo, rel=0.005)

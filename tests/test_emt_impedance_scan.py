@@ -81,7 +81,7 @@ def test_the_low_band_down_to_a_tenth_of_a_hertz(client, quiet):
     0.1 to 20 Hz, a 10 s window at a coarser step: the exact answer, where the grid's R is most of it. It settles over the load's L
     against that R, 2.7 s here: a 200 ms settling read 10 % low at the lowest tones.
     """
-    z = _run(client, quiet, _system(time_step_us=100, scan_f_min_hz=0.1, scan_f_max_hz=20, scan_points_per_decade=5, scan_settle_ms=14000))
+    z = _run(client, quiet, _system(time_step_us=100, scan_f_min_hz=0.1, scan_f_max_hz=20, scan_points_per_decade=5, scan_settle_ms=14000, scan_windows=1))
     assert z['f_hz'][0] == pytest.approx(0.1) and z['window_s'] == pytest.approx(10.0)
     v2 = (KV * 1e3) ** 2
     for f, mag, ang in zip(z['f_hz'], z['z_ohm'], z['angle_deg']):
@@ -120,3 +120,17 @@ def test_an_inverter_with_its_voltage_loop_is_stiff_low_and_inductive_high(clien
     low = np.abs(r + 1j * x)[f < 150]
     # The 8 % transformer on 110 MVA at those frequencies is well under 0.5 pu; no higher than that.
     assert np.all(low < 0.5 * zb)
+
+
+def test_the_inverters_low_band_says_when_it_has_not_settled(client, quiet):
+    """
+    The same low band: read after 100 ms, its lowest tones still move from one window to the next, and it says
+    which; after a longer settling, read over three windows, none moves by 2 %.
+    """
+    common = dict(time_step_us=50, duration_ms=5, scan_bus='crit', scan_f_min_hz=1, scan_f_max_hz=40, scan_points_per_decade=5, scan_base_mva=100,
+                  gfm_voltage_loop_pcs='inv', frequency=50)
+    early = _run(client, quiet, DC._system(scan_settle_ms=100, **common))
+    assert early['windows'] == 2 and early['unsettled_hz'] and min(early['unsettled_hz']) < 10.0
+    late = _run(client, quiet, DC._system(scan_settle_ms=1500, scan_windows=3, **common))
+    assert late['windows'] == 3 and late['unsettled_hz'] == [], late['change']
+    assert max(late['change']) < 0.02

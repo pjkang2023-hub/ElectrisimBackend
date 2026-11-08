@@ -742,7 +742,10 @@ class _EmtBuilder:
         conv = emt_mmc.Mmc(ckt, label, ac.nodes[ac_bus], p_node, ac.w, ac._v_phasor(ac_bus), ac._injection_phasor(ac_bus, -p, -q), rated * 1e6, vn, v_dc,
                            x_t_pu=col('x_ohm', 0.0) / z if col('x_ohm', 0.0) > 0 else 0.15, r_t_pu=col('r_ohm', 0.0) / z if col('r_ohm', 0.0) > 0 else 0.005,
                            x_arm_pu=col('mmc_x_arm_pu', 0.0) or 0.15, energy_kj_per_mva=col('mmc_energy_kj_per_mva', 0.0) or 30.0, levels=int(col('mmc_levels', 0.0)),
-                           mode='vdc' if holds_dc else 'p', limit_pu=col('current_limit_pu', 1.2))
+                           mode='vdc' if holds_dc else 'p', limit_pu=col('current_limit_pu', 1.2),
+                           cell=str(net.vsc.at[vi, 'mmc_cell']) if 'mmc_cell' in net.vsc.columns and str(net.vsc.at[vi, 'mmc_cell']) == 'full' else 'half',
+                           submodules=int(col('mmc_submodules', 0.0)),
+                           balancing=str(net.vsc.at[vi, 'mmc_balancing'] if 'mmc_balancing' in net.vsc.columns else 'true').strip().lower() not in ('false', '0', 'no'))
         if holds_dc:
             # Its DC bus is held across a capacitor: as much as its arms' own in series, unless drawn.
             c_dc = col('dc_link_mf', 0.0) * 1e-3 or 2.0 * conv.c_arm
@@ -754,8 +757,12 @@ class _EmtBuilder:
         self.series.append(('VSC', label, conv.id, f'{label} (DC side)', ('i_rl', k_dc), -1.0))
         self.ac.series.append(('VSC', label, conv.id, f'{label} (AC side)',
                                [[('i_rl', u, None, 1.0), ('i_rl', d, None, -1.0)] for u, d in zip(conv.k_u, conv.k_l)]))
-        self.warnings.append(f'VSC {label} is modular multilevel with half-bridge submodules: it blocks on arm overcurrent or a trip, '
-                             'and a DC fault is still fed from its AC side through the bypass diodes.')
+        if conv.full:
+            self.warnings.append(f'VSC {label} is modular multilevel with full-bridge submodules: it blocks on arm overcurrent or a trip, '
+                                 'and blocked, its arms stand against a DC fault\'s current both ways.')
+        else:
+            self.warnings.append(f'VSC {label} is modular multilevel with half-bridge submodules: it blocks on arm overcurrent or a trip, '
+                                 'and a DC fault is still fed from its AC side through the bypass diodes.')
 
     def _vsc_on_ac_network(self, vi, label, bus, term, r_dc, blocker):
         """
@@ -1169,12 +1176,21 @@ def emt_study(net, params, in_data=None):
             scan = emt_impedance_scan.ImpedanceScan(ckt, b.ac.nodes[hit[0]], b.ac.vn[hit[0]], params, b.f_hz, dt, _label(net, 'bus', hit[0]))
             t_end = max(t_end, scan.t_end + dt)
             ckt.add_controller(scan.control)
+    # Middlebrook's criterion: its series scan in the named line, built with the lines.
+    series_scan = None
+    if b.ac.middlebrook is not None:
+        mb = b.ac.middlebrook
+        series_scan = emt_impedance_scan.SeriesScan(mb['bus_nodes'], mb['line_nodes'], mb['ks'], mb['vn'], params, b.f_hz, dt, mb['label'])
+        t_end = max(t_end, series_scan.t_end + dt)
+        ckt.add_controller(series_scan.control)
+    elif str(params.get('middlebrook_line') or '').strip():
+        warnings_out.append(f"No line {params.get('middlebrook_line')} for Middlebrook's criterion: the study runs without it.")
     t_fine = min(t_end, (max(event_times) if event_times else 0.0) + 0.01)
     with np.errstate(all='ignore'):
         # A switching converter keeps its fine step throughout: fifty to its switching period at most.
         t_sw = min((1.0 / c.f_sw for c in b.vscs + b.dcdcs if c.model == "switching"), default=None)
         dt_coarse = min(10 * dt, 2e-5) if t_sw is None else max(dt, min(10 * dt, 2e-5, t_sw / 50))
-        if scan is not None or b.ac.fd_lines:
+        if scan is not None or series_scan is not None or b.ac.fd_lines or any(hasattr(c, 'i_from') for c in b.ac.cable_sheaths):
             dt_coarse = dt                  # its tones are read at one step; a travelling wave's history is kept at one
         record_every = max(1, int(_f(params.get('record_every'), max(1.0, 2e-4 / dt) if t_end > 2.0 else 1.0)))
         sim = ckt.simulate(t_end, dt, dt_coarse=dt_coarse, t_fine=t_fine, record_every=record_every)
@@ -1208,6 +1224,7 @@ def emt_study(net, params, in_data=None):
               'resumed': [{'label': c.label, 'blocks_ms': [[_round(a * 1e3), _round(z * 1e3)] for a, z in c.blocks]}
                           for c in b.vscs if getattr(c, 'blocks', None)],
               'impedance_scan': scan.result() if scan is not None else None,
+              'middlebrook': series_scan.result() if series_scan is not None else None,
               'series_ups': [ups.result() for ups in b.upss],
               'double_conversion': [ups.result() for ups in b.doubles],
               'converters': [_converter_result(c, min(event_times, default=t_end)) for c in b.vscs]
@@ -1402,6 +1419,26 @@ def _ac_harmonics(sim, ac, net, cycles, h_max):
     return {'cycles': cycles, 'buses': buses, 'branches': branches}
 
 
+def _rms_final(t, v3, f_nominal):
+    """
+    Each phase's rms over the bus's own last period, the lowest, and that frequency: read from its voltage space vector's
+    turning over the last nominal cycle. Over a fixed nominal period, a voltage 2 Hz off reads 2 % wrong.
+    """
+    sel = t >= t[-1] - 1.0 / f_nominal
+    if sel.sum() < 4:
+        return None, None
+    a = np.exp(2j * math.pi / 3.0)
+    sv = v3[sel, 0] + a * v3[sel, 1] + a * a * v3[sel, 2]
+    if np.min(np.abs(sv)) <= 0:
+        return None, None
+    turn = np.unwrap(np.angle(sv))
+    f = float((turn[-1] - turn[0]) / (t[sel][-1] - t[sel][0]) / (2.0 * math.pi))
+    if not 0.5 * f_nominal < f < 1.5 * f_nominal:
+        return None, None
+    last = t > t[-1] - 1.0 / f
+    return min(float(np.sqrt(np.mean(v3[last, k] ** 2))) for k in range(3)), f
+
+
 def _ac_results(sim, ac, net, t_fine, fault):
     """Three-phase bus voltages with their lowest rms over a cycle, phase currents, the fault's."""
     if not ac.nodes:
@@ -1423,7 +1460,11 @@ def _ac_results(sim, ac, net, t_fine, fault):
                 if r[j] < rms_min:
                     rms_min, t_min = float(r[j]), float(t[j])
                 rms_end.append(float(r[-1]))
+        own, f_end = _rms_final(t, sim['v'][:, nodes], ac.f_hz)
+        if own is not None:
+            rms_end = [own]
         buses.append({'name': str(net.bus.at[b, 'name']), 'id': _row_id(net, 'bus', b), 'label': _label(net, 'bus', b),
+                      'f_end_hz': _round(f_end) if f_end is not None else None,
                       'vn_kv': ac.vn[b] / 1e3, 'vuf_end_percent': _vuf_end(t, sim['v'][:, nodes], ac.f_hz),
                       # its zero-sequence voltage over the last cycle (a 59N's displacement), per unit of the phase's
                       'v0_end_pu': _round(_fundamental_end(t, sim['v'][:, nodes].sum(axis=1) / 3.0, ac.f_hz) / v_ph),
@@ -1585,9 +1626,16 @@ def _cable_sheath_result(sim, cable, f_hz):
     nodes = sorted({n for ring in cable.sheath_nodes + cable.joints for n in ring})
     v_peak = float(np.max(np.abs(sim['v'][:, nodes]))) if nodes else 0.0
     standing = max((float(np.sqrt(np.mean(sim['v'][last, n] ** 2))) for n in nodes), default=0.0)
-    i = sim['i_cp'][cable.groups[0]]
-    rms = [float(np.sqrt(np.mean(i[last, k] ** 2))) for k in range(6)]
+    if hasattr(cable, 'i_from'):
+        # The wideband model: its from end's conductor currents, step by step.
+        i = np.array(cable.i_from)
+        n = max(1, int(round(1.0 / f_hz / max(t[-1] / max(len(i), 1), 1e-12))))
+        rms = [float(np.sqrt(np.mean(i[-n:, k] ** 2))) for k in range(6)]
+    else:
+        i = sim['i_cp'][cable.groups[0]]
+        rms = [float(np.sqrt(np.mean(i[last, k] ** 2))) for k in range(6)]
     return {'label': cable.label, 'bonding': cable.bonding, 'formation': getattr(cable, 'formation', 'trefoil'),
+            'model': 'wideband' if hasattr(cable, 'i_from') else 'fundamental',
             'sheath_v_peak_kv': _round(v_peak * 1e-3), 'sheath_v_standing_kv': _round(standing * 1e-3),
             'core_i_a': [_round(x) for x in rms[:3]], 'sheath_i_a': [_round(x) for x in rms[3:]]}
 
@@ -1598,7 +1646,13 @@ def _machine_result(m):
     out = {'label': m.label, 'id': m.row_id, 'governor': bool(m.gov), 'exciter': bool(m.exc)}
     if isinstance(m, emt_machine.ParkMachine):
         out.update(model='detailed', efd_start_pu=_round(m.efd0), efd_end_pu=_round(m.efd),
-                   exciter_model=m.exc_name, governor_model=m.gov_name)
+                   exciter_model=m.exc_name, governor_model=m.gov_name, pss_model=m.pss_name)
+        if m.limiters is not None:
+            out.update(ifd_end_pu=_round(getattr(m, 'ifd', None)) if getattr(m, 'ifd', None) is not None else None,
+                       oel_acted_s=m.limiters.oel_picked_s, uel_acted_s=m.limiters.uel_acted_s)
+        if m.shaft is not None:
+            out['shaft'] = {'modes_hz': [_round(x) for x in m.shaft.frequencies()], 'torque_start_pu': [_round(x) for x in m.shaft.torque0],
+                            'torque_max_pu': [_round(x) for x in m.shaft.torque_max]}
         if m.exc_name:
             out['exciter'] = True
         if m.gov_name:
@@ -1631,6 +1685,11 @@ def _converter_result(conv, t_event):
            'rated_mva': _round(conv.s_rated / 1e6), 'current_limit_ka': _round(conv.i_max / SQ2 / 1e3),
            'blocked_ms': _round(conv.blocked_at * 1e3) if conv.blocked_at is not None else None,
            'limited_ms': _round(conv.limited_time * 1e3)}
+    if conv.model == 'mmc':
+        out['cell'] = 'full' if conv.full else 'half'
+        sm = conv.sm_result(conv.t_last)
+        if sm is not None:
+            out['submodules'] = {k: (_round(v) if isinstance(v, float) else v) for k, v in sm.items()}
     if getattr(conv, 'ease', None) is not None or getattr(conv, 'uv', None) is not None:
         # A rectifier easing off as its island's frequency fell or its voltage dipped: how long, how far.
         out.update(eased_ms=_round(conv.eased_time * 1e3), ease_min_pu=_round(conv.ease_min),

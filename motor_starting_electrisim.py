@@ -613,6 +613,18 @@ def _derive_motor3_params(el: Dict[str, Any], warnings: List[str]) -> Dict[str, 
     }
 
 
+def motor3_torque(mparams: Dict[str, Any], sb: float) -> Dict[str, float]:
+    """
+    ANDES puts Motor3's impedances and Hm on the system base but not c1..c3, which act directly on the
+    system-base torque balance - and its Tm(slip) = (c1+c2+c3) - (c2+2*c3)*slip + c2*slip^2 has c2 where the
+    expansion of c1 + c2*w + c3*w^2 in w = 1 - slip has c3. The coefficients that give the drawn curve, in pu of
+    the system base, at the motor's loading (pn_mech_mw).
+    """
+    tm_scale = mparams["pn_mech_mw"] / sb
+    c1, c2, c3 = mparams["c1"], mparams["c2"], mparams["c3"]
+    return {"c1": (c1 + (c2 - c3) / 2.0) * tm_scale, "c2": c3 * tm_scale, "c3": (c2 + c3) / 2.0 * tm_scale}
+
+
 def _dynamic_start(params: Dict[str, Any], in_data: Dict[str, Any]) -> Dict[str, Any]:
     if not _HAS_ANDES:
         return {
@@ -919,16 +931,8 @@ def _build_system_with_motors(
         mname = mparams.pop("name")
         lrc = mparams.pop("lrc_pu")
         sn_rated = mparams["Sn"]
-        # ANDES puts Motor3's impedances and Hm on the system base but not
-        # c1..c3, which act directly on the system-base torque balance - and
-        # its Tm(slip) = (c1+c2+c3) - (c2+2*c3)*slip + c2*slip^2 has c2 where
-        # the expansion of c1 + c2*w + c3*w^2 in w = 1 - slip has c3. Pass the
-        # coefficients that give the drawn curve, in pu of the system base.
-        tm_scale = mparams.pop("pn_mech_mw") / sb
-        c1, c2, c3 = mparams["c1"], mparams["c2"], mparams["c3"]
-        mparams["c1"] = (c1 + (c2 - c3) / 2.0) * tm_scale
-        mparams["c2"] = c3 * tm_scale
-        mparams["c3"] = (c2 + c3) / 2.0 * tm_scale
+        mparams.update(motor3_torque(mparams, sb))
+        mparams.pop("pn_mech_mw")
         note = None
         applied_method = "dol"
         if method == "soft_start":

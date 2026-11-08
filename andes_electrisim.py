@@ -73,7 +73,8 @@ _EXCITER_DEFAULTS: Dict[str, Dict[str, float]] = {
     "ESDC2A": {"TR": 0.01, "KA": 20.0, "TA": 0.2, "VRMAX": 5.0, "VRMIN": -5.0},
     "EXST1": {"TR": 0.01, "KA": 100.0, "TA": 0.05, "VRMAX": 5.0, "VRMIN": -5.0},
     "ESST1A": {"TR": 0.01, "KA": 100.0, "TA": 0.05, "VRMAX": 5.0, "VRMIN": -5.0},
-    "AC8B": {"TR": 0.01, "KA": 40.0, "TA": 0.05, "VRMAX": 5.0, "VRMIN": -5.0},
+    # KA 4: at 40 its PID loop limit-cycles (in ANDES and the EMT alike) on a plain load step.
+    "AC8B": {"TR": 0.01, "KA": 4.0, "TA": 0.05, "VRMAX": 5.0, "VRMIN": -5.0},
 }
 
 _GOVERNOR_DEFAULTS: Dict[str, Dict[str, float]] = {
@@ -95,7 +96,11 @@ _GOVERNOR_DEFAULTS: Dict[str, Dict[str, float]] = {
     "HYGOV": {"R": 0.05},
 }
 
-_PSS_DEFAULTS = {"IEEEST": {"A1": 0.1, "A2": 0.1, "A3": 0.1, "A4": 0.1, "A5": 0.1, "A6": 0.1}}
+# IEEEST on the machine's speed (MODE 1): its filters left out (A1..A6 0), two lead-lags of 0.15 s over 0.05 s, a
+# 2 s washout, gain 10 within +/-0.1 pu, no voltage window (VCU, VCL 0).
+_PSS_DEFAULTS = {"IEEEST": {"MODE": 1, "A1": 0.0, "A2": 0.0, "A3": 0.0, "A4": 0.0, "A5": 0.0, "A6": 0.0,
+                            "T1": 0.15, "T2": 0.05, "T3": 0.15, "T4": 0.05, "T5": 2.0, "T6": 2.0, "KS": 10.0,
+                            "LSMAX": 0.1, "LSMIN": -0.1, "VCU": 0.0, "VCL": 0.0}}
 
 _RENEWABLE_DEFAULTS: Dict[str, Dict[str, float]] = {
     "REGCA1": {"Tg": 0.02, "Lvplsw": 1.0, "Volim": 1.2, "Lvpnt0": 0.4, "Iolim": -1.5},
@@ -976,6 +981,68 @@ _LOAD_MODELS = {"impedance": (0.0, 0.0, 1.0), "current": (0.0, 1.0, 0.0), "power
 _LOAD_MODEL_NAMES = {"impedance": "constant impedance", "current": "constant current", "power": "constant power"}
 
 
+def _motor3_steady(ss, k: int) -> Optional[Dict[str, float]]:
+    """
+    Motor3 number k's steady state at its bus's voltage: the slip where its electrical torque meets its load's,
+    the smallest one (the stable side of its curve), and its other variables there; None where its load is above
+    its pull-out torque. Its equations at rest (dx/dt = 0) are linear in e'd, e'q, Id, Iq for a given slip.
+    """
+    m = ss.Motor3
+    v = float(ss.Bus.v.v[ss.Bus.idx2uid(m.bus.v[k])])
+    a = float(ss.Bus.a.v[ss.Bus.idx2uid(m.bus.v[k])])
+    vd, vq = -v * math.sin(a), v * math.cos(a)
+    rs, x0, x1, t10, wb = (float(getattr(m, n).v[k]) for n in ("rs", "x0", "x1", "T10", "wb"))
+    aa, bb, c2 = (float(getattr(m, n).v[k]) for n in ("aa", "bb", "c2"))
+
+    def state(s: float):
+        # unknowns e1d, e1q, Id, Iq
+        mat = np.array([[-1.0 / t10, wb * s, 0.0, -(x0 - x1) / t10],
+                        [-wb * s, -1.0 / t10, (x0 - x1) / t10, 0.0],
+                        [-1.0, 0.0, -rs, x1],
+                        [0.0, -1.0, -x1, -rs]])
+        e1d, e1q, i_d, i_q = np.linalg.solve(mat, np.array([0.0, 0.0, -vd, -vq]))
+        te = e1d * i_d + e1q * i_q
+        return te - (aa + bb * s + c2 * s * s), (e1d, e1q, i_d, i_q, te)
+
+    grid = np.concatenate((np.geomspace(1e-7, 0.05, 400), np.linspace(0.05, 1.0, 400)[1:]))
+    f = [state(s)[0] for s in grid]
+    for i in range(len(grid) - 1):
+        if f[i] < 0.0 <= f[i + 1]:
+            lo, hi = grid[i], grid[i + 1]
+            for _ in range(60):
+                mid = 0.5 * (lo + hi)
+                lo, hi = (mid, hi) if state(mid)[0] < 0.0 else (lo, mid)
+            s = 0.5 * (lo + hi)
+            e1d, e1q, i_d, i_q, te = state(s)[1]
+            return {"slip": s, "e1d": e1d, "e1q": e1q, "Id": i_d, "Iq": i_q, "te": te, "tm": te, "vd": vd, "vq": vq,
+                    "p": vd * i_d + vq * i_q, "q": vq * i_d - vd * i_q}
+    return None
+
+
+def _seed_running_motors(ss, warnings: List[str]) -> None:
+    """
+    ANDES starts a running Motor3's power flow at standstill (slip 1, Id 1), from which its Newton steps can fail
+    (and its sparse solver crash): after ANDES's own start, each one's steady state at its bus's voltage.
+    """
+    pflow = ss.PFlow
+    first = pflow.init
+
+    def init():
+        first()
+        for k in range(ss.Motor3.n):
+            if not ss.Motor3.u.v[k]:
+                continue
+            seed = _motor3_steady(ss, k)
+            if seed is None:
+                warnings.append(f"Motor '{ss.Motor3.name.v[k]}': its load is above its pull-out torque at its bus's "
+                                "starting voltage; its power flow starts from standstill.")
+                continue
+            for name, value in seed.items():
+                getattr(ss.Motor3, name).v[k] = value
+
+    pflow.init = init
+
+
 def build_system(
     in_data: Dict[str, Any],
     params: Optional[Dict[str, Any]] = None,
@@ -1413,7 +1480,10 @@ def build_system(
             q0=_sf(el.get("q_mvar")) * scaling / sn_base,
         )
 
-    # --- Motors: the load pandapower gives them in a power flow ---
+    # --- Motors: the load pandapower gives them in a power flow, or (motor_model "dynamic") ANDES's Motor3,
+    # its slip and inertia in the study, from the data the motor starting study derives ---
+    dynamic_motors = str(params.get("motor_model") or "static").strip().lower() == "dynamic"
+    meta_motors: List[Dict[str, Any]] = []
     for _, el, typ in _iter_elements(in_data):
         if not typ.startswith("Motor") or "Parameters" in typ:
             continue
@@ -1423,6 +1493,19 @@ def build_system(
         if bus is None:
             _warn_no_bus(warnings, el, typ)
         if bus is None or not _sb(el.get("in_service"), True):
+            continue
+        if dynamic_motors:
+            import motor_starting_electrisim as mse
+            mp = mse._derive_motor3_params(el, warnings)
+            scale = _sf(el.get("scaling"), 1.0)
+            mp["pn_mech_mw"] *= scale
+            midx = f"Motor_{len(meta_motors) + 1}"
+            ss.add("Motor3", idx=midx, name=mp["name"], bus=bus, Sn=mp["Sn"] * scale, Vn=bus_vn.get(bus, mp["Vn"]),
+                   fn=freq, rs=mp["rs"], xs=mp["xs"], rr1=mp["rr1"], xr1=mp["xr1"], xm=mp["xm"], Hm=mp["Hm"],
+                   **mse.motor3_torque(mp, sn_base))
+            if not meta_motors:
+                _seed_running_motors(ss, warnings)
+            meta_motors.append({"idx": midx, "name": mp["name"], "sn_mva": mp["Sn"] * scale})
             continue
         eff = _sf(el.get("efficiency_percent"), 100.0) or 100.0
         p_mw = (_sf(el.get("pn_mech_mw")) * _sf(el.get("loading_percent"), 100.0) / eff
@@ -1684,9 +1767,13 @@ def build_system(
             if xq2_given > 0 and abs(xq2_given - kw["xd2"]) > 1e-9:
                 defaults_applied.append(
                     f"Generator '{ufname}': GENROU needs xq'' = xd'', so xq2={xq2_given:g} "
-                    f"was replaced by xd2={kw['xd2']:g}."
+                    f"was replaced by xd2={kw['xd2']:g} (the EMT study's detailed machine takes it)."
                 )
             kw["xq2"] = kw["xd2"]
+            # Its saturation, where its row gives it (ANDES's quadratic through S(1.0) and S(1.2), as the EMT's).
+            for key in ("S10", "S12"):
+                if el.get(f"dyn_{key}") not in (None, "", "null", "None"):
+                    kw[key] = max(_sf(el.get(f"dyn_{key}"), 0.0), 0.0)
             ss.add("GENROU", **kw)
 
         if used_defaults:
@@ -1710,6 +1797,9 @@ def build_system(
             )
             if all(el.get(k) in (None, "", "null") for k in ("dyn_exciter_model", "dyn_exc_KA", "dyn_exc_K")):
                 defaults_applied.append(f"Generator '{ufname}': applied default {exc_model} exciter.")
+            if any(el.get(k) not in (None, "", "null") for k in ("dyn_oel_ifd_pu", "dyn_uel_q0_pu")):
+                defaults_applied.append(f"Generator '{ufname}': its excitation limiters (OEL, UEL) are modelled in the "
+                                        "EMT study only; ANDES has no limiter models, so this study runs without them.")
 
         # Governor
         gov_model = (el.get("dyn_governor_model") or "TGOV1").strip().upper()
@@ -1730,11 +1820,15 @@ def build_system(
 
         pss_model = (el.get("dyn_pss_model") or "NONE").strip().upper()
         pss_idx = None
-        if pss_model == "IEEEST":
+        if pss_model == "IEEEST" and exc_idx is None:
+            defaults_applied.append(f"Generator '{ufname}': its PSS needs an exciter to act through; omitted.")
+        elif pss_model == "IEEEST":
+            # ANDES links a stabiliser to its exciter (avr), the machine following from it.
+            pss_kw = _model_kwargs(el, "dyn_pss_", _PSS_DEFAULTS["IEEEST"])
+            pss_kw["MODE"] = int(round(pss_kw["MODE"])) if 1 <= round(pss_kw["MODE"]) <= 6 else 1
             pss_idx = _add_model_safe(
                 ss, "IEEEST", defaults_applied, f"Generator '{ufname}'",
-                idx=f"IEEEST_{gen_count}", name=f"IEEEST_{ufname}", syn=syn_idx,
-                **_model_kwargs(el, "dyn_pss_", _PSS_DEFAULTS["IEEEST"]),
+                idx=f"IEEEST_{gen_count}", name=f"IEEEST_{ufname}", avr=exc_idx, **pss_kw,
             )
         elif pss_model not in ("", "NONE", "OFF"):
             defaults_applied.append(f"Generator '{ufname}': unknown PSS '{pss_model}', omitted.")
@@ -2118,6 +2212,7 @@ def build_system(
         "n_renewable_plants": renewable_count,
         "n_pcs": pcs_count,
         "n_buses": len(bus_name_by_idx),
+        "motors": meta_motors,
         "islanded_after": islanded_after,
         "timed_events": timed_events,
         "ups_loads": ups_loads,
@@ -3144,6 +3239,20 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
 
         pcs = _pcs_series(ss, meta, idx)
         _warn_island_starts_charging(ss, meta, pcs)
+        # Running motors as Motor3 (motor_model "dynamic"): each one's slip and power.
+        motors = []
+        if meta.get("motors") and hasattr(ss, "Motor3") and ss.Motor3.n:
+            slip, p_m = tds_values(ss, ss.Motor3.slip), tds_values(ss, ss.Motor3.p)
+            uid = {str(i): k for k, i in enumerate(ss.Motor3.idx.v)}
+            for rec in meta["motors"]:
+                k = uid.get(rec["idx"])
+                if k is None:
+                    continue
+                sl = slip[:, k] if slip.ndim == 2 else slip
+                pm = p_m[:, k] if p_m.ndim == 2 else p_m
+                motors.append({"name": rec["name"], "slip": [_clean_num(float(x)) for x in sl[idx].tolist()],
+                               "p_mw": [_clean_num(float(x) * meta["sn_mva"]) for x in pm[idx].tolist()],
+                               "slip_max": _clean_num(float(np.max(sl))), "stalled": bool(np.max(sl) > 0.5)})
         swing_metrics = _swing_metrics(ss, t, meta, params)
 
         # Frequency estimate from mean omega (pu → Hz); without a machine, the grid-forming PCS's
@@ -3265,6 +3374,7 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
             "generator_p_mw": power,
             "bus_voltage": bus_v,
             "pcs": pcs,
+            "motors": motors,
             "frequency_hz": [_clean_num(float(x)) for x in freq_hz] if freq_hz is not None else None,
             "tf": tf,
             "n_points": int(len(t_ds)),

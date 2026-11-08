@@ -63,6 +63,31 @@ def parse_vector_group(vector_group, shift_degree=0.0):
     return hv_c, hv == 'YN', lv_c, lv == 'yn', clock, assumed
 
 
+def parse_vector_group_3w(vector_group, shift_mv, shift_lv):
+    """
+    A three-winding transformer's connections and clocks: (HV connection, grounded), (MV ..., clock), (LV ..., clock),
+    assumed. pandapower names its groups without clock numbers ('YNynd'); the load flow's shifts give them, a
+    winding unlike the HV's with no shift taken as clock 11 (and said so).
+    """
+    letters = re.findall(r'YN|yn|Y|y|D|d|Z|z', str(vector_group or 'YNynd'))
+    if len(letters) != 3:
+        letters = ['YN', 'yn', 'd']
+    hv, mv, lv = letters
+    conn = lambda x: 'D' if x.upper() == 'D' else 'Y'
+    assumed = False
+    clocks = []
+    for side, shift in ((mv, shift_mv), (lv, shift_lv)):
+        shift = _f(shift, 0.0)
+        if abs(shift) > 1e-9:
+            clocks.append(int(round(shift / 30.0)) % 12)
+        elif conn(side) == conn(hv):
+            clocks.append(0)
+        else:
+            clocks.append(11)
+            assumed = True
+    return (conn(hv), hv == 'YN'), (conn(mv), mv == 'yn', clocks[0]), (conn(lv), lv == 'yn', clocks[1]), assumed
+
+
 def winding_pairs(hv_c, lv_c, clock):
     """
     For each single-phase unit k: the HV winding's (from, to) phase indices and
@@ -127,6 +152,7 @@ class AcBuilder:
         self.line_rows = {}      # line name -> its diagram row (its frequency-dependent line's geometry)
         self.fd_lines = []       # emt_fd_line.FdLine, one per line modelled so
         self.cable_sheaths = []  # emt_cable.CableSheaths, one per cable modelled with its sheaths
+        self.middlebrook = None  # the series scan's nodes and sources, where the study names a line for one
         self.machines = []       # emt_machine.SynchronousMachine, one per generator modelled as a machine
         t_island = _f(params.get('island_time_ms'), -1.0) if str(params.get('island_time_ms') or '').strip() else -1.0
         # Islanding: {'t', 'switches': per grid phase, 'opened': its time, 'last': its last current}.
@@ -178,7 +204,7 @@ class AcBuilder:
         self._energised_shunt()
         self._energised_trafo()
         self._generation()
-        for table in ('trafo3w', 'impedance', 'ward', 'xward', 'dcline'):
+        for table in ('impedance', 'ward', 'xward', 'dcline'):
             if table in net and len(net[table]) and net[table]['in_service'].astype(bool).any():
                 self.left_out.add(table)
         if self.left_out:
@@ -219,6 +245,17 @@ class AcBuilder:
                 if a in adj and b in adj:
                     adj[a].append((b, 0.0))
                     adj[b].append((a, 0.0))
+        if 'trafo3w' in net and len(net.trafo3w):
+            for ti in net.trafo3w.index:
+                hv, mv, lv = (int(net.trafo3w.at[ti, k]) for k in ('hv_bus', 'mv_bus', 'lv_bus'))
+                col = lambda c: _f(net.trafo3w.at[ti, c], 0.0) if c in net.trafo3w.columns else 0.0
+                _, (_, _, c_mv), (_, _, c_lv), _ = parse_vector_group_3w(
+                    net.trafo3w.at[ti, 'vector_group'] if 'vector_group' in net.trafo3w.columns else 'YNynd', col('shift_mv_degree'), col('shift_lv_degree'))
+                for other, clock, shift in ((mv, c_mv, col('shift_mv_degree')), (lv, c_lv, col('shift_lv_degree'))):
+                    if hv in adj and other in adj:
+                        d = -clock * math.pi / 6.0 + math.radians(shift)
+                        adj[hv].append((other, d))
+                        adj[other].append((hv, -d))
         for ti in net.trafo.index:
             hv, lv = int(net.trafo.at[ti, 'hv_bus']), int(net.trafo.at[ti, 'lv_bus'])
             if hv not in adj or lv not in adj:
@@ -388,8 +425,20 @@ class AcBuilder:
             self.warnings.append(f'Line {label} runs as pi sections without its sheaths: {why}.')
             return False
         formation = 'flat' if str(row.get('fd_formation') or '').strip().lower() == 'flat' else 'trefoil'
+        majors = int(_f(row.get('fd_major_sections'), 1.0))
+        # Wideband (fd_sheath_model 'wideband'): cores and sheaths as the universal line model, for travelling waves too.
+        if str(row.get('fd_sheath_model') or self.params.get('fd_sheath_model') or '').strip().lower() == 'wideband':
+            dt = max(_f(self.params.get('time_step_us'), 1.0), 0.01) * 1e-6
+            try:
+                cable = emt_cable.WidebandCable(self.ckt, start, stop, g, km, dt, self.w, label, bonding=bonding, formation=formation,
+                                                major_sections=majors)
+            except ValueError as exc:
+                self.warnings.append(f'Line {label}: its wideband model cannot be made ({exc}), so its sheaths run at the fundamental.')
+            else:
+                self.cable_sheaths.append(cable)
+                return True
         cable = emt_cable.CableSheaths(self.ckt, start, stop, g, km, self.f_hz, label, bonding=bonding, formation=formation,
-                                       major_sections=int(_f(row.get('fd_major_sections'), 1.0)), sections=int(_f(row.get('fd_sections'), 4.0)))
+                                       major_sections=majors, sections=int(_f(row.get('fd_sections'), 4.0)))
         cable.formation = formation
         self.cable_sheaths.append(cable)
         self.series.append(('Line', label, _row_id(self.net, 'line', li), f'{label} (from end)', [('i_cp', cable.groups[0], k, 1.0) for k in range(3)]))
@@ -412,31 +461,69 @@ class AcBuilder:
             return self._cable_sheaths(li, row, start, stop, km, par, label, bonding)
         fields = emt_fd_line.CABLE_FIELDS if cable else emt_fd_line.FIELDS
         geometry = {k: _f(row.get(f'fd_{k}'), _f(self.params.get(f'fd_{k}'), 0.0)) for k in fields}
+        # Untransposed (fd_transposed 'false'), or its conductors where they are (fd_conductors 'x,y; ...', one
+        # three per circuit: two circuits on its towers when its row's parallel is 2).
+        xy = None if cable else emt_fd_line.parse_conductors(row.get('fd_conductors') or self.params.get('fd_conductors'))
+        if not cable:
+            transposed = str(row.get('fd_transposed') or self.params.get('fd_transposed') or 'true').strip().lower()
+            geometry['transposed'] = transposed not in ('false', '0', 'no')
+            geometry['transform_hz'] = _f(row.get('fd_transform_hz'), _f(self.params.get('fd_transform_hz'), 1000.0))
+            if xy:
+                geometry['conductors'] = xy
+                geometry.pop('height_m')
+                geometry.pop('spacing_m')
         why = None
-        missing = [k for k, v in geometry.items() if v <= 0]
+        missing = [k for k, v in geometry.items() if k not in ('transposed', 'transform_hz', 'conductors') and v <= 0]
+        n_circuits = int(round(par))
         if missing:
             why = 'it needs ' + ', '.join(f'fd_{k}' for k in missing)
-        elif par != 1.0:
-            why = 'parallel circuits are not modelled'
-        elif self.fault_line is not None and self.fault_line[0] == li:
-            why = 'a fault along it is not modelled'
+        elif xy and len(xy) != 3 * n_circuits:
+            why = f'its fd_conductors give {len(xy)} conductors, not three for each of its {n_circuits} circuit(s)'
+        elif xy and min(y for _, y in xy) <= geometry['radius_m']:
+            why = 'its conductors must be above the ground'
+        elif (xy or not geometry.get('transposed', True)) and abs(par - n_circuits) > 1e-9:
+            why = 'its parallel count must be whole'
         elif cable and geometry['insulation_radius_m'] <= geometry['core_radius_m']:
             why = 'its insulation radius must be above its core radius'
+        lines = []
         if why is None:
             dt = max(_f(self.params.get('time_step_us'), 1.0), 0.01) * 1e-6
             if cable:
                 geometry['kind'] = 'cable'
+            # Coupled circuits are its conductors; circuits with no geometry of their own share its impedance.
+            coupled = bool(xy) or not geometry.get('transposed', True)
+            share = 1.0 if coupled else par
+            ends = lambda nodes: list(nodes) * (n_circuits if coupled else 1)
+            # At a fault along it, two lines either side of the fault point.
+            parts = [(start, stop, km)]
+            if self.fault_line is not None and self.fault_line[0] == li:
+                frac = self.fault_line[1]
+                point = [self.ckt.node(f'{label} fault point {p}') for p in 'abc']
+                parts = [(start, point, km * frac), (point, stop, km * (1.0 - frac))]
             try:
-                line = emt_fd_line.FdLine(self.ckt, start, stop, geometry, km, dt, self.w, label)
+                for a_end, b_end, part_km in parts:
+                    lines.append(emt_fd_line.FdLine(self.ckt, ends(a_end), ends(b_end), geometry, part_km, dt, self.w,
+                                                    label if len(parts) == 1 else f'{label} ({part_km:g} km part)', par=share))
             except ValueError as exc:
                 why = str(exc)
         if why is not None:
             self.warnings.append(f'Line {label} runs as pi sections, not frequency-dependent: {why}.')
             return False
-        self.ckt.add_controller(line.control)
-        self.fd_lines.append(line)
-        z1 = (emt_fd_line.per_km_cable(np.array([self.f_hz]), geometry)[0] if cable
-              else emt_fd_line.per_km(np.array([self.f_hz]), geometry)[0])
+        if len(parts) == 2:
+            self.fault_point = parts[0][1]
+        for line in lines:
+            self.ckt.add_controller(line.control)
+            self.fd_lines.append(line)
+        if xy or not geometry.get('transposed', True):
+            # Its positive sequence at the fundamental, for the check against its row: the folded phase impedance's.
+            z, y = emt_fd_line.per_km_matrix(np.array([self.f_hz]), geometry)
+            pm = np.kron(np.ones((n_circuits, 1)), np.eye(3))
+            zp = np.linalg.inv(pm.T @ np.linalg.inv(z[0]) @ pm)
+            z1 = [np.mean([zp[i, i] for i in range(3)]) - np.mean([zp[i, j] for i in range(3) for j in range(3) if i != j])]
+            z1 = [z1[0] * n_circuits]   # per circuit, as its row gives it
+        else:
+            z1 = (emt_fd_line.per_km_cable(np.array([self.f_hz]), geometry)[0] if cable
+                  else emt_fd_line.per_km(np.array([self.f_hz]), geometry)[0])
         r1, x1 = _f(self.net.line.at[li, 'r_ohm_per_km'], 0.0), _f(self.net.line.at[li, 'x_ohm_per_km'], 0.0)
         if abs(complex(r1, x1) - z1[0]) > 0.1 * abs(z1[0]):
             self.warnings.append(f'Line {label}: its geometry gives {z1[0].real:.3f} + j{z1[0].imag:.3f} ohm/km at the fundamental, its row {r1:.3f} + j{x1:.3f}: '
@@ -473,6 +560,13 @@ class AcBuilder:
                         trip['last'].append(None)
                     own_ends.append(end)
                 start, stop = own_ends
+            # Middlebrook's series scan: its sources between the bus and the line (emt_impedance_scan.SeriesScan).
+            target = str(self.params.get('middlebrook_line') or '').strip()
+            if target and target in (str(self.net.line.at[li, 'name']), str(_row_id(self.net, 'line', li)), label):
+                mid = [ckt.node(f'{label} series scan {p}') for p in 'abc']
+                ks = [ckt.add_rl(start[ph], mid[ph], 1e-6, 0.0, controlled=True) for ph in range(3)]
+                self.middlebrook = {'bus_nodes': list(start), 'line_nodes': mid, 'ks': ks, 'vn': self.vn[fb], 'label': label}
+                start = mid
             ups = self.series_ups.get(li)
             if ups is not None:
                 # A series-reactor UPS: its static disconnect before the reactor, its bypass around both.
@@ -557,6 +651,12 @@ class AcBuilder:
             unit = self._trafo(ti, self.nodes[hv], self.nodes[lv])
             if str(self.params.get('trafo_saturation') or '').strip().lower() == 'all':
                 self.sat_cores.extend(self._saturable_cores(unit, self._remanence()))
+        if 'trafo3w' in net and len(net.trafo3w):
+            for ti in net.trafo3w.index:
+                buses = [int(net.trafo3w.at[ti, k]) for k in ('hv_bus', 'mv_bus', 'lv_bus')]
+                if not bool(net.trafo3w.at[ti, 'in_service']) or any(b not in self.nodes for b in buses):
+                    continue
+                self._trafo3w(ti, *[self.nodes[b] for b in buses])
 
     def _remanence(self):
         """Each core's remanent flux, per unit of its rated peak (trafo_remanence_pu; default 0.8, -0.4, -0.4)."""
@@ -688,6 +788,86 @@ class AcBuilder:
         self.series.append(('Transformer', label, _row_id(net, 'trafo', ti), f'{label} (HV side)', phases))
         self.trafos.append({'label': label, 'clock': clock, 'groups': groups})
         return {'label': label, 'groups': groups, 'vw1': vw1, 'zb1': zb1, 'xk': xk, 's_ph': s_ph}
+
+    def _trafo3w(self, ti, hv_nodes, mv_nodes, lv_nodes):
+        """
+        One three-winding transformer: three single-phase units, each three windings on one core. Its leakage as
+        pandapower's own star equivalent (each pair's short-circuit voltage on the smaller of their ratings, turned to
+        the HV rating and split among the windings), its magnetising and iron loss on the HV side.
+        """
+        net, ckt, w = self.net, self.ckt, self.w
+        label = _label(net, 'trafo3w', ti)
+        col = lambda c, d: _f(net.trafo3w.at[ti, c], d) if c in net.trafo3w.columns else d
+        (hv_c, hv_g), (mv_c, mv_g, c_mv), (lv_c, lv_g, c_lv), assumed = parse_vector_group_3w(
+            net.trafo3w.at[ti, 'vector_group'] if 'vector_group' in net.trafo3w.columns else 'YNynd', col('shift_mv_degree', 0.0), col('shift_lv_degree', 0.0))
+        if assumed:
+            self.warnings.append(f"Transformer {label}: a delta winding with no load-flow shift - taken as clock 11.")
+        sn = np.array([col('sn_hv_mva', 1.0), col('sn_mv_mva', 1.0), col('sn_lv_mva', 1.0)])
+        s_ph = sn[0] * 1e6 / 3.0
+        v = [col('vn_hv_kv', 1.0) * 1e3, col('vn_mv_kv', 1.0) * 1e3, col('vn_lv_kv', 1.0) * 1e3]
+        tap = (col('tap_pos', 0.0) - col('tap_neutral', 0.0)) * col('tap_step_percent', 0.0) / 100.0
+        side = str(net.trafo3w.at[ti, 'tap_side'] if 'tap_side' in net.trafo3w.columns else 'hv')
+        v[{'hv': 0, 'mv': 1, 'lv': 2}.get(side, 0)] *= 1.0 + tap
+        conns = (hv_c, mv_c, lv_c)
+        vw = [v[k] / math.sqrt(3.0) if conns[k] == 'Y' else v[k] for k in range(3)]
+        # Each pair's short-circuit voltage on the HV rating, then the star: hv-mv, mv-lv, lv-hv as pandapower orders them.
+        pair_s = [min(sn[0], sn[1]), min(sn[1], sn[2]), min(sn[0], sn[2])]
+        vk = np.array([col('vk_hv_percent', 10.0), col('vk_mv_percent', 10.0), col('vk_lv_percent', 10.0)]) / 100.0 * sn[0] / np.array(pair_s)
+        vkr = np.array([col('vkr_hv_percent', 0.3), col('vkr_mv_percent', 0.3), col('vkr_lv_percent', 0.3)]) / 100.0 * sn[0] / np.array(pair_s)
+        vki = np.sqrt(np.maximum(vk * vk - vkr * vkr, 1e-12))
+        star = lambda z: 0.5 * np.array([z[0] + z[2] - z[1], z[1] + z[0] - z[2], z[2] + z[1] - z[0]])
+        x_star, r_star = star(vki), star(vkr)
+        if np.any(x_star < 1e-4):
+            self.warnings.append(f"Transformer {label}: its star equivalent has a negative or zero leakage, {', '.join(f'{x:.4f}' for x in x_star)} pu: "
+                                 'taken as 0.0001 pu there, which the EMT needs to stay passive.')
+            x_star = np.maximum(x_star, 1e-4)
+        r_star = np.maximum(r_star, 0.0)
+        zb = [vw[k] * vw[k] / s_ph for k in range(3)]
+        i0 = col('i0_percent', 0.0)
+        xm = 100.0 / i0 if i0 > 0 else 1000.0
+        lm1 = xm * zb[0] / w
+        n = np.array([1.0, vw[1] / vw[0], vw[2] / vw[0]])
+        r_m = np.diag([r_star[k] * zb[k] for k in range(3)])
+        l_m = lm1 * np.outer(n, n) + np.diag([x_star[k] * zb[k] / w for k in range(3)])
+        neutral = {}
+        for key, conn, grounded in (('hv', hv_c, hv_g), ('mv', mv_c, mv_g), ('lv', lv_c, lv_g)):
+            if conn == 'Y':
+                if grounded:
+                    neutral[key] = 0
+                else:
+                    neutral[key] = ckt.node(f'{label} {key} star point')
+                    ckt.add_r(neutral[key], 0, R_BIAS)
+        pairs_mv = winding_pairs(hv_c, mv_c, c_mv)
+        pairs_lv = winding_pairs(hv_c, lv_c, c_lv)
+        if any(pm[0] != pl[0] for pm, pl in zip(pairs_mv, pairs_lv)):
+            self.warnings.append(f'Transformer {label}: its HV delta cannot wind both its MV and LV clocks on one core here, so it is left out.')
+            return
+        ends = {'hv': hv_nodes, 'mv': mv_nodes, 'lv': lv_nodes}
+        node = lambda key, x: neutral[key] if x == 'n' else ends[key][x]
+        pfe = col('pfe_kw', 0.0) * 1e3 / 3.0
+        groups = []
+        for (hp, mp, rev_m), (_, lp, rev_l) in zip(pairs_mv, pairs_lv):
+            a1, b1 = node('hv', hp[0]), node('hv', hp[1])
+            a2, b2 = node('mv', mp[0]), node('mv', mp[1])
+            a3, b3 = node('lv', lp[0]), node('lv', lp[1])
+            if rev_m:
+                a2, b2 = b2, a2
+            if rev_l:
+                a3, b3 = b3, a3
+            groups.append((ckt.add_coupled([a1, a2, a3], [b1, b2, b3], r_m, l_m), hp, a1, b1))
+            if pfe > 0:
+                ckt.add_r(a1, b1, vw[0] * vw[0] / pfe)
+        phases = []
+        for ph in range(3):
+            terms = []
+            for g, hp, _a1, _b1 in groups:
+                if hp[0] == ph:
+                    terms.append(('i_cp', g, 0, 1.0))
+                elif hp[1] == ph:
+                    terms.append(('i_cp', g, 0, -1.0))
+            phases.append(terms)
+        self.series.append(('Transformer', label, _row_id(net, 'trafo3w', ti), f'{label} (HV side)', phases))
+        self.trafos.append({'label': label, 'clock': c_lv, 'groups': groups})
 
     def _impedance_load(self, b, p_mw, q_mvar, label, profile=None):
         """

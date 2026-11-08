@@ -3,11 +3,19 @@ Voltage stability curves on the drawn network, by load flow.
 
 PV curve: every load raised together at its own power factor, by a factor lam from the drawn
 network, each step started from the last, until the load flow no longer solves; then bisection
-to the last factor that does. That is the nose, to the tolerance set. Only the upper branch is
-traced: past the nose there is no solution at higher load, and this is not a continuation load
-flow, so the lower branch is not drawn. A solution dropping suddenly from the last (a step onto
-the lower branch) is taken as past the nose. Generators stay at their set power unless
-scale_gens, so the slack bus takes the rise.
+to the last factor that does. That is the nose, to the tolerance set. A solution dropping suddenly
+from the last (a step onto the lower branch) is taken as past the nose. Generators stay at their
+set power unless scale_gens, so the slack bus takes the rise.
+
+Its lower branch (lower_branch, on unless 'false'), past the nose: the load factor no longer
+fixes a point there, so the weakest bus's voltage does - a generator of no power holds it, as the
+QV curve's does, stepped down from the nose by lower_v_step_pu, and the load factor is the one at
+which that generator gives no reactive power (found by secant), where the network's own solution
+has that voltage. It stops at lambda_lower_min (0.3 by default) or lower_v_min_pu (0.3).
+
+Generators' reactive limits (min_q_mvar, max_q_mvar) are held unless q_limits is 'false': a
+machine or converter at its limit lets its voltage go and brings the nose in. Each one reaching a
+limit is reported with the load factor where it first did.
 
 QV curve: a fictitious generator at the bus holds its voltage, stepped down from v_max_pu; the
 reactive power it supplies, against that voltage. Q at its lowest is the bus's reactive margin:
@@ -17,8 +25,7 @@ Q means the bus already needs that much support.
 The nose ignores thermal limits, so the first line or transformer past its rating along the curve is
 reported apart, first_thermal_limit, by interpolating between the steps: usually the margin that matters.
 
-Reactive limits are not enforced on the drawn generators: a converter or machine at its limit would
-bring the nose in. Each curve is at the network's own topology: run it again with an element out for N-1.
+Each curve is at the network's own topology: run it again with an element out for N-1.
 """
 import copy
 import math
@@ -54,11 +61,12 @@ def _solve(net, lam, base, warm):
     trial = copy.deepcopy(net)
     trial.load['scaling'] = base['load'] * lam
     if base['gen'] is not None:
-        trial.gen['p_mw'] = base['gen'] * lam
+        trial.gen.loc[base['gen_index'], 'p_mw'] = base['gen'] * lam
     if base['sgen'] is not None:
         trial.sgen['scaling'] = base['sgen'] * lam
     try:
-        pe._electrisim_runpp(trial, algorithm='nr', calculate_voltage_angles=True, init='results' if warm else 'auto', max_iteration=30)
+        pe._electrisim_runpp(trial, algorithm='nr', calculate_voltage_angles=True, init='results' if warm else 'auto', max_iteration=30,
+                             enforce_q_lims=base.get('q_limits', False))
     except pp.LoadflowNotConverged:
         return None
     vm = trial.res_bus['vm_pu'].to_numpy()
@@ -99,6 +107,81 @@ def _first_limit(points, heaviest):
     return None
 
 
+def _at_q_limit(n):
+    """The generators at a reactive limit in n's results: {name: 'max' or 'min'}."""
+    out = {}
+    if not len(n.gen) or 'max_q_mvar' not in n.gen.columns:
+        return out
+    names = getattr(n, 'user_friendly_names', {}) or {}
+    for g in n.gen.index:
+        if g not in n.res_gen.index or str(n.gen.at[g, 'name']) == LOWER_GEN:
+            continue
+        q = float(n.res_gen.at[g, 'q_mvar'])
+        for side, lim in (('max', n.gen.at[g, 'max_q_mvar']), ('min', n.gen.at[g, 'min_q_mvar'])):
+            lim = _f(lim, float('nan'))
+            if math.isfinite(lim) and abs(q - lim) <= 1e-4 * max(1.0, abs(lim)):
+                raw = str(n.gen.at[g, 'name'])
+                out[str(names.get(raw) or raw)] = side
+    return out
+
+
+LOWER_GEN = 'PV curve lower branch'
+
+
+def _lower_branch(nose, lam_nose, base, bus, shown, params, p_total, voltages):
+    """
+    Past the nose: the weakest bus held at each voltage below the nose's by a generator of no power, and
+    the load factor where that generator gives no reactive power. [(lam, p, voltages)], and why it stopped.
+    """
+    dv = max(_f(params.get('lower_v_step_pu'), 0.02), 1e-3)
+    lam_min = _f(params.get('lambda_lower_min'), 0.3)
+    v_min = _f(params.get('lower_v_min_pu'), 0.3)
+    work = copy.deepcopy(nose)
+    v = float(nose.res_bus.at[bus, 'vm_pu'])
+    g = pp.create_gen(work, bus, p_mw=0.0, vm_pu=v, name=LOWER_GEN, slack=False, min_q_mvar=-1e9, max_q_mvar=1e9)
+    tol_q = 1e-6 * max(abs(p_total(nose)), 1.0)
+
+    def q_at(lam, start):
+        trial = _solve(start, lam, base, True)
+        if trial is None:
+            return None, None
+        return float(trial.res_gen.at[g, 'q_mvar']), trial
+
+    points, last, lam_prev, stop = [], work, lam_nose, None
+    while True:
+        v -= dv
+        if v < v_min:
+            stop = f'the weakest bus reached {v_min:g} pu'
+            break
+        last.gen.at[g, 'vm_pu'] = v
+        a, b = lam_prev, lam_prev - 0.02 * lam_nose
+        qa, na = q_at(a, last)
+        qb, nb = q_at(b, last)
+        found = None
+        for _ in range(30):
+            if qa is None or qb is None:
+                break
+            if abs(qb) < tol_q:
+                found = (b, nb)
+                break
+            if qb == qa:
+                break
+            c = b - qb * (b - a) / (qb - qa)
+            c = min(max(c, 0.0), lam_nose)
+            a, qa, na = b, qb, nb
+            b = c
+            qb, nb = q_at(b, nb)
+        if found is None:
+            stop = f'no solution with the weakest bus at {v:.3f} pu'
+            break
+        lam_prev, last = found
+        points.append((lam_prev, p_total(last), voltages(last)))
+        if lam_prev < lam_min:
+            stop = f'the load factor fell below {lam_min:g}'
+            break
+    return points, stop
+
+
 def pv_curve(net, params):
     tol = max(_f(params.get('tolerance'), 0.002), 1e-4)
     step = max(_f(params.get('step'), 0.1), tol)
@@ -108,7 +191,9 @@ def pv_curve(net, params):
         return {'error': True, 'message': 'A PV curve needs a load to raise.'}
     base = {'load': net.load['scaling'].to_numpy(dtype=float).copy(),
             'gen': net.gen['p_mw'].to_numpy(dtype=float).copy() if scale_gens and len(net.gen) else None,
-            'sgen': net.sgen['scaling'].to_numpy(dtype=float).copy() if scale_gens and len(net.sgen) else None}
+            'gen_index': net.gen.index.copy(),
+            'sgen': net.sgen['scaling'].to_numpy(dtype=float).copy() if scale_gens and len(net.sgen) else None,
+            'q_limits': str(params.get('q_limits') or 'true').strip().lower() not in ('false', '0', 'no', 'off')}
     last = _solve(net, 1.0, base, False)
     if last is None:
         return {'error': True, 'message': 'The load flow does not solve at the drawn load.'}
@@ -126,6 +211,13 @@ def pv_curve(net, params):
 
     points = [(1.0, p_total(last), voltages(last))]
     heavy = [_heaviest(last)]
+    limited = {}
+
+    def note_limits(n, lam_n):
+        for name, side in _at_q_limit(n).items():
+            limited.setdefault(name, {'generator': name, 'limit': side, 'lambda': round(lam_n, 5)})
+
+    note_limits(last, 1.0)
     lam = 1.0
     bound = None
     while lam < lam_max:
@@ -137,6 +229,7 @@ def pv_curve(net, params):
         last = trial
         points.append((lam, p_total(last), voltages(last)))
         heavy.append(_heaviest(last))
+        note_limits(last, lam)
     if bound is None:
         warnings = [f'No nose found up to {lam_max:g} times the drawn load.']
     else:
@@ -149,13 +242,19 @@ def pv_curve(net, params):
                 low, last = mid, trial
                 points.append((mid, p_total(last), voltages(last)))
                 heavy.append(_heaviest(last))
+                note_limits(last, mid)
             else:
                 high = mid
         lam = low
     p0 = points[0][1]
     nose_v = voltages(last)
     weakest = min(nose_v, key=lambda b: nose_v[b])
-    return {'error': False, 'lambda': [round(p[0], 5) for p in points], 'p_total_mw': [round(p[1], 4) for p in points],
+    lower = None
+    if bound is not None and str(params.get('lower_branch') or 'true').strip().lower() not in ('false', '0', 'no', 'off'):
+        low_points, why = _lower_branch(last, lam, base, weakest, shown, params, p_total, voltages)
+        lower = {'lambda': [round(x[0], 5) for x in low_points], 'p_total_mw': [round(x[1], 4) for x in low_points],
+                 'buses': [{'name': names[b], 'vm_pu': [round(x[2][b], 5) for x in low_points]} for b in shown], 'stopped': why}
+    return {'error': False, 'lower_branch': lower, 'q_limited': sorted(limited.values(), key=lambda x: x['lambda']), 'lambda': [round(p[0], 5) for p in points], 'p_total_mw': [round(p[1], 4) for p in points],
             'buses': [{'name': names[b], 'vm_pu': [round(p[2][b], 5) for p in points]} for b in shown],
             'nose': None if bound is None else {'lambda': round(lam, 5), 'p_total_mw': round(p_total(last), 4), 'margin_mw': round(p_total(last) - p0, 4),
                                                'margin_percent': round(100.0 * (lam - 1.0), 3), 'weakest_bus': names[weakest], 'weakest_vm_pu': round(nose_v[weakest], 5)},

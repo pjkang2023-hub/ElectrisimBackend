@@ -21,6 +21,24 @@ Bonding:
 
 Cable positions: trefoil (an equilateral triangle of side ``spacing_m``) or flat (a row, ``spacing_m`` apart),
 ``depth_m`` down.
+
+Wideband (WidebandCable): the same six conductors with their impedances at every frequency, for travelling
+waves as well - each core's skin effect (Bessel functions), each sheath a thin tube (its inner and outer
+surfaces' impedances and the mutual one between them, rho m / 2 pi r coth or csch of m t), and the earth's
+return by Saad, Gaba and Giroux's closed form of Pollaczek's integral,
+
+    Z_e ij = j w u0 / 2 pi  (K0(m d_ij) + 2 / (4 + m^2 x_ij^2) exp(-(h_i + h_j) m)),   m = sqrt(j w u0 / rho)
+
+(d_ij the cables' distance, a cable's own its outer radius; x_ij their horizontal distance; h their depths),
+which at power frequency is Carson's above. Each cable:
+
+    Z_cc = Z_core + Z_ins + Z_sheath in + Z_sheath out - 2 Z_sheath mutual + Z_jacket + Z_e,   Z_cs = Z_sheath out - Z_sheath mutual + Z_jacket + Z_e,
+    Z_ss = Z_sheath out + Z_jacket + Z_e
+
+and between cables Z_e ij in all four. Its admittance through the insulation and the jacket, the cables
+screened from each other by their sheaths. Run by the universal line model (emt_ulm), in the phase domain: a
+constant modal transformation is far off for cores and sheaths together (its two-port 57 % off at 50 Hz on
+the test cable). One line per minor section, bonded as above.
 """
 import math
 
@@ -114,3 +132,105 @@ class CableSheaths:
         for node in sheaths:
             ckt.add_r(node, bond, 1e-6)
         ckt.add_r(bond, 0, r_ground)
+
+
+def _tube(w, a, b, rdc_per_m):
+    """A thin tube's inner surface, outer surface and mutual impedances (ohm/m), its inner and outer radii a, b."""
+    rho = rdc_per_m * math.pi * (b * b - a * a)
+    m = np.sqrt(1j * w * U0 / rho)
+    t = b - a
+    coth = 1.0 / np.tanh(m * t)
+    return (rho * m / (2.0 * math.pi * a) * coth, rho * m / (2.0 * math.pi * b) * coth,
+            rho * m / (math.pi * (a + b)) / np.sinh(m * t))
+
+
+def _earth(w, d, x, h_sum, rho):
+    from scipy.special import kv
+    m = np.sqrt(1j * w * U0 / rho)
+    return 1j * w * U0 / (2.0 * math.pi) * (kv(0, m * d) + 2.0 / (4.0 + m * m * x * x) * np.exp(-h_sum * m))
+
+
+def per_km_wideband(f, g, formation='trefoil'):
+    """Z and Y per km of the six conductors (cores, then sheaths) at frequencies ``f``: arrays (len(f), 6, 6)."""
+    import emt_fd_line
+    w = 2.0 * math.pi * np.asarray(f, dtype=float)
+    rc, a = g['core_radius_m'], g['insulation_radius_m']
+    b = a + g['sheath_thickness_m']
+    rj = max(g['jacket_radius_m'], b * 1.01)
+    xy = positions(formation, g['spacing_m'], g['depth_m'])
+    z_core = emt_fd_line._internal(w, rc, g['core_rdc_ohm_per_km'] * 1e-3)
+    z_ins = 1j * w * U0 / (2.0 * math.pi) * math.log(a / rc)
+    z_in, z_out, z_mut = _tube(w, a, b, g['sheath_rdc_ohm_per_km'] * 1e-3)
+    z_jkt = 1j * w * U0 / (2.0 * math.pi) * math.log(rj / b)
+    z = np.zeros((len(w), 6, 6), dtype=complex)
+    for i in range(3):
+        for j in range(3):
+            if i == j:
+                ze = _earth(w, rj, rj, 2.0 * xy[i][1], g['rho_ohm_m'])
+                z[:, i, i] = z_core + z_ins + z_in + z_out - 2.0 * z_mut + z_jkt + ze
+                z[:, i, 3 + i] = z[:, 3 + i, i] = z_out - z_mut + z_jkt + ze
+                z[:, 3 + i, 3 + i] = z_out + z_jkt + ze
+            else:
+                ze = _earth(w, math.dist(xy[i], xy[j]), abs(xy[i][0] - xy[j][0]), xy[i][1] + xy[j][1], g['rho_ohm_m'])
+                for p in (i, 3 + i):
+                    for q in (j, 3 + j):
+                        z[:, p, q] = ze
+    c_ins = 2.0 * math.pi * E0 * g['eps_r'] / math.log(a / rc)
+    c_jkt = 2.0 * math.pi * E0 * g.get('jacket_eps_r', 2.5) / math.log(rj / b)
+    pot = np.zeros((6, 6))
+    for i in range(3):
+        pot[i, i] = 1.0 / c_ins + 1.0 / c_jkt
+        pot[i, 3 + i] = pot[3 + i, i] = pot[3 + i, 3 + i] = 1.0 / c_jkt
+    y = 1j * w[:, None, None] * np.linalg.inv(pot)[None, :, :]
+    return z * 1e3, y * 1e3
+
+
+class WidebandCable:
+    """
+    The six-conductor cable as emt_fd_line lines, one per minor section, bonded as CableSheaths is. ``a``, ``b``:
+    its ends' core nodes. Its from end's core and sheath currents are kept for the results.
+    """
+
+    def __init__(self, ckt, a, b, g, km, dt, w0, label, bonding='cross', formation='trefoil', major_sections=1, r_ground=0.1):
+        import emt_ulm
+        if bonding not in BONDINGS:
+            raise ValueError(f"its bonding must be one of {', '.join(BONDINGS)}")
+        self.label, self.bonding, self.formation = label, bonding, formation
+        minors = 3 * max(int(major_sections), 1) if bonding == 'cross' else 1
+        f = np.logspace(-2, 6, 241)
+        z, y = per_km_wideband(f, g, formation)
+        self.fit = emt_ulm.UlmFit(z, y, km / minors, f)
+        self.lines, self.sheath_nodes, self.joints = [], [], []
+        cores = list(a)
+        sheaths = [ckt.node(f'{label} sheath {p} start') for p in 'abc']
+        self._ground = r_ground
+        CableSheaths._bond(self, ckt, sheaths, r_ground, 'start')
+        self.joints.append(list(sheaths))
+        for minor in range(minors):
+            last = minor == minors - 1
+            next_cores = list(b) if last else [ckt.node(f'{label} core {p} {minor}') for p in 'abc']
+            next_sheaths = [ckt.node(f'{label} sheath {p} {minor}') for p in 'abc']
+            line = emt_ulm.UlmLine(ckt, cores + sheaths, next_cores + next_sheaths, self.fit, dt, w0, f'{label} minor {minor}')
+            ckt.add_controller(line.control)
+            self.lines.append(line)
+            cores, sheaths = next_cores, next_sheaths
+            self.sheath_nodes.append(list(sheaths))
+            self.joints.append(list(sheaths))
+            if bonding == 'cross' and not last:
+                if (minor + 1) % 3 == 0:
+                    CableSheaths._bond(self, ckt, sheaths, r_ground, f'major {minor // 3}')
+                else:
+                    sheaths = [sheaths[2], sheaths[0], sheaths[1]]
+        if bonding in ('solid', 'cross'):
+            CableSheaths._bond(self, ckt, sheaths, r_ground, 'end')
+        self.sheath_end = list(sheaths)
+        self.i_from = []
+        ckt.add_controller(self._record)
+
+    def _record(self, t, state):
+        self.i_from.append(self.lines[0].currents()[0].copy())
+        return False
+
+    @property
+    def tau_ms(self):
+        return self.lines[0].tau_ms

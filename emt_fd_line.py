@@ -22,6 +22,19 @@ current source the controller sets each step, as long as tau is over a step: ref
 
 It starts in its own steady state at the fundamental (emt_solver's AC block).
 
+Untransposed, or more than one circuit on its towers (geometry 'conductors', each one's (x, y) in metres; or
+'transposed' False on the flat row): its N conductors' Z and Y in full,
+
+    Z ii = Z internal + j w u0 / 2 pi  ln(2 (y_i + p) / r),   Z ij = j w u0 / 2 pi  ln(sqrt((y_i + y_j + 2 p)^2 + dx^2) / sqrt((y_i - y_j)^2 + dx^2))
+
+and its modes by J. Marti's constant real transformation: the eigenvectors of Z Y at 'transform_hz' (1 kHz by
+default), their real parts, Q = their inverse, so that v_mode = Q v and i = Q^T i_mode, each mode Q Z Q^T and
+Q^-T Y Q^-1's diagonal at every frequency, fitted on its own. What the real, fixed Q leaves coupled between
+modes is left out: small on a flat or vertical line, as in PSCAD's and EMTP's own models of the kind.
+Conductors tied to the same node at its ends (two circuits in parallel between the same buses) are folded
+into it. Identical circuits with no geometry of their own ('parallel' > 1 on a transposed row) are taken
+far enough apart not to couple: Zc over their number.
+
 A cable (fd_kind 'cable'): each phase a coaxial core inside its sheath, the sheath at ground potential, as
 with solid bonding on a run short against the sheath's own impedance. The phases are then uncoupled, each one
 mode, so the same model runs with the identity for its transform:
@@ -133,10 +146,72 @@ class ModeFit:
         return np.sum(self.c / (np.asarray(s)[..., None] + self.q), axis=-1) * np.exp(-np.asarray(s) * self.tau)
 
 
-def fits(geometry, km):
+def fits(geometry, km, par=1.0):
     f = np.logspace(-3, 6, 361)
     z1, y1, z0, y0 = per_km(f, geometry)
-    return ModeFit(z0, y0, km, f), ModeFit(z1, y1, km, f)
+    return ModeFit(z0 / par, y0 * par, km, f), ModeFit(z1 / par, y1 * par, km, f)
+
+
+def conductors(geometry):
+    """Its conductors' (x, y), m: as given, or the flat row's three at its height and spacing."""
+    xy = geometry.get('conductors')
+    if xy:
+        return [(float(x), float(y)) for x, y in xy]
+    d, h = geometry['spacing_m'], geometry['height_m']
+    return [(-d, h), (0.0, h), (d, h)]
+
+
+def parse_conductors(text):
+    """'x,y; x,y; ...' to [(x, y)], or None."""
+    raw = str(text or '').strip()
+    if not raw:
+        return None
+    try:
+        out = [tuple(float(v) for v in pair.split(',')) for pair in raw.split(';') if pair.strip()]
+    except ValueError:
+        return None
+    return out if out and all(len(x) == 2 for x in out) else None
+
+
+def per_km_matrix(f, geometry):
+    """Z and Y per km of its conductors at frequencies ``f``: arrays (len(f), N, N)."""
+    xy = conductors(geometry)
+    r, rdc, rho = geometry['radius_m'], geometry['rdc_ohm_per_km'] * 1e-3, geometry['rho_ohm_m']
+    w = 2.0 * math.pi * np.asarray(f, dtype=float)
+    p = np.sqrt(rho / (1j * w * U0))
+    n = len(xy)
+    z = np.zeros((len(w), n, n), dtype=complex)
+    pot = np.zeros((n, n))
+    zi = _internal(w, r, rdc)
+    for i, (xi, yi) in enumerate(xy):
+        for j, (xj, yj) in enumerate(xy):
+            if i == j:
+                z[:, i, i] = zi + 1j * w * U0 / (2.0 * math.pi) * np.log(2.0 * (yi + p) / r)
+                pot[i, i] = math.log(2.0 * yi / r) / (2.0 * math.pi * E0)
+            else:
+                dx, near = xi - xj, math.hypot(xi - xj, yi - yj)
+                z[:, i, j] = 1j * w * U0 / (2.0 * math.pi) * np.log(np.sqrt((yi + yj + 2.0 * p) ** 2 + dx * dx) / near)
+                pot[i, j] = math.log(math.hypot(yi + yj, dx) / near) / (2.0 * math.pi * E0)
+    y = 1j * w[:, None, None] * np.linalg.inv(pot)[None, :, :]
+    return z * 1e3, y * 1e3
+
+
+def modal(z, y, f, transform_hz=1000.0):
+    """
+    J. Marti's constant real transformation: Q, and each mode's z and y per km at every frequency
+    (arrays (len(f), N)). Its modes ordered slowest (the ground mode) first.
+    """
+    k = int(np.argmin(np.abs(np.log(np.asarray(f) / transform_hz))))
+    lam, vec = np.linalg.eig(z[k] @ y[k])
+    tv = vec.real.copy()
+    tv /= np.linalg.norm(tv, axis=0)
+    order = np.argsort(-lam.real)               # the largest gamma^2: the slowest, lossiest mode
+    tv = tv[:, order]
+    q = np.linalg.inv(tv)
+    qi = np.linalg.inv(q)
+    zm = np.einsum('ij,fjk,lk->fil', q, z, q)
+    ym = np.einsum('ji,fjk,kl->fil', qi, y, qi)
+    return q, np.diagonal(zm, axis1=1, axis2=2), np.diagonal(ym, axis1=1, axis2=2)
 
 
 class _Mode:
@@ -222,73 +297,110 @@ class _Mode:
 class FdLine:
     """``a``, ``b``: its two ends' phase nodes. Raises ValueError if a mode's delay is not over a step, or its conductances cannot be a network."""
 
-    def __init__(self, ckt, a, b, geometry, km, dt, w0, label):
-        self.label, self.a, self.b = label, list(a), list(b)
+    def __init__(self, ckt, a, b, geometry, km, dt, w0, label, par=1.0):
+        """``a``, ``b``: each conductor's node at each end (repeated where conductors are tied to one node)."""
+        self.label = label
         self.kind = 'cable' if geometry.get('kind') == 'cable' else 'overhead'
+        self.untransposed = self.kind == 'overhead' and (bool(geometry.get('conductors')) or geometry.get('transposed') is False)
         if self.kind == 'cable':
             f = np.logspace(-3, 6, 361)
             z, y = per_km_cable(f, geometry)
-            fit0 = fit1 = ModeFit(z, y, km, f)
+            fit = ModeFit(z / par, y * par, km, f)
+            fitted = [fit, fit, fit]
             self.T = np.eye(3)                 # its phases uncoupled: each its own mode
+        elif self.untransposed:
+            f = np.logspace(-3, 6, 361)
+            z, y = per_km_matrix(f, geometry)
+            self.T, zm, ym = modal(z, y, f, float(geometry.get('transform_hz') or 1000.0))
+            fitted = [ModeFit(zm[:, m], ym[:, m], km, f) for m in range(zm.shape[1])]
         else:
-            fit0, fit1 = fits(geometry, km)
+            fit0, fit1 = fits(geometry, km, par)
+            fitted = [fit0, fit1, fit1]
             self.T = T
-        self.tau_ms = (fit0.tau * 1e3, fit1.tau * 1e3)
-        if min(fit0.tau, fit1.tau) <= dt:
-            raise ValueError(f'its travel time, {min(fit0.tau, fit1.tau) * 1e6:.1f} us, is not over the {dt * 1e6:g} us step')
-        self.modes = [_Mode(fit0, dt), _Mode(fit1, dt), _Mode(fit1, dt)]
-        g0, g1 = 1.0 / self.modes[0].req, 1.0 / self.modes[1].req
-        if g1 < g0:
-            raise ValueError('its aerial surge impedance is above its ground mode\'s')
-        # The Norton conductance as a network: phase to ground G0, phase to phase (G1 - G0) / 3.
-        for nodes in (self.a, self.b):
-            for ph in range(3):
-                ckt.add_r(nodes[ph], 0, 1.0 / g0)
-                ckt.add_r(nodes[ph], nodes[(ph + 1) % 3], 3.0 / (g1 - g0) if g1 > g0 else 1e12)
-        self.ks = [[ckt.add_isrc(nodes[ph], 0) for ph in range(3)] for nodes in (self.a, self.b)]
+        n = len(fitted)
+        if len(a) != n or len(b) != n:
+            raise ValueError(f'its {n} conductors need {n} nodes at each end')
+        taus = [x.tau for x in fitted]
+        self.tau_ms = (max(taus) * 1e3, min(taus) * 1e3)
+        self.tau_modes_ms = [x * 1e3 for x in taus]
+        if min(taus) <= dt:
+            raise ValueError(f'its travel time, {min(taus) * 1e6:.1f} us, is not over the {dt * 1e6:g} us step')
+        self.modes = [_Mode(x, dt) for x in fitted]
+        # Its conductors to the nodes they are tied to: P, conductors x nodes, at each end.
+        self.a, self.pa = self._fold(a)
+        self.b, self.pb = self._fold(b)
+        g = np.diag([1.0 / m.req for m in self.modes])
+        for nodes, pm in ((self.a, self.pa), (self.b, self.pb)):
+            self._network(ckt, nodes, pm.T @ self.T.T @ g @ self.T @ pm)
+        self.ks = [[ckt.add_isrc(x, 0) for x in nodes] for nodes in (self.a, self.b)]
         self.w0 = w0
         self.ckt = ckt
         ckt.add_ac_block(self.a + self.b, self._ac_correction(), self._start)
 
+    @staticmethod
+    def _fold(nodes):
+        unique = list(dict.fromkeys(int(x) for x in nodes))
+        pm = np.zeros((len(nodes), len(unique)))
+        for k, x in enumerate(nodes):
+            pm[k, unique.index(int(x))] = 1.0
+        return unique, pm
+
+    def _network(self, ckt, nodes, g):
+        """
+        The Norton conductance matrix ``g`` among ``nodes``: as resistors where they can all be positive (a transposed
+        line's always can), else as a conductance matrix (a cable's cores and sheaths).
+        """
+        tol = 1e-9 * float(np.max(np.abs(g)))
+        ground = g.sum(axis=1)
+        off = -(g - np.diag(np.diag(g)))
+        if np.any(ground < -tol) or np.any(off < -tol):
+            ckt.add_gmatrix(nodes, g)
+            return
+        for i in range(len(nodes)):
+            if ground[i] > tol:
+                ckt.add_r(nodes[i], 0, 1.0 / ground[i])
+            for j in range(i + 1, len(nodes)):
+                if off[i, j] > tol:
+                    ckt.add_r(nodes[i], nodes[j], 1.0 / off[i, j])
+
     def _phase_y(self, w):
-        """Its 6 x 6 phase admittance at ``w``, as the recursion has it."""
-        y = np.zeros((6, 6), dtype=complex)
-        modal = [m.admittance(w) for m in self.modes]
-        for e1 in range(2):
-            for e2 in range(2):
-                block = self.T.T @ np.diag([modal[m][e1, e2] for m in range(3)]) @ self.T
-                y[3 * e1:3 * e1 + 3, 3 * e2:3 * e2 + 3] = block
-        return y
+        """Its admittance among its end nodes at ``w``, as the recursion has it."""
+        modal_y = [m.admittance(w) for m in self.modes]
+        blocks = [[self.T.T @ np.diag([modal_y[m][e1, e2] for m in range(len(self.modes))]) @ self.T for e2 in range(2)] for e1 in range(2)]
+        pms = (self.pa, self.pb)
+        return np.block([[pms[e1].T @ blocks[e1][e2] @ pms[e2] for e2 in range(2)] for e1 in range(2)])
 
     def _ac_correction(self):
         """What the phasor solve must add to the Norton resistors to make them the whole line at the fundamental."""
         y = self._phase_y(self.w0)
-        norton = self.T.T @ np.diag([1.0 / self.modes[m].req for m in range(3)]) @ self.T
-        y[:3, :3] -= norton
-        y[3:, 3:] -= norton
+        norton = self.T.T @ np.diag([1.0 / m.req for m in self.modes]) @ self.T
+        na = len(self.a)
+        y[:na, :na] -= self.pa.T @ norton @ self.pa
+        y[na:, na:] -= self.pb.T @ norton @ self.pb
         return y
 
     def _start(self, v):
         """The phasor solve's end voltages ``v``: the state at t = 0, and the sources for the first step."""
-        va, vb = self.T @ v[:3], self.T @ v[3:]
+        na = len(self.a)
+        va, vb = self.T @ (self.pa @ v[:na]), self.T @ (self.pb @ v[na:])
         for m, mode in enumerate(self.modes):
             mode.start(np.array([va[m], vb[m]]), self.w0)
         self._set(lambda k, value: self.ckt.isrc[k].__setitem__(2, value))
 
     def _set(self, setter):
-        for e in range(2):
-            i_ph = self.T.T @ np.array([mode.source(e) for mode in self.modes])
-            for ph in range(3):
+        for e, pm in enumerate((self.pa, self.pb)):
+            i_node = pm.T @ (self.T.T @ np.array([mode.source(e) for mode in self.modes]))
+            for k, value in enumerate(i_node):
                 # add_isrc(node, 0): a current from the node into the line.
-                setter(self.ks[e][ph], float(i_ph[ph]))
+                setter(self.ks[e][k], float(value))
 
     def control(self, t, state):
-        va, vb = self.T @ state.v[self.a], self.T @ state.v[self.b]
+        va, vb = self.T @ (self.pa @ state.v[self.a]), self.T @ (self.pb @ state.v[self.b])
         for m, mode in enumerate(self.modes):
             mode.step((va[m], vb[m]))
         self._set(state.set_source_value)
         return False
 
     def currents(self):
-        """Its present current into the line at each end, phases, in A."""
+        """Its present current into the line at each end, per conductor, in A."""
         return [self.T.T @ np.array([mode.i[e] for mode in self.modes]) for e in range(2)]
