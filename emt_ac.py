@@ -126,6 +126,7 @@ class AcBuilder:
         self.gen_rows = {}       # generator name -> its diagram row (its rotor, governor and exciter data)
         self.line_rows = {}      # line name -> its diagram row (its frequency-dependent line's geometry)
         self.fd_lines = []       # emt_fd_line.FdLine, one per line modelled so
+        self.cable_sheaths = []  # emt_cable.CableSheaths, one per cable modelled with its sheaths
         self.machines = []       # emt_machine.SynchronousMachine, one per generator modelled as a machine
         t_island = _f(params.get('island_time_ms'), -1.0) if str(params.get('island_time_ms') or '').strip() else -1.0
         # Islanding: {'t', 'switches': per grid phase, 'opened': its time, 'last': its last current}.
@@ -368,6 +369,32 @@ class AcBuilder:
                     changed = True
         return changed
 
+    def _cable_sheaths(self, li, row, start, stop, km, par, label, bonding):
+        """A cable with its sheaths as conductors and their bonding (emt_cable): True if it now is, else pi sections, said so."""
+        import emt_cable
+        g = {k: _f(row.get(f'fd_{k}'), _f(self.params.get(f'fd_{k}'), 0.0)) for k in emt_cable.FIELDS}
+        g['jacket_eps_r'] = _f(row.get('fd_jacket_eps_r'), 2.5)
+        missing = [k for k, v in g.items() if v <= 0]
+        why = None
+        if missing:
+            why = 'it needs ' + ', '.join(f'fd_{k}' for k in missing)
+        elif par != 1.0:
+            why = 'parallel circuits are not modelled'
+        elif self.fault_line is not None and self.fault_line[0] == li:
+            why = 'a fault along it is not modelled'
+        elif g['insulation_radius_m'] <= g['core_radius_m']:
+            why = 'its insulation radius must be above its core radius'
+        if why is not None:
+            self.warnings.append(f'Line {label} runs as pi sections without its sheaths: {why}.')
+            return False
+        formation = 'flat' if str(row.get('fd_formation') or '').strip().lower() == 'flat' else 'trefoil'
+        cable = emt_cable.CableSheaths(self.ckt, start, stop, g, km, self.f_hz, label, bonding=bonding, formation=formation,
+                                       major_sections=int(_f(row.get('fd_major_sections'), 1.0)), sections=int(_f(row.get('fd_sections'), 4.0)))
+        cable.formation = formation
+        self.cable_sheaths.append(cable)
+        self.series.append(('Line', label, _row_id(self.net, 'line', li), f'{label} (from end)', [('i_cp', cable.groups[0], k, 1.0) for k in range(3)]))
+        return True
+
     def _fd_line(self, li, start, stop, km, par, label):
         """
         Line li as a frequency-dependent line (emt_fd_line) if its row or the study says so: True if it now is.
@@ -380,6 +407,9 @@ class AcBuilder:
         if not any(str(x or '').strip().lower() in ('true', '1', 'yes') for x in (row.get('fd_line'), self.params.get('fd_line'))):
             return False
         cable = str(row.get('fd_kind') or self.params.get('fd_kind') or '').strip().lower() == 'cable'
+        bonding = str(row.get('fd_bonding') or self.params.get('fd_bonding') or '').strip().lower()
+        if cable and bonding in ('solid', 'single', 'cross'):
+            return self._cable_sheaths(li, row, start, stop, km, par, label, bonding)
         fields = emt_fd_line.CABLE_FIELDS if cable else emt_fd_line.FIELDS
         geometry = {k: _f(row.get(f'fd_{k}'), _f(self.params.get(f'fd_{k}'), 0.0)) for k in fields}
         why = None

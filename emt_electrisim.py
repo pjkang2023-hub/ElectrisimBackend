@@ -1268,6 +1268,8 @@ def emt_study(net, params, in_data=None):
                                 'lengthen the run or shorten harmonics_cycles.')
     if b.ac.machines:
         result['machines'] = [_machine_result(m) for m in b.ac.machines]
+    if b.ac.cable_sheaths:
+        result['cable_sheaths'] = [_cable_sheath_result(sim, c, b.ac.f_hz) for c in b.ac.cable_sheaths]
     if b.ac.fd_lines:
         result['fd_lines'] = [{'label': x.label, 'travel_ground_ms': _round(x.tau_ms[0]), 'travel_aerial_ms': _round(x.tau_ms[1])} for x in b.ac.fd_lines]
     result['ders'] = [_der_result(rec, m) for rec, m in b.ders]
@@ -1573,6 +1575,23 @@ def _energise_result(sim, ac, net):
             'v_rms_max_pu': _round(rms_max / v_ph) if rms_max > 0 else None}
 
 
+def _cable_sheath_result(sim, cable, f_hz):
+    """
+    A cable's sheaths: the highest voltage any sheath reached through the run, and over its last cycle each sheath's
+    highest standing voltage along it (rms) and its current at the from end, against its core's.
+    """
+    t = sim['t']
+    last = t >= t[-1] - 1.0 / f_hz
+    nodes = sorted({n for ring in cable.sheath_nodes + cable.joints for n in ring})
+    v_peak = float(np.max(np.abs(sim['v'][:, nodes]))) if nodes else 0.0
+    standing = max((float(np.sqrt(np.mean(sim['v'][last, n] ** 2))) for n in nodes), default=0.0)
+    i = sim['i_cp'][cable.groups[0]]
+    rms = [float(np.sqrt(np.mean(i[last, k] ** 2))) for k in range(6)]
+    return {'label': cable.label, 'bonding': cable.bonding, 'formation': getattr(cable, 'formation', 'trefoil'),
+            'sheath_v_peak_kv': _round(v_peak * 1e-3), 'sheath_v_standing_kv': _round(standing * 1e-3),
+            'core_i_a': [_round(x) for x in rms[:3]], 'sheath_i_a': [_round(x) for x in rms[3:]]}
+
+
 def _machine_result(m):
     """A synchronous machine: its power, frequency, rotor angle, internal voltage and mechanical power."""
     tr = np.array(m.trace) if m.trace else np.zeros((0, 7))
@@ -1593,6 +1612,10 @@ def _machine_result(m):
                trace={'t_ms': [_round(x * 1e3) for x in tr[::max(1, len(tr) // 400), 0]],
                       'p_mw': [_round(x) for x in tr[::max(1, len(tr) // 400), 1]],
                       'f_hz': [_round(x) for x in tr[::max(1, len(tr) // 400), 3]]})
+    if tr.shape[1] >= 9:
+        # The detailed machine's field voltage and terminal voltage, per unit.
+        out['trace']['efd_pu'] = [_round(x) for x in tr[::max(1, len(tr) // 400), 7]]
+        out['trace']['v_pu'] = [_round(x) for x in tr[::max(1, len(tr) // 400), 8]]
     return out
 
 

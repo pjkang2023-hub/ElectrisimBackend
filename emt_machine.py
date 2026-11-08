@@ -239,7 +239,7 @@ class ParkMachine(SynchronousMachine):
         self.exc_model = self.gov_model = None
         if controls.get('exc'):
             self.exc_name, params = controls['exc']
-            self.exc_model = emt_controls.exciter(self.exc_name, params, self.efd0, abs(v_ph) / self.e_base)
+            self.exc_model = emt_controls.exciter(self.exc_name, params, self.efd0, abs(v_ph) / self.e_base, self.efd0)
         if controls.get('gov'):
             self.gov_name, params = controls['gov']
             self.gov_model = emt_controls.governor(self.gov_name, params, self.pm)
@@ -284,7 +284,10 @@ class ParkMachine(SynchronousMachine):
         # Its exciter, on its terminal voltage's magnitude (the space vector's).
         v_mag = math.sqrt(2.0 / 3.0 * float(np.dot(v, v)))
         if self.exc_model is not None:
-            self.efd = self.exc_model.step(dt, v_mag / self.e_base, self.w)
+            # Its field current as GENROU's XadIfd: what holds its transient flux, Efd in the steady state.
+            xadifd = (self.pd1 + (self.xd - self.xd1) * (self.gd1 * i_d + self.gd2 * (self.pd1 - self.pd2))
+                      + self._se(math.hypot(psi_d, psi_q)) * psi_d)
+            self.efd = self.exc_model.step(dt, v_mag / self.e_base, self.w, xadifd)
         elif self.exc:
             self._regulator(dt, v_mag)
         # Its rotor's circuits.
@@ -309,7 +312,7 @@ class ParkMachine(SynchronousMachine):
             state.set_emf(self.k_e[k], float((e_s * complex(math.cos(k * A120), -math.sin(k * A120))).real))
         q = ((v[1] - v[2]) * i[0] + (v[2] - v[0]) * i[1] + (v[0] - v[1]) * i[2]) / math.sqrt(3.0)
         self.trace.append((t, float(np.dot(v, i)) / 1e6, q / 1e6, self.w * self.w0 / (2 * math.pi), self.delta,
-                           math.hypot(psi_d, psi_q) / self.e0, self.pm * self.s / 1e6))
+                           math.hypot(psi_d, psi_q) / self.e0, self.pm * self.s / 1e6, self.efd, v_mag / self.e_base))
         return False
 
 

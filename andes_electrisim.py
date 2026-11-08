@@ -86,10 +86,13 @@ _GOVERNOR_DEFAULTS: Dict[str, Dict[str, float]] = {
     "VMIN": 0.0,
     "Dt": 0.0,
     },
-    "IEEEG1": {"R": 0.05, "T1": 0.5, "T2": 1.0, "T3": 1.0, "VMAX": 1.2, "VMIN": 0.0},
+    # IEEEG1 has no R, VMAX or VMIN: with them ANDES refused the model and the machine ran with no governor.
+    # Its gain K is 1/R (governor_kwargs takes the dialog's R so), PMAX and PMIN its valve limits.
+    "IEEEG1": {"K": 20.0, "T1": 0.5, "T2": 1.0, "T3": 1.0, "PMAX": 1.2, "PMIN": 0.0},
     "IEESGO": {"T1": 0.1, "T2": 0.1, "T3": 0.1, "T4": 0.1, "T5": 0.1, "T6": 0.1},
     "GAST": {"R": 0.05, "T1": 0.4, "T2": 0.1, "T3": 0.1, "VMAX": 1.2, "VMIN": 0.0},
-    "HYGOV": {"R": 0.05, "T1": 0.5, "T2": 1.0, "T3": 1.0, "VMAX": 1.2, "VMIN": 0.0},
+    # HYGOV has no T1-T3, VMAX or VMIN either; the rest are ANDES's defaults.
+    "HYGOV": {"R": 0.05},
 }
 
 _PSS_DEFAULTS = {"IEEEST": {"A1": 0.1, "A2": 0.1, "A3": 0.1, "A4": 0.1, "A5": 0.1, "A6": 0.1}}
@@ -204,6 +207,16 @@ def _model_kwargs(
         key: _dyn_value(el, f"{attr_prefix}{key}", default)
         for key, default in defaults.items()
     }
+
+
+def governor_kwargs(el: Dict[str, Any], model: str) -> Dict[str, float]:
+    """A governor's parameters from its row: IEEEG1's gain K from the dialog's droop R, where no K is given."""
+    kw = _model_kwargs(el, "dyn_gov_", _GOVERNOR_DEFAULTS[model])
+    if model == "IEEEG1" and el.get("dyn_gov_K") in (None, "", "null") and el.get("dyn_gov_R") not in (None, "", "null"):
+        r = _sf(el.get("dyn_gov_R"), 0.0)
+        if r > 0:
+            kw["K"] = 1.0 / r
+    return kw
 
 
 def tds_values(ss, var) -> np.ndarray:
@@ -1710,7 +1723,7 @@ def build_system(
             gov_idx = _add_model_safe(
                 ss, gov_model, defaults_applied, f"Generator '{ufname}'",
                 idx=f"{gov_model}_{gen_count}", name=f"{gov_model}_{ufname}", syn=syn_idx,
-                **_model_kwargs(el, "dyn_gov_", _GOVERNOR_DEFAULTS[gov_model]),
+                **governor_kwargs(el, gov_model),
             )
             if all(el.get(k) in (None, "", "null") for k in ("dyn_governor_model", "dyn_gov_R")):
                 defaults_applied.append(f"Generator '{ufname}': applied default {gov_model} governor.")
