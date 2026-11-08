@@ -1435,8 +1435,10 @@ def _rms_final(t, v3, f_nominal):
     f = float((turn[-1] - turn[0]) / (t[sel][-1] - t[sel][0]) / (2.0 * math.pi))
     if not 0.5 * f_nominal < f < 1.5 * f_nominal:
         return None, None
-    last = t > t[-1] - 1.0 / f
-    return min(float(np.sqrt(np.mean(v3[last, k] ** 2))) for k in range(3)), f
+    # A whole number of steps, the nearest to its period: a window a step short reads 5e-4 off at 50 Hz.
+    dt = float(np.mean(np.diff(t[sel])))
+    n = max(int(round(1.0 / f / dt)), 2)
+    return min(float(np.sqrt(np.mean(v3[-n:, k] ** 2))) for k in range(3)), f
 
 
 def _ac_results(sim, ac, net, t_fine, fault):
