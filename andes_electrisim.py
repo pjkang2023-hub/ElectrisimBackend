@@ -1360,6 +1360,31 @@ def build_system(
     profile_repeat = params.get("profile_repeat", True) not in (False, "false", "False", 0, "0")
     profiled_loads: List[Dict[str, Any]] = []
     ups_loads: Dict[str, Dict[str, Any]] = {}
+    # A load drawn as constant impedance or current (its const_z_percent, const_i_percent) draws, in Electrisim's
+    # load flow, its power at rated voltage times V^2 or V there; ANDES's power flow holds a PQ load at its p0. So
+    # p0 is what it draws in Electrisim's load flow, and the run starts where that load flow is: on the WSCC 9-bus
+    # case, holding the drawn powers instead started its rotor angles 0.4 deg off ETAP's (9 Nov 2026).
+    zip_flow, zip_problem = None, None
+    if any(typ.startswith("Load") and not typ.startswith("Load DC")
+           and _sf(el.get("const_z_percent")) + _sf(el.get("const_i_percent")) > 0
+           for _, el, typ in _iter_elements(in_data)):
+        zip_flow, zip_problem = _electrisim_flow(in_data, freq)
+        if zip_flow is None:
+            warnings.append(f"Loads drawn as constant impedance or current start at their drawn power: the load flow "
+                            f"that sets their voltage failed ({zip_problem}).")
+
+    def _zip_factor(el: Dict[str, Any]) -> float:
+        z, i = _sf(el.get("const_z_percent")) / 100.0, _sf(el.get("const_i_percent")) / 100.0
+        if zip_flow is None or z + i <= 0:
+            return 1.0
+        hit = zip_flow.bus.index[zip_flow.bus["name"].astype(str) == str(el.get("bus"))]
+        if not len(hit) or hit[0] not in zip_flow.res_bus.index:
+            return 1.0
+        vm = float(zip_flow.res_bus.at[hit[0], "vm_pu"])
+        if not np.isfinite(vm) or vm <= 0:
+            return 1.0
+        return z * vm * vm + i * vm + max(1.0 - z - i, 0.0)
+
     pq_i = 0
     for _, el, typ in _iter_elements(in_data):
         if not typ.startswith("Load") or typ.startswith("Load DC"):
@@ -1372,7 +1397,7 @@ def build_system(
             _warn_no_bus(warnings, el, typ)
             continue
         pq_i += 1
-        scaling = _sf(el.get("scaling"), 1.0)
+        scaling = _sf(el.get("scaling"), 1.0) * _zip_factor(el)
         p_mw = _sf(el.get("p_mw")) * scaling
         q_mvar = _sf(el.get("q_mvar")) * scaling
         u = 1 if _sb(el.get("in_service"), True) else 0
@@ -1411,7 +1436,7 @@ def build_system(
     # --- The DC network: each converter the load its AC side is in the load flow ---
     flow, flow_problem = None, None
     if any(typ.startswith(k) for _, _, typ in _iter_elements(in_data) for k in _DC_CONVERTERS):
-        flow, flow_problem = _electrisim_flow(in_data, freq)
+        flow, flow_problem = (zip_flow, zip_problem) if zip_flow is not None else _electrisim_flow(in_data, freq)
         if flow is None:
             warnings.append(f"The DC network's converters are left out: its load flow failed ({flow_problem}).")
     converter_loads = _converter_ac_loads(flow) if flow is not None else []
