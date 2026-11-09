@@ -300,12 +300,104 @@ def _run_pp(net) -> Optional[str]:
     # Electrisim's load flow: it settles the converters and the sources behind them,
     # which pandapower's alone does not - a campus with a DC side failed before any
     # motor started.
+    # A locked rotor is a constant impedance, whose voltage dependence
+    # pandapower's Newton-Raphson leaves out of its Jacobian: a deep dip took
+    # more than its default 10 iterations (an 11 % dip behind a grid's
+    # impedance, 9 Nov 2026).
     from pandapower_electrisim import _electrisim_runpp
     try:
-        _electrisim_runpp(net, calculate_voltage_angles=True, init="auto")
+        _electrisim_runpp(net, calculate_voltage_angles=True, init="auto", max_iteration=50)
         return None if net.converged else "The load flow did not converge."
     except Exception as e:
         return str(e)
+
+
+SOURCE_MODELS = ("fixed_voltage", "behind_impedance")
+
+
+def _sources_behind_impedance(net, in_data: Dict[str, Any], warnings: List[str]) -> Dict[str, list]:
+    """
+    Each external grid and generator as its internal voltage behind its
+    impedance, the voltage set by the load flow just solved (the start's
+    before): E = V + Z I. A grid sits behind 1 / S_sc on its own base (the
+    minimum short-circuit power, the weaker grid dipping more, else the
+    maximum) at its R/X; a generator behind Ra + jX'd on its rating - the
+    machine's dynamic data, as the transient stability study takes it, else
+    its subtransient X''d with a warning. ETAP's static motor start does this
+    (its internal voltages in Example-ANSI are exactly these, with X'd), as
+    IEEE 399 has it; a load flow holds a grid's and a generator's voltage, so
+    the bus feeding the start could not dip at all. Returns what to undo.
+    """
+    import cmath
+
+    added: Dict[str, list] = {"ext_grid": [], "impedance": [], "bus": [], "off": []}
+
+    def put_behind(table: str, idx: Any, bus: int, z_pu: complex, sb: float, s_gen: complex, label: str) -> None:
+        if bus not in net.res_bus.index:
+            return
+        v = cmath.rect(float(net.res_bus.at[bus, "vm_pu"]), math.radians(float(net.res_bus.at[bus, "va_degree"])))
+        if not (abs(v) > 0 and np.isfinite(abs(v))):
+            return
+        e = v + z_pu * (s_gen / sb / v).conjugate()
+        nb = pp.create_bus(net, vn_kv=float(net.bus.at[bus, "vn_kv"]), name=f"__source_{label}")
+        added["bus"].append(nb)
+        added["impedance"].append(pp.create_impedance(net, nb, bus, rft_pu=z_pu.real, xft_pu=z_pu.imag, sn_mva=sb,
+                                                      name=f"__source_z_{label}"))
+        added["ext_grid"].append(pp.create_ext_grid(net, nb, vm_pu=abs(e), va_degree=math.degrees(cmath.phase(e)),
+                                                    name=f"__source_e_{label}"))
+        net[table].at[idx, "in_service"] = False
+        added["off"].append((table, idx))
+
+    for idx, row in net.ext_grid.iterrows():
+        if not bool(row.get("in_service", True)) or idx not in net.res_ext_grid.index:
+            continue
+        s_sc = _sf(row.get("s_sc_min_mva")) or _sf(row.get("s_sc_max_mva"))
+        rx = _sf(row.get("rx_min")) if _sf(row.get("s_sc_min_mva")) else _sf(row.get("rx_max"))
+        _, name = _row_id_name(row, idx)
+        if s_sc <= 0:
+            warnings.append(f"External grid '{name}': no short-circuit power, so it holds its voltage during the start.")
+            continue
+        z = complex(rx, 1.0) / math.sqrt(1.0 + rx * rx)
+        s = complex(float(net.res_ext_grid.at[idx, "p_mw"]), float(net.res_ext_grid.at[idx, "q_mvar"]))
+        put_behind("ext_grid", idx, int(row["bus"]), z, s_sc, s, f"grid_{idx}")
+
+    gen_rows = {str(v.get("name")): v for v in (in_data or {}).values()
+                if isinstance(v, dict) and str(v.get("typ", "")).startswith("Generator")}
+    for idx, row in net.gen.iterrows():
+        if not bool(row.get("in_service", True)) or idx not in net.res_gen.index:
+            continue
+        _, name = _row_id_name(row, idx)
+        el = gen_rows.get(str(row.get("name")), {})
+        sn = _sf(row.get("sn_mva"))
+        bus = int(row["bus"])
+        vn_bus = float(net.bus.at[bus, "vn_kv"])
+        vn = _sf(row.get("vn_kv")) or vn_bus
+        xd1, ra = _sf(el.get("dyn_xd1")), _sf(el.get("dyn_ra"))
+        if xd1 <= 0:
+            xd1 = _sf(row.get("xdss_pu"))
+            ra = _sf(row.get("rdss_ohm")) / (vn * vn / sn) if sn > 0 and vn > 0 else 0.0
+            if xd1 > 0:
+                warnings.append(f"Generator '{name}': no transient reactance X'd (dynamic data), its subtransient "
+                                f"X''d taken: the dip is understated.")
+        if sn <= 0 or xd1 <= 0:
+            warnings.append(f"Generator '{name}': no rating or reactance, so it holds its voltage during the start.")
+            continue
+        z = complex(ra, xd1) * (vn / vn_bus) ** 2
+        s = complex(float(net.res_gen.at[idx, "p_mw"]), float(net.res_gen.at[idx, "q_mvar"]))
+        put_behind("gen", idx, bus, z, sn, s, f"gen_{idx}")
+    return added
+
+
+def _undo_sources(net, added: Dict[str, list]) -> None:
+    for table in ("ext_grid", "impedance", "bus"):
+        idx = [i for i in added.get(table, []) if i in net[table].index]
+        if idx:
+            net[table].drop(idx, inplace=True)
+            res = "res_" + table
+            if res in net and net[res] is not None:
+                net[res].drop([i for i in idx if i in net[res].index], inplace=True)
+    for table, i in added.get("off", []):
+        net[table].at[i, "in_service"] = True
 
 
 def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -314,6 +406,10 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
     voltage_limit = _sf(params.get("voltage_limit_percent"), 15.0)
     thermal_limit = _sf(params.get("thermal_limit_percent"), 100.0)
     motor_ids = _parse_motor_ids(params)
+    source_model = str(params.get("source_model") or "fixed_voltage").strip().lower()
+    if source_model not in SOURCE_MODELS:
+        warnings.append(f"Unknown source model '{source_model}': sources held at their set voltage.")
+        source_model = "fixed_voltage"
 
     if not hasattr(net, "motor") or net.motor is None or net.motor.empty:
         return {
@@ -368,6 +464,16 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
         s_mva = math.sqrt(3.0) * rated["vn_kv"] * i_start if rated["vn_kv"] > 0 else 0.0
         p_mw = s_mva * rated["cos_lr"]
         q_mvar = s_mva * rated["sin_lr"]
+        # The load's power is at its bus's nominal voltage, the motor's at its
+        # own rated voltage: a 4 kV motor on a 4.16 kV bus is its locked-rotor
+        # impedance (4 kV)^2 / S, which draws (4.16 / 4)^2 S at 4.16 kV. Taken
+        # at the bus's voltage, ETAP's Example-ANSI pump drew 7.5 % less than
+        # ETAP's locked rotor (9 Nov 2026). A soft starter's current is held,
+        # so its power scales with the voltage once.
+        if rated["vn_kv"] > 0 and bus_vn > 0:
+            k_v = bus_vn / rated["vn_kv"]
+            k_v = k_v if method_meta.get("method", method) == "soft_start" else k_v * k_v
+            p_mw, q_mvar = p_mw * k_v, q_mvar * k_v
         mid, name = _row_id_name(row, idx)
         if s_mva <= 0:
             warnings.append(f"Motor '{name}': zero starting power (check pn_mech_mw, vn_kv, lrc_pu).")
@@ -406,8 +512,11 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
             **{k: _clean(v) for k, v in method_meta.items() if k != "method"},
         })
 
+    sources = _sources_behind_impedance(net, in_data, warnings) if source_model == "behind_impedance" else {}
     err = _run_pp(net)
+    _undo = (lambda: _undo_sources(net, sources)) if sources else (lambda: None)
     if err:
+        _undo()
         for li in lr_load_indices:
             if li in net.load.index:
                 net.load.drop(li, inplace=True)
@@ -432,8 +541,11 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
         result["i_start_nominal_ka"] = result["i_start_ka"]
         result["p_start_mw"] = _clean(p_act)
         result["q_start_mvar"] = _clean(q_act)
-        if result.get("vn_kv") and v_act > 0:
-            result["i_start_ka"] = _clean(math.hypot(p_act, q_act) / (math.sqrt(3.0) * result["vn_kv"] * v_act))
+        bus_vn = float(net.bus.at[int(net.load.at[li, "bus"]), "vn_kv"])
+        if bus_vn > 0 and v_act > 0:
+            result["i_start_ka"] = _clean(math.hypot(p_act, q_act) / (math.sqrt(3.0) * bus_vn * v_act))
+            result["v_motor_percent"] = _clean(100.0 * v_act * bus_vn / result["vn_kv"]) if result.get("vn_kv") else None
+    _undo()
 
     # Remove LR loads
     for li in lr_load_indices:
@@ -516,10 +628,12 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
             "thermal_limit_percent": thermal_limit,
             "starting_method": (method or "dol").lower().replace("-", "_"),
             "n_motors_started": len(selected),
+            "source_model": source_model,
         },
         "parameters": {
             "mode": "steady",
             "starting_method": method,
+            "source_model": source_model,
             "voltage_limit_percent": voltage_limit,
             "thermal_limit_percent": thermal_limit,
             "i_limit_pu": _sf(params.get("i_limit_pu"), 3.0),
