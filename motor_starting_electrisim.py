@@ -296,7 +296,7 @@ def _add_loading_before(branches: List[Dict[str, Any]], before: Dict[Any, Any]) 
         br["loading_before_percent"] = before.get((br["element"], br["id"]))
 
 
-def _run_pp(net) -> Optional[str]:
+def _run_pp(net, init: str = "auto") -> Optional[str]:
     # Electrisim's load flow: it settles the converters and the sources behind them,
     # which pandapower's alone does not - a campus with a DC side failed before any
     # motor started.
@@ -306,7 +306,7 @@ def _run_pp(net) -> Optional[str]:
     # impedance, 9 Nov 2026).
     from pandapower_electrisim import _electrisim_runpp
     try:
-        _electrisim_runpp(net, calculate_voltage_angles=True, init="auto", max_iteration=50)
+        _electrisim_runpp(net, calculate_voltage_angles=True, init=init, max_iteration=50)
         return None if net.converged else "The load flow did not converge."
     except Exception as e:
         return str(e)
@@ -343,8 +343,13 @@ def _sources_behind_impedance(net, in_data: Dict[str, Any], warnings: List[str])
         added["bus"].append(nb)
         added["impedance"].append(pp.create_impedance(net, nb, bus, rft_pu=z_pu.real, xft_pu=z_pu.imag, sn_mva=sb,
                                                       name=f"__source_z_{label}"))
-        added["ext_grid"].append(pp.create_ext_grid(net, nb, vm_pu=abs(e), va_degree=math.degrees(cmath.phase(e)),
-                                                    name=f"__source_e_{label}"))
+        # E's angle in its bus's own frame (a Dyn transformer's 330 deg included).
+        va_e = float(net.res_bus.at[bus, "va_degree"]) + math.degrees(cmath.phase(e / v))
+        added["ext_grid"].append(pp.create_ext_grid(net, nb, vm_pu=abs(e), va_degree=va_e, name=f"__source_e_{label}"))
+        # The load flow starts from the one before: from its default start, a generator's E
+        # beyond a 330 deg transformer from the grid's converged elsewhere (the campus did not
+        # solve with nothing started).
+        net.res_bus.loc[nb, ["vm_pu", "va_degree"]] = [abs(e), va_e]
         net[table].at[idx, "in_service"] = False
         added["off"].append((table, idx))
 
@@ -406,10 +411,13 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
     voltage_limit = _sf(params.get("voltage_limit_percent"), 15.0)
     thermal_limit = _sf(params.get("thermal_limit_percent"), 100.0)
     motor_ids = _parse_motor_ids(params)
-    source_model = str(params.get("source_model") or "fixed_voltage").strip().lower()
+    # Sources behind their impedance by default, as ETAP's static start and
+    # IEEE 399 have it (the user's ruling, 9 Nov 2026); 'fixed_voltage' holds
+    # them at their set voltage as the load flow does.
+    source_model = str(params.get("source_model") or "behind_impedance").strip().lower()
     if source_model not in SOURCE_MODELS:
-        warnings.append(f"Unknown source model '{source_model}': sources held at their set voltage.")
-        source_model = "fixed_voltage"
+        warnings.append(f"Unknown source model '{source_model}': sources behind their impedance.")
+        source_model = "behind_impedance"
 
     if not hasattr(net, "motor") or net.motor is None or net.motor.empty:
         return {
@@ -513,7 +521,7 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
         })
 
     sources = _sources_behind_impedance(net, in_data, warnings) if source_model == "behind_impedance" else {}
-    err = _run_pp(net)
+    err = _run_pp(net, init="results" if sources else "auto")
     _undo = (lambda: _undo_sources(net, sources)) if sources else (lambda: None)
     if err:
         _undo()

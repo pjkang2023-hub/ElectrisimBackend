@@ -1623,7 +1623,7 @@ def test_drawn_diagram_motor_starting(client, quiet, grid):
     request = _study_request(grid, {
         'typ': 'MotorStartingPandaPower Parameters', 'mode': 'steady', 'motor_ids': 'all',
         'starting_method': 'dol', 'voltage_limit_percent': '15', 'thermal_limit_percent': '100',
-        'frequency': '50'})
+        'frequency': '50', 'source_model': 'fixed_voltage'})   # the oracle is the load flow, holding the sources
     result = _post_study(client, quiet, request)
 
     spec = load_spec(grid)
@@ -1690,7 +1690,8 @@ def test_drawn_diagram_dynamic_motor_starting(client, quiet, grid):
                 'starting_method': 'dol', 'voltage_limit_percent': '15',
                 'thermal_limit_percent': '100', 't_start': str(t_start), 't_end': str(t_end),
                 **ANDES_PARAMS}
-    steady = _post_study(client, quiet, _study_request(grid, dict(settings, mode='steady')))
+    # ANDES's slack holds its voltage, as the load flow does: the steady study held its sources too.
+    steady = _post_study(client, quiet, _study_request(grid, dict(settings, mode='steady', source_model='fixed_voltage')))
     dynamic = _post_study(client, quiet, _study_request(grid, dict(settings, mode='dynamic')))
 
     spec = load_spec(grid)

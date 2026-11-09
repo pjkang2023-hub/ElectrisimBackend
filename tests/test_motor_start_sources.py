@@ -103,3 +103,9 @@ def test_a_generator_without_its_transient_reactance_falls_back_with_a_warning()
     warnings = []
     added = ms._sources_behind_impedance(net, {}, warnings)
     assert len(added["ext_grid"]) == 1 and any("subtransient" in w for w in warnings)
+
+
+def test_sources_are_behind_their_impedance_by_default():
+    out = ms._steady_state_start(_net(4.0, s_sc=20.0), {"starting_method": "dol", "motor_ids": "all"}, {})
+    assert out["summary"]["source_model"] == "behind_impedance"
+    assert out["buses"][0]["vm_during"] < 0.95                   # the grid's own bus dips

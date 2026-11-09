@@ -367,9 +367,13 @@ def test_motor_starting_one_chiller(client):
     dip = out['summary']['worst_dip_percent']
     assert m['i_start_ka'] == pytest.approx(m['i_start_nominal_ka'] * (1 - dip / 100), rel=0.02)
     assert out['summary']['n_fail_voltage'] == 0 and 2 < dip < 15
+    # The sources behind their impedance (the default since 9 Nov 2026), the grid at its minimum
+    # short-circuit power: the dip is the starting MVA over the bus's minimum short-circuit MVA
+    # (c = 1) plus it. Holding the sources' voltages it was 6.1 % for this 8.3 %.
     s_start = math.sqrt(3) * 13.8 * 6 * i_rated
-    s_sc = math.sqrt(3) * 13.8 * _golden()['bus_sc_3ph_max']['CA_13']['ikss_ka'] / 1.1
-    assert dip == pytest.approx(100 * s_start / (s_sc + s_start), rel=0.3)
+    s_sc = math.sqrt(3) * 13.8 * _golden()['bus_sc_3ph_min']['CA_13']['ikss_ka']
+    assert out['summary']['source_model'] == 'behind_impedance'
+    assert dip == pytest.approx(100 * s_start / (s_sc + s_start), rel=0.05)
 
 
 def test_chiller_start_overloads_its_16_mva_transformer_briefly(client):
