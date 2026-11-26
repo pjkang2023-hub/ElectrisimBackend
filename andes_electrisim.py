@@ -255,6 +255,9 @@ def _check_init(ss, warnings: List[str]) -> None:
         )
 
 
+_TRIPPED_P_EPS_MW = 1e-9   # a tripped machine's power below this is numerical residue: reported as 0
+
+
 def _clean_num(v: Any) -> Any:
     if v is None:
         return None
@@ -3237,6 +3240,14 @@ def run_tds(in_data: Dict[str, Any], params: Dict[str, Any]) -> str:
         power = _series_for("GENROU", "Pe") + _series_for("GENCLS", "Pe")
         for series in power:
             series["values"] = [_clean_num(x * meta["sn_mva"]) if x is not None else None for x in series["values"]]
+        # A machine tripped in the run (u = 0 at its end) carries no power once it is off, but ANDES's
+        # Pe for it is a floating-point residue (~1e-15 MW): report that as exactly 0.
+        off = {str(i) for m in ("GENROU", "GENCLS") if hasattr(ss, m)
+               for i, u in zip(getattr(ss, m).idx.v, getattr(ss, m).u.v) if not u}
+        for series in power:
+            if series["id"] in off:
+                series["values"] = [0.0 if x is not None and abs(x) < _TRIPPED_P_EPS_MW else x
+                                    for x in series["values"]]
 
         # Bus voltages
         bus_v = []
