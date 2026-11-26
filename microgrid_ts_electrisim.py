@@ -334,6 +334,7 @@ class MicrogridTs:
         self.rows, self.pcs_rows, self.balance = [], [], []
         self.unserved_j = self.curtailed_j = 0.0
         self.unserved_steps = []
+        self.failed_steps = []       # steps whose load flow did not converge: no result
         self.shed = 1.0
         self.curtail = 1.0
         # SOFCs turned down by a surplus the stores could not take: the share of their output above their
@@ -925,10 +926,16 @@ class MicrogridTs:
             self._filter_rectifiers(t)
         # The diagram's loads: an SST's MV draw counted too was its hall's load twice, and, moving as the
         # load flow settled it, read as load not served on a network on the grid.
+        base = sum(p for p, _ in self.base_ac.values()) + sum(self.base_dc.values())
         loads = sum(float(net.load.at[i, 'p_mw']) for i in self.real_ac if bool(net.load.at[i, 'in_service']))
         loads += sum(float(net.load_dc.at[i, 'p_dc_mw']) for i in self.dc_loads if bool(net.load_dc.at[i, 'in_service']))
-        base = sum(p for p, _ in self.base_ac.values()) + sum(self.base_dc.values())
         unserved = max(base - loads, 0.0)
+        if not converged:
+            # A step whose load flow failed has no result: its loads are what the solver's fallbacks left
+            # (voltage-dependent DC loads halved toward nothing). On an island whose stores ran empty that is
+            # load truly lost; on a network whose converters did not settle (a grid-connected PCS3750 run
+            # failing from step 3 read 62.6 MWh "not served") it is not. Counted as before, and named.
+            self.failed_steps.append(t)
         self.unserved_j += unserved * 1e6 * dt
         if unserved > 1e-9:
             self.unserved_steps.append(t)
@@ -1077,6 +1084,11 @@ class MicrogridTs:
                                   f'{-min(self.secondary_mw, default=0.0):.3g} MW less than the demand; the batteries ran '
                                   f'{min(socs, default=0.0):.3g} to {max(socs, default=0.0):.3g} % and ended at '
                                   f'{min(last):.3g} to {max(last):.3g} %.')
+        if self.failed_steps:
+            shown = ', '.join(str(t) for t in self.failed_steps[:10]) + (', ...' if len(self.failed_steps) > 10 else '')
+            self.notes.append(f'The load flow did not converge at {len(self.failed_steps)} of {len(self.balance)} '
+                              f'steps ({shown}): those steps have no valid result; the load their solver left '
+                              'unsupplied is counted as not served.')
         if self.unserved_steps:
             self.notes.append(f'The island ran short at {len(self.unserved_steps)} steps: '
                               f'{self.unserved_j / 3.6e9:.4g} MWh of load was not served.')
@@ -1123,5 +1135,6 @@ class MicrogridTs:
                 'sofc_turned_down_mwh': self.turned_down_j / 3.6e9,
                 'sofc_offline_steps': len(self.offline_steps), 'sofc_offline_mw_max': self.offline_mw,
                 'surplus_steps': len(self.surplus_steps),
+                'failed_steps': list(self.failed_steps),
                 'secondary_soc_percent': self.secondary_soc,
                 'notes': self.notes}

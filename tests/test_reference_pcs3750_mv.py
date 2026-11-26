@@ -1224,6 +1224,7 @@ def test_charge_balancing_evens_the_quadrants(client, quiet, gain):
     and the twelve meet near their 78.3 % average within the 10 h.
     """
     mg, soc = _ts_quadrants(client, quiet, gain, low=60)
+    assert not mg['failed_steps'], f"load flow did not converge at steps {mg['failed_steps']}"
     assert len(soc) == 12 and mg['unserved_mwh'] == 0
     low, others = soc['Block 1 DC1'], [v for k, v in soc.items() if k != 'Block 1 DC1']
     if gain == 0:
