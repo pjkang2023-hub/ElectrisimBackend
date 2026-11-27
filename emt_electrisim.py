@@ -1011,9 +1011,37 @@ def _start_load_flow(net):
             continue
         false_here = pe._electrisim_false_zero_volt(attempt)
         if not false_here:
+            _hold_slack_angles(attempt)
             return attempt, None
         false_solution = false_here
     return net, false_solution or why
+
+
+def _hold_slack_angles(net):
+    """
+    Each External Grid's bus at the grid's own angle, and what is joined to it turned with it. pandapower solves a
+    network with no branch in service - an External Grid's bus alone, as when the transformer it feeds is energised
+    in the run (ac_energise_trafo) - at 0 degrees whatever the grid's va_degree, so every source the EMT started from
+    it was off by that angle; a network with branches comes back at the grid's angle and is left as it is.
+    """
+    if not len(net.ext_grid) or not len(net.res_bus):
+        return
+    import pandapower.topology as top
+    graph = None
+    for gi in net.ext_grid.index:
+        if not bool(net.ext_grid.at[gi, 'in_service']):
+            continue
+        b = int(net.ext_grid.at[gi, 'bus'])
+        if b not in net.res_bus.index or not np.isfinite(net.res_bus.at[b, 'va_degree']):
+            continue
+        d = _f(net.ext_grid.at[gi, 'va_degree'], 0.0) - float(net.res_bus.at[b, 'va_degree'])
+        if abs(d) < 1e-6:
+            continue
+        if graph is None:
+            graph = top.create_nxgraph(net, respect_switches=True)
+        for k in top.connected_component(graph, b):
+            if k in net.res_bus.index and np.isfinite(net.res_bus.at[k, 'va_degree']):
+                net.res_bus.at[k, 'va_degree'] = float(net.res_bus.at[k, 'va_degree']) + d
 
 
 def emt_study(net, params, in_data=None):

@@ -5,6 +5,7 @@ textbook's - its remanence plus twice its rated peak, closed at its voltage's ze
 at the voltage's crest - and only past the knee does the inrush come.
 """
 import json
+import math
 
 import pytest
 
@@ -55,3 +56,35 @@ def test_point_on_wave_sets_the_closing(client, quiet):
     at0 = _energise(client, quiet, ac_energise_angle_deg=0)
     at90 = _energise(client, quiet, ac_energise_angle_deg=90)
     assert at90['closed_ms'] - at0['closed_ms'] == pytest.approx(5.0, abs=0.1)
+
+
+def _closed_at_a_time(client, quiet, va_degree):
+    """Closed at 20 ms (no point on wave given), the grid at va_degree: the bus's phase A and the cores' flux."""
+    params = {'typ': 'EmtStudy Parameters', 'user_email': 't@t', 'frequency': '50', 'time_step_us': '20',
+              'duration_ms': '60', 'ac_energise_trafo': 'tx', 'ac_energise_time_ms': '20', 'trafo_remanence_pu': '0,0,0'}
+    grid = _grid('hv')
+    grid['va_degree'] = str(va_degree)
+    rows = [_bus('hv', 33), _bus('lv', 0.69), grid, _trafo('hv', 'lv', 33, 0.69, 2.5, 6, 0.5, 'Dyn11')]
+    with quiet():
+        out = json.loads(client.post('/', json={'0': params, **{str(k + 1): r for k, r in enumerate(rows)}})
+                         .get_data(as_text=True))
+    assert 'emt' in out, out.get('message')
+    bus = next(b for b in out['emt']['ac']['buses'] if b['name'] == 'hv')['waveform']
+    return bus['v_a_kv'][0], out['emt']['energise_trafo']['psi_max_pu']
+
+
+def test_closed_at_a_time_the_grid_keeps_its_angle(client, quiet):
+    """
+    The grid's va_degree holds when its transformer is energised. Out of the load flow the run starts from, the
+    transformer left the grid's bus alone, with no branch; pandapower solves such a network at 0 degrees whatever
+    the grid's angle, so every run started the grid at 0 - closing at a set time then met a different point on the
+    wave than the study named (found against PSCAD 4.6, which closed at phase A's zero where Electrisim closed at its
+    crest).
+    """
+    crest = 33.0 / math.sqrt(3.0) * math.sqrt(2.0)
+    v0, psi0 = _closed_at_a_time(client, quiet, 0)
+    v90, psi90 = _closed_at_a_time(client, quiet, -90)
+    assert v0 == pytest.approx(crest, rel=0.01)          # cos(w t + 0) at t = 0
+    assert abs(v90) < 0.01 * crest                       # cos(w t - 90 deg): at its zero
+    # and so the closing at 20 ms (a whole period) meets each core's voltage 90 degrees apart: other fluxes
+    assert max(abs(a - b) for a, b in zip(psi0, psi90)) > 0.2
