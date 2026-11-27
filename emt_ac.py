@@ -16,7 +16,9 @@ load-flow state.
   current at their load-flow power. Generators: their voltage behind their
   subtransient reactance.
 - Bus couplers that are closed join their buses; an open switch on a line or
-  transformer takes it out.
+  transformer takes it out. A bus coupler or a switch at a line's end that a
+  timed event trips or closes is a breaker: a switch per phase, each pole
+  opening at its current's zero.
 
 The run starts in the circuit's own AC steady state (emt_solver's phasor
 solution at the grid frequency), the sources' voltages taken from the load
@@ -170,6 +172,11 @@ class AcBuilder:
         self.series_ups = {}
         # Every transformer's saturable cores (trafo_saturation=all).
         self.sat_cores = []
+        # Switches the run's timed events operate (their names), as breakers: bus couplers, and switches at a
+        # line's end ((line, bus) -> switch index, built with the line).
+        self.event_switches = set()
+        self.breakers = []
+        self.line_end_breakers = {}
 
     # --- buses and the phase shifts ------------------------------------------------
 
@@ -212,19 +219,90 @@ class AcBuilder:
         return self
 
     def _switches(self):
-        """Close bus couplers; return the lines and transformers an open switch takes out."""
+        """Close bus couplers; return the lines and transformers an open switch takes out. A switch a timed event
+        operates (event_switches) is a breaker: a switch per phase (_breaker)."""
         net, ckt = self.net, self.ckt
         out = set()
         for si in net.switch.index:
             closed = bool(net.switch.at[si, 'closed'])
             et, el, bus = net.switch.at[si, 'et'], int(net.switch.at[si, 'element']), int(net.switch.at[si, 'bus'])
+            operated = self._operated(si)
             if et == 'b':
-                if closed and bus in self.nodes and el in self.nodes:
+                if operated and bus in self.nodes and el in self.nodes:
+                    self._breaker(si, self.nodes[bus], self.nodes[el], closed)
+                elif closed and bus in self.nodes and el in self.nodes:
                     for k in range(3):
                         ckt.add_r(self.nodes[bus][k], self.nodes[el][k], 1e-4)
             elif not closed and et in ('l', 't'):
+                if operated:
+                    self.warnings.append(f"Switch {_label(net, 'switch', si)} is open at the start: closing it "
+                                         'onto a line or transformer is not modelled; it stays open.')
                 out.add(('line' if et == 'l' else 'trafo', el))
+            elif operated and et == 'l':
+                self.line_end_breakers[(el, bus)] = si      # built with the line (_lines)
+            elif operated:
+                self.warnings.append(f"Switch {_label(net, 'switch', si)}: only bus couplers and switches at a line's "
+                                     'end can be operated in the EMT study; it stays closed.')
         return out
+
+    def _operated(self, si):
+        """Whether a timed event names switch si (by its name, id or label)."""
+        net = self.net
+        names = {str(net.switch.at[si, 'name']), str(_row_id(net, 'switch', si)), _label(net, 'switch', si)}
+        return bool(names & self.event_switches)
+
+    def _breaker(self, si, a, b, closed):
+        """Switch si as a breaker between nodes a and b, a switch per phase: opened by a trip event, each pole at
+        its current's zero, as a circuit breaker interrupts; closed by a close event, all poles at once."""
+        rec = {'switch': si, 'label': _label(self.net, 'switch', si),
+               'names': {str(self.net.switch.at[si, 'name']), str(_row_id(self.net, 'switch', si)), _label(self.net, 'switch', si)},
+               'switches': [self.ckt.add_switch(a[ph], b[ph], closed=closed) for ph in range(3)],
+               'opening': False, 'last': [None] * 3, 'operations': []}
+        self.breakers.append(rec)
+        self.series.append(('Breaker', rec['label'], _row_id(self.net, 'switch', si), rec['label'],
+                            [('i_sw', k, None, 1.0) for k in rec['switches']]))
+        return rec
+
+    def find_breaker(self, name):
+        return next((rec for rec in self.breakers if str(name) in rec['names']), None)
+
+    def operate_breaker(self, rec, action, t, state):
+        """A timed event on a breaker: 'trip' starts its poles opening at their current zeros; 'close' closes them
+        all. True if the circuit changed."""
+        if action == 'trip':
+            if not rec['opening'] and any(state.sw_closed[k] for k in rec['switches']):
+                rec['opening'], rec['last'] = True, [None] * 3
+                rec['operations'].append({'action': 'trip', 't': t, 'poles': [None] * 3})
+            return False
+        rec['opening'] = False
+        rec['operations'].append({'action': 'close', 't': t, 'poles': [t] * 3})
+        changed = False
+        for k in rec['switches']:
+            if not state.sw_closed[k]:
+                state.set_switch(k, True)
+                changed = True
+        return changed
+
+    def breaker_control(self, t, state):
+        """Each opening breaker's poles, each opened as its current passes zero; True if one did."""
+        changed = False
+        for rec in self.breakers:
+            if not rec['opening']:
+                continue
+            op = rec['operations'][-1]
+            for n, k in enumerate(rec['switches']):
+                if not state.sw_closed[k]:
+                    continue
+                i = float(state.i_sw[k])
+                last = rec['last'][n]
+                rec['last'][n] = i
+                if last is not None and (i == 0.0 or (i > 0) != (last > 0)):
+                    state.set_switch(k, False)
+                    op['poles'][n] = t
+                    changed = True
+            if not any(state.sw_closed[k] for k in rec['switches']):
+                rec['opening'] = False
+        return changed
 
     def _phase_offsets(self):
         """
@@ -560,6 +638,16 @@ class AcBuilder:
                         trip['last'].append(None)
                     own_ends.append(end)
                 start, stop = own_ends
+            # A switch at either end a timed event operates: a breaker between its bus and the line's end.
+            for bus, side in ((fb, 'from'), (tb, 'to')):
+                si = self.line_end_breakers.get((li, bus))
+                if si is not None:
+                    end = [ckt.node(f'{label} {side} breaker {p}') for p in 'abc']
+                    self._breaker(si, start if side == 'from' else stop, end, True)
+                    if side == 'from':
+                        start = end
+                    else:
+                        stop = end
             # Middlebrook's series scan: its sources between the bus and the line (emt_impedance_scan.SeriesScan).
             target = str(self.params.get('middlebrook_line') or '').strip()
             if target and target in (str(self.net.line.at[li, 'name']), str(_row_id(self.net, 'line', li)), label):

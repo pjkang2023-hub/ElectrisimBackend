@@ -123,6 +123,7 @@ class _EmtBuilder:
                     if key:
                         ac.load_rows[str(key)] = r
         ac.event_loads = {ev['element'] for ev in self.timed}
+        ac.event_switches = {ev['element'] for ev in self.timed if ev['action'] in ('trip', 'close')}
         self.ac = ac.build()
         self._cables()
         self._capacitors()
@@ -817,7 +818,11 @@ class _EmtBuilder:
             if ld is not None:
                 ld['event'] = {'trip': 0.0, 'close': 1.0}.get(ev['action'], ev.get('value', 1.0))
                 continue
-            self.warnings.append(f"Event at {ev['t']:g} s: no converter or load '{name}'; not applied.")
+            brk = self.ac.find_breaker(name)
+            if brk is not None and ev['action'] in ('trip', 'close'):
+                changed = self.ac.operate_breaker(brk, ev['action'], t, state) or changed
+                continue
+            self.warnings.append(f"Event at {ev['t']:g} s: no converter, load or switch '{name}'; not applied.")
         return changed
 
     def controller(self, t, state):
@@ -830,6 +835,8 @@ class _EmtBuilder:
         if self.ac.island is not None and self.ac.island_control(t, state):
             changed = True
         if self.ac.line_trips and self.ac.line_trip_control(t, state):
+            changed = True
+        if self.ac.breakers and self.ac.breaker_control(t, state):
             changed = True
         for _, model in self.ders:
             model.control(t, state)
@@ -865,7 +872,8 @@ class _EmtBuilder:
 def _timed_events(params, warnings_out):
     """params["events"]: a list (or its JSON) of {"t": s, "action": "trip" | "close" | "scale", "element": name,
     "value": share, "ramp_s": s} - converters blocked and resumed (a resuming converter's power back over
-    ramp_s), loads switched or scaled, at their times."""
+    ramp_s), loads switched or scaled, AC breakers (bus couplers, switches at a line's end) opened at each pole's
+    current zero and closed, at their times."""
     raw = params.get('events') or []
     if isinstance(raw, str):
         try:
@@ -1138,6 +1146,8 @@ def emt_study(net, params, in_data=None):
             event_times.append(t_on + (dur if dur > 0 else 0.0))
     if b.ac.line_trips:
         event_times.append(b.ac.t_trip)
+    if b.ac.breakers:
+        event_times.extend(ev['t'] for ev in b.timed if b.ac.find_breaker(ev['element']) is not None)
     if b.ac.energise is not None:
         event_times.append(b.ac.energise['t'])
     if b.ac.energise_trafo is not None:
@@ -1315,6 +1325,13 @@ def emt_study(net, params, in_data=None):
                                  't_trip_ms': _round(b.ac.t_trip * 1e3),
                                  'opened_ms': [_round(x * 1e3) if x is not None else None for x in tr['opened']]}
                                 for tr in b.ac.line_trips]
+    if b.ac.breakers:
+        # Each AC breaker a timed event operated: each operation, when commanded and when each pole (a, b, c) moved.
+        result['ac_breakers'] = [{'label': rec['label'], 'id': _row_id(net, 'switch', rec['switch']),
+                                  'operations': [{'action': op['action'], 't_ms': _round(op['t'] * 1e3),
+                                                  'poles_ms': [_round(x * 1e3) if x is not None else None for x in op['poles']]}
+                                                 for op in rec['operations']]}
+                                 for rec in b.ac.breakers]
     for conv, sm in b.smoothers:
         tr = np.array(sm.trace) if sm.trace else np.zeros((0, 3))
         row = next(r for r in result['converters'] if r['label'] == conv.label)
