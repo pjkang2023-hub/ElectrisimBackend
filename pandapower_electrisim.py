@@ -2183,10 +2183,23 @@ def _electrisim_pp_runpp(net, kwargs):
     rectifiers holding the 800 V, failed every start and setting, though the
     network solves with 0.15 Mvar from it. Each such generator is first a PQ
     source at its power, then, from that solution, as it is.
+
+    A cold start ('auto') that does not converge is tried once from a flat
+    start first. On the PCS3750 reference's 30 min time series, a step's DC/DC
+    converter inputs settling sent one load flow wandering from its 'auto'
+    start - not converged in 30 iterations, though 50 reached it - and every
+    later round through the DC loads' halving to 62.6 MWh "not served" (with
+    some BLAS kernels; others had it). From flat it converged in 11.
     """
     try:
         return pp.runpp(net, **kwargs)
     except pp.LoadflowNotConverged:
+        if kwargs.get('init', 'auto') == 'auto':
+            flat = {k: v for k, v in kwargs.items() if k not in ('init_va_degree', 'init_vm_pu')}
+            try:
+                return pp.runpp(net, **{**flat, 'init': 'flat'})
+            except pp.LoadflowNotConverged:
+                pass
         gens = _electrisim_gens_beside_vscs(net)
         if not gens:
             raise
