@@ -31,6 +31,22 @@ except ImportError:
 
 VALID_METHODS = ("dol", "soft_start", "star_delta", "autotransformer", "reactor")
 
+# A dynamic start's thermal check against a short-time limit. A branch heats as
+# a first-order body, its losses as its current squared: from its loading
+# before the start, k_pre, held at k for the start's t, its temperature rise is
+#     dT_r (k_pre^2 + (k^2 - k_pre^2) (1 - e^(-t / tau))),
+# within the rise its continuous limit k_lim allows, dT_r k_lim^2, while
+#     k^2 <= k_pre^2 + (k_lim^2 - k_pre^2) / (1 - e^(-t / tau)).
+# tau is a transformer's winding time constant (IEC 60076-7: 4 min for a
+# distribution transformer, 7 to 10 min above - 7 taken) and a conductor's for
+# a line. A transformer is also held to its short-time emergency current
+# (IEC 60076-7: 2.0 pu to 2.5 MVA, 1.8 pu to 100 MVA, 1.5 pu above). A start's
+# seconds against a continuous rating failed the campus's 16 MVA transformer
+# at 129 % for the chiller's 1.6 s start.
+TRAFO_TAU_MIN = ((2.5, 4.0), (math.inf, 7.0))
+TRAFO_SHORT_TIME_PU = ((2.5, 2.0), (100.0, 1.8), (math.inf, 1.5))
+LINE_TAU_MIN = 10.0
+
 
 def _sf(value: Any, default: float = 0.0) -> float:
     if value is None or value == "" or str(value).lower() in ("none", "null", "nan"):
@@ -118,6 +134,8 @@ def _method_factor(method: str, params: Dict[str, Any], lrc_pu: float) -> Tuple[
         return tap * tap, meta
 
     if method == "reactor":
+        # x_r is relative to the motor's locked-rotor impedance (both mostly
+        # reactive), so the motor sees 1 / (1 + x_r) of the bus voltage.
         x_r = _sf(params.get("reactor_x_pu"), 0.25)
         if x_r < 0:
             x_r = 0.25
@@ -226,19 +244,165 @@ def _branch_loadings(net) -> List[Dict[str, Any]]:
                 "id": mid,
                 "name": name,
                 "element": "trafo",
+                "sn_mva": _clean(_sf(row.get("sn_mva"), float("nan"))),
                 "loading_during_percent": _clean(loading),
                 "max_i_ka": None,
                 "i_ka": _clean(_sf(net.res_trafo.at[idx, "i_lv_ka"] if "i_lv_ka" in net.res_trafo.columns else None, float("nan"))),
             })
+    # Three-winding units were left out: on the transmission reference grid
+    # the one feeding the motor's 10 kV winding, 55 % loaded during the start.
+    if hasattr(net, "trafo3w") and not net.trafo3w.empty and hasattr(net, "res_trafo3w") and not net.res_trafo3w.empty:
+        for idx, row in net.trafo3w.iterrows():
+            if idx not in net.res_trafo3w.index:
+                continue
+            loading = _sf(net.res_trafo3w.at[idx, "loading_percent"], float("nan"))
+            mid, name = _row_id_name(row, idx)
+            results.append({
+                "id": mid,
+                "name": name,
+                "element": "trafo3w",
+                "sn_mva": _clean(_sf(row.get("sn_hv_mva"), float("nan"))),
+                "loading_during_percent": _clean(loading),
+                "max_i_ka": None,
+                "i_ka": _clean(_sf(net.res_trafo3w.at[idx, "i_hv_ka"] if "i_hv_ka" in net.res_trafo3w.columns else None, float("nan"))),
+            })
     return results
 
 
-def _run_pp(net) -> Optional[str]:
+def _by_rating(table, sn_mva: float) -> float:
+    return next(v for top, v in table if sn_mva <= top)
+
+
+def _short_time_limit(k_pre: float, k_lim: float, t_s: float, tau_s: float,
+                      cap: Optional[float] = None) -> float:
+    """The loading (pu) a branch may carry for t_s from k_pre: see TRAFO_TAU_MIN."""
+    frac = -math.expm1(-t_s / tau_s) if t_s > 0 and tau_s > 0 else 1.0
+    k = math.sqrt(max(k_pre ** 2 + (k_lim ** 2 - k_pre ** 2) / frac, 0.0))
+    return min(k, max(cap, k_lim)) if cap is not None else k
+
+
+def _before_by_branch(net) -> Dict[Any, Any]:
+    return {(b["element"], b["id"]): b["loading_during_percent"] for b in _branch_loadings(net)}
+
+
+def _add_loading_before(branches: List[Dict[str, Any]], before: Dict[Any, Any]) -> None:
+    """
+    Each branch's loading with the starting motors still off, beside its
+    loading during the start. A thermal fail showed only the start's figure:
+    the campus Chiller A1 start failed its 16 MVA transformer at 119 % with
+    nothing showing it carried 53 % before.
+    """
+    for br in branches:
+        br["loading_before_percent"] = before.get((br["element"], br["id"]))
+
+
+def _run_pp(net, init: str = "auto") -> Optional[str]:
+    # Electrisim's load flow: it settles the converters and the sources behind them,
+    # which pandapower's alone does not - a campus with a DC side failed before any
+    # motor started.
+    # A locked rotor is a constant impedance, whose voltage dependence
+    # pandapower's Newton-Raphson leaves out of its Jacobian: a deep dip took
+    # more than its default 10 iterations (an 11 % dip behind a grid's
+    # impedance, 9 Nov 2026).
+    from pandapower_electrisim import _electrisim_runpp
     try:
-        pp.runpp(net, calculate_voltage_angles=True, init="auto")
-        return None
+        _electrisim_runpp(net, calculate_voltage_angles=True, init=init, max_iteration=50)
+        return None if net.converged else "The load flow did not converge."
     except Exception as e:
         return str(e)
+
+
+SOURCE_MODELS = ("fixed_voltage", "behind_impedance")
+
+
+def _sources_behind_impedance(net, in_data: Dict[str, Any], warnings: List[str]) -> Dict[str, list]:
+    """
+    Each external grid and generator as its internal voltage behind its
+    impedance, the voltage set by the load flow just solved (the start's
+    before): E = V + Z I. A grid sits behind 1 / S_sc on its own base (the
+    minimum short-circuit power, the weaker grid dipping more, else the
+    maximum) at its R/X; a generator behind Ra + jX'd on its rating - the
+    machine's dynamic data, as the transient stability study takes it, else
+    its subtransient X''d with a warning. ETAP's static motor start does this
+    (its internal voltages in Example-ANSI are exactly these, with X'd), as
+    IEEE 399 has it; a load flow holds a grid's and a generator's voltage, so
+    the bus feeding the start could not dip at all. Returns what to undo.
+    """
+    import cmath
+
+    added: Dict[str, list] = {"ext_grid": [], "impedance": [], "bus": [], "off": []}
+
+    def put_behind(table: str, idx: Any, bus: int, z_pu: complex, sb: float, s_gen: complex, label: str) -> None:
+        if bus not in net.res_bus.index:
+            return
+        v = cmath.rect(float(net.res_bus.at[bus, "vm_pu"]), math.radians(float(net.res_bus.at[bus, "va_degree"])))
+        if not (abs(v) > 0 and np.isfinite(abs(v))):
+            return
+        e = v + z_pu * (s_gen / sb / v).conjugate()
+        nb = pp.create_bus(net, vn_kv=float(net.bus.at[bus, "vn_kv"]), name=f"__source_{label}")
+        added["bus"].append(nb)
+        added["impedance"].append(pp.create_impedance(net, nb, bus, rft_pu=z_pu.real, xft_pu=z_pu.imag, sn_mva=sb,
+                                                      name=f"__source_z_{label}"))
+        # E's angle in its bus's own frame (a Dyn transformer's 330 deg included).
+        va_e = float(net.res_bus.at[bus, "va_degree"]) + math.degrees(cmath.phase(e / v))
+        added["ext_grid"].append(pp.create_ext_grid(net, nb, vm_pu=abs(e), va_degree=va_e, name=f"__source_e_{label}"))
+        # The load flow starts from the one before: from its default start, a generator's E
+        # beyond a 330 deg transformer from the grid's converged elsewhere (the campus did not
+        # solve with nothing started).
+        net.res_bus.loc[nb, ["vm_pu", "va_degree"]] = [abs(e), va_e]
+        net[table].at[idx, "in_service"] = False
+        added["off"].append((table, idx))
+
+    for idx, row in net.ext_grid.iterrows():
+        if not bool(row.get("in_service", True)) or idx not in net.res_ext_grid.index:
+            continue
+        s_sc = _sf(row.get("s_sc_min_mva")) or _sf(row.get("s_sc_max_mva"))
+        rx = _sf(row.get("rx_min")) if _sf(row.get("s_sc_min_mva")) else _sf(row.get("rx_max"))
+        _, name = _row_id_name(row, idx)
+        if s_sc <= 0:
+            warnings.append(f"External grid '{name}': no short-circuit power, so it holds its voltage during the start.")
+            continue
+        z = complex(rx, 1.0) / math.sqrt(1.0 + rx * rx)
+        s = complex(float(net.res_ext_grid.at[idx, "p_mw"]), float(net.res_ext_grid.at[idx, "q_mvar"]))
+        put_behind("ext_grid", idx, int(row["bus"]), z, s_sc, s, f"grid_{idx}")
+
+    gen_rows = {str(v.get("name")): v for v in (in_data or {}).values()
+                if isinstance(v, dict) and str(v.get("typ", "")).startswith("Generator")}
+    for idx, row in net.gen.iterrows():
+        if not bool(row.get("in_service", True)) or idx not in net.res_gen.index:
+            continue
+        _, name = _row_id_name(row, idx)
+        el = gen_rows.get(str(row.get("name")), {})
+        sn = _sf(row.get("sn_mva"))
+        bus = int(row["bus"])
+        vn_bus = float(net.bus.at[bus, "vn_kv"])
+        vn = _sf(row.get("vn_kv")) or vn_bus
+        xd1, ra = _sf(el.get("dyn_xd1")), _sf(el.get("dyn_ra"))
+        if xd1 <= 0:
+            xd1 = _sf(row.get("xdss_pu"))
+            ra = _sf(row.get("rdss_ohm")) / (vn * vn / sn) if sn > 0 and vn > 0 else 0.0
+            if xd1 > 0:
+                warnings.append(f"Generator '{name}': no transient reactance X'd (dynamic data), its subtransient "
+                                f"X''d taken: the dip is understated.")
+        if sn <= 0 or xd1 <= 0:
+            warnings.append(f"Generator '{name}': no rating or reactance, so it holds its voltage during the start.")
+            continue
+        z = complex(ra, xd1) * (vn / vn_bus) ** 2
+        s = complex(float(net.res_gen.at[idx, "p_mw"]), float(net.res_gen.at[idx, "q_mvar"]))
+        put_behind("gen", idx, bus, z, sn, s, f"gen_{idx}")
+    return added
+
+
+def _undo_sources(net, added: Dict[str, list]) -> None:
+    for table in ("ext_grid", "impedance", "bus"):
+        idx = [i for i in added.get(table, []) if i in net[table].index]
+        if idx:
+            net[table].drop(idx, inplace=True)
+            res = "res_" + table
+            if res in net and net[res] is not None:
+                net[res].drop([i for i in idx if i in net[res].index], inplace=True)
+    for table, i in added.get("off", []):
+        net[table].at[i, "in_service"] = True
 
 
 def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -247,6 +411,13 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
     voltage_limit = _sf(params.get("voltage_limit_percent"), 15.0)
     thermal_limit = _sf(params.get("thermal_limit_percent"), 100.0)
     motor_ids = _parse_motor_ids(params)
+    # Sources behind their impedance by default, as ETAP's static start and
+    # IEEE 399 have it (the user's ruling, 9 Nov 2026); 'fixed_voltage' holds
+    # them at their set voltage as the load flow does.
+    source_model = str(params.get("source_model") or "behind_impedance").strip().lower()
+    if source_model not in SOURCE_MODELS:
+        warnings.append(f"Unknown source model '{source_model}': sources behind their impedance.")
+        source_model = "behind_impedance"
 
     if not hasattr(net, "motor") or net.motor is None or net.motor.empty:
         return {
@@ -284,6 +455,7 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
             "exception": err,
         }
     vm_before = _snapshot_bus_vm(net)
+    loading_before = _before_by_branch(net)
 
     # --- During: locked-rotor loads ---
     motor_results: List[Dict[str, Any]] = []
@@ -300,9 +472,27 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
         s_mva = math.sqrt(3.0) * rated["vn_kv"] * i_start if rated["vn_kv"] > 0 else 0.0
         p_mw = s_mva * rated["cos_lr"]
         q_mvar = s_mva * rated["sin_lr"]
+        # The load's power is at its bus's nominal voltage, the motor's at its
+        # own rated voltage: a 4 kV motor on a 4.16 kV bus is its locked-rotor
+        # impedance (4 kV)^2 / S, which draws (4.16 / 4)^2 S at 4.16 kV. Taken
+        # at the bus's voltage, ETAP's Example-ANSI pump drew 7.5 % less than
+        # ETAP's locked rotor (9 Nov 2026). A soft starter's current is held,
+        # so its power scales with the voltage once.
+        if rated["vn_kv"] > 0 and bus_vn > 0:
+            k_v = bus_vn / rated["vn_kv"]
+            k_v = k_v if method_meta.get("method", method) == "soft_start" else k_v * k_v
+            p_mw, q_mvar = p_mw * k_v, q_mvar * k_v
         mid, name = _row_id_name(row, idx)
         if s_mva <= 0:
             warnings.append(f"Motor '{name}': zero starting power (check pn_mech_mw, vn_kv, lrc_pu).")
+        # A stalled motor is an impedance: it draws less as the voltage dips.
+        # As a constant-power load it overstated the dip (4.87 % for 4.63 %
+        # on the transmission reference grid) and the loadings. A soft
+        # starter regulates its current instead.
+        if method_meta.get("method", method) == "soft_start":
+            voltage_dependence = dict(const_i_p_percent=100, const_i_q_percent=100)
+        else:
+            voltage_dependence = dict(const_z_p_percent=100, const_z_q_percent=100)
         load_idx = pp.create_load(
             net,
             bus=bus,
@@ -310,6 +500,7 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
             q_mvar=q_mvar,
             name=f"__motor_start_lr_{name}",
             in_service=True,
+            **voltage_dependence,
         )
         lr_load_indices.append(load_idx)
         motor_results.append({
@@ -329,8 +520,11 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
             **{k: _clean(v) for k, v in method_meta.items() if k != "method"},
         })
 
-    err = _run_pp(net)
+    sources = _sources_behind_impedance(net, in_data, warnings) if source_model == "behind_impedance" else {}
+    err = _run_pp(net, init="results" if sources else "auto")
+    _undo = (lambda: _undo_sources(net, sources)) if sources else (lambda: None)
     if err:
+        _undo()
         for li in lr_load_indices:
             if li in net.load.index:
                 net.load.drop(li, inplace=True)
@@ -345,6 +539,21 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
         }
     vm_during = _snapshot_bus_vm(net)
     branches = _branch_loadings(net)
+    _add_loading_before(branches, loading_before)
+    # The current and power the motor draws at the dipped voltage; the
+    # nominal-voltage figures were reported.
+    for result, li in zip(motor_results, lr_load_indices):
+        p_act = float(net.res_load.at[li, "p_mw"])
+        q_act = float(net.res_load.at[li, "q_mvar"])
+        v_act = float(net.res_bus.at[int(net.load.at[li, "bus"]), "vm_pu"])
+        result["i_start_nominal_ka"] = result["i_start_ka"]
+        result["p_start_mw"] = _clean(p_act)
+        result["q_start_mvar"] = _clean(q_act)
+        bus_vn = float(net.bus.at[int(net.load.at[li, "bus"]), "vn_kv"])
+        if bus_vn > 0 and v_act > 0:
+            result["i_start_ka"] = _clean(math.hypot(p_act, q_act) / (math.sqrt(3.0) * bus_vn * v_act))
+            result["v_motor_percent"] = _clean(100.0 * v_act * bus_vn / result["vn_kv"]) if result.get("vn_kv") else None
+    _undo()
 
     # Remove LR loads
     for li in lr_load_indices:
@@ -406,6 +615,14 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
         br["pass"] = ok
         br["thermal_limit_percent"] = thermal_limit
 
+    # Report elements by their diagram labels; the pandapower names are cell
+    # ids ("mxCell_918"). Result boxes find their cells by id.
+    labels = getattr(net, "user_friendly_names", None) or {}
+    for row in bus_results + motor_results + branches:
+        for key in ("name", "bus_name"):
+            if row.get(key) in labels:
+                row[key] = labels[row[key]]
+
     return {
         "mode": "steady",
         "buses": bus_results,
@@ -419,10 +636,12 @@ def _steady_state_start(net, params: Dict[str, Any], in_data: Dict[str, Any]) ->
             "thermal_limit_percent": thermal_limit,
             "starting_method": (method or "dol").lower().replace("-", "_"),
             "n_motors_started": len(selected),
+            "source_model": source_model,
         },
         "parameters": {
             "mode": "steady",
             "starting_method": method,
+            "source_model": source_model,
             "voltage_limit_percent": voltage_limit,
             "thermal_limit_percent": thermal_limit,
             "i_limit_pu": _sf(params.get("i_limit_pu"), 3.0),
@@ -440,7 +659,8 @@ def _motor_el_from_in_data(in_data: Dict[str, Any], motor_ids: Optional[Set[str]
         if not isinstance(el, dict):
             continue
         typ = str(el.get("typ", ""))
-        if not typ.startswith("Motor"):
+        # "MotorStartingPandaPower Parameters" is the study's settings row.
+        if not typ.startswith("Motor") or "Parameters" in typ:
             continue
         mid = str(el.get("id") or el.get("name") or "")
         name = str(el.get("name") or mid)
@@ -489,12 +709,16 @@ def _derive_motor3_params(el: Dict[str, Any], warnings: List[str]) -> Dict[str, 
     hm = _sf(el.get("Hm") or el.get("hm"), 0.5)
     if hm <= 0:
         hm = 0.5
+    # Load torque Tm(w) = c1 + c2*w + c3*w^2 in pu of the rated mechanical
+    # torque at the drawn loading (c3 = 1: a pump or fan at rated load).
     c1 = _sf(el.get("tm_c1") or el.get("c1"), 0.0)
     c2 = _sf(el.get("tm_c2") or el.get("c2"), 0.0)
     c3 = _sf(el.get("tm_c3") or el.get("c3"), 1.0)
-    # ANDES uses aa, bb, c2 for tm = aa + bb*slip + c2*slip^2 in some docs;
-    # Motor3 params: c1, c2, c3 for Tm(w)
+    loading = _sf(el.get("loading_percent"), 100.0)
+    if loading <= 0:
+        loading = 100.0
     return {
+        "pn_mech_mw": (pn if pn > 0 else sn * cos_n * eff / 100.0) * loading / 100.0,
         "Sn": sn,
         "Vn": vn,
         "rs": rs_use,
@@ -509,6 +733,18 @@ def _derive_motor3_params(el: Dict[str, Any], warnings: List[str]) -> Dict[str, 
         "lrc_pu": lrc,
         "name": name,
     }
+
+
+def motor3_torque(mparams: Dict[str, Any], sb: float) -> Dict[str, float]:
+    """
+    ANDES puts Motor3's impedances and Hm on the system base but not c1..c3, which act directly on the
+    system-base torque balance - and its Tm(slip) = (c1+c2+c3) - (c2+2*c3)*slip + c2*slip^2 has c2 where the
+    expansion of c1 + c2*w + c3*w^2 in w = 1 - slip has c3. The coefficients that give the drawn curve, in pu of
+    the system base, at the motor's loading (pn_mech_mw).
+    """
+    tm_scale = mparams["pn_mech_mw"] / sb
+    c1, c2, c3 = mparams["c1"], mparams["c2"], mparams["c3"]
+    return {"c1": (c1 + (c2 - c3) / 2.0) * tm_scale, "c2": c3 * tm_scale, "c3": (c2 + c3) / 2.0 * tm_scale}
 
 
 def _dynamic_start(params: Dict[str, Any], in_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -553,7 +789,7 @@ def _dynamic_start_rebuild(
     t_end: float,
     warnings: List[str],
 ) -> Dict[str, Any]:
-    """Build ANDES system, add Motor3 devices BEFORE setup by patching build flow."""
+    """Build the ANDES system with the started motors, run it and report the start."""
     dyn_params = dict(params)
     dyn_params["fault_enabled"] = False
     dyn_params["fault_bus"] = ""
@@ -563,13 +799,6 @@ def _dynamic_start_rebuild(
 
     try:
         andes.config_logger(stream_level=40)
-        # Monkey-patch: build_system always setups. Rebuild by copying approach —
-        # call build_system then create a NEW system... Better: use andes_electrisim.build_system
-        # but we need motors before setup. Implement local build using andes_electrisim internals
-        # by temporarily injecting motors into in_data as a side channel.
-
-        # Practical approach: modify build_system usage — build, then create fresh System
-        # from the same in_data by calling a helper that adds motors before setup.
         ss, meta, motor_map = _build_system_with_motors(in_data, dyn_params, motors, method, t_start, warnings)
         warnings.extend(meta.get("warnings") or [])
     except Exception as e:
@@ -587,6 +816,9 @@ def _dynamic_start_rebuild(
         except Exception:
             pass
         ss.TDS.config.tf = t_end
+        # The rotor flux turns at slip * 2*pi*f - 314 rad/s at standstill -
+        # which ANDES's default 33 ms step aliases, overshooting the dip.
+        ss.TDS.config.tstep = _sf(params.get("tstep"), 0.01)
         # Power flow
         ss.PFlow.run()
         if not ss.PFlow.converged:
@@ -596,6 +828,17 @@ def _dynamic_start_rebuild(
                 "exception": "PFlow not converged",
                 "warnings": warnings,
             }
+        ss.TDS.init()
+        # ANDES initialises an out-of-service motor at synchronous speed
+        # (slip 0) with Id = 1 pu on the system base: toggled in from there,
+        # the Newton step started from a 100 MVA load on a 0.4 kV bus and
+        # settled on the bus's V = 0 solution. Start it from standstill and
+        # without current instead.
+        m = ss.Motor3
+        off = np.asarray(m.u.v) == 0
+        ss.dae.x[np.asarray(m.slip.a)[off]] = 1.0
+        ss.dae.y[np.asarray(m.Id.a)[off]] = 0.0
+        ss.dae.y[np.asarray(m.Iq.a)[off]] = 0.0
         ss.TDS.run()
     except Exception as e:
         return {
@@ -619,10 +862,12 @@ def _dynamic_start_rebuild(
         if hasattr(ss, "Bus") and ss.Bus.n > 0:
             vvar = ss.Bus.v
             addrs = list(vvar.a)
-            values = np.asarray(ss.TDS.plt.get_values(addrs), dtype=float)
+            values = andes_electrisim.tds_values(ss, vvar)
             for i, addr in enumerate(addrs):
                 col = values[:, i] if values.ndim == 2 else values
                 bidx = ss.Bus.idx.v[i]
+                if bus_name_by_idx and str(bidx) not in bus_name_by_idx:
+                    continue  # a three-winding transformer's star point
                 electrisim_name = bus_name_by_idx.get(str(bidx), str(ss.Bus.name.v[i]))
                 # Prefer electrisim id from bus_map reverse via name
                 eid = electrisim_name
@@ -641,68 +886,50 @@ def _dynamic_start_rebuild(
     motor_series: Dict[str, Any] = {}
     motor_results: List[Dict[str, Any]] = []
     slip_thresh = _sf(params.get("slip_threshold"), 0.02)
+    # A motor still above this slip at t_end has stalled or not run up.
+    stall_slip = _sf(params.get("stall_slip"), 0.1)
+    sb = float(ss.config.mva)
+    after = np.asarray(t, dtype=float) > t_start
 
     try:
         if hasattr(ss, "Motor3") and ss.Motor3.n > 0:
             m = ss.Motor3
-            # currents
-            def _series(var_name):
-                if not hasattr(m, var_name):
-                    return None
-                var = getattr(m, var_name)
-                addrs = list(var.a)
-                vals = np.asarray(ss.TDS.plt.get_values(addrs), dtype=float)
-                return vals
 
-            id_vals = _series("Id")
-            iq_vals = _series("Iq")
-            slip_vals = _series("slip")
-            te_vals = _series("te")
-            tm_vals = _series("tm")
-            p_vals = _series("p")
-            q_vals = _series("q")
+            def _series(var_name, i):
+                vals = andes_electrisim.tds_values(ss, getattr(m, var_name))
+                return np.asarray(vals[:, i] if vals.ndim == 2 else vals, dtype=float)
 
             for i in range(m.n):
                 midx = str(m.idx.v[i])
                 info = motor_map.get(midx, {"id": midx, "name": str(m.name.v[i])})
-                i_mag = None
-                if id_vals is not None and iq_vals is not None:
-                    idi = id_vals[:, i] if id_vals.ndim == 2 else id_vals
-                    iqi = iq_vals[:, i] if iq_vals.ndim == 2 else iq_vals
-                    i_mag = np.sqrt(np.asarray(idi, dtype=float) ** 2 + np.asarray(iqi, dtype=float) ** 2)
+                # ANDES gives the current and torque on the system base;
+                # report them on the motor's rating, as lrc_pu is.
+                vb = float(ss.Bus.get(src="Vn", idx=m.bus.v[i], attr="v"))
+                i_base_sys = sb / (math.sqrt(3) * vb)
+                i_scale = i_base_sys / info.get("i_base_ka", i_base_sys)
+                i_mag = np.hypot(_series("Id", i), _series("Iq", i)) * i_scale
+                p_mw = _series("p", i) * sb
+                q_mvar = _series("q", i) * sb
+                slip = _series("slip", i)
+                te = _series("te", i) * sb / info.get("sn_mva", sb)
 
-                slip_list = None
-                if slip_vals is not None:
-                    sli = slip_vals[:, i] if slip_vals.ndim == 2 else slip_vals
-                    slip_list = [_clean(x) for x in np.asarray(sli, dtype=float).tolist()]
-
+                # Run-up ends when the slip first reaches its running value
+                # (within 20%, or slip_threshold, whichever is larger).
                 start_time_s = None
-                if slip_list and t:
-                    for ti, s in zip(t, slip_list):
-                        if s is not None and abs(s) <= slip_thresh and ti >= t_start:
-                            start_time_s = float(ti) - t_start
-                            break
-
-                i_list = [_clean(x) for x in i_mag.tolist()] if i_mag is not None else None
-                i_start_pu = None
-                if i_list:
-                    # first sample after t_start
-                    for ti, iv in zip(t, i_list):
-                        if ti >= t_start and iv is not None:
-                            i_start_pu = iv
-                            break
-
-                te_list = None
-                if te_vals is not None:
-                    tei = te_vals[:, i] if te_vals.ndim == 2 else te_vals
-                    te_list = [_clean(x) for x in np.asarray(tei, dtype=float).tolist()]
+                if t and slip.size and slip[-1] <= stall_slip:
+                    done = after & (slip <= max(slip_thresh, 1.2 * slip[-1]))
+                    if done.any():
+                        start_time_s = float(np.asarray(t)[done][0]) - t_start
+                i_start_pu = float(i_mag[after].max()) if after.any() else None
 
                 motor_series[info["id"]] = {
                     "id": info["id"],
                     "name": info.get("name"),
-                    "i_pu": i_list,
-                    "slip": slip_list,
-                    "te": te_list,
+                    "i_pu": [_clean(x) for x in i_mag.tolist()],
+                    "slip": [_clean(x) for x in slip.tolist()],
+                    "te": [_clean(x) for x in te.tolist()],
+                    "p_mw": [_clean(x) for x in p_mw.tolist()],
+                    "q_mvar": [_clean(x) for x in q_mvar.tolist()],
                 }
                 motor_results.append({
                     "id": info["id"],
@@ -710,6 +937,7 @@ def _dynamic_start_rebuild(
                     "method": info.get("method", method),
                     "start_time_s": _clean(start_time_s),
                     "i_start_pu": _clean(i_start_pu),
+                    "slip_final": _clean(float(slip[-1])) if slip.size else None,
                     "note": info.get("note"),
                     "pass": start_time_s is not None,
                 })
@@ -795,31 +1023,16 @@ def _build_system_with_motors(
     Build ANDES system like andes_electrisim.build_system but insert Motor3 + Toggle
     before ss.setup().
     """
-    # Strategy: temporarily wrap andes.System.add / use build then reconstruct.
-    # Cleanest reliable way: copy build_system source flow by calling it after
-    # monkeypatching System.setup to no-op, add motors, then setup.
-
-    real_setup = None
-    setup_calls = []
-
-    class _SystemProxy:
-        pass
-
-    # Use andes_electrisim.build_system with patched setup
-    original_system = andes.System
-
-    class SystemNoSetup(original_system):
-        def setup(self, *args, **kwargs):
-            setup_calls.append(self)
-            return self
-
-    andes.System = SystemNoSetup
-    try:
-        ss, meta = andes_electrisim.build_system(in_data, params)
-    finally:
-        andes.System = original_system
+    # Motor3 and Toggle must exist before setup. (This used to swap in an
+    # andes.System subclass whose setup() did nothing - and the final
+    # ss.setup() below was that same no-op, so the system was never set up
+    # and every dynamic start failed.) The started motors are Motor3
+    # machines, not loads.
+    ss, meta = andes_electrisim.build_system(
+        in_data, params, exclude_motors={str(el.get("name")) for el in motors}, setup=False)
 
     bus_map = meta["bus_map"]
+    sb = float(ss.config.mva)
     motor_map: Dict[str, Dict[str, Any]] = {}
     toggle_i = 0
 
@@ -839,6 +1052,9 @@ def _build_system_with_motors(
         mid = str(el.get("id") or el.get("name"))
         mname = mparams.pop("name")
         lrc = mparams.pop("lrc_pu")
+        sn_rated = mparams["Sn"]
+        mparams.update(motor3_torque(mparams, sb))
+        mparams.pop("pn_mech_mw")
         note = None
         applied_method = "dol"
         if method == "soft_start":
@@ -862,6 +1078,7 @@ def _build_system_with_motors(
             u=0,
             Sn=mparams["Sn"],
             Vn=mparams["Vn"],
+            fn=meta["frequency"],
             rs=mparams["rs"],
             xs=mparams["xs"],
             rr1=mparams["rr1"],
@@ -887,10 +1104,111 @@ def _build_system_with_motors(
             "method": applied_method,
             "note": note,
             "lrc_pu": lrc,
+            # The rating, for reporting current and torque in pu of it.
+            "sn_mva": sn_rated,
+            "i_base_ka": sn_rated / (math.sqrt(3) * mparams["Vn"]),
         }
 
     ss.setup()
     return ss, meta, motor_map
+
+
+def _dynamic_branch_loadings(net, payload: Dict[str, Any], params: Dict[str, Any]) -> None:
+    """
+    Thermal check for a dynamic start: a load flow with each starting motor
+    replaced by the power it drew at the moment of the largest total demand.
+    Dynamic mode returned no branches at all, so its thermal check could
+    never fail - with the radial grid's TA at 118 % during the start.
+
+    That loading, held for the whole start, is judged against each branch's
+    short-time limit for the start's duration (see TRAFO_TAU_MIN), or with
+    thermal_check "continuous" against its continuous rating; both verdicts
+    are reported.
+    """
+    thermal_limit = _sf(params.get("thermal_limit_percent"), 100.0)
+    ts = payload.get("timeseries") or {}
+    t = np.asarray(ts.get("t") or [], dtype=float)
+    series = ts.get("motors") or {}
+    if not len(t) or not series or not hasattr(net, "motor") or net.motor.empty:
+        return
+    t_start = _sf((payload.get("parameters") or {}).get("t_start"), 0.0)
+    demand = np.zeros(len(t))
+    for ser in series.values():
+        p = np.asarray(ser.get("p_mw") or [np.nan] * len(t), dtype=float)
+        q = np.asarray(ser.get("q_mvar") or [np.nan] * len(t), dtype=float)
+        demand += np.nan_to_num(np.hypot(p, q))
+    demand[t < t_start] = -1.0
+    k = int(np.argmax(demand))
+    by_id = {str(_row_id_name(net.motor.loc[i], i)[0]): i for i in net.motor.index}
+    added, switched, starting = [], [], []
+    for mid, ser in series.items():
+        idx = by_id.get(str(mid))
+        if idx is None or not ser.get("p_mw"):
+            continue
+        switched.append((idx, bool(net.motor.at[idx, "in_service"])))
+        net.motor.at[idx, "in_service"] = False
+        starting.append((idx, mid, ser))
+    try:
+        # Before: the starting motors off, as they are until t_start.
+        loading_before = {} if not starting or _run_pp(net) else _before_by_branch(net)
+        for idx, mid, ser in starting:
+            added.append(pp.create_load(net, bus=int(net.motor.at[idx, "bus"]),
+                                        p_mw=float(ser["p_mw"][k] or 0.0),
+                                        q_mvar=float(ser["q_mvar"][k] or 0.0),
+                                        name=f"__motor_start_dyn_{mid}"))
+        if not added or _run_pp(net):
+            payload.setdefault("warnings", []).append(
+                "The thermal check of the dynamic start could not be run (load flow failed).")
+            return
+        branches = _branch_loadings(net)
+        _add_loading_before(branches, loading_before)
+    finally:
+        net.load.drop([li for li in added if li in net.load.index], inplace=True)
+        for idx, state in switched:
+            net.motor.at[idx, "in_service"] = state
+    # How long the start current flows. None when a motor did not finish
+    # starting: its locked-rotor current then flows until its protection trips.
+    times = [m.get("start_time_s") for m in payload.get("motors") or []]
+    duration = max(times) if times and all(x is not None for x in times) else None
+    check = str(params.get("thermal_check") or "short_time").strip().lower()
+    short = check != "continuous" and duration is not None and duration > 0
+    if check != "continuous" and not short:
+        payload.setdefault("warnings", []).append(
+            "A motor did not finish starting, so the branches are judged on their continuous rating.")
+    trafo_tau = _sf(params.get("trafo_tau_min"), 0.0)
+    line_tau = _sf(params.get("line_tau_min"), LINE_TAU_MIN)
+    k_lim = thermal_limit / 100.0
+    labels = getattr(net, "user_friendly_names", None) or {}
+    n_fail = n_over = 0
+    for br in branches:
+        loading = br.get("loading_during_percent")
+        continuous = loading is None or float(loading) <= thermal_limit
+        limit = None
+        if short and loading is not None:
+            before = br.get("loading_before_percent")
+            # Its loading before unknown: as loaded as its limit allows, the safe side.
+            k_pre = k_lim if before is None else float(before) / 100.0
+            if br.get("element") == "line":
+                tau, cap = line_tau, None
+            else:
+                sn = _sf(br.get("sn_mva"), 0.0)
+                tau = trafo_tau or _by_rating(TRAFO_TAU_MIN, sn)
+                cap = _by_rating(TRAFO_SHORT_TIME_PU, sn)
+            limit = 100.0 * _short_time_limit(k_pre, k_lim, float(duration), tau * 60.0, cap)
+        br["thermal_limit_percent"] = thermal_limit
+        br["short_time_limit_percent"] = _clean(limit)
+        br["pass_continuous"] = continuous
+        br["pass"] = continuous if limit is None else float(loading) <= limit
+        n_fail += 0 if br["pass"] else 1
+        n_over += 0 if continuous else 1
+        if br.get("name") in labels:
+            br["name"] = labels[br["name"]]
+    payload["branches"] = branches
+    payload["summary"]["n_fail_thermal"] = n_fail
+    payload["summary"]["n_over_continuous"] = n_over
+    payload["summary"]["thermal_check"] = "short_time" if short else "continuous"
+    payload["summary"]["thermal_check_t_s"] = _clean(float(t[k]))
+    payload["summary"]["start_duration_s"] = _clean(duration)
 
 
 def motor_starting(net, params: Dict[str, Any], in_data: Dict[str, Any]) -> str:
@@ -899,6 +1217,8 @@ def motor_starting(net, params: Dict[str, Any], in_data: Dict[str, Any]) -> str:
         mode = str(params.get("mode") or "steady").lower().strip()
         if mode in ("dynamic", "transient", "tds", "andes"):
             payload = _dynamic_start(params, in_data)
+            if not payload.get("error") and net is not None:
+                _dynamic_branch_loadings(net, payload, params)
         else:
             payload = _steady_state_start(net, params, in_data)
         return json.dumps(payload, allow_nan=False)

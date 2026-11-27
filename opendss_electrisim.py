@@ -1,8 +1,11 @@
 import opendssdirect as dss
 from typing import List, Optional
+import cmath
 import math
 import json
+import random
 import re
+import statistics
 import threading
 
 from storage_q_capability import (
@@ -221,6 +224,313 @@ def _sanitize_opendss_name(name):
     if name is None:
         return name
     return name.replace(' ', '_')
+
+
+# The DC network and the converters on it: OpenDSS models neither, and a DC
+# bus taken for an AC one sat in the results at 0 pu, its cables (X1=None)
+# failing to build.
+_OPENDSS_DC_TYP_PREFIXES = ('DC Bus', 'DC Line', 'DC Breaker', 'DC Diode', 'DC/DC Converter', 'Load DC')
+_OPENDSS_CONVERTER_TYP_PREFIXES = ('PCS', 'Solid-State Transformer', 'VSC', 'B2B VSC')
+
+
+def _opendss_is_dc_typ(typ):
+    return str(typ or '').startswith(_OPENDSS_DC_TYP_PREFIXES)
+
+
+def _opendss_is_ac_bus_typ(typ):
+    typ = str(typ or '')
+    return 'Bus' in typ and not _opendss_is_dc_typ(typ)
+
+
+def _opendss_grid_behind_impedance(data):
+    """
+    Put each external grid of a diagram behind the Thevenin impedance its
+    OpenDSS Vsource has (a bus and an Impedance element), as OpenDSS sees it.
+    pandapower holds an external grid's own bus at vm_pu; a converter whose Q
+    follows its voltage - a grid-forming PCS in Q-V droop - then answered a
+    different voltage there than in OpenDSS.
+    """
+    buses = {v.get('name'): v for v in data.values() if isinstance(v, dict) and _opendss_is_ac_bus_typ(v.get('typ'))}
+    for key, grid in list(data.items()):
+        if not (isinstance(grid, dict) and str(grid.get('typ', '')).startswith('External Grid')):
+            continue
+        bus = buses.get(grid.get('bus'))
+        vn = _opendss_float(bus.get('vn_kv'), 0.0) if bus else 0.0
+        s_sc = _opendss_float(grid.get('s_sc_max_mva'), 0.0)
+        s_sc = s_sc if s_sc > 0.1 else 10000.0                 # as _ext_grid_vsource_impedance
+        rx = _opendss_float(grid.get('rx_max'), 0.0)
+        thevenin = _thevenin_impedance_ohm(vn, s_sc, rx if rx > 0 else 0.25)   # else OpenDSS's X1/R1 = 4
+        if thevenin is None:
+            continue
+        r_ohm, x_ohm = thevenin[0], thevenin[1]
+        source = f"{grid.get('name')}_source"
+        z_base = vn ** 2 / 100.0
+        data[f'{key}_source_bus'] = {'typ': 'Bus', 'name': source, 'id': source, 'vn_kv': vn}
+        data[f'{key}_source_z'] = {'typ': 'Impedance', 'name': f'{source}_z', 'id': f'{source}_z',
+                                   'busFrom': source, 'busTo': grid['bus'], 'rft_pu': r_ohm / z_base,
+                                   'xft_pu': x_ohm / z_base, 'sn_mva': 100.0, 'in_service': True}
+        grid['bus'] = source
+
+
+def _opendss_electrisim_load_flow(in_data, frequency):
+    """Electrisim's own (pandapower) load flow of the diagram, its grid as OpenDSS has it, as its JSON result."""
+    import copy
+    import pandapower as pp
+    import pandapower_electrisim as pe
+    data = copy.deepcopy(in_data)
+    _opendss_grid_behind_impedance(data)
+    key = next((k for k, v in data.items()
+                if isinstance(v, dict) and 'Parameters' in str(v.get('typ', ''))), '0')
+    data[key] = {'typ': 'PowerFlowPandaPower Parameters', 'frequency': frequency, 'algorithm': 'nr',
+                 'calculate_voltage_angles': 'auto', 'initialization': 'auto'}
+    net = pp.create_empty_network(f_hz=float(frequency))
+    busbars = pe.create_busbars(data, net)
+    pe.create_other_elements(data, net, key, busbars)
+    out = pe.powerflow(net, 'nr', 'auto', 'auto', False, data, busbars)
+    out = json.loads(out) if isinstance(out, str) else out
+    if not isinstance(out, dict) or out.get('error'):
+        raise RuntimeError(out.get('error') if isinstance(out, dict) else 'no result')
+    return out
+
+
+def _opendss_converter_stand_ins(in_data, frequency):
+    """
+    Each converter as the load or source its AC side is in Electrisim's own
+    load flow, which solves the DC network behind it: OpenDSS has neither,
+    and without them the AI campus reference lost its data halls - 25 MW
+    of SSTs at 35 kV, 24 MW of rectifiers at 0.48 kV - and its PV and SOFC.
+
+    Returns [{'name', 'label', 'bus', 'p_mw', 'q_mvar'}], p and q drawn from
+    the bus (negative: supplied), and says in the warnings what it did.
+    """
+    converters = {e.get('name'): e for e in (in_data or {}).values()
+                  if isinstance(e, dict) and str(e.get('typ', '')).startswith(_OPENDSS_CONVERTER_TYP_PREFIXES)}
+    if not converters:
+        _opendss_warn_dc_left_out(in_data)
+        return []
+    try:
+        result = _opendss_electrisim_load_flow(in_data, frequency)
+    except Exception as exc:   # noqa: BLE001 - said in the warning
+        print(f"[OpenDSS] Converter AC-side load flow failed: {exc}")
+        _opendss_warn_dc_left_out(in_data, failure=str(exc))
+        return []
+
+    def finite(*values):
+        return all(isinstance(v, (int, float)) and math.isfinite(v) for v in values)
+
+    stand_ins = []
+
+    def add(row, side, bus_field, p_draw, q_draw):
+        element = converters.get(row.get('name'))
+        bus = element.get(bus_field) if element else None
+        # A converter carrying nothing (a catcher's rectifier at rest) is left out: a load of no
+        # power injects 0/0 of its fundamental, and every harmonic solve came out NaN - read as 0 % THD.
+        if bus and finite(p_draw, q_draw) and math.hypot(float(p_draw), float(q_draw)) >= 1e-3:
+            stand_ins.append({'name': f"{row['name']}_{side}", 'bus': bus, 'p_mw': float(p_draw),
+                              'q_mvar': float(q_draw),
+                              'label': element.get('userFriendlyName') or row['name'],
+                              # A PCS's or an SST's LV inverter: its own choice; a rectifier's AC
+                              # side, or an SST's MV, an active front end's unless told.
+                              'spectrum': element.get('spectrum') or ('afe' if side in ('ac', 'mv') else 'none'),
+                              'spectrum_csv': element.get('spectrum_csv') or ''})
+
+    angles = {b.get('name'): b.get('va_degree') for b in result.get('busbars') or []}
+    for row in result.get('pcs') or []:
+        if not finite(row.get('p_mw'), row.get('q_mvar')):
+            continue
+        element = converters.get(row.get('name'))
+        if (row.get('control') == 'grid_forming' and row.get('islanded') and element
+                and finite(row.get('vm_pu'), row.get('s_rated_mva'), angles.get(element.get('bus')))):
+            stand_ins.append(_pcs_voltage_source(row, element, float(angles[element.get('bus')])))
+            continue
+        add(row, 'ac', 'bus', -row['p_mw'], -row['q_mvar'])        # generator convention
+    for row in result.get('vscs') or []:
+        add(row, 'ac', 'bus', row.get('p_mw'), row.get('q_mvar'))       # load convention
+    for row in result.get('ssts') or []:
+        if row.get('in_service') is False:
+            continue
+        add(row, 'mv', 'bus_mv', row.get('p_mv_mw'), row.get('q_mv_mvar'))
+        if row.get('p_lv_ac_mw') is not None:
+            add(row, 'lv', 'bus_lv_ac', -row['p_lv_ac_mw'], -(row.get('q_lv_ac_mvar') or 0.0))
+    _opendss_warn_dc_left_out(in_data, stand_ins=stand_ins)
+    return stand_ins
+
+
+# A grid-forming PCS's reactor (pu of its rating, X then R): EMT's, which it builds each behind.
+PCS_REACTOR_PU = (0.15, 0.01)
+
+
+def _pcs_voltage_source(row, element, va_degree):
+    """
+    An island's grid-forming PCS as what holds its voltage: a source behind
+    its reactor, its EMF its terminal voltage plus the drop its current makes
+    across the reactor, E = V + Z I, so the load flow's fundamental is
+    Electrisim's; no harmonic EMF of its own (OpenDSS's default source
+    spectrum) and no zero sequence - a three-wire converter. As a constant
+    power source an island of them had no voltage reference: OpenDSS left it
+    unsolved, every bus at 0 % THD, and its SSTs' harmonics went nowhere.
+    Its active damping, harmonic_r_pu: its control drawing current in phase
+    with its terminals' harmonic voltage - a virtual resistance across them
+    at the harmonics, none at the fundamental (the harmonic study's alone).
+    In series with its reactor instead it does little: the island's
+    resonance is the cables against the reactors and T2s, as the SSTs' bus
+    sees them.
+    """
+    x_pu, r_pu = PCS_REACTOR_PU
+    try:
+        damping = max(0.0, float(element.get('harmonic_r_pu') or 0.0))
+    except (TypeError, ValueError):
+        damping = 0.0
+    s_rated = float(row['s_rated_mva'])
+    v = float(row['vm_pu']) * cmath.exp(1j * math.radians(va_degree))
+    s = complex(float(row['p_mw']), float(row['q_mvar'])) / s_rated
+    e = v + complex(r_pu, x_pu) * (s / v).conjugate()
+    return {'kind': 'vsource', 'name': f"{row['name']}_ac", 'bus': element.get('bus'),
+            'label': element.get('userFriendlyName') or row['name'], 'p_mw': -float(row['p_mw']),
+            'q_mvar': -float(row['q_mvar']), 's_rated_mva': s_rated, 'e_pu': abs(e),
+            'e_angle_degree': math.degrees(cmath.phase(e)), 'r_pu': r_pu, 'x_pu': x_pu,
+            'harmonic_r_pu': damping}
+
+
+def _opendss_add_harmonic_damping(stand_ins, BusbarsDictVoltage, BusbarsDictConnectionToName,
+                                  execute_dss_command):
+    """
+    In harmonics mode, after the fundamental: each grid-forming PCS's active
+    damping as a resistor across its terminals, star floating (a three-wire
+    converter). Returns how many.
+    """
+    n = 0
+    for st in stand_ins or ():
+        r_pu = st.get('harmonic_r_pu') or 0.0
+        bus_name = BusbarsDictConnectionToName.get(st.get('bus'))
+        kv = BusbarsDictVoltage.get(bus_name) if bus_name else None
+        if st.get('kind') != 'vsource' or r_pu <= 0 or not kv:
+            continue
+        name = _sanitize_opendss_name(st['name'])
+        r_ohm = r_pu * float(kv) ** 2 / st['s_rated_mva']
+        execute_dss_command(f"New Reactor.{name}_damping Bus1={bus_name} Bus2={name}_damping_n.4.4.4 "
+                            f"Phases=3 R={r_ohm:.6f} X=0.000001")
+        n += 1
+    return n
+
+
+def _opendss_create_converter_stand_in(dss, stand_in, BusbarsDictVoltage, BusbarsDictConnectionToName,
+                                       execute_dss_command):
+    """
+    A constant-P/Q load (or Model 1 generator where it supplies) for one
+    converter's AC side. Delta: a converter has no neutral, and wye on the
+    delta winding of its transformer it would be the only path to ground.
+    Its harmonic current spectrum: an active front end's (two-level, with its
+    line filter) by default, a six-pulse bridge's, none, or a custom table.
+    Before, it had none and every bus read 0 % THD.
+    """
+    bus_name = BusbarsDictConnectionToName.get(stand_in['bus'])
+    kv = BusbarsDictVoltage.get(bus_name) if bus_name else None
+    if not kv:
+        return
+    name = _sanitize_opendss_name(stand_in['name'])
+    if stand_in.get('kind') == 'vsource':
+        z_base = float(kv) ** 2 / stand_in['s_rated_mva']
+        r1, x1 = stand_in['r_pu'] * z_base, stand_in['x_pu'] * z_base
+        execute_dss_command(
+            f"New Vsource.{name} Bus1={bus_name} Phases=3 basekV={kv} pu={stand_in['e_pu']:.6f} "
+            f"angle={stand_in['e_angle_degree']:.6f} R1={r1:.6f} X1={x1:.6f} R0={r1:.6f} X0={1e4 * z_base:.3f}")
+        return
+    spectrum = _converter_spectrum(dss, stand_in, name, execute_dss_command)
+    p_kw, q_kvar = stand_in['p_mw'] * 1000.0, stand_in['q_mvar'] * 1000.0
+    if p_kw >= 0:
+        execute_dss_command(
+            f"New Load.{name} Bus1={bus_name} Phases=3 conn=delta kV={kv} kW={p_kw:.4f} "
+            f"kvar={q_kvar:.4f} model=1 Vminpu=0.5 Vmaxpu=2.0 spectrum={spectrum}")
+    else:
+        execute_dss_command(
+            f"New Generator.{name} Bus1={bus_name} Phases=3 conn=delta kV={kv} kW={-p_kw:.4f} "
+            f"kvar={-q_kvar:.4f} Model=1 Vminpu=0.5 Vmaxpu=2.0 spectrum={spectrum}")
+
+
+# A converter's harmonic currents, % of its fundamental. Generic values, ours, for a
+# study before a vendor's data: a two-level active front end at some 5 kHz behind its
+# LCL filter (current THD near 3 %, inside IEEE 519's 5 % TDD), and a six-pulse diode
+# bridge behind a 3 % line reactor (characteristic orders 6k +/- 1).
+CONVERTER_SPECTRA = {
+    'afe': "5,2.0,0\n7,1.5,0\n11,0.8,0\n13,0.6,0\n17,0.4,0\n19,0.3,0\n23,0.2,0\n25,0.2,0",
+    'six_pulse': "5,17.5,0\n7,11.1,0\n11,4.5,0\n13,2.9,0\n17,1.5,0\n19,1.0,0\n23,0.9,0\n25,0.8,0",
+}
+
+# IEEE 519-2022, Table 1: the voltage distortion limits at a point of common coupling, by
+# its voltage - (up to kV, individual harmonic %, THD %).
+IEEE519_VOLTAGE_LIMITS = ((1.0, 5.0, 8.0), (69.0, 3.0, 5.0), (161.0, 1.5, 2.5), (float('inf'), 1.0, 1.5))
+
+
+def ieee519_voltage_limits(kv):
+    """IEEE 519-2022's limits for a bus of ``kv``: (individual harmonic %, THD %)."""
+    for top, single, thd in IEEE519_VOLTAGE_LIMITS:
+        if kv <= top:
+            return single, thd
+    return IEEE519_VOLTAGE_LIMITS[-1][1:]
+
+
+def _converter_spectrum(dss, stand_in, name, execute_dss_command):
+    """The OpenDSS spectrum for a converter's stand-in: its named one, a custom table, or none."""
+    choice = str(stand_in.get('spectrum') or 'afe').strip().lower()
+    if choice == 'none':
+        return _no_harmonics_spectrum(dss, execute_dss_command)
+    csv_text = stand_in.get('spectrum_csv', '') if choice == 'custom' else CONVERTER_SPECTRA.get(choice)
+    if not csv_text:
+        return _no_harmonics_spectrum(dss, execute_dss_command)
+    spectrum_name = _sanitize_opendss_name(f"{name}_spectrum")
+    csv_text = "1,100,0\n" + csv_text if not str(csv_text).lstrip().startswith('1,') else csv_text
+    if _create_spectrum_from_csv(dss, spectrum_name, csv_text, execute_dss_command):
+        return spectrum_name
+    return _no_harmonics_spectrum(dss, execute_dss_command)
+
+
+def _opendss_warn_dc_left_out(in_data, stand_ins=None, failure=None):
+    """Say what of the DC network and its converters the OpenDSS circuit leaves out."""
+    dc_buses, dc_load_mw, n_dc_loads, converters = [], 0.0, 0, []
+    for elem in (in_data or {}).values():
+        if not isinstance(elem, dict):
+            continue
+        typ = str(elem.get('typ', ''))
+        label = elem.get('userFriendlyName') or elem.get('name', '')
+        if typ.startswith('DC Bus'):
+            dc_buses.append(label)
+        elif typ.startswith('Load DC'):
+            n_dc_loads += 1
+            dc_load_mw += _opendss_float(elem.get('p_dc_mw', elem.get('p_mw')), 0.0)
+        elif typ.startswith(_OPENDSS_CONVERTER_TYP_PREFIXES):
+            converters.append(label)
+    if not dc_buses and not converters:
+        return
+    parts = []
+    if dc_buses:
+        parts.append(f"{len(dc_buses)} DC bus{'es' if len(dc_buses) != 1 else ''}")
+    if n_dc_loads:
+        parts.append(f"{n_dc_loads} DC load{'s' if n_dc_loads != 1 else ''} of {dc_load_mw:.3g} MW")
+    message = "OpenDSS has no DC or converter model, so the DC network is left out"
+    if parts:
+        message += f" ({', '.join(parts)})"
+    if stand_ins:
+        def describe(s):
+            sign = 1.0 if s['p_mw'] >= 0 else -1.0
+            verb = 'draws' if sign > 0 else 'supplies'
+            if s.get('kind') == 'vsource':
+                verb = f"holds its island's voltage behind its {s['x_pu']:g} pu reactor and supplies"
+            return (f"{s['label']} {verb} {round(sign * s['p_mw'], 3) + 0.0:g} MW, "
+                    f"{round(sign * s['q_mvar'], 3) + 0.0:g} Mvar")
+        message += (". Each converter is the constant load or source its AC side is in Electrisim's "
+                    "own load flow, which solves the DC network, without harmonic injection: "
+                    + '; '.join(describe(s) for s in stand_ins))
+        stood_in = {s['label'] for s in stand_ins}
+        missing = [c for c in converters if c not in stood_in]
+        if missing:
+            message += f". Left out, with no AC power in that load flow: {', '.join(missing)}"
+    elif converters:
+        message += (f", with the converter{'s' if len(converters) != 1 else ''} on its AC side "
+                    f"({', '.join(converters)}): this result does not include what they draw or supply")
+        if failure:
+            message += f" (the load flow that gives their AC power failed: {failure})"
+    _opendss_warn(message + '.')
 
 
 _opendss_warnings = []
@@ -801,6 +1111,8 @@ def _collect_voltage_bases_from_in_data(in_data, BusbarsDictVoltage):
             pass
     for elem in in_data.values():
         typ = elem.get('typ', '')
+        if _opendss_is_dc_typ(typ):
+            continue
         for key in ('vn_kv', 'vn_hv_kv', 'vn_lv_kv', 'vn_mv_kv', 'kV', 'kv'):
             raw = elem.get(key)
             if raw in (None, '', '0'):
@@ -1022,7 +1334,7 @@ def create_busbars(in_data, dss, export_commands=False, opendss_commands=None):
         # Collect bus information from input data for reference
     bus_elements = {}
     for x in in_data:         
-        if "Bus" in in_data[x]['typ']:
+        if _opendss_is_ac_bus_typ(in_data[x]['typ']):
             bus_name_raw = in_data[x]['name']
             bus_name = _sanitize_opendss_name(bus_name_raw)
             bus_id = in_data[x].get('id', bus_name_raw)  # Get ID for error messages
@@ -1067,7 +1379,7 @@ def create_busbars(in_data, dss, export_commands=False, opendss_commands=None):
     for bus_name in bus_elements.keys():
         BusbarsDictConnectionToName[bus_name] = bus_name
     for x in in_data:
-        if "Bus" in in_data[x].get('typ', ''):
+        if _opendss_is_ac_bus_typ(in_data[x].get('typ', '')):
             bus_name_raw = in_data[x].get('name', '')
             bus_name = _sanitize_opendss_name(bus_name_raw)
             bus_id = in_data[x].get('id', '')
@@ -1083,8 +1395,15 @@ def create_busbars(in_data, dss, export_commands=False, opendss_commands=None):
     
     return BusbarsDictVoltage, BusbarsDictConnectionToName
 
-def create_other_elements(in_data, dss, BusbarsDictVoltage, BusbarsDictConnectionToName, export_commands=False, opendss_commands=None, execute_dss_command=None):
-    """Create other elements in OpenDSS circuit"""
+def create_other_elements(in_data, dss, BusbarsDictVoltage, BusbarsDictConnectionToName, export_commands=False, opendss_commands=None, execute_dss_command=None,
+                          generator_conn='delta', converter_stand_ins=None):
+    """Create other elements in OpenDSS circuit
+
+    generator_conn: how a (PV, Model 3) generator connects - delta for the load
+    flow and harmonics, so it holds the line voltage; the short-circuit study
+    keeps it wye, its zero-sequence path to ground.
+    converter_stand_ins: from _opendss_converter_stand_ins, each converter's AC side.
+    """
     global _opendss_shunt_meta
     _opendss_shunt_meta = {}
     if opendss_commands is None:
@@ -1170,7 +1489,7 @@ def create_other_elements(in_data, dss, BusbarsDictVoltage, BusbarsDictConnectio
             element_id = element_data.get('id', '')
             if element_type.startswith("Line 1ph"):
                 create_line_1ph_element(dss, element_data, element_name, element_id, BusbarsDictVoltage, BusbarsDictConnectionToName, LinesDict, LinesDictId, created_elements, execute_dss_command)
-            elif "Line" in element_type:
+            elif "Line" in element_type and not _opendss_is_dc_typ(element_type):
                 create_line_element(dss, element_data, element_name, element_id, BusbarsDictVoltage, BusbarsDictConnectionToName, LinesDict, LinesDictId, created_elements, execute_dss_command)
             elif element_type.startswith("Impedance"):
                 create_impedance_element(dss, element_data, element_name, element_id, BusbarsDictVoltage, BusbarsDictConnectionToName, LinesDict, LinesDictId, created_elements, execute_dss_command)
@@ -1190,6 +1509,8 @@ def create_other_elements(in_data, dss, BusbarsDictVoltage, BusbarsDictConnectio
                 create_transformer_1ph_element(dss, element_data, element_name, element_id, BusbarsDictVoltage, BusbarsDictConnectionToName, TransformersDict, TransformersDictId, created_elements, execute_dss_command)
             elif (element_type.startswith("Transformer") or element_type.startswith("Two Winding Transformer")) and not element_type.startswith("Three Winding Transformer"):
                 create_transformer_element(dss, element_data, element_name, element_id, BusbarsDictVoltage, BusbarsDictConnectionToName, TransformersDict, TransformersDictId, created_elements, execute_dss_command)
+            elif element_type.startswith("Grounding Transformer"):
+                create_grounding_transformer_element(dss, element_data, element_name, element_id, in_data, BusbarsDictVoltage, BusbarsDictConnectionToName, TransformersDict, TransformersDictId, created_elements, execute_dss_command)
         except ValueError as ve:
             raise
         except Exception as e:
@@ -1250,7 +1571,8 @@ def create_other_elements(in_data, dss, BusbarsDictVoltage, BusbarsDictConnectio
             elif element_type.startswith("Generator 1ph"):
                 create_generator_1ph_element(dss, element_data, element_name, element_id, BusbarsDictVoltage, BusbarsDictConnectionToName, GeneratorsDict, GeneratorsDictId, created_elements, execute_dss_command)
             elif element_type.startswith("Generator"):
-                create_generator_element(dss, element_data, element_name, element_id, BusbarsDictVoltage, BusbarsDictConnectionToName, GeneratorsDict, GeneratorsDictId, created_elements, execute_dss_command)
+                create_generator_element(dss, element_data, element_name, element_id, BusbarsDictVoltage, BusbarsDictConnectionToName, GeneratorsDict, GeneratorsDictId, created_elements, execute_dss_command,
+                                         conn=generator_conn)
             elif element_type.startswith("Storage"):
                 create_storage_element(dss, element_data, element_name, element_id, BusbarsDictVoltage, BusbarsDictConnectionToName, StoragesDict, StoragesDictId, created_elements, execute_dss_command)
             elif element_type.startswith("PVSystem"):
@@ -1303,6 +1625,13 @@ def create_other_elements(in_data, dss, BusbarsDictVoltage, BusbarsDictConnectio
             print(f'[OpenDSS] Control element creation failed: {e}')
             continue
 
+    for stand_in in converter_stand_ins or ():
+        try:
+            _opendss_create_converter_stand_in(dss, stand_in, BusbarsDictVoltage, BusbarsDictConnectionToName,
+                                               execute_dss_command)
+        except Exception as e:
+            print(f"[OpenDSS] Converter stand-in {stand_in.get('name')} failed: {e}")
+
     # After all elements: set voltage bases and run calcv so OpenDSS assigns correct base kV
     # to every bus (including those with PVSystems/Loads). Running calcv before power
     # injection elements can leave the first solve at zero power until the circuit is rebuilt.
@@ -1352,7 +1681,9 @@ def create_load_1ph_element(dss, element_data, element_name, element_id, Busbars
     try:
         load_cmd = f"New Load.{load_name} phases=1 Bus1={bus_terminal} kV={kv} kW={p_kw} kvar={abs(q_kvar)} conn={conn}"
         spectrum = element_data.get('spectrum', 'defaultload')
-        if spectrum and str(spectrum).lower() != 'none':
+        if spectrum and str(spectrum).lower() == 'none':
+            load_cmd += f" spectrum={_no_harmonics_spectrum(dss, execute_dss_command)}"
+        elif spectrum:
             load_cmd += f" spectrum={spectrum}"
         pct_series_rl = element_data.get('pctSeriesRL', '')
         if pct_series_rl not in ('', None):
@@ -1409,7 +1740,9 @@ def create_generator_1ph_element(dss, element_data, element_name, element_id, Bu
         if sn_kva not in (None, '', '0', 0):
             gen_cmd += f" kVA={float(sn_kva)}"
         spectrum = element_data.get('spectrum', 'defaultgen')
-        if spectrum and str(spectrum).lower() != 'none':
+        if spectrum and str(spectrum).lower() == 'none':
+            gen_cmd += f" spectrum={_no_harmonics_spectrum(dss, execute_dss_command)}"
+        elif spectrum:
             gen_cmd += f" spectrum={spectrum}"
         execute_dss_command(gen_cmd)
         in_service = element_data.get('in_service', True)
@@ -1435,14 +1768,16 @@ def create_line_1ph_element(dss, element_data, element_name, element_id, Busbars
     phase, conn = _element_phase_conn(element_data)
     t1 = _format_opendss_bus_terminal(bus_from_name, phase, conn)
     t2 = _format_opendss_bus_terminal(bus_to_name, phase, conn)
-    r_ohm_per_km = float(element_data.get('r_ohm_per_km', 0.122) or 0.122)
-    x_ohm_per_km = float(element_data.get('x_ohm_per_km', 0.112) or 0.112)
+    n_par = _element_parallel(element_data)
+    r_ohm_per_km = float(element_data.get('r_ohm_per_km', 0.122) or 0.122) / n_par
+    x_ohm_per_km = float(element_data.get('x_ohm_per_km', 0.112) or 0.112) / n_par
     length_km = float(element_data.get('length_km', 1) or 1)
-    c_nf_per_km = element_data.get('c_nf_per_km')
+    c_nf_per_km = _scaled_per_km(element_data.get('c_nf_per_km'), n_par)
     try:
         line_cmd = f'New Line.{element_name} phases=1 Bus1={t1} Bus2={t2} R1={r_ohm_per_km} X1={x_ohm_per_km} Length={length_km} units=km'
         if c_nf_per_km not in (None, '', '0', 0):
             line_cmd += f' C1={float(c_nf_per_km)}'
+        line_cmd += _line_rating_suffix(element_data)
         execute_dss_command(line_cmd)
         in_service = element_data.get('in_service', True)
         is_in_service = in_service if isinstance(in_service, bool) else str(in_service).lower() not in ['false', 'no', '0']
@@ -1507,7 +1842,7 @@ def create_transformer_1ph_element(dss, element_data, element_name, element_id, 
     bus_to_name = BusbarsDictConnectionToName.get(bus_to_ref) or _sanitize_opendss_name(bus_to_ref)
     phase, conn = _element_phase_conn(element_data)
     try:
-        sn_kva = float(element_data.get('sn_kva', 25) or 25)
+        sn_kva = float(element_data.get('sn_kva', 25) or 25) * _element_parallel(element_data)
         vk_percent = float(element_data.get('vk_percent', 2.0) or 2.0)
         vkr_percent = float(element_data.get('vkr_percent', 0.6) or 0.6)
         kv_hv = float(element_data.get('vn_hv_kv', BusbarsDictVoltage.get(bus_from_name) or 7.2) or 7.2)
@@ -1546,6 +1881,62 @@ def create_transformer_1ph_element(dss, element_data, element_name, element_id, 
 
 
 # Individual element creation functions
+def _element_parallel(element_data):
+    """
+    How many identical circuits or units the element stands for. OpenDSS has
+    no such property and it was never read: a double-circuit line went in as
+    one circuit (twice the impedance, half the rating), as pandapower does not.
+    """
+    try:
+        n = int(float(element_data.get('parallel') or 1))
+    except (TypeError, ValueError):
+        n = 1
+    return n if n >= 1 else 1
+
+
+def _scaled_per_km(value, factor):
+    """A per-km line constant times factor, left as given when absent."""
+    if value in (None, ''):
+        return value
+    return float(value) * factor
+
+
+def _line_rated_ka(element_data):
+    """The line's thermal rating as pandapower takes it: max_i_ka x df x parallel."""
+    try:
+        amps = float(element_data.get('max_i_ka'))
+    except (TypeError, ValueError):
+        return 0.0
+    try:
+        df = float(element_data.get('df') if element_data.get('df') not in (None, '') else 1.0)
+    except (TypeError, ValueError):
+        df = 1.0
+    rated = amps * (df if df > 0 else 1.0) * _element_parallel(element_data)
+    return rated if rated > 0 and not math.isinf(rated) else 0.0
+
+
+def _line_rating_suffix(element_data):
+    """
+    The line's thermal rating for OpenDSS: max_i_ka (derated by df) as
+    normamps and emergamps. Without it every line had OpenDSS's default 400 A,
+    which the DG screening's thermal check measured against - a 420 A cable
+    read 5 % high, a 362 A line 10 % low.
+    """
+    try:
+        amps = float(element_data.get('max_i_ka')) * 1000.0
+    except (TypeError, ValueError):
+        return ''
+    try:
+        df = float(element_data.get('df') if element_data.get('df') not in (None, '') else 1.0)
+    except (TypeError, ValueError):
+        df = 1.0
+    amps *= df if df > 0 else 1.0
+    amps *= _element_parallel(element_data)
+    if not (amps > 0) or math.isinf(amps):
+        return ''
+    return f' normamps={amps:g} emergamps={amps:g}'
+
+
 def create_line_element(dss, element_data, element_name, element_id, BusbarsDictVoltage, BusbarsDictConnectionToName, LinesDict, LinesDictId, created_elements, execute_dss_command=None):
     """Create a line element in OpenDSS"""
     
@@ -1614,6 +2005,17 @@ def create_line_element(dss, element_data, element_name, element_id, BusbarsDict
                     raise
                 raise ValueError(f"Line '{element_name}': Invalid value for c0_nf_per_km: {c0_nf_per_km}")
         
+        # n identical circuits in parallel: series impedances / n, shunt
+        # capacitances x n (the rating x n is in _line_rating_suffix).
+        n_par = _element_parallel(element_data)
+        if n_par > 1:
+            r_ohm_per_km = _scaled_per_km(r_ohm_per_km, 1.0 / n_par)
+            x_ohm_per_km = _scaled_per_km(x_ohm_per_km, 1.0 / n_par)
+            r0_ohm_per_km = _scaled_per_km(r0_ohm_per_km, 1.0 / n_par)
+            x0_ohm_per_km = _scaled_per_km(x0_ohm_per_km, 1.0 / n_par)
+            c_nf_per_km = _scaled_per_km(c_nf_per_km, n_par)
+            c0_nf_per_km = _scaled_per_km(c0_nf_per_km, n_par)
+
         try:
             # Create line using OpenDSS command with parameters from frontend
             line_cmd = f'New Line.{element_name} phases=3 Bus1={bus_from_name} Bus2={bus_to_name} R1={r_ohm_per_km} X1={x_ohm_per_km} Length={length_km} units=km'
@@ -1627,6 +2029,7 @@ def create_line_element(dss, element_data, element_name, element_id, BusbarsDict
                 line_cmd += f' C1={c_nf_per_km}'
             if c0_nf_per_km is not None:
                 line_cmd += f' C0={c0_nf_per_km}'
+            line_cmd += _line_rating_suffix(element_data)
                 
             execute_dss_command(line_cmd)
             
@@ -1870,14 +2273,38 @@ def _create_spectrum_from_csv(dss, spectrum_name, csv_text, execute_dss_command)
     return True
 
 
+NO_HARMONICS_SPECTRUM = 'electrisim_no_harmonics'
+
+
+def _no_harmonics_spectrum(dss, execute_dss_command):
+    """
+    A spectrum of the fundamental alone, for elements set to "None".
+
+    OpenDSS gives an element without spectrum= its class default - a load
+    defaultload, a generator defaultgen - so leaving it out, as "None" did,
+    left every element injecting harmonics.
+    """
+    try:
+        dss.Circuit.SetActiveClass('Spectrum')
+        if NO_HARMONICS_SPECTRUM in [str(n).lower() for n in dss.ActiveClass.AllNames()]:
+            return NO_HARMONICS_SPECTRUM
+    except Exception:
+        pass
+    run = execute_dss_command or dss.Text.Command
+    run(f'New Spectrum.{NO_HARMONICS_SPECTRUM} NumHarm=1 harmonic=(1) %mag=(100) angle=(0)')
+    return NO_HARMONICS_SPECTRUM
+
+
 def _resolve_named_spectrum_for_element(dss, element_data, default_spectrum, spectrum_object_name, execute_dss_command):
     """
     Resolve spectrum= for Generator, static Generator, PVSystem, Vsource: named spectrum or
     custom CSV (creates New Spectrum.<spectrum_object_name> and references it).
     """
     spectrum = element_data.get('spectrum', default_spectrum)
-    if spectrum is None or str(spectrum).strip().lower() == 'none':
+    if spectrum is None:
         return None
+    if str(spectrum).strip().lower() == 'none':
+        return _no_harmonics_spectrum(dss, execute_dss_command)
     spectrum = str(spectrum).strip()
     sl = spectrum.lower()
     if sl == 'custom':
@@ -1971,7 +2398,9 @@ def create_load_element(dss, element_data, element_name, element_id, BusbarsDict
                 load_cmd += " model=1"  # Constant P+jQ model for motors
             
             # Append harmonic analysis properties if provided
-            spectrum = element_data.get('spectrum', 'defaultload')
+            # A motor (no spectrum of its own) took defaultload, a 6-pulse
+            # rectifier; a directly fed induction motor injects no harmonics.
+            spectrum = element_data.get('spectrum') or ('none' if is_motor else 'defaultload')
             if spectrum and spectrum.lower() != 'none':
                 spectrum_to_use = spectrum
                 # For TCR_PU / HVDC_PU: use built-in IEEE benchmark spectra
@@ -2002,6 +2431,8 @@ def create_load_element(dss, element_data, element_name, element_id, BusbarsDict
                     else:
                         spectrum_to_use = 'defaultload'
                 load_cmd += f" spectrum={spectrum_to_use}"
+            elif spectrum:
+                load_cmd += f" spectrum={_no_harmonics_spectrum(dss, execute_dss_command)}"
             # %SeriesRL: IEEE benchmark uses 100% for harmonic loads (TCR_PU, HVDC_PU)
             spectrum_upper = (spectrum or '').upper()
             if spectrum_upper in ('TCR_PU', 'HVDC_PU'):
@@ -2214,7 +2645,8 @@ def create_static_generator_element(dss, element_data, element_name, element_id,
             pass
     else:
         pass
-def create_generator_element(dss, element_data, element_name, element_id, BusbarsDictVoltage, BusbarsDictConnectionToName, GeneratorsDict, GeneratorsDictId, created_elements, execute_dss_command=None):
+def create_generator_element(dss, element_data, element_name, element_id, BusbarsDictVoltage, BusbarsDictConnectionToName, GeneratorsDict, GeneratorsDictId, created_elements, execute_dss_command=None,
+                             conn='delta'):
     """Create a generator element in OpenDSS"""
     
     # Check for duplicates - skip if already created
@@ -2259,11 +2691,18 @@ def create_generator_element(dss, element_data, element_name, element_id, Busbar
 
         try:
             # Model=3 = constant kW / constant kV, matching pandapower gen (a PV bus).
+            # Connected delta it regulates the mean line-to-line voltage, the
+            # positive sequence pandapower holds. Wye (OpenDSS's default) it
+            # regulates phase-to-ground, and on a bus with no other ground - the
+            # delta side of a gas turbine's YNd step-up - its correction went
+            # into the zero sequence: 52 pu V0, V1 unmoved, no convergence.
             q_abs_sync = abs(float(q_kvar))
             maxkvar_sync = max(q_abs_sync * 2.0, 10000.0)
+            # Vpu is Model 3's voltage setpoint. Without it every generator held
+            # its bus at 1.0 pu whatever vm_pu the diagram gave.
             gen_cmd = (
                 f"New Generator.{element_name} Bus1={bus_name} kV={bus_voltage} "
-                f"kW={p_kw} kvar={q_kvar} Model=3 PF={cos_phi} "
+                f"kW={p_kw} kvar={q_kvar} Model=3 Vpu={vm_pu} PF={cos_phi} conn={conn} "
                 f"Vminpu=0.5 Vmaxpu=2.0 Maxkvar={maxkvar_sync:.3f} Minkvar={-maxkvar_sync:.3f}"
             )
             
@@ -2366,7 +2805,13 @@ def _opendss_terminal_pq_kw(powers, terminal_index, n_conductors=0, n_phases=3):
 
 
 def _opendss_terminal_i_ka(currents, terminal_index, n_conductors=0, n_phases=3):
-    """Average phase/conductor current magnitude (kA) for one OpenDSS terminal."""
+    """
+    Average phase/conductor current magnitude (kA) for one OpenDSS terminal,
+    from CktElement.Currents() - rectangular (re, im) pairs. Lines passed
+    CurrentsMagAng() (magnitude, angle in degrees) and got sqrt(mag^2 +
+    angle^2): 98 A for the 8 A on the transmission reference grid's 110 kV
+    line, and loadings to match.
+    """
     n_per_terminal = _opendss_n_per_terminal(n_conductors, n_phases)
     start = terminal_index * n_per_terminal
     n_cond = int(n_conductors) if n_conductors else int(n_phases or 3)
@@ -2677,8 +3122,10 @@ def create_transformer_element(dss, element_data, element_name, element_id, Busb
             else:
                 bus_hv_name, bus_lv_name = bus_to_name, bus_from_name
             
-            # Convert MVA to kVA
-            sn_kva = sn_mva * 1000
+            # Convert MVA to kVA; n units in parallel are one of n x the
+            # rating at the same per-unit impedance, with n x the iron losses.
+            n_par = _element_parallel(element_data)
+            sn_kva = sn_mva * 1000 * n_par
             
             # Convert vector group to OpenDSS connection format
             conns = vector_group_to_opendss_conns(vector_group)
@@ -2688,7 +3135,7 @@ def create_transformer_element(dss, element_data, element_name, element_id, Busb
             i0_percent_raw = element_data.get('i0_percent', '0')
             
             # Convert loss parameters to float
-            pfe_kw = float(pfe_kw_raw)
+            pfe_kw = float(pfe_kw_raw) * n_par
             i0_percent = float(i0_percent_raw)
             
             # Get tap parameters from frontend
@@ -2788,6 +3235,56 @@ def create_transformer_element(dss, element_data, element_name, element_id, Busb
                 pass
     else:
         pass
+def grounding_transformer_dss_command(name, bus, kv, z, neutral_node=4):
+    """
+    A zigzag grounding transformer in OpenDSS: a wye-delta unit with its delta
+    left floating. Its zero-sequence impedance is its leakage (XHL, %R, on a
+    1 MVA base) and its neutral resistor or reactor is the wye winding's own
+    rneut / xneut, so a ground fault sees Z0 + 3 Z_N, as in pandapower. Its
+    neutral is a node of its own on the bus (``neutral_node``): left on the
+    bus's node 0 it would be solidly grounded and rneut ignored.
+    ``z``: r0, x0, r_n, x_n in ohm (pandapower_electrisim._electrisim_grounding_params).
+    """
+    z_base = kv * kv / 1.0
+    x_pct = max(100.0 * z['x0'] / z_base, 1e-6)
+    r_pct = 100.0 * z['r0'] / z_base
+    return (f"New Transformer.{name} Phases=3 Windings=2 XHL={x_pct} "
+            f"wdg=1 bus={bus}.1.2.3.{neutral_node} conn=wye kV={kv} kVA=1000 %R={r_pct / 2} "
+            f"rneut={z['r_n']} xneut={z['x_n']} "
+            f"wdg=2 bus={name}_delta conn=delta kV={kv} kVA=1000 %R={r_pct / 2}")
+
+
+def create_grounding_transformer_element(dss, element_data, element_name, element_id, in_data, BusbarsDictVoltage,
+                                         BusbarsDictConnectionToName, TransformersDict, TransformersDictId,
+                                         created_elements, execute_dss_command=None):
+    """A zigzag grounding transformer: on its bus, or behind the breaker that joins it to one."""
+    from pandapower_electrisim import _electrisim_grounding_params
+    if element_name in created_elements:
+        return
+    ref = element_data.get('bus')
+    if ref not in BusbarsDictConnectionToName:
+        ref = next((row.get('bus') for row in in_data.values()
+                    if isinstance(row, dict) and str(row.get('typ', '')).startswith('Switch')
+                    and row.get('element') == element_data.get('name')
+                    and row.get('bus') in BusbarsDictConnectionToName), None)
+    if ref is None:
+        return
+    bus = BusbarsDictConnectionToName[ref]
+    kv = float(BusbarsDictVoltage.get(bus))
+    z = _electrisim_grounding_params(element_data, kv)
+    run = execute_dss_command or dss.Text.Command
+    node = 4 + sum(1 for e in created_elements if str(e).startswith('__gt_'))
+    run(grounding_transformer_dss_command(element_name, bus, kv, z, neutral_node=node))
+    created_elements.add(f'__gt_{element_name}')
+    if str(element_data.get('in_service', True)).lower() in ('false', 'no', '0'):
+        run(f'Transformer.{element_name}.enabled=no')
+    TransformersDict[element_name] = element_name
+    if element_data.get('name') not in (None, '') and element_data.get('name') != element_name:
+        TransformersDict[element_data['name']] = element_name
+    TransformersDictId[element_name] = element_id
+    created_elements.add(element_name)
+
+
 def create_shunt_reactor_element(dss, element_data, element_name, element_id, BusbarsDictVoltage, BusbarsDictConnectionToName, ShuntsDict, ShuntsDictId, created_elements, execute_dss_command=None):
     """Create a shunt reactor element in OpenDSS"""
     
@@ -2965,9 +3462,27 @@ def create_capacitor_element(dss, element_data, element_name, element_id, Busbar
             
             
             try:
-                # Use bus name directly - OpenDSS will create bus automatically
-                simple_cmd = f"New Capacitor.{element_name} Bus1={bus_name} kvar={abs(q_kvar)} kV={bus_voltage}"
-                execute_dss_command(simple_cmd)
+                filter_order = float(element_data.get('filter_order') or 0)
+                if filter_order > 1:
+                    # A harmonic filter: the bank in series to its reactor, the reactor's star point
+                    # floating (no zero sequence on an ungrounded or resistance-earthed system); its
+                    # resistor in series (single-tuned) or across the reactor (high-pass).
+                    from pandapower_electrisim import harmonic_filter
+                    hf = harmonic_filter(abs(q_mvar), bus_voltage, filter_order,
+                                         str(element_data.get('filter_type') or 'high_pass'),
+                                         element_data.get('filter_q'))
+                    node = f"{bus_name}_{element_name}_f"
+                    q_c_kvar = 1000.0 * float(bus_voltage) ** 2 / hf['x_c_ohm']
+                    execute_dss_command(f"New Capacitor.{element_name} Bus1={bus_name} Bus2={node} Phases=3 "
+                                        f"kvar={q_c_kvar:.4f} kV={bus_voltage}")
+                    damping = (f"R={hf['r_ohm']:.6f}" if hf['type'] == 'single_tuned'
+                               else f"R=0 Rp={hf['r_ohm']:.6f}")
+                    execute_dss_command(f"New Reactor.{element_name}_l Bus1={node} Bus2={node}_n.4.4.4 Phases=3 "
+                                        f"X={hf['x_l_ohm']:.6f} {damping}")
+                else:
+                    # Use bus name directly - OpenDSS will create bus automatically
+                    simple_cmd = f"New Capacitor.{element_name} Bus1={bus_name} kvar={abs(q_kvar)} kV={bus_voltage}"
+                    execute_dss_command(simple_cmd)
                 # print(f"Command: {simple_cmd}")  # Reduced logging
                 
                 # Handle in_service status AFTER creating the element
@@ -3459,6 +3974,8 @@ def create_storage_element(dss, element_data, element_name, element_id, BusbarsD
                             simple_cmd += " spectrum=default"
                     else:
                         simple_cmd += f" spectrum={spectrum}"
+                elif spectrum is not None and str(spectrum).strip().lower() == 'none':
+                    simple_cmd += f" spectrum={_no_harmonics_spectrum(dss, execute_dss_command)}"
                 
                 execute_dss_command(simple_cmd)
                 
@@ -4092,7 +4609,7 @@ def shortcircuit(in_data, frequency=50, fault_type='3ph', export_open_dss_result
     for key in in_data:
         try:
             elem = in_data[key]
-            if elem and isinstance(elem, dict) and 'Bus' in str(elem.get('typ', '')) and elem.get('name') and elem.get('id') is not None:
+            if elem and isinstance(elem, dict) and _opendss_is_ac_bus_typ(elem.get('typ', '')) and elem.get('name') and elem.get('id') is not None:
                 bus_name_to_graph_id[str(elem.get('name')).replace('#', '_')] = str(elem.get('id'))
         except (TypeError, AttributeError):
             continue
@@ -4189,7 +4706,7 @@ def shortcircuit(in_data, frequency=50, fault_type='3ph', export_open_dss_result
                  StoragesDict, StoragesDictId, PVSystemsDict, PVSystemsDictId, ExternalGridsDict, ExternalGridsDictId,
                  _circuit_source) = create_other_elements(
                     in_data, dss, BusbarsDictVoltage, BusbarsDictConnectionToName,
-                    export_commands, opendss_commands, execute_dss_command)
+                    export_commands, opendss_commands, execute_dss_command, generator_conn='wye')
             except ValueError as ve:
                 return json.dumps({"error": str(ve)})
             except Exception as e:
@@ -4294,10 +4811,26 @@ def _monte_carlo_percentile(values, percentile):
     return values[lower] + (values[upper] - values[lower]) * (position - lower)
 
 
+def _monte_carlo_labels(in_data):
+    """Element name (as OpenDSS knows it, lower case) -> the diagram's label."""
+    labels = {}
+    for element in in_data.values():
+        if isinstance(element, dict) and element.get('name') and element.get('userFriendlyName'):
+            labels[_sanitize_opendss_name(element['name']).lower()] = str(element['userFriendlyName'])
+            labels[str(element['name']).lower()] = str(element['userFriendlyName'])
+    return labels
+
+
+class _MonteCarloSnapshotFailed(Exception):
+    """The snapshot Monte Carlo sampling starts from did not converge; try the next plan."""
+
+
 def _capture_monte_carlo_sample(BusbarsDictConnectionToName, LinesDict, LinesDictId, in_data):
     """Capture one native OpenDSS Monte Carlo solve result."""
     buses = {}
     lines = {}
+    # Reported by the diagram's labels; they read "mxCell_426".
+    labels = _monte_carlo_labels(in_data)
     try:
         for bus_name in dss.Circuit.AllBusNames():
             dss.Circuit.SetActiveBus(bus_name)
@@ -4310,9 +4843,10 @@ def _capture_monte_carlo_sample(BusbarsDictConnectionToName, LinesDict, LinesDic
             magnitudes = [float(pu_values[index]) for index in range(0, len(pu_values), 2)
                           if math.isfinite(float(pu_values[index]))]
             if magnitudes:
+                cell = BusbarsDictConnectionToName[bus_id]
                 buses[bus_id] = {
                     'id': bus_id,
-                    'name': BusbarsDictConnectionToName[bus_id],
+                    'name': labels.get(str(cell).lower(), cell),
                     'vm_pu': sum(magnitudes) / len(magnitudes),
                 }
     except Exception as error:
@@ -4321,18 +4855,20 @@ def _capture_monte_carlo_sample(BusbarsDictConnectionToName, LinesDict, LinesDic
     line_ratings = {}
     for element in in_data.values():
         if isinstance(element, dict) and 'Line' in str(element.get('typ', '')):
-            line_ratings[_sanitize_opendss_name(element.get('name', ''))] = element.get('max_i_ka')
+            line_ratings[_sanitize_opendss_name(element.get('name', ''))] = _line_rated_ka(element)
     for key, line_name in LinesDict.items():
         try:
             dss.Circuit.SetActiveElement(f"Line.{line_name}")
-            currents = dss.CktElement.CurrentsMagAng()
+            currents = dss.CktElement.Currents()
             n_conductors = dss.CktElement.NumConductors()
             n_phases = dss.CktElement.NumPhases()
-            current_ka = _opendss_terminal_i_ka(currents, 0, n_conductors, n_phases) if currents else 0.0
+            # The worse end, as in the load-flow results.
+            current_ka = max(_opendss_terminal_i_ka(currents, 0, n_conductors, n_phases),
+                             _opendss_terminal_i_ka(currents, 1, n_conductors, n_phases)) if currents else 0.0
             rating_ka = float(line_ratings.get(key) or 0)
             lines[key] = {
                 'id': LinesDictId.get(key, key),
-                'name': key,
+                'name': labels.get(str(key).lower(), key),
                 'loading_percent': (current_ka / rating_ka * 100.0) if rating_ka > 0 else 0.0,
                 'current_ka': current_ka,
             }
@@ -4341,8 +4877,85 @@ def _capture_monte_carlo_sample(BusbarsDictConnectionToName, LinesDict, LinesDic
     return buses, lines
 
 
-def _build_monte_carlo_result(mode, number, random_distribution, bus_samples, line_samples, converged_count):
+def _default_daily_shape_stats():
+    """Mean and standard deviation of OpenDSS's built-in daily load curve - what M2 and M3 draw a Gaussian factor from."""
+    dss.LoadShape.Name('default')
+    values = list(dss.LoadShape.PMult())
+    return statistics.mean(values), statistics.pstdev(values)
+
+
+def _monte_carlo_solves(mode, number, random_distribution):
+    """
+    Solve the Monte Carlo samples one at a time; yield after each whether it converged.
+
+    M1 and M3 solve one native sample per call. A native M2 solve is a whole
+    day - 24 hourly steps of which only the last could be read - so M2 runs
+    each day hour by hour itself, as OpenDSS does: one load factor for the
+    day (Uniform 0-1, or Gaussian on the default daily curve's mean and
+    standard deviation), the hours solved in Daily mode. Storage starts every
+    day as drawn: carried over, a discharging battery was empty from the
+    first day on.
+    """
+    if mode.upper() != 'M2':
+        dss.Text.Command('set Number=1')
+        for _ in range(number):
+            dss.Text.Command('solve')
+            yield dss.Solution.Converged()
+        return
+    storage = {}
+    for name in dss.Storages.AllNames():
+        if name and name.lower() != 'none':
+            storage[name] = {}
+            for prop in ('%stored', 'State', 'kW'):
+                dss.Text.Command(f'? Storage.{name}.{prop}')
+                storage[name][prop] = dss.Text.Result()
+    if random_distribution == 'Gaussian':
+        mean, stddev = _default_daily_shape_stats()
+        draw = lambda: random.gauss(mean, stddev)
+    else:
+        draw = random.random
+    for _ in range(number):
+        for name, props in storage.items():
+            for prop, value in props.items():
+                dss.Text.Command(f'Storage.{name}.{prop}={value}')
+        for command in ('set Mode=Daily', 'set Stepsize=1h', 'set Number=1', 'set Hour=0',
+                        'set Sec=0', f'set LoadMult={draw()}'):
+            dss.Text.Command(command)
+        for _ in range(24):
+            dss.Text.Command('solve')
+            yield dss.Solution.Converged()
+
+
+def _monte_carlo_random_description(mode, random_distribution):
+    """How the load factors were drawn, which differs between M1 and M2/M3."""
+    per_load = mode.upper() == 'M1'
+    if random_distribution != 'Gaussian':
+        text = 'Uniform 0-1'
+    elif per_load:
+        settings = set()
+        for name in dss.Loads.AllNames():
+            if name and name.lower() != 'none':
+                values = []
+                for prop in ('%mean', '%stddev'):
+                    dss.Text.Command(f'? Load.{name}.{prop}')
+                    values.append(dss.Text.Result())
+                settings.add(tuple(values))
+        if len(settings) == 1:
+            mean, stddev = next(iter(settings))
+            text = f"Gaussian, mean {float(mean):g} %, \u03c3 {float(stddev):g} % (each load's %mean and %stddev)"
+        else:
+            text = "Gaussian on each load's %mean and %stddev"
+    else:
+        mean, stddev = _default_daily_shape_stats()
+        text = (f"Gaussian, mean {100 * mean:.1f} %, \u03c3 {100 * stddev:.1f} % "
+                "(OpenDSS's default daily load curve)")
+    return text + (', drawn for each load separately' if per_load else ', one factor for all loads together')
+
+
+def _build_monte_carlo_result(mode, number, random_distribution, bus_samples, line_samples, converged_count,
+                              n_samples=None, random_description=None, notes=None):
     """Aggregate captured Monte Carlo samples into the frontend response schema."""
+    n_samples = number if n_samples is None else n_samples
     bus_stats = []
     for bus_id, entry in bus_samples.items():
         values = entry['values']
@@ -4364,16 +4977,18 @@ def _build_monte_carlo_result(mode, number, random_distribution, bus_samples, li
     ]
     return {
         'mode': mode, 'number': number, 'random': random_distribution,
+        'random_description': random_description or random_distribution,
+        'notes': list(notes or []),
         'bus_stats': bus_stats, 'line_stats': line_stats,
         'samples': {'bus_voltage_pu': histogram_buses},
-        'summary': {'n_samples': number, 'converged_count': converged_count,
-                    'failed_count': number - converged_count},
+        'summary': {'n_samples': n_samples, 'converged_count': converged_count,
+                    'failed_count': n_samples - converged_count},
     }
 
 
 def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, tolerance, controlmode,
               export_commands=False, monte_carlo_number=100, monte_carlo_random='Uniform',
-              monte_carlo_hour=None):
+              monte_carlo_hour=None, converter_stand_ins=None):
     """Main powerflow function for OpenDSS
     
     Parameters based on OpenDSS documentation: https://opendss.epri.com/PowerFlow.html
@@ -4395,7 +5010,11 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
     # Initialize list to collect OpenDSS commands if export is requested
     opendss_commands = []
     _reset_opendss_warnings()
-    
+    if converter_stand_ins is None:
+        converter_stand_ins = _opendss_converter_stand_ins(in_data, frequency)
+    else:
+        _opendss_warn_dc_left_out(in_data, stand_ins=converter_stand_ins)
+
     def execute_dss_command(command):
         """Execute DSS command and optionally collect it for export"""
         print(f"[OpenDSS] {command}")  # Log all commands
@@ -4424,6 +5043,10 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
     monte_carlo_bus_samples = {}
     monte_carlo_line_samples = {}
     monte_carlo_converged_count = 0
+    # M2 samples every hour of each day.
+    monte_carlo_samples_total = monte_carlo_number * (24 if mode.upper() == 'M2' else 1)
+    monte_carlo_random_description = None
+    monte_carlo_notes = []
 
     # Set OpenDSS circuit parameters
     f = frequency
@@ -4441,11 +5064,11 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
     ext_scan = _prescan_external_grid(in_data)
     
     element_dicts = None
-    if monte_carlo_mode:
-        plan_queue = [{'label': str(mode), 'algorithm': algorithm,
-                       'max_iterations': max_iterations, 'gen_vminpu': None}]
-    else:
-        plan_queue = _opendss_snapshot_solve_plans(algorithm, max_iterations)
+    # Monte Carlo too: its sampling starts from a snapshot of the circuit, which
+    # needs the same fallbacks - the transmission grid's does not converge with
+    # Normal from a flat start, only with Newton.
+    plan_queue = _opendss_snapshot_solve_plans(algorithm, max_iterations)
+    monte_carlo_snapshot_failed = False
     build_attempt = 0
     zero_power_rebuild_done = False
     usable_plan = None
@@ -4483,7 +5106,8 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
 
             element_dicts = create_other_elements(
                 in_data, dss, BusbarsDictVoltage, BusbarsDictConnectionToName,
-                export_commands, opendss_commands, execute_dss_command)
+                export_commands, opendss_commands, execute_dss_command,
+                converter_stand_ins=converter_stand_ins)
         except ValueError as ve:
             error_response = {"error": str(ve)}
             return json.dumps(error_response)
@@ -4495,12 +5119,27 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
             print("[OpenDSS] solve")
             gens_for_solve = element_dicts[12] if element_dicts and len(element_dicts) > 12 else {}
             if monte_carlo_mode:
+                # A snapshot first: Monte Carlo solves start from the voltages
+                # OpenDSS holds, and nothing initialised them - all zero in a
+                # fresh backend, where every sample failed to converge, and
+                # whatever the previous study left otherwise, which moved the
+                # statistics with it.
+                execute_dss_command('set Mode=Snapshot')
+                monte_carlo_snapshot_failed = not _opendss_solve_snapshot_plan(
+                    dss, execute_dss_command, plan, gens_for_solve)
+                if monte_carlo_snapshot_failed and build_attempt + 1 < len(plan_queue):
+                    raise _MonteCarloSnapshotFailed()
+                execute_dss_command(f'set Mode={mode}')
+                execute_dss_command(f'set Random={monte_carlo_random}')
+                if mode.upper() == 'M3' and monte_carlo_hour not in (None, ''):
+                    execute_dss_command(f'set Hour={monte_carlo_hour}')
                 # Retain the requested Number setting in the exported model, then
                 # use one solve at a time to preserve each random realization.
                 execute_dss_command('set Number=1')
-                for sample_index in range(monte_carlo_number):
-                    dss.Text.Command('solve')
-                    if not dss.Solution.Converged():
+                monte_carlo_random_description = _monte_carlo_random_description(mode, monte_carlo_random)
+                for sample_index, sample_converged in enumerate(
+                        _monte_carlo_solves(mode, monte_carlo_number, monte_carlo_random)):
+                    if not sample_converged:
                         print(f"[OpenDSS] Monte Carlo sample {sample_index + 1} did not converge")
                         continue
                     monte_carlo_converged_count += 1
@@ -4516,6 +5155,8 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
                         entry['values'].append(sample['loading_percent'])
             else:
                 _opendss_solve_snapshot_plan(dss, execute_dss_command, plan, gens_for_solve)
+        except _MonteCarloSnapshotFailed:
+            print(f"[OpenDSS] Monte Carlo initial snapshot did not converge: {plan['label']}")
         except Exception as e:
             print(f"[OpenDSS] Solve EXCEPTION: {e}")
 
@@ -4548,6 +5189,9 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
                 continue
 
             if monte_carlo_mode:
+                if monte_carlo_snapshot_failed and build_attempt + 1 < len(plan_queue):
+                    build_attempt += 1
+                    continue
                 break
 
             solution_usable = _opendss_circuit_has_usable_solution(dss)
@@ -4595,11 +5239,16 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
                     "load-flow dialog, or compare with pandapower on the same case."
                 )
             })
+        # Finite but not converged is the last iterate, not a solution: it was
+        # reported as one, the gas turbines of the AI campus reference absorbing
+        # 17 Mvar each at 0.98 pu after 200 iterations. Say so with the result.
         try:
             if not dss.Solution.Converged():
-                print(
-                    f"[OpenDSS] Solution.Converged()=False after {dss.Solution.Iterations()} "
-                    "iteration(s), but voltages and total power are finite; reporting result"
+                _opendss_warn(
+                    f"The load flow did not converge ({plan['label']}, {dss.Solution.Iterations()} "
+                    "iterations, every fallback tried): these results are OpenDSS's last iterate, "
+                    "not a solution, and may be far from it. Check the generators' setpoints and "
+                    "limits, or compare with pandapower on the same case."
                 )
         except Exception:
             pass
@@ -4648,11 +5297,13 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
             eid = _elem.get('id')
             if not eid:
                 continue
-            mode = str(_elem.get('inv_control_mode', 'NONE')).upper()
+            # Not "mode": that is the study's (M1 ...), which this overwrote -
+            # the Monte Carlo results came back as mode "NONE".
+            inv_mode = str(_elem.get('inv_control_mode', 'NONE')).upper()
             if typ.startswith('Storage'):
-                storage_inv_mode_by_id[str(eid)] = mode
+                storage_inv_mode_by_id[str(eid)] = inv_mode
             elif typ.startswith('PVSystem'):
-                pv_inv_mode_by_id[str(eid)] = mode
+                pv_inv_mode_by_id[str(eid)] = inv_mode
         except Exception:
             pass
     
@@ -4889,8 +5540,8 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
                 else:
                     p_from_mw = p_to_mw = q_from_mvar = q_to_mvar = 0.0
 
-                # Get currents (in A) - use magnitude from currents_mag_ang
-                currents = dss.CktElement.CurrentsMagAng()
+                # Get currents (in A), as (re, im) pairs
+                currents = dss.CktElement.Currents()
                 if len(currents) >= 2:
                     n_conductors = dss.CktElement.NumConductors()
                     n_phases = dss.CktElement.NumPhases()
@@ -4909,13 +5560,14 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
             max_i_ka = None
             for data_key, data_value in in_data.items():
                 if _sanitize_opendss_name(data_value.get('name', '')) == key and 'Line' in data_value.get('typ', ''):
-                    max_i_ka_raw = data_value.get('max_i_ka')
-                    if max_i_ka_raw is not None:
-                        max_i_ka = float(max_i_ka_raw)
+                    # max_i_ka x df x parallel, as pandapower rates it.
+                    max_i_ka = _line_rated_ka(data_value)
                     break
             
             if max_i_ka and max_i_ka > 0 and is_enabled:
-                loading_percent = (i_from_ka / max_i_ka) * 100
+                # The worse end: the from end alone read a charged cable low
+                # (LA2 3.42 % for 3.54 %).
+                loading_percent = (max(i_from_ka, i_to_ka) / max_i_ka) * 100
             else:
                 # Fallback if max_i_ka not available or line is disabled
                 loading_percent = 0.0
@@ -4977,6 +5629,7 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
 
             p_set_mw = None
             vm_pu = None
+            load_label = key
             if in_data:
                 for elem in in_data.values():
                     if not isinstance(elem, dict):
@@ -4985,6 +5638,8 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
                         continue
                     if _sanitize_opendss_name(elem.get('name', '')) != key:
                         continue
+                    # The diagram's label, not the canvas cell name.
+                    load_label = elem.get('userFriendlyName') or key
                     if elem.get('p_kw') not in (None, ''):
                         p_set_mw = float(elem.get('p_kw') or 0) / 1000.0
                     else:
@@ -5003,13 +5658,16 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
                             break
             except Exception:
                 pass
+            # Not in Monte Carlo: there a load draws its random share of the
+            # set power, and every load was said to be at a low voltage.
             if (
-                p_set_mw is not None and p_set_mw > 0.001
+                not monte_carlo_mode
+                and p_set_mw is not None and p_set_mw > 0.001
                 and is_enabled and abs(p_mw) < 0.9 * abs(p_set_mw)
             ):
                 vm_txt = f'{vm_pu:.3f} pu' if vm_pu is not None else 'low'
                 _opendss_warn(
-                    f"Load '{key}' draws {abs(p_mw) * 1000:.1f} kW vs {abs(p_set_mw) * 1000:.1f} kW set - "
+                    f"Load '{load_label}' draws {abs(p_mw) * 1000:.1f} kW vs {abs(p_set_mw) * 1000:.1f} kW set - "
                     f"bus voltage {vm_txt}. Check line length, transformer kVA, or use constant-P load (%SeriesRL=0)."
                 )
 
@@ -5063,22 +5721,20 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
                 # Get voltage from bus (use CktElement so it works for Generator)
                 vm_pu = 1.0
                 va_degree = 0.0
+                # The bus's positive sequence, as for the busbars. This looked the
+                # bus up with SetActiveBus(index), which takes a name: it always
+                # failed, and every generator read 1.0 pu at 0 degrees.
                 try:
                     bus_names = dss.CktElement.BusNames()
                     gen_bus_name = bus_names[0].split('.')[0] if bus_names else None
-                    bus_index = None
-                    if gen_bus_name:
-                        for i in range(dss.Circuit.NumBuses()):
-                            dss.Circuit.SetActiveBus(i)
-                            if dss.Bus.Name().lower() == gen_bus_name.lower():
-                                bus_index = i
-                                break
-                    if bus_index is not None:
-                        dss.Circuit.SetActiveBus(bus_index)
+                    if gen_bus_name and dss.Circuit.SetActiveBus(gen_bus_name) >= 0:
+                        seq = dss.Bus.SeqVoltages()
+                        kv_base = dss.Bus.kVBase()
+                        if len(seq) >= 2 and kv_base > 0 and not math.isnan(seq[1]):
+                            vm_pu = seq[1] / (kv_base * 1000.0)
                         bus_angles = dss.Bus.puVmagAngle()
-                        if len(bus_angles) >= 2:
-                            vm_pu = bus_angles[0] if not math.isnan(bus_angles[0]) else 1.0
-                            va_degree = bus_angles[1] if not math.isnan(bus_angles[1]) else 0.0
+                        if len(bus_angles) >= 2 and not math.isnan(bus_angles[1]):
+                            va_degree = bus_angles[1]
                 except Exception as e:
                     pass
             else:
@@ -5209,13 +5865,15 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
                                         break
                         
                         if element_data:
+                            # n units in parallel carry n x the rating.
+                            n_par = _element_parallel(element_data)
                             sn_mva_raw = element_data.get('sn_mva')
                             if sn_mva_raw is not None:
-                                sn_mva = float(sn_mva_raw)
+                                sn_mva = float(sn_mva_raw) * n_par
                             else:
                                 sn_kva_raw = element_data.get('sn_kva')
                                 if sn_kva_raw is not None:
-                                    sn_mva = float(sn_kva_raw) / 1000.0
+                                    sn_mva = float(sn_kva_raw) / 1000.0 * n_par
                         else:
                             # Debug: show what transformers ARE in in_data
                             transformer_keys_found = []
@@ -5342,14 +6000,23 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
                     i_hv_ka = _opendss_terminal_i_ka(currents, 0, n_conductors, n_phases)
                     i_mv_ka = _opendss_terminal_i_ka(currents, 1, n_conductors, n_phases)
                     i_lv_ka = _opendss_terminal_i_ka(currents, 2, n_conductors, n_phases)
-                sn_hv = 100.0  # default
+                # The worst winding, each against its own rating: the HV side
+                # alone read the transmission grid's main transformer at 14.6 %
+                # (5.8 MVA of 40) while its 15 MVA tertiary carried 19.7 %.
+                sn = {'hv': 100.0, 'mv': 100.0, 'lv': 100.0}
                 for elem_key, elem_data in in_data.items():
                     if isinstance(elem_data, dict) and elem_data.get('typ', '').startswith('Three Winding'):
                         if _sanitize_opendss_name(elem_data.get('name', '')) == trafo_name:
-                            sn_hv = float(elem_data.get('sn_hv_mva', 100))
+                            for side in sn:
+                                try:
+                                    sn[side] = float(elem_data.get(f'sn_{side}_mva', 100))
+                                except (TypeError, ValueError):
+                                    pass
                             break
-                s_actual = math.sqrt(abs(p_hv_mw)**2 + abs(q_hv_mvar)**2)
-                loading_percent = (s_actual / sn_hv * 100.0) if sn_hv > 0 else 0.0
+                loading_percent = max(
+                    (math.hypot(p, q) / sn[side] * 100.0) if sn[side] > 0 else 0.0
+                    for side, p, q in (('hv', p_hv_mw, q_hv_mvar), ('mv', p_mv_mw, q_mv_mvar),
+                                       ('lv', p_lv_mw, q_lv_mvar)))
             frontend_id = Transformers3WDictId.get(key, key)
             t3w = Transformer3WOut(name=key, id=frontend_id, i_hv_ka=i_hv_ka, i_mv_ka=i_mv_ka, i_lv_ka=i_lv_ka,
                                    loading_percent=loading_percent, p_hv_mw=p_hv_mw, q_hv_mvar=q_hv_mvar,
@@ -5754,9 +6421,23 @@ def powerflow(in_data, frequency, mode, algorithm, loadmodel, max_iterations, to
     if _opendss_warnings:
         result['warnings'] = list(_opendss_warnings)
     if monte_carlo_mode:
+        # The model gives no element a daily or yearly profile, so M2's days
+        # and M3's hour vary nothing but storage.
+        if mode.upper() == 'M2':
+            monte_carlo_notes.append(
+                f'Each day is solved hour by hour: {monte_carlo_number} days x 24 h = '
+                f'{monte_carlo_samples_total} samples. The loads carry no daily profile, so a '
+                "day's load factor holds all day; storage starts each day as drawn and follows "
+                'its dispatch through the day.')
+        elif mode.upper() == 'M3':
+            hour = monte_carlo_hour if monte_carlo_hour not in (None, '') else 0
+            monte_carlo_notes.append(
+                f'The hour ({hour}) has no effect: the loads carry no yearly profile.')
         result['monte_carlo'] = _build_monte_carlo_result(
             mode.upper(), monte_carlo_number, monte_carlo_random, monte_carlo_bus_samples,
-            monte_carlo_line_samples, monte_carlo_converged_count)
+            monte_carlo_line_samples, monte_carlo_converged_count,
+            n_samples=monte_carlo_samples_total,
+            random_description=monte_carlo_random_description, notes=monte_carlo_notes)
 
     # Add OpenDSS commands to result if export was requested
     if export_commands and opendss_commands:
@@ -5840,9 +6521,12 @@ def harmonic_analysis(in_data, frequency, mode, algorithm, loadmodel, max_iterat
         harmonic_orders = [3, 5, 7, 11, 13]
 
     # ---- Step 1: run fundamental power flow for base results -------------------
+    # The converters' AC sides once, for both circuits.
+    converter_stand_ins = _opendss_converter_stand_ins(in_data, frequency)
     base_result_json = powerflow(
         in_data, frequency, mode, algorithm, loadmodel,
-        max_iterations, tolerance, controlmode, export_commands
+        max_iterations, tolerance, controlmode, export_commands,
+        converter_stand_ins=converter_stand_ins
     )
     try:
         base_result = json.loads(base_result_json)
@@ -5864,82 +6548,126 @@ def harmonic_analysis(in_data, frequency, mode, algorithm, loadmodel, max_iterat
             opendss_commands.append(command)
 
     f = frequency
-    execute_dss_command('clear')
-    execute_dss_command('New Circuit.OpenDSS_Circuit')
-    execute_dss_command(f'set DefaultBaseFrequency={f}')
-    execute_dss_command(f'set Mode={mode}')
-    execute_dss_command(f'set Algorithm={algorithm}')
-    execute_dss_command(f'set LoadModel={loadmodel}')
-    execute_dss_command(f'set ControlMode={controlmode}')
-    execute_dss_command(f'set MaxIterations={max_iterations}')
-    execute_dss_command(f'set Tolerance={tolerance}')
+    ext_scan = _prescan_external_grid(in_data)
+    # The fundamental solve takes the load flow's fallbacks, each on a freshly
+    # built circuit: OpenDSS enters harmonics mode only from a converged
+    # solution, and failed with "#487 Circuit must be solved in a fundamental
+    # frequency power flow" - a server error - when it had none.
+    converged = False
+    plan = None
+    for plan in _opendss_snapshot_solve_plans(algorithm, max_iterations):
+        opendss_commands.clear()
+        execute_dss_command('clear')
+        execute_dss_command(_new_circuit_command(ext_scan))
+        execute_dss_command(f'set DefaultBaseFrequency={f}')
+        execute_dss_command(f'set Mode={mode}')
+        execute_dss_command(f"set Algorithm={plan['algorithm']}")
+        execute_dss_command(f'set LoadModel={loadmodel}')
+        execute_dss_command(f'set ControlMode={controlmode}')
+        execute_dss_command(f"set MaxIterations={plan['max_iterations']}")
+        execute_dss_command(f'set Tolerance={tolerance}')
 
-    try:
-        BusbarsDictVoltage, BusbarsDictConnectionToName = create_busbars(
-            in_data, dss, export_commands, opendss_commands)
+        try:
+            BusbarsDictVoltage, BusbarsDictConnectionToName = create_busbars(
+                in_data, dss, export_commands, opendss_commands)
 
-        (LinesDict, LinesDictId, LoadsDict, LoadsDictId,
-         TransformersDict, TransformersDictId,
-         Transformers3WDict, Transformers3WDictId,
-         ShuntsDict, ShuntsDictId, CapacitorsDict, CapacitorsDictId,
-         GeneratorsDict, GeneratorsDictId,
-         StoragesDict, StoragesDictId, PVSystemsDict, PVSystemsDictId,
-         ExternalGridsDict, ExternalGridsDictId,
-         circuit_source_element_name) = create_other_elements(
-            in_data, dss, BusbarsDictVoltage, BusbarsDictConnectionToName,
-            export_commands, opendss_commands, execute_dss_command)
-    except Exception as e:
-        return json.dumps({"error": f"Error creating harmonic circuit: {str(e)}"})
+            (LinesDict, LinesDictId, LoadsDict, LoadsDictId,
+             TransformersDict, TransformersDictId,
+             Transformers3WDict, Transformers3WDictId,
+             ShuntsDict, ShuntsDictId, CapacitorsDict, CapacitorsDictId,
+             GeneratorsDict, GeneratorsDictId,
+             StoragesDict, StoragesDictId, PVSystemsDict, PVSystemsDictId,
+             ExternalGridsDict, ExternalGridsDictId,
+             circuit_source_element_name) = create_other_elements(
+                in_data, dss, BusbarsDictVoltage, BusbarsDictConnectionToName,
+                export_commands, opendss_commands, execute_dss_command,
+                converter_stand_ins=converter_stand_ins)
+        except Exception as e:
+            return json.dumps({"error": f"Error creating harmonic circuit: {str(e)}"})
 
-    # Add monitors BEFORE solving so they are part of the initial circuit
-    def _find_line_buses(line_key):
-        for x_key in in_data:
-            ed = in_data[x_key]
-            typ = ed.get('typ', '')
-            if (typ == 'Line' or typ.startswith('Impedance')) and (ed.get('name', '') == line_key or ed.get('id', '') == LinesDictId.get(line_key, '')):
-                return ed.get('busFrom', ''), ed.get('busTo', '')
-        return '', ''
+        # Add monitors BEFORE solving so they are part of the initial circuit
+        def _find_line_buses(line_key):
+            for x_key in in_data:
+                ed = in_data[x_key]
+                typ = ed.get('typ', '')
+                # 'Line0', 'Line1', ... as well: a diagram numbers its lines.
+                if ((typ.startswith('Line') or typ.startswith('Impedance')) and not _opendss_is_dc_typ(typ)
+                        and (ed.get('name', '') == line_key or ed.get('id', '') == LinesDictId.get(line_key, ''))):
+                    return ed.get('busFrom', ''), ed.get('busTo', '')
+            return '', ''
 
-    def _find_trafo_buses(trafo_key):
-        for x_key in in_data:
-            ed = in_data[x_key]
-            _t = ed.get('typ', '')
-            if (_t.startswith("Transformer") or _t.startswith("Two Winding Transformer")) and not _t.startswith("Three Winding Transformer") and (ed.get('name', '') == trafo_key or ed.get('id', '') == TransformersDictId.get(trafo_key, '')):
-                return ed.get('busFrom', ''), ed.get('busTo', '')
-        return '', ''
+        def _find_trafo_buses(trafo_key):
+            for x_key in in_data:
+                ed = in_data[x_key]
+                _t = ed.get('typ', '')
+                if (_t.startswith("Transformer") or _t.startswith("Two Winding Transformer")) and not _t.startswith("Three Winding Transformer") and (ed.get('name', '') == trafo_key or ed.get('id', '') == TransformersDictId.get(trafo_key, '')):
+                    # hv_bus / lv_bus as create_transformer_element reads them:
+                    # without, no bus behind a transformer had a monitor (0 % THD).
+                    return (ed.get('busFrom') or ed.get('hv_bus') or '',
+                            ed.get('busTo') or ed.get('lv_bus') or '')
+            return '', ''
 
-    elem_terminal_to_bus = []
+        elem_terminal_to_bus = []
 
-    for line_key, dss_line_name in LinesDict.items():
-        execute_dss_command(f'New Monitor.mon_{dss_line_name} element=Line.{dss_line_name} terminal=1 mode=0')
-        execute_dss_command(f'New Monitor.mon_{dss_line_name}_t2 element=Line.{dss_line_name} terminal=2 mode=0')
-        bf, bt = _find_line_buses(line_key)
-        if bf and bf in BusbarsDictConnectionToName:
-            bus_key = BusbarsDictConnectionToName.get(bf, bf).lower()
-            elem_terminal_to_bus.append(('Line', dss_line_name, 1, bus_key))
-        if bt and bt in BusbarsDictConnectionToName:
-            bus_key = BusbarsDictConnectionToName.get(bt, bt).lower()
-            elem_terminal_to_bus.append(('Line', dss_line_name, 2, bus_key))
+        for line_key, dss_line_name in LinesDict.items():
+            execute_dss_command(f'New Monitor.mon_{dss_line_name} element=Line.{dss_line_name} terminal=1 mode=0')
+            execute_dss_command(f'New Monitor.mon_{dss_line_name}_t2 element=Line.{dss_line_name} terminal=2 mode=0')
+            bf, bt = _find_line_buses(line_key)
+            if bf and bf in BusbarsDictConnectionToName:
+                bus_key = BusbarsDictConnectionToName.get(bf, bf).lower()
+                elem_terminal_to_bus.append(('Line', dss_line_name, 1, bus_key))
+            if bt and bt in BusbarsDictConnectionToName:
+                bus_key = BusbarsDictConnectionToName.get(bt, bt).lower()
+                elem_terminal_to_bus.append(('Line', dss_line_name, 2, bus_key))
 
-    for trafo_key, dss_trafo_name in TransformersDict.items():
-        execute_dss_command(f'New Monitor.mon_{dss_trafo_name}_t1 element=Transformer.{dss_trafo_name} terminal=1 mode=0')
-        execute_dss_command(f'New Monitor.mon_{dss_trafo_name}_t2 element=Transformer.{dss_trafo_name} terminal=2 mode=0')
-        bf, bt = _find_trafo_buses(trafo_key)
-        if bf and bf in BusbarsDictConnectionToName:
-            bus_key = BusbarsDictConnectionToName.get(bf, bf).lower()
-            elem_terminal_to_bus.append(('Transformer', dss_trafo_name, 1, bus_key))
-        if bt and bt in BusbarsDictConnectionToName:
-            bus_key = BusbarsDictConnectionToName.get(bt, bt).lower()
-            elem_terminal_to_bus.append(('Transformer', dss_trafo_name, 2, bus_key))
+        for trafo_key, dss_trafo_name in TransformersDict.items():
+            execute_dss_command(f'New Monitor.mon_{dss_trafo_name}_t1 element=Transformer.{dss_trafo_name} terminal=1 mode=0')
+            execute_dss_command(f'New Monitor.mon_{dss_trafo_name}_t2 element=Transformer.{dss_trafo_name} terminal=2 mode=0')
+            bf, bt = _find_trafo_buses(trafo_key)
+            if bf and bf in BusbarsDictConnectionToName:
+                bus_key = BusbarsDictConnectionToName.get(bf, bf).lower()
+                elem_terminal_to_bus.append(('Transformer', dss_trafo_name, 1, bus_key))
+            if bt and bt in BusbarsDictConnectionToName:
+                bus_key = BusbarsDictConnectionToName.get(bt, bt).lower()
+                elem_terminal_to_bus.append(('Transformer', dss_trafo_name, 2, bus_key))
 
-    # ---- Step 3: Solve fundamental power flow on the fresh circuit ------------
-    if neglect_load_y:
-        execute_dss_command('set NeglectLoadY=Yes')
+        # Three-winding transformers too: a bus reached only through one (a
+        # tertiary, say) otherwise had no monitor and reported 0 % THD.
+        for trafo_key, dss_trafo_name in Transformers3WDict.items():
+            ed = next((in_data[k] for k in in_data
+                       if isinstance(in_data[k], dict)
+                       and str(in_data[k].get('typ', '')).startswith('Three Winding Transformer')
+                       and (in_data[k].get('name', '') == trafo_key
+                            or in_data[k].get('id', '') == Transformers3WDictId.get(trafo_key, ''))), None)
+            if ed is None:
+                continue
+            for terminal, field in ((1, 'hv_bus'), (2, 'mv_bus'), (3, 'lv_bus')):
+                execute_dss_command(f'New Monitor.mon_{dss_trafo_name}_t{terminal} '
+                                    f'element=Transformer.{dss_trafo_name} terminal={terminal} mode=0')
+                ref = ed.get(field, '')
+                if ref and ref in BusbarsDictConnectionToName:
+                    elem_terminal_to_bus.append(('Transformer', dss_trafo_name, terminal,
+                                                 BusbarsDictConnectionToName.get(ref, ref).lower()))
 
-    execute_dss_command('solve')
+        # ---- Step 3: Solve fundamental power flow on the fresh circuit --------
+        if neglect_load_y:
+            execute_dss_command('set NeglectLoadY=Yes')
 
-    converged = dss.Solution.Converged()
-    print(f"[OpenDSS][HARMONICS] Fresh circuit solve converged: {converged}")
+        try:
+            converged = (_opendss_solve_snapshot_plan(dss, execute_dss_command, plan, GeneratorsDict)
+                         and dss.Solution.Converged())
+        except Exception as e:
+            print(f"[OpenDSS][HARMONICS] Fundamental solve failed ({plan['label']}): {e}")
+            converged = False
+        print(f"[OpenDSS][HARMONICS] Fresh circuit solve converged: {converged} ({plan['label']})")
+        if converged:
+            break
+
+    if not converged:
+        return json.dumps({"error": (
+            "Harmonic analysis needs a converged fundamental-frequency load flow, and OpenDSS's did "
+            f"not converge ({plan['label'] if plan else algorithm}, every fallback tried). Run the "
+            "OpenDSS load flow on its own to see its last iterate, or compare with pandapower.")})
 
     # Read fundamental voltages and currents for THD base computation
     user_bus_names = list(set(BusbarsDictConnectionToName.values()))
@@ -5993,10 +6721,24 @@ def harmonic_analysis(in_data, frequency, mode, algorithm, loadmodel, max_iterat
     all_harmonics = sorted(set([1] + harmonic_orders))
     h_str = '[' + ','.join(str(h) for h in all_harmonics) + ']'
     execute_dss_command(f'set harmonics={h_str}')
-    execute_dss_command('set mode=harmonics')
+    # Entering harmonics mode writes the circuit's saved voltages to a file; on Windows the file
+    # just written can be held a moment (a virus scan, the last run's handle) and the study failed
+    # with "being used by another process" - the next run passed. A few short retries.
+    import time as _time
+    for attempt in range(4):
+        try:
+            execute_dss_command('set mode=harmonics')
+            break
+        except Exception as e:
+            if attempt < 3 and 'used by another process' in str(e):
+                _time.sleep(0.5 * (attempt + 1))
+                continue
+            return json.dumps({"error": f"OpenDSS could not enter harmonics mode: {e}"})
 
     # ---- Step 5: Apply harmonic-specific modifications and solve harmonics ----
-    execute_dss_command('batchedit transformer..* ppm_antifloat=0')
+    if _opendss_add_harmonic_damping(converter_stand_ins, BusbarsDictVoltage, BusbarsDictConnectionToName,
+                                     execute_dss_command):
+        print("[OpenDSS][HARMONICS] Grid-forming PCS active damping added across their terminals")
 
     def _bus_num(s):
         if not s:
@@ -6020,11 +6762,19 @@ def harmonic_analysis(in_data, frequency, mode, algorithm, loadmodel, max_iterat
             hvdc_trafos[bt_num] = trafo_name
 
     if 301 in hvdc_trafos and 302 in hvdc_trafos:
+        # The HVDC benchmark's own setting. On any other circuit a delta
+        # winding with nothing grounded beyond it - a PCS transformer whose
+        # PCS OpenDSS leaves out, a generator step-up - floats without the
+        # antifloat shunt, and every harmonic solve came out NaN (0 % THD).
+        execute_dss_command('batchedit transformer..* ppm_antifloat=0')
         execute_dss_command(f"Edit Transformer.{hvdc_trafos[301]} conns=[wye wye]")
         execute_dss_command(f"Edit Transformer.{hvdc_trafos[302]} conns=[wye delta] leadlag=lead")
         print("[OpenDSS][HARMONICS] Applied HVDC harmonics cancelling: 3->301 wye-wye, 3->302 wye-delta leadlag=lead")
 
-    execute_dss_command('solve')
+    try:
+        execute_dss_command('solve')
+    except Exception as e:
+        return json.dumps({"error": f"OpenDSS harmonic solve failed: {e}"})
 
     # ---- Step 7: Read per-harmonic data from monitors -------------------------
     # After mode=harmonics solve, monitors have one sample per harmonic step.
@@ -6155,6 +6905,16 @@ def harmonic_analysis(in_data, frequency, mode, algorithm, loadmodel, max_iterat
             for h in harmonic_orders:
                 per_h[str(h)] = round(bus_harmonic_v.get(bus_key, {}).get(h, 0.0), 6)
             bus_entry["harmonic_voltages_kv"] = per_h
+            # IEEE 519-2022's voltage limits for the bus's class, against its THD and its
+            # largest single harmonic.
+            kv_nom = next((float(v) for k, v in BusbarsDictVoltage.items() if str(k).lower() == bus_key), None)
+            if kv_nom and v1 > 0:
+                single_lim, thd_lim = ieee519_voltage_limits(kv_nom)
+                worst = float(max((100.0 * float(bus_harmonic_v.get(bus_key, {}).get(h, 0.0)) / v1
+                                   for h in harmonic_orders), default=0.0))
+                bus_entry["ieee519"] = {"thd_limit_percent": thd_lim, "individual_limit_percent": single_lim,
+                                        "max_individual_percent": round(worst, 3),
+                                        "ok": bool(bus_entry["vthd_percent"] <= thd_lim and worst <= single_lim)}
 
     if "lines" in base_result:
         for line_entry in base_result["lines"]:
@@ -6281,22 +7041,48 @@ def _dg_collect_metrics(dss, BusbarsDictConnectionToName, LinesDict, LinesDictId
     except Exception:
         pass
 
-    source_p_kw = 0.0
+    # Power the grid supplies: positive importing, negative exporting.
+    # OpenDSS reports a source's terminal power as negative while it supplies,
+    # and the source is Vsource.source, not the External Grid's cell name -
+    # activating that name failed silently and read whatever element was
+    # active last, so every screening flagged reverse power.
+    # Transformers too, by their windings' current against rated current (as
+    # pandapower loads them): only lines were checked, and PV behind a 1 MVA
+    # transformer screened clear up to 5 MW with the transformer at 445 %.
     try:
-        for src_name in (ExternalGridsDict or {}):
+        for trafo_name in dss.Transformers.AllNames() or []:
+            if not trafo_name or trafo_name.lower() == 'none':
+                continue
             try:
-                dss.Circuit.SetActiveElement(f'Vsource.{src_name}')
-                powers = dss.CktElement.Powers()
-                if powers:
-                    # Sum P across phases at terminal 1
-                    n = max(1, int(len(powers) / 2))
-                    source_p_kw += sum(powers[i * 2] for i in range(min(n, 3)))
+                dss.Circuit.SetActiveElement(f'Transformer.{trafo_name}')
+                currents = dss.CktElement.CurrentsMagAng()
+                n_cond = dss.CktElement.NumConductors()
+                n_phases = dss.CktElement.NumPhases()
+                n_term = dss.CktElement.NumTerminals()
+                dss.Transformers.Name(trafo_name)
+                worst = 0.0
+                for w in range(n_term):
+                    dss.Transformers.Wdg(w + 1)
+                    kva, kv = float(dss.Transformers.kVA()), float(dss.Transformers.kV())
+                    if kva <= 0 or kv <= 0:
+                        continue
+                    rated = kva / (math.sqrt(3) * kv) if n_phases > 1 else kva / kv
+                    mags = [currents[2 * (w * n_cond + c)] for c in range(n_phases)
+                            if 2 * (w * n_cond + c) < len(currents)]
+                    if mags and rated > 0:
+                        worst = max(worst, max(mags) / rated * 100.0)
+                line_metrics.append({'name': trafo_name, 'id': trafo_name, 'loading_percent': float(worst),
+                                     'kind': 'transformer'})
             except Exception:
                 continue
-        if not ExternalGridsDict:
-            total = dss.Circuit.TotalPower()
-            if total:
-                source_p_kw = float(total[0])
+    except Exception:
+        pass
+
+    source_p_kw = 0.0
+    try:
+        total = dss.Circuit.TotalPower()
+        if total:
+            source_p_kw = -float(total[0])
     except Exception:
         pass
 
@@ -6342,7 +7128,7 @@ def _dg_evaluate_checks(bus_metrics, line_metrics, source_p_kw, vmin_pu, vmax_pu
         ok = worst_line['loading_percent'] <= max_loading_percent + 1e-9
         checks.append({
             'id': 'thermal',
-            'name': 'Thermal loading',
+            'name': 'Thermal loading (lines and transformers)',
             'status': 'pass' if ok else 'fail',
             'value': round(worst_line['loading_percent'], 2),
             'limit': max_loading_percent,
@@ -6357,23 +7143,22 @@ def _dg_evaluate_checks(bus_metrics, line_metrics, source_p_kw, vmin_pu, vmax_pu
 
     # Reverse power at source: OpenDSS Vsource P > 0 means power into the grid from the circuit
     # Convention varies; treat large negative circuit TotalPower export as reverse through source.
+    # Informational, not a limit: a warning, never the limiting constraint. It
+    # read "fail" and was named as what limited a screening that passed - on
+    # the radial grid, which exports before any change.
     reverse = source_p_kw < -1.0  # kW into grid / reverse through POC source
     checks.append({
         'id': 'reverse_power',
         'name': 'Reverse power at source',
-        'status': 'fail' if reverse else 'pass',
+        'status': 'warning' if reverse else 'pass',
         'value': round(source_p_kw, 3),
         'limit': 0.0,
         'location': 'source',
         'unit': 'kW',
         'note': 'Negative source P indicates export / reverse power through the grid source',
     })
-    if reverse and limiting is None:
-        limiting = f"Reverse power at source ({source_p_kw:.1f} kW)"
 
-    overall = 'pass' if all(c['status'] == 'pass' for c in checks if c['id'] != 'reverse_power') else 'fail'
-    # Reverse power is informational for DG interconnection unless strict mode - flag but do not alone fail hosting
-    hard_fail = any(c['status'] == 'fail' and c['id'] != 'reverse_power' for c in checks)
+    hard_fail = any(c['status'] == 'fail' for c in checks)
     overall = 'fail' if hard_fail else 'pass'
     return checks, overall, limiting
 
@@ -6433,36 +7218,40 @@ def _dg_build_and_solve(in_data, frequency, controlmode='Time'):
         dss.Text.Command(command)
         opendss_commands.append(command)
 
-    try:
-        dss.Basic.ClearAll()
-    except Exception:
-        pass
-
     f = float(frequency or 50)
-    ext_scan = None
-    for _k, el in work.items():
-        if isinstance(el, dict) and str(el.get('typ', '')).startswith('External Grid'):
-            ext_scan = el
-            break
+    # The circuit source as the load flow builds it. The raw External Grid
+    # element lacks basekv/pu/angle, so every screening failed with 'basekv'.
+    ext_scan = _prescan_external_grid(
+        {k: el for k, el in work.items() if isinstance(el, dict)})
     try:
-        execute_dss_command(_new_circuit_command(ext_scan) if ext_scan else 'New Circuit.ElectrisimDG basefreq={}'.format(f))
-        execute_dss_command(f'set DefaultBaseFrequency={f}')
-        BusbarsDictVoltage, BusbarsDictConnectionToName = create_busbars(work, dss, False, opendss_commands)
-        element_dicts = create_other_elements(
-            work, dss, BusbarsDictVoltage, BusbarsDictConnectionToName, False, opendss_commands, execute_dss_command)
-        (LinesDict, LinesDictId, LoadsDict, LoadsDictId, TransformersDict, TransformersDictId,
-         Transformers3WDict, Transformers3WDictId,
-         ShuntsDict, ShuntsDictId, CapacitorsDict, CapacitorsDictId, GeneratorsDict, GeneratorsDictId,
-         StoragesDict, StoragesDictId, PVSystemsDict, PVSystemsDictId, ExternalGridsDict, ExternalGridsDictId,
-         circuit_source_element_name) = element_dicts
-        execute_dss_command('set Mode=Snapshot')
-        execute_dss_command('set Algorithm=Normal')
-        ctrl = 'Time' if (_in_data_needs_time_control(work) or str(controlmode).lower() == 'time') else str(controlmode or 'Static')
-        execute_dss_command(f'set ControlMode={ctrl}')
-        execute_dss_command('set MaxIterations=100')
-        execute_dss_command('set tolerance=0.0001')
-        execute_dss_command('solve')
-        converged = bool(dss.Solution.Converged())
+        # The load flow's ladder of attempts: a diverged solve leaves NaN that
+        # only a rebuild clears, and the first (Normal) one diverges on some
+        # networks Newton solves - this screening used to stop there, all NaN.
+        for plan in _opendss_snapshot_solve_plans('Normal', 100):
+            work = copy.deepcopy(in_data)
+            try:
+                dss.Basic.ClearAll()
+            except Exception:
+                pass
+            execute_dss_command(_new_circuit_command(ext_scan) if ext_scan else 'New Circuit.ElectrisimDG basefreq={}'.format(f))
+            execute_dss_command(f'set DefaultBaseFrequency={f}')
+            BusbarsDictVoltage, BusbarsDictConnectionToName = create_busbars(work, dss, False, opendss_commands)
+            element_dicts = create_other_elements(
+                work, dss, BusbarsDictVoltage, BusbarsDictConnectionToName, False, opendss_commands, execute_dss_command)
+            (LinesDict, LinesDictId, LoadsDict, LoadsDictId, TransformersDict, TransformersDictId,
+             Transformers3WDict, Transformers3WDictId,
+             ShuntsDict, ShuntsDictId, CapacitorsDict, CapacitorsDictId, GeneratorsDict, GeneratorsDictId,
+             StoragesDict, StoragesDictId, PVSystemsDict, PVSystemsDictId, ExternalGridsDict, ExternalGridsDictId,
+             circuit_source_element_name) = element_dicts
+            execute_dss_command('set Mode=Snapshot')
+            execute_dss_command(f"set Algorithm={plan['algorithm']}")
+            ctrl = 'Time' if (_in_data_needs_time_control(work) or str(controlmode).lower() == 'time') else str(controlmode or 'Static')
+            execute_dss_command(f'set ControlMode={ctrl}')
+            execute_dss_command(f"set MaxIterations={plan['max_iterations']}")
+            execute_dss_command('set tolerance=0.0001')
+            converged = _opendss_solve_snapshot_plan(dss, execute_dss_command, plan, GeneratorsDict)
+            if converged and _opendss_circuit_has_usable_solution(dss):
+                break
         bus_metrics, line_metrics, source_p_kw = _dg_collect_metrics(
             dss, BusbarsDictConnectionToName, LinesDict, LinesDictId, ExternalGridsDict)
         return {
@@ -6530,6 +7319,25 @@ def dg_interconnection_screening(in_data, params):
             'error': True,
             'message': f'DER element not found (id={der_id}, type={der_type}). Select an existing PVSystem, Storage, or Generator on the canvas.',
         })
+    # The screening resizes the DER where it is connected: that bus is the
+    # point of coupling. The POC chosen was only a label - the default, the
+    # first bus, put a 20 kV CHP plant "at" the 110 kV busbar.
+    warnings = []
+    der_bus = str(der.get('bus') or '')
+    if der_bus and poc_bus_id and str(poc_bus_id) != der_bus:
+        warnings.append(f'The DER connects at {{{der_bus}}}, not at the POC chosen, {{{poc_bus_id}}}; '
+                        'it is screened where it is connected.')
+    if der_bus:
+        poc_bus_id = der_bus
+    # Volt-VAR is an OpenDSS InvControl, which acts on PVSystem and Storage
+    # elements only: for a generator the "comparison" repeated the base case.
+    der_typ = str(der.get('typ', ''))
+    inverter = der_typ.startswith(('PVSystem', 'Storage'))
+
+    # The grid's power with the DER as drawn, so the change the proposed size
+    # makes to any export can be seen.
+    as_drawn = _dg_build_and_solve(copy.deepcopy(clean), frequency, controlmode='Static')
+    as_drawn_kw = as_drawn.get('source_p_kw') if as_drawn.get('ok') and as_drawn.get('converged') else None
 
     # Baseline proposed size
     _dg_scale_der(der, proposed_kw, proposed_kva)
@@ -6544,10 +7352,22 @@ def dg_interconnection_screening(in_data, params):
     checks, overall, limiting = _dg_evaluate_checks(
         result_base['bus_metrics'], result_base['line_metrics'], result_base['source_p_kw'],
         vmin_pu, vmax_pu, max_loading)
+    for check in checks:
+        if check['id'] == 'reverse_power' and as_drawn_kw is not None:
+            check['as_drawn_kw'] = round(as_drawn_kw, 3)
+            if as_drawn_kw < -1.0:
+                check['note'] = (f'The grid already exports {-as_drawn_kw:.1f} kW with the DER as drawn; '
+                                 f'at the proposed size the source carries {check["value"]:.1f} kW.')
 
     mitigations = []
     inv_compare = None
-    if compare_inv:
+    if compare_inv and not inverter:
+        inv_compare = {
+            'applicable': False,
+            'note': f'Volt-VAR InvControl acts on PVSystem and Storage inverters; {{{der_id}}} is a '
+                    f'{der_typ.rstrip("0123456789") or "generator"}, so there is nothing to compare.',
+        }
+    elif compare_inv:
         clean_inv = copy.deepcopy(clean)
         der_inv = _dg_find_der_element(clean_inv, der_id, der_type)
         if der_inv is not None:
@@ -6560,6 +7380,7 @@ def dg_interconnection_screening(in_data, params):
                     res_inv['bus_metrics'], res_inv['line_metrics'], res_inv['source_p_kw'],
                     vmin_pu, vmax_pu, max_loading)
                 inv_compare = {
+                    'applicable': True,
                     'overall': o2,
                     'checks': c2,
                     'limiting_constraint': lim2,
@@ -6578,46 +7399,81 @@ def dg_interconnection_screening(in_data, params):
 
     hosting = None
     if run_hc:
-        lo, hi = 0.0, max(hc_max_kw, proposed_kw)
-        best = 0.0
-        iters = 0
-        last_lim = None
-        while (hi - lo) > hc_tol_kw and iters < 24:
-            mid = 0.5 * (lo + hi)
+        use_inv = bool(inv_compare and inv_compare.get('applicable') and inv_compare.get('overall') == 'pass')
+
+        def screen_at(kw):
             clean_hc = copy.deepcopy(clean)
             der_hc = _dg_find_der_element(clean_hc, der_id, der_type)
             if der_hc is None:
-                break
-            _dg_scale_der(der_hc, mid, proposed_kva)
-            # Prefer InvControl if it helped
-            if inv_compare and inv_compare.get('overall') == 'pass':
-                der_hc['inv_control_mode'] = 'VOLTVAR'
-                ctrl = 'Time'
-            else:
-                der_hc['inv_control_mode'] = 'NONE'
-                ctrl = 'Static'
-            res_hc = _dg_build_and_solve(clean_hc, frequency, controlmode=ctrl)
-            iters += 1
+                return None, 'DER not found'
+            _dg_scale_der(der_hc, kw, proposed_kva)
+            # Volt-VAR, where it is an inverter and it helped.
+            der_hc['inv_control_mode'] = 'VOLTVAR' if use_inv else 'NONE'
+            res_hc = _dg_build_and_solve(clean_hc, frequency, controlmode='Time' if use_inv else 'Static')
             if not res_hc.get('ok') or not res_hc.get('converged'):
-                hi = mid
-                last_lim = 'Did not converge'
-                continue
+                return False, 'Did not converge'
             _c, o_hc, lim_hc = _dg_evaluate_checks(
                 res_hc['bus_metrics'], res_hc['line_metrics'], res_hc['source_p_kw'],
                 vmin_pu, vmax_pu, max_loading)
-            last_lim = lim_hc
-            if o_hc == 'pass':
-                best = mid
-                lo = mid
-            else:
-                hi = mid
+            return o_hc == 'pass', lim_hc
+
+        top = max(hc_max_kw, proposed_kw)
+        # The top first: a search that never failed reported the last midpoint
+        # below it - "4990 kW" for "no limit up to 5000 kW".
+        top_ok, top_lim = screen_at(top)
+        iters = 1
+        best = 0.0
+        last_lim = top_lim
+        if top_ok:
+            best = top
+        else:
+            lo, hi = 0.0, top
+            while (hi - lo) > hc_tol_kw and iters < 24:
+                mid = 0.5 * (lo + hi)
+                ok, lim = screen_at(mid)
+                iters += 1
+                if ok is None:
+                    break
+                if ok:
+                    best = lo = mid
+                else:
+                    hi = mid
+                    last_lim = lim
         hosting = {
             'hosting_capacity_kw': round(best, 2),
+            'at_least': bool(top_ok),
             'iterations': iters,
-            'search_max_kw': hc_max_kw,
+            'search_max_kw': top,
             'tolerance_kw': hc_tol_kw,
-            'limiting_constraint_at_upper': last_lim,
+            'limiting_constraint_at_upper': None if top_ok else last_lim,
         }
+        if top_ok:
+            warnings.append(f'No limit was reached up to the search maximum, {top:g} kW: the hosting '
+                            'capacity is at least that.')
+
+    # Name places as the diagram labels them; OpenDSS knows only cell ids
+    # (bus names lower-cased), which the user cannot find on the drawing.
+    labels = {str(el.get('name')).lower(): str(el['userFriendlyName'])
+              for el in clean.values() if isinstance(el, dict) and el.get('userFriendlyName')}
+
+    def label(text):
+        if text is None:
+            return None
+        return re.sub(r'mxcell_\d+', lambda m: labels.get(m.group(0).lower(), m.group(0)),
+                      str(text), flags=re.IGNORECASE)
+
+    def label_braced(text):
+        return re.sub(r'\{([^{}]*)\}', lambda m: labels.get(m.group(1).lower(), m.group(1)), str(text))
+
+    warnings = [label_braced(w) for w in warnings]
+    if inv_compare and inv_compare.get('note'):
+        inv_compare['note'] = label_braced(inv_compare['note'])
+    for check in list(checks or []) + list((inv_compare or {}).get('checks') or []):
+        check['location'] = label(check.get('location'))
+    if inv_compare and inv_compare.get('limiting_constraint'):
+        inv_compare['limiting_constraint'] = label(inv_compare['limiting_constraint'])
+    if hosting and hosting.get('limiting_constraint_at_upper'):
+        hosting['limiting_constraint_at_upper'] = label(hosting['limiting_constraint_at_upper'])
 
     # Restore note about original inv mode
     out = {
@@ -6626,16 +7482,19 @@ def dg_interconnection_screening(in_data, params):
             'overall': overall,
             'proposed_kw': proposed_kw,
             'der_id': der_id,
+            'der_label': label(der_id),
             'der_type': der_type,
             'poc_bus_id': poc_bus_id,
+            'poc_bus_label': label(poc_bus_id),
             'converged': result_base.get('converged'),
-            'limiting_constraint': limiting,
+            'limiting_constraint': label(limiting),
             'original_inv_control_mode': original_inv,
         },
         'checks': checks,
         'invcontrol_compare': inv_compare,
         'mitigations': mitigations,
         'hosting_capacity': hosting,
+        'warnings': warnings,
         'related': {
             'bess_sizing': 'Pandapower BESS sizing study can size storage to POC P/Q targets.',
             'rpc': 'Pandapower Grid Code Compliance (P-Q & U-Q) checks reactive capability envelopes.',

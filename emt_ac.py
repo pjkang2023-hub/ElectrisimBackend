@@ -1,0 +1,1493 @@
+"""
+The three-phase AC network in the EMT study (emt_solver.Circuit), from the
+load-flow state.
+
+- External grids: their voltage behind their short-circuit impedance, positive
+  and zero sequence (s_sc_max_mva, rx_max, x0x_max, r0x0_max), star grounded.
+- Lines: pi sections with their phase-domain coupling, from positive- and
+  zero-sequence R, X and C per km (self Z = (Z0 + 2 Z1) / 3, mutual
+  (Z0 - Z1) / 3; C0 phase to ground, (C1 - C0) / 3 phase to phase).
+- Two-winding transformers: three single-phase units on separate cores (no
+  zero-sequence flux path between phases), each a coupled pair - leakage split
+  between the windings, magnetising from i0, iron loss from pfe - connected by
+  their vector group, the delta's phase shift included.
+- Loads, motors and shunts: constant impedance at their load-flow power,
+  ungrounded star. Static generators and storage: grid-following, a constant
+  current at their load-flow power. Generators: their voltage behind their
+  subtransient reactance.
+- Bus couplers that are closed join their buses; an open switch on a line or
+  transformer takes it out. A bus coupler or a switch at a line's end that a
+  timed event trips or closes is a breaker: a switch per phase, each pole
+  opening at its current's zero.
+
+The run starts in the circuit's own AC steady state (emt_solver's phasor
+solution at the grid frequency), the sources' voltages taken from the load
+flow - rotated where a transformer's vector group shifts phase that the load
+flow, given a shift of 0, did not.
+"""
+
+import math
+import re
+
+import numpy as np
+
+from dc_fault_electrisim import _f, _label, _row_id
+from emt_solver import R_BIAS
+
+SQ2 = math.sqrt(2.0)
+A120 = 2.0 * math.pi / 3.0
+_VG = re.compile(r'^\s*(YN|Y|D|Z)(yn|y|d|z)(\d{1,2})?\s*$')
+_SUPPORTED_CLOCKS = {('Y', 'Y'): (0, 6), ('D', 'D'): (0, 6), ('D', 'Y'): (1, 5, 7, 11), ('Y', 'D'): (1, 5, 7, 11)}
+
+
+def parse_vector_group(vector_group, shift_degree=0.0):
+    """
+    (HV connection, HV neutral grounded, LV connection, LV neutral grounded,
+    clock, assumed) from a vector group such as 'Dyn11' or 'YNd1'. Without a
+    clock number, the load flow's shift (in 30-degree steps) gives it; a
+    star-delta with neither is taken as clock 11.
+    """
+    m = _VG.match(str(vector_group or 'Dyn'))
+    if not m:
+        m = _VG.match('Dyn')
+    hv, lv, clock = m.group(1), m.group(2), m.group(3)
+    hv_c = 'D' if hv == 'D' else 'Y'
+    lv_c = 'D' if lv == 'd' else 'Y'
+    assumed = False
+    if clock is None:
+        shift = _f(shift_degree, 0.0)
+        if abs(shift) > 1e-9:
+            clock = int(round(shift / 30.0)) % 12
+        else:
+            clock = 0 if hv_c == lv_c else 11
+            assumed = hv_c != lv_c
+    clock = int(clock) % 12
+    return hv_c, hv == 'YN', lv_c, lv == 'yn', clock, assumed
+
+
+def parse_vector_group_3w(vector_group, shift_mv, shift_lv):
+    """
+    A three-winding transformer's connections and clocks: (HV connection, grounded), (MV ..., clock), (LV ..., clock),
+    assumed. pandapower names its groups without clock numbers ('YNynd'); the load flow's shifts give them, a
+    winding unlike the HV's with no shift taken as clock 11 (and said so).
+    """
+    letters = re.findall(r'YN|yn|Y|y|D|d|Z|z', str(vector_group or 'YNynd'))
+    if len(letters) != 3:
+        letters = ['YN', 'yn', 'd']
+    hv, mv, lv = letters
+    conn = lambda x: 'D' if x.upper() == 'D' else 'Y'
+    assumed = False
+    clocks = []
+    for side, shift in ((mv, shift_mv), (lv, shift_lv)):
+        shift = _f(shift, 0.0)
+        if abs(shift) > 1e-9:
+            clocks.append(int(round(shift / 30.0)) % 12)
+        elif conn(side) == conn(hv):
+            clocks.append(0)
+        else:
+            clocks.append(11)
+            assumed = True
+    return (conn(hv), hv == 'YN'), (conn(mv), mv == 'yn', clocks[0]), (conn(lv), lv == 'yn', clocks[1]), assumed
+
+
+def unrealisable_clock(hv_c, lv_c, clock, label, shift_degree):
+    """
+    A warning when a transformer's clock (its load-flow shift over 30 degrees) is one its windings cannot make -
+    a star-delta at an even clock, a star-star or delta-delta at an odd one - or None. winding_pairs then winds it
+    at the nearest it can (a star-delta at 11, the others at 0), so the EMT's angles beyond it are not the load
+    flow's and the run starts away from it. In Electrisim the vector group's number is the shift: shift_degree
+    adds to it, so e.g. YNd1 with shift_degree 30 makes 60 degrees.
+    """
+    supported = _SUPPORTED_CLOCKS.get((hv_c, lv_c), ())
+    if clock in supported:
+        return None
+    used = 11 if hv_c != lv_c else 0
+    return (f'Transformer {label}: its load-flow shift of {_f(shift_degree, 0.0):g} degrees (clock {clock}) is not one a '
+            f'{hv_c}-{lv_c} connection can make; the EMT winds it at clock {used}, so the study does not start in the load '
+            "flow's state. The vector group's number already gives the shift: shift_degree adds to it.")
+
+
+def winding_pairs(hv_c, lv_c, clock):
+    """
+    For each single-phase unit k: the HV winding's (from, to) phase indices and
+    the LV's, and whether the LV winding is reversed - 'n' for the star point.
+    Clock 11: LV leads HV by 30 degrees; clock 1: lags; 5 and 7 are 11 and 1
+    reversed; 6 is 0 reversed.
+    """
+    base = {11: 11, 5: 11, 1: 1, 7: 1, 0: 0, 6: 0}.get(clock, 0 if hv_c == lv_c else 11)
+    reverse = clock in (5, 7, 6)
+    pairs = []
+    for k in range(3):
+        if hv_c == 'Y':
+            hv_pair = (k, 'n')
+        elif lv_c == 'Y' and base == 11:
+            hv_pair = (k, (k + 1) % 3)
+        elif lv_c == 'Y' and base == 1:
+            hv_pair = (k, (k - 1) % 3)
+        else:
+            hv_pair = (k, (k + 1) % 3)
+        if lv_c == 'Y':
+            lv_pair = (k, 'n')
+        elif hv_c == 'Y' and base == 11:
+            lv_pair = (k, (k - 1) % 3)
+        elif hv_c == 'Y' and base == 1:
+            lv_pair = (k, (k + 1) % 3)
+        else:
+            lv_pair = (k, (k + 1) % 3)
+        pairs.append((hv_pair, lv_pair, reverse))
+    return pairs
+
+
+def _sequence_to_phase(z1, z0):
+    """Phase-domain self and mutual from positive- and zero-sequence values."""
+    return (z0 + 2.0 * z1) / 3.0, (z0 - z1) / 3.0
+
+
+def _matrix(self_, mutual):
+    return np.full((3, 3), mutual) + np.eye(3) * (self_ - mutual)
+
+
+class AcBuilder:
+    """Builds the AC network into a circuit; knows its nodes and what to report."""
+
+    def __init__(self, ckt, net, params, warnings_out, f_hz):
+        self.ckt, self.net, self.params, self.warnings = ckt, net, params, warnings_out
+        self.w = 2.0 * math.pi * f_hz
+        self.f_hz = f_hz
+        self.nodes = {}          # AC bus -> [phase a, b, c] nodes
+        self.vn = {}             # AC bus -> nominal line voltage (V)
+        self.offset = {}         # AC bus -> radians the EMT angle leads the load flow's
+        self.series = []         # (kind, name, id, label, [(array, group or index, column or None, sign)] per phase)
+        self.grid_groups = []    # (ext_grid index, its source's coupled group, label): a voltage profile scales them
+        self.trafos = []
+        self.left_out = set()
+        self.skip = set()        # (table, index): elements a converter's EMT model stands for
+        self.profiles = {}       # load index -> its profile's plan (emt_electrisim._plan_profiles)
+        self.profiled = []       # loads following a profile: their nodes, correction sources and plan
+        self.load_rows = {}      # load name / label -> its diagram row (its UPS and constant-power fields)
+        self.event_loads = set() # loads a run's event switches or scales
+        self.dyn_loads = []      # those changing through the run: behind a UPS, at constant power, or by events
+        self.gen_rows = {}       # generator name -> its diagram row (its rotor, governor and exciter data)
+        self.line_rows = {}      # line name -> its diagram row (its frequency-dependent line's geometry)
+        self.fd_lines = []       # emt_fd_line.FdLine, one per line modelled so
+        self.cable_sheaths = []  # emt_cable.CableSheaths, one per cable modelled with its sheaths
+        self.middlebrook = None  # the series scan's nodes and sources, where the study names a line for one
+        self.machines = []       # emt_machine.SynchronousMachine, one per generator modelled as a machine
+        t_island = _f(params.get('island_time_ms'), -1.0) if str(params.get('island_time_ms') or '').strip() else -1.0
+        # Islanding: {'t', 'switches': per grid phase, 'opened': its time, 'last': its last current}.
+        self.island = {'t': t_island * 1e-3, 'switches': [], 'opened': [], 'last': []} if t_island >= 0 else None
+        # A fault along a line, and the lines' breakers that open on it (as their protection would).
+        self.fault_line = None   # (line index, fraction from its from-bus)
+        self.fault_point = None  # its [a, b, c] nodes there
+        self.line_trips = []     # {'line', 'label', 'switches', 'opened', 'last'}: each line's breakers, per phase
+        self.t_trip = None
+        # A shunt energised during the run (ac_energise_shunt): {'shunt', 't', 'switches', 'label', 'bus'}.
+        self.energise = None
+        # A transformer energised during the run (ac_energise_trafo): its breaker, cores and closing.
+        self.energise_trafo = None
+        # A series-reactor UPS (emt_series_ups): its line index -> its disconnect's and bypass's switches.
+        self.series_ups = {}
+        # Every transformer's saturable cores (trafo_saturation=all).
+        self.sat_cores = []
+        # Switches the run's timed events operate (their names), as breakers: bus couplers, and switches at a
+        # line's end ((line, bus) -> switch index, built with the line).
+        self.event_switches = set()
+        self.breakers = []
+        self.line_end_breakers = {}
+
+    # --- buses and the phase shifts ------------------------------------------------
+
+    def build(self):
+        net, ckt = self.net, self.ckt
+        aux = net.bus['electrisim_aux'] == True if 'electrisim_aux' in net.bus.columns else None
+        grounding = net.bus['electrisim_grounding'] == True if 'electrisim_grounding' in net.bus.columns else None
+        for b in net.bus.index:
+            if not bool(net.bus.at[b, 'in_service']) or b not in net.res_bus.index:
+                continue
+            if aux is not None and aux.at[b]:
+                continue
+            if grounding is not None and grounding.at[b]:
+                continue          # a grounding transformer's delta: the zigzag is built as itself
+            if not np.isfinite(net.res_bus.at[b, 'vm_pu']):
+                continue
+            label = _label(net, 'bus', b)
+            self.nodes[b] = [ckt.node(f'{label} {p}') for p in 'abc']
+            self.vn[b] = float(net.bus.at[b, 'vn_kv']) * 1e3
+        if not self.nodes:
+            return self
+        self._open_switches = self._switches()
+        self._line_events()
+        self._series_ups()
+        self._phase_offsets()
+        self._grids()
+        self._lines()
+        self._trafos()
+        self._cores_controller()
+        self._grounding()
+        self._loads()
+        self._energised_shunt()
+        self._energised_trafo()
+        self._generation()
+        for table in ('impedance', 'ward', 'xward', 'dcline'):
+            if table in net and len(net[table]) and net[table]['in_service'].astype(bool).any():
+                self.left_out.add(table)
+        if self.left_out:
+            self.warnings.append('Left out of the EMT study so far: ' + ', '.join(sorted(self.left_out)) + '.')
+        return self
+
+    def _switches(self):
+        """Close bus couplers; return the lines and transformers an open switch takes out. A switch a timed event
+        operates (event_switches) is a breaker: a switch per phase (_breaker)."""
+        net, ckt = self.net, self.ckt
+        out = set()
+        for si in net.switch.index:
+            closed = bool(net.switch.at[si, 'closed'])
+            et, el, bus = net.switch.at[si, 'et'], int(net.switch.at[si, 'element']), int(net.switch.at[si, 'bus'])
+            operated = self._operated(si)
+            if et == 'b':
+                if operated and bus in self.nodes and el in self.nodes:
+                    self._breaker(si, self.nodes[bus], self.nodes[el], closed)
+                elif closed and bus in self.nodes and el in self.nodes:
+                    for k in range(3):
+                        ckt.add_r(self.nodes[bus][k], self.nodes[el][k], 1e-4)
+            elif not closed and et in ('l', 't'):
+                if operated:
+                    self.warnings.append(f"Switch {_label(net, 'switch', si)} is open at the start: closing it "
+                                         'onto a line or transformer is not modelled; it stays open.')
+                out.add(('line' if et == 'l' else 'trafo', el))
+            elif operated and et == 'l':
+                self.line_end_breakers[(el, bus)] = si      # built with the line (_lines)
+            elif operated:
+                self.warnings.append(f"Switch {_label(net, 'switch', si)}: only bus couplers and switches at a line's "
+                                     'end can be operated in the EMT study; it stays closed.')
+        return out
+
+    def _operated(self, si):
+        """Whether a timed event names switch si (by its name, id or label)."""
+        net = self.net
+        names = {str(net.switch.at[si, 'name']), str(_row_id(net, 'switch', si)), _label(net, 'switch', si)}
+        return bool(names & self.event_switches)
+
+    def _breaker(self, si, a, b, closed):
+        """Switch si as a breaker between nodes a and b, a switch per phase: opened by a trip event, each pole at
+        its current's zero, as a circuit breaker interrupts; closed by a close event, all poles at once."""
+        rec = {'switch': si, 'label': _label(self.net, 'switch', si),
+               'names': {str(self.net.switch.at[si, 'name']), str(_row_id(self.net, 'switch', si)), _label(self.net, 'switch', si)},
+               'switches': [self.ckt.add_switch(a[ph], b[ph], closed=closed) for ph in range(3)],
+               'opening': False, 'last': [None] * 3, 'operations': []}
+        self.breakers.append(rec)
+        self.series.append(('Breaker', rec['label'], _row_id(self.net, 'switch', si), rec['label'],
+                            [('i_sw', k, None, 1.0) for k in rec['switches']]))
+        return rec
+
+    def find_breaker(self, name):
+        return next((rec for rec in self.breakers if str(name) in rec['names']), None)
+
+    def operate_breaker(self, rec, action, t, state):
+        """A timed event on a breaker: 'trip' starts its poles opening at their current zeros; 'close' closes them
+        all. True if the circuit changed."""
+        if action == 'trip':
+            if not rec['opening'] and any(state.sw_closed[k] for k in rec['switches']):
+                rec['opening'], rec['last'] = True, [None] * 3
+                rec['operations'].append({'action': 'trip', 't': t, 'poles': [None] * 3})
+            return False
+        rec['opening'] = False
+        rec['operations'].append({'action': 'close', 't': t, 'poles': [t] * 3})
+        changed = False
+        for k in rec['switches']:
+            if not state.sw_closed[k]:
+                state.set_switch(k, True)
+                changed = True
+        return changed
+
+    def breaker_control(self, t, state):
+        """Each opening breaker's poles, each opened as its current passes zero; True if one did."""
+        changed = False
+        for rec in self.breakers:
+            if not rec['opening']:
+                continue
+            op = rec['operations'][-1]
+            for n, k in enumerate(rec['switches']):
+                if not state.sw_closed[k]:
+                    continue
+                i = float(state.i_sw[k])
+                last = rec['last'][n]
+                rec['last'][n] = i
+                if last is not None and (i == 0.0 or (i > 0) != (last > 0)):
+                    state.set_switch(k, False)
+                    op['poles'][n] = t
+                    changed = True
+            if not any(state.sw_closed[k] for k in rec['switches']):
+                rec['opening'] = False
+        return changed
+
+    def _phase_offsets(self):
+        """
+        Each bus's angle in the EMT model less its load-flow angle: a
+        transformer whose vector group shifts phase the load flow did not
+        (its shift_degree) moves the buses beyond it.
+        """
+        net = self.net
+        adj = {b: [] for b in self.nodes}
+        for li in net.line.index:
+            fb, tb = int(net.line.at[li, 'from_bus']), int(net.line.at[li, 'to_bus'])
+            if fb in adj and tb in adj:
+                adj[fb].append((tb, 0.0))
+                adj[tb].append((fb, 0.0))
+        for si in net.switch.index:
+            if net.switch.at[si, 'et'] == 'b' and bool(net.switch.at[si, 'closed']):
+                a, b = int(net.switch.at[si, 'bus']), int(net.switch.at[si, 'element'])
+                if a in adj and b in adj:
+                    adj[a].append((b, 0.0))
+                    adj[b].append((a, 0.0))
+        if 'trafo3w' in net and len(net.trafo3w):
+            for ti in net.trafo3w.index:
+                hv, mv, lv = (int(net.trafo3w.at[ti, k]) for k in ('hv_bus', 'mv_bus', 'lv_bus'))
+                col = lambda c: _f(net.trafo3w.at[ti, c], 0.0) if c in net.trafo3w.columns else 0.0
+                _, (_, _, c_mv), (_, _, c_lv), _ = parse_vector_group_3w(
+                    net.trafo3w.at[ti, 'vector_group'] if 'vector_group' in net.trafo3w.columns else 'YNynd', col('shift_mv_degree'), col('shift_lv_degree'))
+                for other, clock, shift in ((mv, c_mv, col('shift_mv_degree')), (lv, c_lv, col('shift_lv_degree'))):
+                    if hv in adj and other in adj:
+                        d = -clock * math.pi / 6.0 + math.radians(shift)
+                        adj[hv].append((other, d))
+                        adj[other].append((hv, -d))
+        for ti in net.trafo.index:
+            hv, lv = int(net.trafo.at[ti, 'hv_bus']), int(net.trafo.at[ti, 'lv_bus'])
+            if hv not in adj or lv not in adj:
+                continue
+            hv_c, _, lv_c, _, clock, _ = parse_vector_group(net.trafo.at[ti, 'vector_group'] if 'vector_group' in net.trafo.columns else 'Dyn',
+                                                           net.trafo.at[ti, 'shift_degree'] if 'shift_degree' in net.trafo.columns else 0.0)
+            lf_shift = math.radians(_f(net.trafo.at[ti, 'shift_degree'], 0.0)) if 'shift_degree' in net.trafo.columns else 0.0
+            # The LV side lags the HV by clock x 30 degrees; the load flow lagged it by shift_degree.
+            d = -clock * math.pi / 6.0 + lf_shift
+            adj[hv].append((lv, d))
+            adj[lv].append((hv, -d))
+        roots = [int(net.ext_grid.at[i, 'bus']) for i in net.ext_grid.index if int(net.ext_grid.at[i, 'bus']) in adj]
+        roots += [b for b in adj if b not in roots]
+        for r in roots:
+            if r in self.offset:
+                continue
+            self.offset[r] = 0.0
+            stack = [r]
+            while stack:
+                x = stack.pop()
+                for y, d in adj[x]:
+                    if y not in self.offset:
+                        self.offset[y] = self.offset[x] + d
+                        stack.append(y)
+
+    def _v_phasor(self, b):
+        """Bus b's phase-a voltage phasor (amplitude, V), in the EMT model's angles."""
+        res = self.net.res_bus
+        v_ph = float(res.at[b, 'vm_pu']) * self.vn[b] / math.sqrt(3.0)
+        return SQ2 * v_ph * np.exp(1j * (math.radians(float(res.at[b, 'va_degree'])) + self.offset.get(b, 0.0)))
+
+    def _injection_phasor(self, b, p_mw, q_mvar):
+        """The phase-a current phasor (amplitude) of a three-phase injection of P + jQ into bus b."""
+        v = self._v_phasor(b)
+        return np.conj((p_mw + 1j * q_mvar) * 1e6 / 3.0 / (v / SQ2)) * SQ2
+
+    @staticmethod
+    def _three(ph):
+        """Amplitudes and phases of a positive-sequence set from the phase-a phasor."""
+        return np.full(3, abs(ph)), np.angle(ph) - np.arange(3) * A120
+
+    # --- the elements ------------------------------------------------------------------
+
+    def _grids(self):
+        net, ckt, w = self.net, self.ckt, self.w
+        for gi in net.ext_grid.index:
+            b = int(net.ext_grid.at[gi, 'bus'])
+            if not bool(net.ext_grid.at[gi, 'in_service']) or b not in self.nodes:
+                continue
+            vn = self.vn[b]
+            s_sc = _f(net.ext_grid.at[gi, 's_sc_max_mva'], 0.0) if 's_sc_max_mva' in net.ext_grid.columns else 0.0
+            if s_sc <= 0:
+                s_sc = 1000.0
+                self.warnings.append(f"External grid {_label(net, 'ext_grid', gi)} has no short-circuit power: "
+                                     "1000 MVA is taken.")
+            rx = _f(net.ext_grid.at[gi, 'rx_max'], 0.1) if 'rx_max' in net.ext_grid.columns else 0.1
+            z1 = vn * vn / (s_sc * 1e6)
+            x1 = z1 / math.sqrt(1 + rx * rx)
+            r1 = rx * x1
+            x0x = _f(net.ext_grid.at[gi, 'x0x_max'], 1.0) if 'x0x_max' in net.ext_grid.columns else 1.0
+            r0x0 = _f(net.ext_grid.at[gi, 'r0x0_max'], rx) if 'r0x0_max' in net.ext_grid.columns else rx
+            x0 = x0x * x1 if x0x > 0 else x1
+            r0 = r0x0 * x0
+            rs, rm = _sequence_to_phase(r1, r0)
+            ls, lm = _sequence_to_phase(x1 / w, x0 / w)
+            p = _f(net.res_ext_grid.at[gi, 'p_mw']) if gi in net.res_ext_grid.index else 0.0
+            q = _f(net.res_ext_grid.at[gi, 'q_mvar']) if gi in net.res_ext_grid.index else 0.0
+            i_ph = self._injection_phasor(b, p, q)
+            e_ph = self._v_phasor(b) + complex(r1, x1) * i_ph
+            amp, ph = self._three(e_ph)
+            ends = self.nodes[b]
+            if self.island is not None:
+                # Its breaker, between it and its bus: opened by the islanding, each phase at its current's zero.
+                ends = [ckt.node(f"{_label(net, 'ext_grid', gi)} breaker {p}") for p in 'abc']
+                for k in range(3):
+                    self.island['switches'].append(ckt.add_switch(ends[k], self.nodes[b][k], closed=True))
+                    self.island['opened'].append(None)
+                    self.island['last'].append(None)
+            g = ckt.add_coupled([0, 0, 0], ends, _matrix(rs, rm), _matrix(ls, lm), ac=(amp, w, ph))
+            label = _label(net, 'ext_grid', gi)
+            self.grid_groups.append((gi, g, label))
+            self.series.append(('External grid', label, _row_id(net, 'ext_grid', gi), label,
+                                [('i_cp', g, k, 1.0) for k in range(3)]))
+
+    def _find_line(self, ident):
+        net = self.net
+        ident = str(ident).strip()
+        return next((li for li in net.line.index
+                     if ident in (str(net.line.at[li, 'name']), str(_row_id(net, 'line', li)), _label(net, 'line', li))),
+                    None)
+
+    def _line_events(self):
+        """
+        A fault along a line (ac_fault_line, at ac_fault_fraction of its length
+        from its from-bus), and from ac_trip_time_ms the breakers at both ends of
+        the lines in ac_trip_lines (the faulted line, by default) opening, each
+        phase at its current's zero - its differential protection clearing it.
+        """
+        p = self.params
+        name = str(p.get('ac_fault_line') or '').strip()
+        if name and name != 'none':
+            li = self._find_line(name)
+            if li is None:
+                self.warnings.append(f'No line {name} to fault: the study runs without a line fault.')
+            else:
+                frac = min(max(_f(p.get('ac_fault_fraction'), 0.5), 0.01), 0.99)
+                self.fault_line = (li, frac)
+        if not str(p.get('ac_trip_time_ms') or '').strip():
+            return
+        self.t_trip = _f(p.get('ac_trip_time_ms'), 0.0) * 1e-3
+        names = [x.strip() for x in str(p.get('ac_trip_lines') or '').split(',') if x.strip()]
+        if not names and self.fault_line is not None:
+            names = [str(_row_id(self.net, 'line', self.fault_line[0]))]
+        for name in names:
+            li = self._find_line(name)
+            if li is None:
+                self.warnings.append(f'No line {name} to trip.')
+            else:
+                self.line_trips.append({'line': li, 'label': _label(self.net, 'line', li), 'switches': [],
+                                        'opened': [], 'last': []})
+
+    def _series_ups(self):
+        """The line series_ups_line names is a series-reactor UPS's reactor, from its source bus to its critical bus."""
+        name = str(self.params.get('series_ups_line') or '').strip()
+        if not name or name == 'none':
+            return
+        li = self._find_line(name)
+        if li is None:
+            self.warnings.append(f'No line {name} for the series-reactor UPS: the study runs without one.')
+        else:
+            self.series_ups[li] = {'line': li, 'label': _label(self.net, 'line', li), 'disconnect': [], 'bypass': []}
+
+    def line_trip_control(self, t, state):
+        """From the trip time, each line breaker's phase opens as its current passes zero; True if one did."""
+        if self.t_trip is None or t < self.t_trip - 1e-12:
+            return False
+        changed = False
+        for trip in self.line_trips:
+            for n, k in enumerate(trip['switches']):
+                if trip['opened'][n] is not None:
+                    continue
+                i = float(state.i_sw[k])
+                last = trip['last'][n]
+                trip['last'][n] = i
+                if last is not None and (i == 0.0 or (i > 0) != (last > 0)):
+                    state.set_switch(k, False)
+                    trip['opened'][n] = t
+                    changed = True
+        return changed
+
+    def _cable_sheaths(self, li, row, start, stop, km, par, label, bonding):
+        """A cable with its sheaths as conductors and their bonding (emt_cable): True if it now is, else pi sections, said so."""
+        import emt_cable
+        g = {k: _f(row.get(f'fd_{k}'), _f(self.params.get(f'fd_{k}'), 0.0)) for k in emt_cable.FIELDS}
+        g['jacket_eps_r'] = _f(row.get('fd_jacket_eps_r'), 2.5)
+        missing = [k for k, v in g.items() if v <= 0]
+        why = None
+        if missing:
+            why = 'it needs ' + ', '.join(f'fd_{k}' for k in missing)
+        elif par != 1.0:
+            why = 'parallel circuits are not modelled'
+        elif self.fault_line is not None and self.fault_line[0] == li:
+            why = 'a fault along it is not modelled'
+        elif g['insulation_radius_m'] <= g['core_radius_m']:
+            why = 'its insulation radius must be above its core radius'
+        if why is not None:
+            self.warnings.append(f'Line {label} runs as pi sections without its sheaths: {why}.')
+            return False
+        formation = 'flat' if str(row.get('fd_formation') or '').strip().lower() == 'flat' else 'trefoil'
+        majors = int(_f(row.get('fd_major_sections'), 1.0))
+        # Wideband (fd_sheath_model 'wideband'): cores and sheaths as the universal line model, for travelling waves too.
+        if str(row.get('fd_sheath_model') or self.params.get('fd_sheath_model') or '').strip().lower() == 'wideband':
+            dt = max(_f(self.params.get('time_step_us'), 1.0), 0.01) * 1e-6
+            try:
+                cable = emt_cable.WidebandCable(self.ckt, start, stop, g, km, dt, self.w, label, bonding=bonding, formation=formation,
+                                                major_sections=majors)
+            except ValueError as exc:
+                self.warnings.append(f'Line {label}: its wideband model cannot be made ({exc}), so its sheaths run at the fundamental.')
+            else:
+                self.cable_sheaths.append(cable)
+                return True
+        cable = emt_cable.CableSheaths(self.ckt, start, stop, g, km, self.f_hz, label, bonding=bonding, formation=formation,
+                                       major_sections=majors, sections=int(_f(row.get('fd_sections'), 4.0)))
+        cable.formation = formation
+        self.cable_sheaths.append(cable)
+        self.series.append(('Line', label, _row_id(self.net, 'line', li), f'{label} (from end)', [('i_cp', cable.groups[0], k, 1.0) for k in range(3)]))
+        return True
+
+    def _fd_line(self, li, start, stop, km, par, label):
+        """
+        Line li as a frequency-dependent line (emt_fd_line) if its row or the study says so: True if it now is.
+        Its geometry from its row's fd_ fields, or the study's; pi sections, with a warning, if it cannot be.
+        """
+        import emt_fd_line
+        row = self.line_rows.get(str(self.net.line.at[li, 'name'])) or {}
+        # On if the line's own EMT tab or the study says so: a line saved as pi sections stores 'false', which must not
+        # hide the study's switch.
+        if not any(str(x or '').strip().lower() in ('true', '1', 'yes') for x in (row.get('fd_line'), self.params.get('fd_line'))):
+            return False
+        cable = str(row.get('fd_kind') or self.params.get('fd_kind') or '').strip().lower() == 'cable'
+        bonding = str(row.get('fd_bonding') or self.params.get('fd_bonding') or '').strip().lower()
+        if cable and bonding in ('solid', 'single', 'cross'):
+            return self._cable_sheaths(li, row, start, stop, km, par, label, bonding)
+        fields = emt_fd_line.CABLE_FIELDS if cable else emt_fd_line.FIELDS
+        geometry = {k: _f(row.get(f'fd_{k}'), _f(self.params.get(f'fd_{k}'), 0.0)) for k in fields}
+        # Untransposed (fd_transposed 'false'), or its conductors where they are (fd_conductors 'x,y; ...', one
+        # three per circuit: two circuits on its towers when its row's parallel is 2).
+        xy = None if cable else emt_fd_line.parse_conductors(row.get('fd_conductors') or self.params.get('fd_conductors'))
+        if not cable:
+            transposed = str(row.get('fd_transposed') or self.params.get('fd_transposed') or 'true').strip().lower()
+            geometry['transposed'] = transposed not in ('false', '0', 'no')
+            geometry['transform_hz'] = _f(row.get('fd_transform_hz'), _f(self.params.get('fd_transform_hz'), 1000.0))
+            if xy:
+                geometry['conductors'] = xy
+                geometry.pop('height_m')
+                geometry.pop('spacing_m')
+        why = None
+        missing = [k for k, v in geometry.items() if k not in ('transposed', 'transform_hz', 'conductors') and v <= 0]
+        n_circuits = int(round(par))
+        if missing:
+            why = 'it needs ' + ', '.join(f'fd_{k}' for k in missing)
+        elif xy and len(xy) != 3 * n_circuits:
+            why = f'its fd_conductors give {len(xy)} conductors, not three for each of its {n_circuits} circuit(s)'
+        elif xy and min(y for _, y in xy) <= geometry['radius_m']:
+            why = 'its conductors must be above the ground'
+        elif (xy or not geometry.get('transposed', True)) and abs(par - n_circuits) > 1e-9:
+            why = 'its parallel count must be whole'
+        elif cable and geometry['insulation_radius_m'] <= geometry['core_radius_m']:
+            why = 'its insulation radius must be above its core radius'
+        lines = []
+        if why is None:
+            dt = max(_f(self.params.get('time_step_us'), 1.0), 0.01) * 1e-6
+            if cable:
+                geometry['kind'] = 'cable'
+            # Coupled circuits are its conductors; circuits with no geometry of their own share its impedance.
+            coupled = bool(xy) or not geometry.get('transposed', True)
+            share = 1.0 if coupled else par
+            ends = lambda nodes: list(nodes) * (n_circuits if coupled else 1)
+            # At a fault along it, two lines either side of the fault point.
+            parts = [(start, stop, km)]
+            if self.fault_line is not None and self.fault_line[0] == li:
+                frac = self.fault_line[1]
+                point = [self.ckt.node(f'{label} fault point {p}') for p in 'abc']
+                parts = [(start, point, km * frac), (point, stop, km * (1.0 - frac))]
+            try:
+                for a_end, b_end, part_km in parts:
+                    lines.append(emt_fd_line.FdLine(self.ckt, ends(a_end), ends(b_end), geometry, part_km, dt, self.w,
+                                                    label if len(parts) == 1 else f'{label} ({part_km:g} km part)', par=share))
+            except ValueError as exc:
+                why = str(exc)
+        if why is not None:
+            self.warnings.append(f'Line {label} runs as pi sections, not frequency-dependent: {why}.')
+            return False
+        if len(parts) == 2:
+            self.fault_point = parts[0][1]
+        for line in lines:
+            self.ckt.add_controller(line.control)
+            self.fd_lines.append(line)
+        if xy or not geometry.get('transposed', True):
+            # Its positive sequence at the fundamental, for the check against its row: the folded phase impedance's.
+            z, y = emt_fd_line.per_km_matrix(np.array([self.f_hz]), geometry)
+            pm = np.kron(np.ones((n_circuits, 1)), np.eye(3))
+            zp = np.linalg.inv(pm.T @ np.linalg.inv(z[0]) @ pm)
+            z1 = [np.mean([zp[i, i] for i in range(3)]) - np.mean([zp[i, j] for i in range(3) for j in range(3) if i != j])]
+            z1 = [z1[0] * n_circuits]   # per circuit, as its row gives it
+        else:
+            z1 = (emt_fd_line.per_km_cable(np.array([self.f_hz]), geometry)[0] if cable
+                  else emt_fd_line.per_km(np.array([self.f_hz]), geometry)[0])
+        r1, x1 = _f(self.net.line.at[li, 'r_ohm_per_km'], 0.0), _f(self.net.line.at[li, 'x_ohm_per_km'], 0.0)
+        if abs(complex(r1, x1) - z1[0]) > 0.1 * abs(z1[0]):
+            self.warnings.append(f'Line {label}: its geometry gives {z1[0].real:.3f} + j{z1[0].imag:.3f} ohm/km at the fundamental, its row {r1:.3f} + j{x1:.3f}: '
+                                 'the load flow and this line disagree, so the run starts with a transient.')
+        return True
+
+    def _lines(self):
+        net, ckt, w = self.net, self.ckt, self.w
+        max_km = max(_f(self.params.get('ac_max_section_km'), 50.0), 1e-3)
+        trips = {tr['line']: tr for tr in self.line_trips}
+        for li in net.line.index:
+            fb, tb = int(net.line.at[li, 'from_bus']), int(net.line.at[li, 'to_bus'])
+            if not bool(net.line.at[li, 'in_service']) or fb not in self.nodes or tb not in self.nodes or ('line', li) in self._open_switches:
+                continue
+            km = _f(net.line.at[li, 'length_km'], 1.0)
+            par = max(_f(net.line.at[li, 'parallel'], 1.0), 1.0) if 'parallel' in net.line.columns else 1.0
+            col = lambda c, d: _f(net.line.at[li, c], d) if c in net.line.columns else d
+            r1, x1, c1 = col('r_ohm_per_km', 0.0), col('x_ohm_per_km', 0.0), col('c_nf_per_km', 0.0)
+            r0, x0, c0 = col('r0_ohm_per_km', r1), col('x0_ohm_per_km', x1), col('c0_nf_per_km', c1)
+            r0 = r0 if r0 > 0 else r1
+            x0 = x0 if x0 > 0 else x1
+            c0 = c0 if c0 > 0 else c1
+            label = _label(net, 'line', li)
+            start, stop = self.nodes[fb], self.nodes[tb]
+            trip = trips.get(li)
+            if trip is not None:
+                # Its breakers, one per phase at each end, between its bus and its own end.
+                own_ends = []
+                for bus, side in ((fb, 'from'), (tb, 'to')):
+                    end = [ckt.node(f'{label} {side} end {p}') for p in 'abc']
+                    for ph in range(3):
+                        trip['switches'].append(ckt.add_switch(self.nodes[bus][ph], end[ph], closed=True))
+                        trip['opened'].append(None)
+                        trip['last'].append(None)
+                    own_ends.append(end)
+                start, stop = own_ends
+            # A switch at either end a timed event operates: a breaker between its bus and the line's end.
+            for bus, side in ((fb, 'from'), (tb, 'to')):
+                si = self.line_end_breakers.get((li, bus))
+                if si is not None:
+                    end = [ckt.node(f'{label} {side} breaker {p}') for p in 'abc']
+                    self._breaker(si, start if side == 'from' else stop, end, True)
+                    if side == 'from':
+                        start = end
+                    else:
+                        stop = end
+            # Middlebrook's series scan: its sources between the bus and the line (emt_impedance_scan.SeriesScan).
+            target = str(self.params.get('middlebrook_line') or '').strip()
+            if target and target in (str(self.net.line.at[li, 'name']), str(_row_id(self.net, 'line', li)), label):
+                mid = [ckt.node(f'{label} series scan {p}') for p in 'abc']
+                ks = [ckt.add_rl(start[ph], mid[ph], 1e-6, 0.0, controlled=True) for ph in range(3)]
+                self.middlebrook = {'bus_nodes': list(start), 'line_nodes': mid, 'ks': ks, 'vn': self.vn[fb], 'label': label}
+                start = mid
+            ups = self.series_ups.get(li)
+            if ups is not None:
+                # A series-reactor UPS: its static disconnect before the reactor, its bypass around both.
+                end = [ckt.node(f'{label} disconnect {p}') for p in 'abc']
+                ups['disconnect'] = [ckt.add_switch(start[ph], end[ph], closed=True) for ph in range(3)]
+                if str(self.params.get('series_ups_opening') or '').strip().lower() == 'forced':
+                    # A turn-off switch: its arrester clamps the reactor's voltage at twice the phase's peak.
+                    clamp = 2.0 * self.vn[fb] * math.sqrt(2.0 / 3.0)
+                    for ph in range(3):
+                        ckt.add_arrester(start[ph], end[ph], clamp)
+                ups['bypass'] = [ckt.add_switch(self.nodes[fb][ph], self.nodes[tb][ph], closed=False) for ph in range(3)]
+                ups['source_bus'], ups['critical_bus'] = fb, tb
+                start = end
+            if self._fd_line(li, start, stop, km, par, label):
+                continue
+            # Its length in parts: at a fault along it, two, either side of the fault point.
+            parts = [(start, stop, km)]
+            if self.fault_line is not None and self.fault_line[0] == li:
+                frac = self.fault_line[1]
+                self.fault_point = [ckt.node(f'{label} fault point {p}') for p in 'abc']
+                parts = [(start, self.fault_point, km * frac), (self.fault_point, stop, km * (1.0 - frac))]
+            first = None
+            for n_part, (a_end, b_end, part_km) in enumerate(parts):
+                n_sec = max(1, int(math.ceil(part_km / max_km - 1e-9)))
+                sec = part_km / n_sec
+                rs, rm = _sequence_to_phase(r1 * sec / par, r0 * sec / par)
+                ls, lm = _sequence_to_phase(x1 * sec / par / w, x0 * sec / par / w)
+                cg = c0 * 1e-9 * sec * par
+                cl = max(c1 - c0, 0.0) / 3.0 * 1e-9 * sec * par
+                ends = [a_end] + [[ckt.node(f'{label} section {n_part}.{k} {p}') for p in 'abc']
+                                  for k in range(1, n_sec)] + [b_end]
+                for k in range(n_sec):
+                    g = ckt.add_coupled(ends[k], ends[k + 1], _matrix(rs, rm), _matrix(ls, lm))
+                    first = g if first is None else first
+                    for end in (ends[k], ends[k + 1]):
+                        for ph in range(3):
+                            if cg > 0:
+                                ckt.add_c(0, end[ph], cg / 2.0)
+                            if cl > 0:
+                                ckt.add_c(end[ph], end[(ph + 1) % 3], cl / 2.0)
+            self.series.append(('Line', label, _row_id(net, 'line', li), f'{label} (from end)',
+                                [('i_cp', first, k, 1.0) for k in range(3)]))
+
+    def _grounding(self):
+        """
+        Each zigzag grounding transformer: from its bus's phases to its star
+        point, a coupled branch whose zero-sequence impedance is its Z0 and
+        whose positive sequence is its magnetising impedance (taken as 10^4 x
+        its zero-sequence one: it passes no balanced current); its star point
+        to ground through its neutral resistor and reactor.
+        """
+        net, ckt, w = self.net, self.ckt, self.w
+        if 'electrisim_grounding' not in net.trafo.columns:
+            return
+        for ti in net.trafo.index[net.trafo['electrisim_grounding'] == True]:
+            b = int(net.trafo.at[ti, 'hv_bus'])
+            if not bool(net.trafo.at[ti, 'in_service']) or b not in self.nodes or ('trafo', ti) in self._open_switches:
+                continue
+            r0, x0 = _f(net.trafo.at[ti, 'electrisim_gt_r0']), _f(net.trafo.at[ti, 'electrisim_gt_x0'])
+            r_n, x_n = _f(net.trafo.at[ti, 'electrisim_gt_r_n']), _f(net.trafo.at[ti, 'electrisim_gt_x_n'])
+            x1 = 1e4 * max(abs(complex(r0 + 3 * r_n, x0 + 3 * x_n)), 1.0)
+            rs, rm = _sequence_to_phase(r0, r0)
+            ls, lm = _sequence_to_phase(x1 / w, max(x0, 1e-6) / w)
+            label = _label(net, 'trafo', ti)
+            star = ckt.node(f'{label} star point')
+            g = ckt.add_coupled(self.nodes[b], [star] * 3, _matrix(rs, rm), _matrix(ls, lm))
+            if r_n > 0 or x_n > 0:
+                n = ckt.add_rl(star, 0, max(r_n, 0.0), max(x_n, 0.0) / w)
+            else:
+                n = ckt.add_rl(star, 0, 1e-4, 0.0)
+            self.series.append(('Grounding transformer', label, _row_id(net, 'trafo', ti), f'{label} (neutral)',
+                                [('i_rl', n, None, 1.0)]))
+
+    def _trafos(self):
+        net = self.net
+        for ti in net.trafo.index:
+            if 'electrisim_grounding' in net.trafo.columns and net.trafo.at[ti, 'electrisim_grounding'] == True:
+                continue          # built by _grounding
+            hv, lv = int(net.trafo.at[ti, 'hv_bus']), int(net.trafo.at[ti, 'lv_bus'])
+            if not bool(net.trafo.at[ti, 'in_service']) or hv not in self.nodes or lv not in self.nodes or ('trafo', ti) in self._open_switches:
+                continue
+            unit = self._trafo(ti, self.nodes[hv], self.nodes[lv])
+            if str(self.params.get('trafo_saturation') or '').strip().lower() == 'all':
+                self.sat_cores.extend(self._saturable_cores(unit, self._remanence()))
+        if 'trafo3w' in net and len(net.trafo3w):
+            for ti in net.trafo3w.index:
+                buses = [int(net.trafo3w.at[ti, k]) for k in ('hv_bus', 'mv_bus', 'lv_bus')]
+                if not bool(net.trafo3w.at[ti, 'in_service']) or any(b not in self.nodes for b in buses):
+                    continue
+                self._trafo3w(ti, *[self.nodes[b] for b in buses])
+
+    def _remanence(self):
+        """Each core's remanent flux, per unit of its rated peak (trafo_remanence_pu; default 0.8, -0.4, -0.4)."""
+        f_rem = [_f(x, 0.0) for x in str(self.params.get('trafo_remanence_pu') or '0.8,-0.4,-0.4').split(',')][:3]
+        return f_rem + [0.0] * (3 - len(f_rem))
+
+    def _saturable_cores(self, unit, f_rem):
+        """
+        A transformer's cores made saturable: each its flux, from its remanence and its winding's voltage, past
+        its knee (trafo_knee_pu, default 1.2 of the rated peak) bringing in its air-core inductance
+        (trafo_air_core_pu of its rating, default twice its short-circuit reactance) - a branch across its
+        first winding closed while the flux is past the knee and its current flows the same way.
+        """
+        ckt, p, w = self.ckt, self.params, self.w
+        knee = max(_f(p.get('trafo_knee_pu'), 1.2), 1.0)
+        x_air = _f(p.get('trafo_air_core_pu'), 0.0) or 2.0 * unit['xk']
+        psi_n = SQ2 * unit['vw1'] / w                   # the rated peak flux of its first winding
+        l_air = x_air * unit['zb1'] / w
+        cores = []
+        for k, (g, hp, a1, b1) in enumerate(unit['groups']):
+            core = {'label': unit['label'], 'a': a1, 'b': b1, 'psi': f_rem[k] * psi_n, 'psi_n': psi_n, 'knee': knee,
+                    'x_air': x_air, 'psi_max': abs(f_rem[k]) * psi_n, 'branches': [], 'saturated_ms': 0.0}
+            for sign in (1.0, -1.0):
+                mid = ckt.node(f'{unit["label"]} core {k} {"+" if sign > 0 else "-"}')
+                rl = ckt.add_rl(a1, mid, 1e-3 * unit['zb1'], l_air)
+                sw = ckt.add_switch(mid, b1, closed=False)
+                core['branches'].append({'sign': sign, 'rl': rl, 'sw': sw, 'on': False})
+            cores.append(core)
+        return cores
+
+    @staticmethod
+    def step_cores(cores, state, dt):
+        """Each core's flux moved on by its winding's voltage over dt, its saturation branches in or out.
+        Returns (changed, any saturated)."""
+        changed = any_on = False
+        for c in cores:
+            v = float(state.v[c['a']] - (state.v[c['b']] if c['b'] else 0.0))
+            c['psi'] += 0.5 * (c.get('v_prev', v) + v) * dt
+            c['v_prev'] = v
+            c['psi_max'] = max(c['psi_max'], abs(c['psi']))
+            on = False
+            for br in c['branches']:
+                past = br['sign'] * c['psi'] > c['knee'] * c['psi_n']
+                i = float(state.i_rl[br['rl']]) * br['sign']
+                if not br['on'] and past:
+                    state.set_switch(br['sw'], True)
+                    br['on'], changed = True, True
+                elif br['on'] and i <= 0.0 and not past:
+                    state.set_switch(br['sw'], False)
+                    br['on'], changed = False, True
+                on = on or br['on']
+            if on:
+                c['saturated_ms'] += dt * 1e3
+                c['last_saturated_t'] = state.t if hasattr(state, 't') else None
+            any_on = any_on or on
+        return changed, any_on
+
+    def _cores_controller(self):
+        """Every saturable core's flux, from the run's start (trafo_saturation=all)."""
+        if not self.sat_cores:
+            return
+        last = {'t': None}
+
+        def control(t, state):
+            dt = 0.0 if last['t'] is None else t - last['t']
+            last['t'] = t
+            return self.step_cores(self.sat_cores, state, dt)[0]
+        self.ckt.add_controller(control)
+
+    def _trafo(self, ti, hv_nodes, lv_nodes):
+        """One two-winding transformer between hv_nodes and lv_nodes (each three nodes); its coupled units."""
+        net, ckt, w = self.net, self.ckt, self.w
+        label = _label(net, 'trafo', ti)
+        col = lambda c, d: _f(net.trafo.at[ti, c], d) if c in net.trafo.columns else d
+        hv_c, hv_g, lv_c, lv_g, clock, assumed = parse_vector_group(
+            net.trafo.at[ti, 'vector_group'] if 'vector_group' in net.trafo.columns else 'Dyn', col('shift_degree', 0.0))
+        if assumed:
+            self.warnings.append(f"Transformer {label}: its vector group gives no clock number and its load-flow "
+                                 "shift is 0 - taken as clock 11.")
+        bad = unrealisable_clock(hv_c, lv_c, clock, label, col('shift_degree', 0.0))
+        if bad:
+            self.warnings.append(bad)
+        s_ph = col('sn_mva', 1.0) * max(col('parallel', 1.0), 1.0) * 1e6 / 3.0
+        v_hv, v_lv = col('vn_hv_kv', 1.0) * 1e3, col('vn_lv_kv', 1.0) * 1e3
+        tap = (col('tap_pos', 0.0) - col('tap_neutral', 0.0)) * col('tap_step_percent', 0.0) / 100.0
+        if str(net.trafo.at[ti, 'tap_side'] if 'tap_side' in net.trafo.columns else 'hv') == 'lv':
+            v_lv *= 1.0 + tap
+        else:
+            v_hv *= 1.0 + tap
+        vw1 = v_hv / math.sqrt(3.0) if hv_c == 'Y' else v_hv
+        vw2 = v_lv / math.sqrt(3.0) if lv_c == 'Y' else v_lv
+        zb1, zb2 = vw1 * vw1 / s_ph, vw2 * vw2 / s_ph
+        vk, vkr = col('vk_percent', 6.0) / 100.0, col('vkr_percent', 0.5) / 100.0
+        xk = math.sqrt(max(vk * vk - vkr * vkr, 1e-12))
+        i0 = col('i0_percent', 0.0)
+        xm = 100.0 / i0 if i0 > 0 else 1000.0
+        n = vw2 / vw1
+        lm1 = xm * zb1 / w
+        r_m = np.diag([vkr / 2 * zb1, vkr / 2 * zb2])
+        l_m = np.array([[lm1 + xk / 2 * zb1 / w, n * lm1], [n * lm1, n * n * lm1 + xk / 2 * zb2 / w]])
+        neutral = {}
+        for side, conn, grounded in (('hv', hv_c, hv_g), ('lv', lv_c, lv_g)):
+            if conn == 'Y':
+                if grounded:
+                    neutral[side] = 0
+                else:
+                    neutral[side] = ckt.node(f'{label} {side} star point')
+                    ckt.add_r(neutral[side], 0, R_BIAS)
+        pfe = col('pfe_kw', 0.0) * 1e3 / 3.0
+        groups = []
+        pairs = winding_pairs(hv_c, lv_c, clock)
+        ends = {'hv': hv_nodes, 'lv': lv_nodes}
+        for k, (hp, lp, rev) in enumerate(pairs):
+            node = lambda side, x: neutral[side] if x == 'n' else ends[side][x]
+            a1, b1 = node('hv', hp[0]), node('hv', hp[1])
+            a2, b2 = node('lv', lp[0]), node('lv', lp[1])
+            if rev:
+                a2, b2 = b2, a2
+            groups.append((ckt.add_coupled([a1, a2], [b1, b2], r_m, l_m), hp, a1, b1))
+            if pfe > 0:
+                ckt.add_r(a1, b1, vw1 * vw1 / pfe)
+        # Its HV line currents: what leaves each phase into the windings.
+        phases = []
+        for ph in range(3):
+            terms = []
+            for g, hp, _a1, _b1 in groups:
+                if hp[0] == ph:
+                    terms.append(('i_cp', g, 0, 1.0))
+                elif hp[1] == ph:
+                    terms.append(('i_cp', g, 0, -1.0))
+            phases.append(terms)
+        self.series.append(('Transformer', label, _row_id(net, 'trafo', ti), f'{label} (HV side)', phases))
+        self.trafos.append({'label': label, 'clock': clock, 'groups': groups})
+        return {'label': label, 'groups': groups, 'vw1': vw1, 'zb1': zb1, 'xk': xk, 's_ph': s_ph}
+
+    def _trafo3w(self, ti, hv_nodes, mv_nodes, lv_nodes):
+        """
+        One three-winding transformer: three single-phase units, each three windings on one core. Its leakage as
+        pandapower's own star equivalent (each pair's short-circuit voltage on the smaller of their ratings, turned to
+        the HV rating and split among the windings), its magnetising and iron loss on the HV side.
+        """
+        net, ckt, w = self.net, self.ckt, self.w
+        label = _label(net, 'trafo3w', ti)
+        col = lambda c, d: _f(net.trafo3w.at[ti, c], d) if c in net.trafo3w.columns else d
+        (hv_c, hv_g), (mv_c, mv_g, c_mv), (lv_c, lv_g, c_lv), assumed = parse_vector_group_3w(
+            net.trafo3w.at[ti, 'vector_group'] if 'vector_group' in net.trafo3w.columns else 'YNynd', col('shift_mv_degree', 0.0), col('shift_lv_degree', 0.0))
+        if assumed:
+            self.warnings.append(f"Transformer {label}: a delta winding with no load-flow shift - taken as clock 11.")
+        for conn, clock, shift in ((mv_c, c_mv, col('shift_mv_degree', 0.0)), (lv_c, c_lv, col('shift_lv_degree', 0.0))):
+            bad = unrealisable_clock(hv_c, conn, clock, label, shift)
+            if bad:
+                self.warnings.append(bad)
+        sn = np.array([col('sn_hv_mva', 1.0), col('sn_mv_mva', 1.0), col('sn_lv_mva', 1.0)])
+        s_ph = sn[0] * 1e6 / 3.0
+        v = [col('vn_hv_kv', 1.0) * 1e3, col('vn_mv_kv', 1.0) * 1e3, col('vn_lv_kv', 1.0) * 1e3]
+        tap = (col('tap_pos', 0.0) - col('tap_neutral', 0.0)) * col('tap_step_percent', 0.0) / 100.0
+        side = str(net.trafo3w.at[ti, 'tap_side'] if 'tap_side' in net.trafo3w.columns else 'hv')
+        v[{'hv': 0, 'mv': 1, 'lv': 2}.get(side, 0)] *= 1.0 + tap
+        conns = (hv_c, mv_c, lv_c)
+        vw = [v[k] / math.sqrt(3.0) if conns[k] == 'Y' else v[k] for k in range(3)]
+        # Each pair's short-circuit voltage on the HV rating, then the star: hv-mv, mv-lv, lv-hv as pandapower orders them.
+        pair_s = [min(sn[0], sn[1]), min(sn[1], sn[2]), min(sn[0], sn[2])]
+        vk = np.array([col('vk_hv_percent', 10.0), col('vk_mv_percent', 10.0), col('vk_lv_percent', 10.0)]) / 100.0 * sn[0] / np.array(pair_s)
+        vkr = np.array([col('vkr_hv_percent', 0.3), col('vkr_mv_percent', 0.3), col('vkr_lv_percent', 0.3)]) / 100.0 * sn[0] / np.array(pair_s)
+        vki = np.sqrt(np.maximum(vk * vk - vkr * vkr, 1e-12))
+        star = lambda z: 0.5 * np.array([z[0] + z[2] - z[1], z[1] + z[0] - z[2], z[2] + z[1] - z[0]])
+        x_star, r_star = star(vki), star(vkr)
+        if np.any(x_star < 1e-4):
+            self.warnings.append(f"Transformer {label}: its star equivalent has a negative or zero leakage, {', '.join(f'{x:.4f}' for x in x_star)} pu: "
+                                 'taken as 0.0001 pu there, which the EMT needs to stay passive.')
+            x_star = np.maximum(x_star, 1e-4)
+        r_star = np.maximum(r_star, 0.0)
+        zb = [vw[k] * vw[k] / s_ph for k in range(3)]
+        i0 = col('i0_percent', 0.0)
+        xm = 100.0 / i0 if i0 > 0 else 1000.0
+        lm1 = xm * zb[0] / w
+        n = np.array([1.0, vw[1] / vw[0], vw[2] / vw[0]])
+        r_m = np.diag([r_star[k] * zb[k] for k in range(3)])
+        l_m = lm1 * np.outer(n, n) + np.diag([x_star[k] * zb[k] / w for k in range(3)])
+        neutral = {}
+        for key, conn, grounded in (('hv', hv_c, hv_g), ('mv', mv_c, mv_g), ('lv', lv_c, lv_g)):
+            if conn == 'Y':
+                if grounded:
+                    neutral[key] = 0
+                else:
+                    neutral[key] = ckt.node(f'{label} {key} star point')
+                    ckt.add_r(neutral[key], 0, R_BIAS)
+        pairs_mv = winding_pairs(hv_c, mv_c, c_mv)
+        pairs_lv = winding_pairs(hv_c, lv_c, c_lv)
+        if any(pm[0] != pl[0] for pm, pl in zip(pairs_mv, pairs_lv)):
+            self.warnings.append(f'Transformer {label}: its HV delta cannot wind both its MV and LV clocks on one core here, so it is left out.')
+            return
+        ends = {'hv': hv_nodes, 'mv': mv_nodes, 'lv': lv_nodes}
+        node = lambda key, x: neutral[key] if x == 'n' else ends[key][x]
+        pfe = col('pfe_kw', 0.0) * 1e3 / 3.0
+        groups = []
+        for (hp, mp, rev_m), (_, lp, rev_l) in zip(pairs_mv, pairs_lv):
+            a1, b1 = node('hv', hp[0]), node('hv', hp[1])
+            a2, b2 = node('mv', mp[0]), node('mv', mp[1])
+            a3, b3 = node('lv', lp[0]), node('lv', lp[1])
+            if rev_m:
+                a2, b2 = b2, a2
+            if rev_l:
+                a3, b3 = b3, a3
+            groups.append((ckt.add_coupled([a1, a2, a3], [b1, b2, b3], r_m, l_m), hp, a1, b1))
+            if pfe > 0:
+                ckt.add_r(a1, b1, vw[0] * vw[0] / pfe)
+        phases = []
+        for ph in range(3):
+            terms = []
+            for g, hp, _a1, _b1 in groups:
+                if hp[0] == ph:
+                    terms.append(('i_cp', g, 0, 1.0))
+                elif hp[1] == ph:
+                    terms.append(('i_cp', g, 0, -1.0))
+            phases.append(terms)
+        self.series.append(('Transformer', label, _row_id(net, 'trafo3w', ti), f'{label} (HV side)', phases))
+        self.trafos.append({'label': label, 'clock': c_lv, 'groups': groups})
+
+    def _impedance_load(self, b, p_mw, q_mvar, label, profile=None):
+        """
+        Constant impedance at its load-flow power, ungrounded star. Following a
+        profile, its impedance changes with it: current sources per phase carry
+        the change in its conductance and susceptance from their starting values,
+        by its phase voltage and the line voltage a quarter cycle behind it, taken
+        from the last step. These are stable only while the change is smaller than
+        the conductance solved with the step: an increase as large as the load
+        itself overshot each step, and a load doubling blew up. So a rise in
+        conductance is a branch per phase solved with the step instead. A fall
+        stays a source, or the susceptance's source would lose the conductance
+        that keeps it stable, as the load falls to nothing.
+        """
+        ckt, w = self.ckt, self.w
+        v_ll = float(self.net.res_bus.at[b, 'vm_pu']) * self.vn[b]
+        star = ckt.node(f'{label} star point')
+        ckt.add_r(star, 0, R_BIAS)
+        parts = {'i_r': [], 'i_rl': [], 'i_c': []}       # its branches, phase by phase, for its measured power
+        for k in range(3):
+            node = self.nodes[b][k]
+            if p_mw > 1e-12:
+                parts['i_r'].append(ckt.add_r(node, star, v_ll * v_ll / (p_mw * 1e6)))
+            if q_mvar > 1e-12:
+                parts['i_rl'].append(ckt.add_rl(node, star, 0.0, v_ll * v_ll / (q_mvar * 1e6) / w))
+            elif q_mvar < -1e-12:
+                parts['i_c'].append(ckt.add_c(node, star, -q_mvar * 1e6 / (w * v_ll * v_ll)))
+        row = self.load_rows.get(str(label)) or self.load_rows.get(str(label).split(' (')[0]) or {}
+        uv = _f(row.get('uv_ease_pu'), 0.0)
+        cp = str(row.get('emt_load_model') or '').strip().lower() == 'power'
+        named = {str(label), str(label).split(' (')[0], str(row.get('name') or '')} & self.event_loads
+        if profile is not None or uv > 0 or cp or named:
+            parts['i_src'] = [ckt.add_isrc(self.nodes[b][k], star) for k in range(3)]
+            ld = {'nodes': self.nodes[b], 'star': star, 'v2': v_ll * v_ll, 'label': str(label),
+                  'names': {str(label), str(label).split(' (')[0], str(row.get('name') or '')} - {''},
+                  'p0': p_mw * 1e6, 'q0': q_mvar * 1e6, 'plan': profile, 'ks': parts['i_src'], 'parts': parts,
+                  'v_nom': self.vn[b], 'scale': 1.0, 'dg': 0.0}
+            parts['i_nl'] = [ckt.add_nonlinear(self.nodes[b][k], star, lambda v, t, ld=ld: (ld['dg'] * v, ld['dg'])) for k in range(3)]
+            self.profiled.append(ld)
+            if profile is not None:
+                profile['measure'] = ('ac', self.nodes[b], star, parts)
+            if uv > 0 or cp or named:
+                ld.update(event=1.0, ups=1.0, v_f=v_ll / self.vn[b], t_last=0.0, cp=cp, ups_at=None, min_ups=1.0,
+                          uv=(uv, min(max(_f(row.get('uv_floor_pu'), 0.0), 0.0), 1.0),
+                              max(_f(row.get('uv_restore_s'), 10.0), 1e-3)) if uv > 0 else None)
+                self.dyn_loads.append(ld)
+
+    def dyn_load(self, name):
+        return next((ld for ld in self.dyn_loads if name in ld['names']), None)
+
+    def load_control(self, t, state):
+        """
+        Each changing load's share of its load-flow power for the next step: its event's (tripped 0, scaled),
+        behind a UPS - below uv_ease_pu its UPS takes it onto its battery down to uv_floor_pu, and walks it back
+        in over uv_restore_s once its voltage is back above it - and at constant power its conductance by
+        1 / V^2 (constant current below 0.8 pu, as a DC load's). Its voltage: the phases' magnitude, through 10 ms.
+        """
+        for ld in self.dyn_loads:
+            dt = t - ld['t_last']
+            ld['t_last'] = t
+            phase = state.v[ld['nodes']] - state.v[ld['star']]
+            # sum of the phases' squares = 1.5 V_peak^2 (balanced)
+            v_pu = math.sqrt(max(float(np.dot(phase, phase)), 0.0) / 1.5) / SQ2 / (ld['v_nom'] / math.sqrt(3.0))
+            if dt > 0:
+                ld['v_f'] += (v_pu - ld['v_f']) * min(dt / 0.01, 1.0)
+            v = max(ld['v_f'], 0.05)
+            if ld['uv'] is not None and dt > 0:
+                v_th, floor, restore = ld['uv']
+                if v < v_th:
+                    ld['ups'] = floor
+                    ld['ups_at'] = t if ld['ups_at'] is None else ld['ups_at']
+                else:
+                    ld['ups'] = min(1.0, ld['ups'] + (1.0 - floor) * dt / restore)
+                ld['min_ups'] = min(ld['min_ups'], ld['ups'])
+            k_v = (1.0 / (v * v) if v >= 0.8 else 1.0 / (0.8 * v)) if ld['cp'] else 1.0
+            # its load flow's voltage is where 1 / V^2 starts from
+            k_v *= ld['v2'] / ld['v_nom'] ** 2 if ld['cp'] else 1.0
+            ld['scale'] = ld['event'] * ld['ups'] * k_v
+
+    def follow_profiles(self, t, state):
+        """Each profiled load's change in conductance and susceptance, as the currents its sources draw."""
+        for ld in self.profiled:
+            plan = ld['plan']
+            if plan is None:
+                p, q = ld['p0'], ld['q0']
+            else:
+                f = plan['follower'](t)
+                p = plan['p_set'] * f * 1e6
+                q = (plan['q_set'] * f if plan['q_mode'] == 'pf' else plan['q_set']) * 1e6
+            s = ld.get('scale', 1.0)
+            p, q = p * s, q * s
+            dg, db = (p - ld['p0']) / ld['v2'], (q - ld['q0']) / ld['v2']
+            ld['dg'] = max(dg, 0.0)
+            v = state.v[ld['nodes']]
+            phase = v - state.v[ld['star']]
+            behind = np.array([v[1] - v[2], v[2] - v[0], v[0] - v[1]]) / math.sqrt(3.0)
+            i = min(dg, 0.0) * phase + db * behind
+            for k in range(3):
+                state.set_source_value(ld['ks'][k], float(i[k]))
+
+    def _loads(self):
+        net = self.net
+        for table, res in (('load', 'res_load'), ('motor', 'res_motor'), ('shunt', 'res_shunt')):
+            if table not in net or not len(net[table]):
+                continue
+            for i in net[table].index:
+                b = int(net[table].at[i, 'bus'])
+                if not bool(net[table].at[i, 'in_service']) or b not in self.nodes or i not in net[res].index:
+                    continue
+                if (table, i) in self.skip:
+                    continue
+                if table == 'shunt' and self._filter_shunt(i, b):
+                    continue
+                self._impedance_load(b, _f(net[res].at[i, 'p_mw']), _f(net[res].at[i, 'q_mvar']), _label(net, table, i),
+                                     self.profiles.get(i) if table == 'load' else None)
+        if 'asymmetric_load' in net and len(net.asymmetric_load):
+            for i in net.asymmetric_load.index:
+                b = int(net.asymmetric_load.at[i, 'bus'])
+                if not bool(net.asymmetric_load.at[i, 'in_service']) or b not in self.nodes or ('asymmetric_load', i) in self.skip:
+                    continue
+                self._asymmetric_load(i, b)
+
+    def ground_floating_buses(self):
+        """
+        Each AC bus no branch joins to earth - behind a delta winding with its
+        grid, generator or converter out of service - held there through
+        R_BIAS a phase, as a star point is. Floating, it left the network's
+        matrix singular: the solver fell back to the whole matrix, densely, at
+        every step, and a run of 20 ms took longer than ten minutes. Run once
+        the circuit is built, converters and all. Returns their labels.
+        """
+        ckt = self.ckt
+        parent = list(range(len(ckt.labels)))
+
+        def root(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def join(a, b):
+            parent[root(int(a))] = root(int(b))
+
+        for br in ckt.rl:
+            join(br[0], br[1])
+        for table in (ckt.c, ckt.r, ckt.sw, ckt.d, ckt.arr):
+            for a, b, *_ in table:
+                join(a, b)
+        for a, b, *_ in ckt.cp:
+            for x, y in zip(a, b):
+                join(x, y)
+        held = []
+        for b, nodes in self.nodes.items():
+            if any(root(k) != root(0) for k in nodes):
+                for k in nodes:
+                    ckt.add_r(k, 0, R_BIAS)
+                held.append(_label(self.net, 'bus', b))
+        return held
+
+    def _filter_shunt(self, i, b, ends=None):
+        """
+        A harmonic filter (a shunt with electrisim_filter_order) as its parts:
+        each phase its capacitor in series with its reactor - its damping
+        resistor across the reactor (high-pass) or in series (single-tuned) -
+        to a floating star. ``ends``: the nodes it hangs from, its bus's by
+        default. False for a shunt that is no filter.
+        """
+        net = self.net
+        if 'electrisim_filter_order' not in net.shunt.columns:
+            return False
+        order = _f(net.shunt.at[i, 'electrisim_filter_order'], 0.0)
+        rated = _f(net.shunt.at[i, 'electrisim_filter_rated_q_mvar'], 0.0) if 'electrisim_filter_rated_q_mvar' in net.shunt.columns else 0.0
+        if not order > 1 or not rated > 0:
+            return False
+        import pandapower_electrisim as pe
+        vn = _f(net.shunt.at[i, 'vn_kv'], 0.0) or self.vn[b] / 1e3
+        hf = pe.harmonic_filter(rated, vn, order, str(net.shunt.at[i, 'electrisim_filter_type']),
+                                _f(net.shunt.at[i, 'electrisim_filter_quality'], 0.0))
+        ckt, w = self.ckt, self.w
+        label = _label(net, 'shunt', i)
+        star = ckt.node(f'{label} star point')
+        ckt.add_r(star, 0, R_BIAS)
+        for k in range(3):
+            mid = ckt.node(f'{label} {"abc"[k]} reactor')
+            ckt.add_c((ends or self.nodes[b])[k], mid, 1.0 / (w * hf['x_c_ohm']))
+            if hf['type'] == 'single_tuned':
+                ckt.add_rl(mid, star, hf['r_ohm'], hf['x_l_ohm'] / w)
+            else:
+                ckt.add_rl(mid, star, 0.0, hf['x_l_ohm'] / w)
+                ckt.add_r(mid, star, hf['r_ohm'])
+        return True
+
+    def _energised_shunt(self):
+        """
+        The shunt ac_energise_shunt names, out of the load flow the run starts
+        from, behind its breaker's three poles, closed together at
+        ac_energise_time_ms: a capacitor bank's or a harmonic filter's inrush.
+        """
+        net, ckt, p = self.net, self.ckt, self.params
+        i = net.get('_electrisim_energise_shunt') if hasattr(net, 'get') else None
+        if i is None or i not in net.shunt.index:
+            return
+        b = int(net.shunt.at[i, 'bus'])
+        if b not in self.nodes:
+            return
+        label = _label(net, 'shunt', i)
+        ends = [ckt.node(f'{label} breaker {"abc"[k]}') for k in range(3)]
+        switches = [ckt.add_switch(self.nodes[b][k], ends[k], closed=False) for k in range(3)]
+        if not self._filter_shunt(i, b, ends):
+            v = self.vn[b]
+            q = -_f(net.shunt.at[i, 'q_mvar'], 0.0) * 1e6 * (v / (_f(net.shunt.at[i, 'vn_kv'], 0.0) * 1e3 or v)) ** 2
+            p_w = _f(net.shunt.at[i, 'p_mw'], 0.0) * 1e6
+            star = ckt.node(f'{label} star point')
+            ckt.add_r(star, 0, R_BIAS)
+            for k in range(3):
+                if q > 1e-6:
+                    ckt.add_c(ends[k], star, q / (self.w * v * v))
+                elif q < -1e-6:
+                    ckt.add_rl(ends[k], star, 0.0, v * v / -q / self.w)
+                if p_w > 1e-6:
+                    ckt.add_r(ends[k], star, v * v / p_w)
+        t_on = _f(p.get('ac_energise_time_ms'), 20.0) * 1e-3
+        controlled = str(p.get('ac_energise_controlled') or 'false').strip().lower() in ('true', '1', 'yes')
+        self.energise = {'shunt': i, 'bus': b, 't': t_on, 'switches': switches, 'label': label,
+                         'controlled': controlled, 'closed_ms': [None, None, None]}
+        # Its current through its breaker's poles, whichever way they close.
+        self.series.append(('Shunt', str(net.shunt.at[i, 'name']), _row_id(net, 'shunt', i), f'{label} (energised)',
+                            [('i_sw', k, None, 1.0) for k in switches]))
+        if not controlled:
+            for k in switches:
+                ckt.at(t_on, lambda st, k=k: st.set_switch(k, True))
+            self.energise['closed_ms'] = [t_on * 1e3] * 3
+            return
+        # Controlled closing, as a synchronous breaker does for a bank with a floating star: poles a
+        # and b together at a zero of the line voltage between them, pole c a quarter cycle later at
+        # its own phase voltage's zero - each pole closing on no voltage across its capacitor.
+        nodes, en, last = self.nodes[b], self.energise, {}
+
+        def close(t, state):
+            if t < t_on - 1e-12 or en['closed_ms'][2] is not None:
+                return False
+            v = state.v[nodes]
+            stage = 'ab' if en['closed_ms'][0] is None else 'c'
+            x = float(v[0] - v[1]) if stage == 'ab' else float(v[2])
+            prev, last[stage] = last.get(stage), x
+            if prev is None or (prev > 0) == (x > 0) and x != 0.0:
+                return False
+            if stage == 'ab':
+                state.set_switch(switches[0], True)
+                state.set_switch(switches[1], True)
+                en['closed_ms'][0] = en['closed_ms'][1] = t * 1e3
+            else:
+                state.set_switch(switches[2], True)
+                en['closed_ms'][2] = t * 1e3
+            return True
+        ckt.add_controller(close)
+
+    def _energised_trafo(self):
+        """
+        The transformer ac_energise_trafo names, out of the load flow the run starts from, behind its HV
+        breaker's three poles, its LV winding open (its LV breaker open): closed at ac_energise_time_ms - or,
+        given ac_energise_angle_deg, that many degrees after the next upward zero of its first winding's
+        voltage (0: the worst point for a positive remanence); each pole ac_energise_pole_delays_ms after
+        that (default 0, 0, 0: together). Its cores saturable (_saturable_cores) - all ASSUMED unless the
+        transformer's saturation curve is given.
+        """
+        net, ckt, p, w = self.net, self.ckt, self.params, self.w
+        ti = net.get('_electrisim_energise_trafo') if hasattr(net, 'get') else None
+        if ti is None or ti not in net.trafo.index:
+            return
+        hv = int(net.trafo.at[ti, 'hv_bus'])
+        if hv not in self.nodes:
+            self.warnings.append(f"Transformer {_label(net, 'trafo', ti)}: its HV bus is not energised in the "
+                                 "load flow; it is not energised.")
+            return
+        label = _label(net, 'trafo', ti)
+        ends = [ckt.node(f'{label} breaker {"abc"[k]}') for k in range(3)]
+        lv = [ckt.node(f'{label} LV {"abc"[k]}') for k in range(3)]
+        for x in ends + lv:
+            ckt.add_r(x, 0, R_BIAS)
+        switches = [ckt.add_switch(self.nodes[hv][k], ends[k], closed=False) for k in range(3)]
+        unit = self._trafo(ti, ends, lv)
+        f_rem = self._remanence()
+        cores = self._saturable_cores(unit, f_rem)
+        psi_n, knee, x_air = cores[0]['psi_n'], cores[0]['knee'], cores[0]['x_air']
+        delays = [_f(x, 0.0) * 1e-3 for x in str(p.get('ac_energise_pole_delays_ms') or '0,0,0').split(',')][:3]
+        delays += [0.0] * (3 - len(delays))
+        t_on = _f(p.get('ac_energise_time_ms'), 20.0) * 1e-3
+        angle = p.get('ac_energise_angle_deg')
+        angle = None if angle in (None, '', 'none') else _f(angle, 0.0) % 360.0
+        en = {'trafo': ti, 'bus': hv, 't': t_on, 'switches': switches, 'label': label, 'closed_ms': None,
+              'pole_closed_ms': [None, None, None], 't_fire': None,
+              'cores': cores, 'psi_n': psi_n, 'knee': knee, 'x_air': x_air, 'angle': angle, 'rem': f_rem,
+              'rated_a': unit['s_ph'] * 3.0 / (math.sqrt(3.0) * self.vn[hv]), 'saturated_ms': 0.0}
+        self.energise_trafo = en
+        nodes, last = self.nodes[hv], {'t': None, 'x': None, 'zero': None}
+
+        def control(t, state):
+            changed = False
+            dt = 0.0 if last['t'] is None else t - last['t']
+            last['t'] = t
+            if en['t_fire'] is not None and None in en['pole_closed_ms']:
+                # Its later poles, each at its delay.
+                for k, sw in enumerate(switches):
+                    if en['pole_closed_ms'][k] is None and t >= en['t_fire'] + delays[k] - 1e-12:
+                        state.set_switch(sw, True)
+                        en['pole_closed_ms'][k] = t * 1e3
+                        changed = True
+            if en['closed_ms'] is None:
+                # Its first winding's voltage, as it would be closed: the bus side of its poles.
+                hp = unit['groups'][0][1]
+                x = float(state.v[nodes[hp[0]]] - (state.v[nodes[hp[1]]] if hp[1] != 'n' else 0.0))
+                fire = False
+                if t >= t_on - 1e-12:
+                    if angle is None:
+                        fire = True
+                    else:
+                        if last['zero'] is None and last['x'] is not None and last['x'] < 0.0 <= x:
+                            last['zero'] = t
+                        fire = last['zero'] is not None and t >= last['zero'] + angle / 360.0 / self.f_hz - 1e-12
+                last['x'] = x
+                if fire:
+                    en['t_fire'] = t
+                    for k, sw in enumerate(switches):
+                        if delays[k] <= 1e-12:
+                            state.set_switch(sw, True)
+                            en['pole_closed_ms'][k] = t * 1e3
+                    en['closed_ms'] = t * 1e3
+                    changed = True
+                return changed
+            # Each core's flux, and its saturation branches in or out.
+            moved, any_on = self.step_cores(cores, state, dt)
+            changed = changed or moved
+            if any_on:
+                en['saturated_ms'] += dt * 1e3
+            return changed
+        ckt.add_controller(control)
+        self.series.append(('Transformer', str(net.trafo.at[ti, 'name']), _row_id(net, 'trafo', ti), f'{label} (energised)',
+                            [('i_sw', k, None, 1.0) for k in switches]))
+
+    def _asymmetric_load(self, i, b):
+        """
+        An asymmetric load: each phase's (or, delta, each line's: a-b, b-c, c-a)
+        P and Q as a constant impedance at its bus's voltage - an ungrounded star
+        (a three-wire network carries no neutral) or a delta. Its unbalance is
+        the EMT study's own: the balanced load flow it starts from has none.
+        """
+        ckt, w, net = self.ckt, self.w, self.net
+        row = net.asymmetric_load.loc[i]
+        scale = _f(row.get('scaling', 1.0), 1.0)
+        v_ll = (float(net.res_bus.at[b, 'vm_pu']) if b in net.res_bus.index else 1.0) * self.vn[b]
+        delta = str(row.get('type', 'wye')).strip().lower() == 'delta'
+        nodes = self.nodes[b]
+        label = _label(net, 'asymmetric_load', i)
+        if delta:
+            pairs = [(nodes[0], nodes[1]), (nodes[1], nodes[2]), (nodes[2], nodes[0])]
+            v2 = v_ll * v_ll
+        else:
+            star = ckt.node(f'{label} star point')
+            ckt.add_r(star, 0, R_BIAS)
+            pairs = [(n, star) for n in nodes]
+            v2 = v_ll * v_ll / 3.0
+        for k, (a, c) in enumerate(pairs):
+            p = _f(row.get(f'p_{"abc"[k]}_mw'), 0.0) * scale * 1e6
+            q = _f(row.get(f'q_{"abc"[k]}_mvar'), 0.0) * scale * 1e6
+            if p > 1e-6:
+                ckt.add_r(a, c, v2 / p)
+            if q > 1e-6:
+                ckt.add_rl(a, c, 0.0, v2 / q / w)
+            elif q < -1e-6:
+                ckt.add_c(a, c, -q / (w * v2))
+
+    def _generation(self):
+        net, ckt, w = self.net, self.ckt, self.w
+        # Grid-following: a constant current at their load-flow power.
+        for table, res in (('sgen', 'res_sgen'), ('storage', 'res_storage')):
+            if table not in net or not len(net[table]):
+                continue
+            for i in net[table].index:
+                b = int(net[table].at[i, 'bus'])
+                if not bool(net[table].at[i, 'in_service']) or b not in self.nodes or i not in net[res].index:
+                    continue
+                if (table, i) in self.skip:
+                    continue
+                p, q = _f(net[res].at[i, 'p_mw']), _f(net[res].at[i, 'q_mvar'])
+                if table == 'storage':
+                    p, q = -p, -q          # storage results use the load convention
+                amp, ph = self._three(self._injection_phasor(b, p, q))
+                ks = [ckt.add_isrc(0, self.nodes[b][k], ac=(amp[k], w, ph[k])) for k in range(3)]
+                label = _label(net, table, i)
+                self.series.append(('Static generator' if table == 'sgen' else 'Storage', label,
+                                    _row_id(net, table, i), label, [('i_src', k, None, 1.0) for k in ks]))
+        # Synchronous: their voltage behind their subtransient reactance; or, as machines, with their rotor,
+        # governor and exciter (emt_machine) - by the study's generator_model, the machine when it islands.
+        mode = str(self.params.get('generator_model') or 'auto').strip().lower()
+        as_machine = mode in ('machine', 'detailed') or (mode == 'auto' and self.island is not None)
+        for i in net.gen.index:
+            b = int(net.gen.at[i, 'bus'])
+            if not bool(net.gen.at[i, 'in_service']) or b not in self.nodes or i not in net.res_gen.index:
+                continue
+            if ('gen', i) in self.skip:
+                continue
+            if as_machine:
+                self._machine(i, b)
+                continue
+            vn = self.vn[b]
+            sn = _f(net.gen.at[i, 'sn_mva'], 0.0) if 'sn_mva' in net.gen.columns else 0.0
+            sn = sn if sn > 0 else max(abs(_f(net.res_gen.at[i, 'p_mw'])), 1.0) * 1.2
+            xd = _f(net.gen.at[i, 'xdss_pu'], 0.2) if 'xdss_pu' in net.gen.columns else 0.2
+            xd = xd if xd > 0 else 0.2
+            x = xd * vn * vn / (sn * 1e6)
+            r = _f(net.gen.at[i, 'rdss_ohm'], 0.0) if 'rdss_ohm' in net.gen.columns else 0.0
+            r = r if r > 0 else 0.05 * x
+            i_ph = self._injection_phasor(b, _f(net.res_gen.at[i, 'p_mw']), _f(net.res_gen.at[i, 'q_mvar']))
+            amp, ph = self._three(self._v_phasor(b) + complex(r, x) * i_ph)
+            star = ckt.node(f'{_label(net, "gen", i)} star point')
+            ckt.add_r(star, 0, R_BIAS)
+            g = ckt.add_coupled([star] * 3, self.nodes[b], np.eye(3) * r, np.eye(3) * x / w, ac=(amp, w, ph))
+            label = _label(net, 'gen', i)
+            self.series.append(('Generator', label, _row_id(net, 'gen', i), label, [('i_cp', g, k, 1.0) for k in range(3)]))
+
+    def _machine(self, i, b):
+        """Generator i as a synchronous machine with its rotor, governor and exciter."""
+        import emt_machine
+        from andes_electrisim import _DEFAULT_GENROU, _EXCITER_DEFAULTS, _GOVERNOR_DEFAULTS
+        net = self.net
+        name = str(net.gen.at[i, 'name'])
+        sn = _f(net.gen.at[i, 'sn_mva'], 0.0) if 'sn_mva' in net.gen.columns else 0.0
+        sn = sn if sn > 0 else max(abs(_f(net.res_gen.at[i, 'p_mw'])), 1.0) * 1.2
+        label = _label(net, 'gen', i)
+        i_ph = self._injection_phasor(b, _f(net.res_gen.at[i, 'p_mw']), _f(net.res_gen.at[i, 'q_mvar']))
+        if str(self.params.get('generator_model') or '').strip().lower() == 'detailed':
+            data, notes = emt_machine.park_data(self.gen_rows.get(name), _GOVERNOR_DEFAULTS, _EXCITER_DEFAULTS, _DEFAULT_GENROU)
+            self.warnings.extend(f'Generator {label}: {note}.' for note in notes)
+            model = emt_machine.ParkMachine
+        else:
+            data = emt_machine.machine_data(self.gen_rows.get(name), _GOVERNOR_DEFAULTS, _EXCITER_DEFAULTS)
+            model = emt_machine.SynchronousMachine
+        m = model(self.ckt, label, self.nodes[b], self.w, self._v_phasor(b), i_ph, sn * 1e6, self.vn[b], r_bias=R_BIAS, **data)
+        m.row_id = _row_id(net, 'gen', i)
+        self.ckt.add_controller(m.control)
+        self.machines.append(m)
+        self.series.append(('Generator', label, m.row_id, label, [('i_rl', k, None, 1.0) for k in m.k_e]))
+
+    def island_control(self, t, state):
+        """From the islanding time, each grid breaker's phase opens as its current passes zero; True if one did."""
+        isl = self.island
+        if t < isl['t'] - 1e-12:
+            return False
+        changed = False
+        for n, k in enumerate(isl['switches']):
+            if isl['opened'][n] is not None:
+                continue
+            i = float(state.i_sw[k])
+            last = isl['last'][n]
+            isl['last'][n] = i
+            if last is not None and (i == 0.0 or (i > 0) != (last > 0)):
+                state.set_switch(k, False)
+                isl['opened'][n] = t
+                changed = True
+        return changed
+
+    # --- a fault -------------------------------------------------------------------------
+
+    def fault(self, bus, kind, r_pn, r_ng, t_on, t_off, nodes=None):
+        """
+        A fault at ``bus`` from t_on: each faulted phase through r_pn to a star
+        point, grounded through r_ng for a ground fault (as Simscape's
+        three-phase fault block). ``kind``: ag, bg, cg, ab, bc, ca, abg, bcg,
+        cag, abc, abcg. Cleared from t_off, if given, as an arc goes out: each
+        phase at its current's next zero, the ground path with the last -
+        opening at once would chop an inductive current into an overvoltage
+        only the circuit's parasitics limit.
+        """
+        ckt = self.ckt
+        phases = [k for k, p in enumerate('abc') if p in kind.replace('g', '')]
+        star = ckt.node('AC fault star point')
+        ckt.add_r(star, 0, R_BIAS)
+        switches = []
+        for k in phases:
+            mid = ckt.node(f'AC fault {"abc"[k]}')
+            switches.append(ckt.add_switch((nodes or self.nodes[bus])[k], mid, closed=False))
+            ckt.add_r(mid, star, r_pn)
+        if kind.endswith('g'):
+            mid = ckt.node('AC fault ground')
+            switches.append(ckt.add_switch(star, mid, closed=False))
+            ckt.add_r(mid, 0, r_ng)
+        for k in switches:
+            ckt.at(t_on, lambda st, k=k: st.set_switch(k, True))
+        phase_sw, ground_sw = switches[:len(phases)], switches[len(phases):]
+        if t_off is not None:
+            last = {}
+
+            def clear(t, state):
+                if t < t_off - 1e-12:
+                    return False
+                changed = False
+                for k in phase_sw:
+                    if not state.sw_closed[k]:
+                        continue
+                    i = float(state.i_sw[k])
+                    if k in last and (i == 0.0 or (i > 0) != (last[k] > 0)):
+                        state.set_switch(k, False)
+                        changed = True
+                    last[k] = i
+                if changed and not any(state.sw_closed[k] for k in phase_sw):
+                    for k in ground_sw:
+                        state.set_switch(k, False)
+                return changed
+            ckt.add_controller(clear)
+        return {'phases': phases, 'switches': phase_sw}

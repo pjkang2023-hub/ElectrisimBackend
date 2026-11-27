@@ -24,7 +24,8 @@ def main():
     pf_params = next((in_data[k] for k in in_data if 'PowerFlowPandaPower' in in_data[k].get('typ', '')), {})
     frequency = int(pf_params.get('frequency', 50))
     algorithm = pf_params.get('algorithm', 'nr')
-    calculate_voltage_angles = pf_params.get('calculate_voltage_angles', 'auto')
+    calculate_voltage_angles = pandapower_electrisim._as_calculate_voltage_angles(
+        pf_params.get('calculate_voltage_angles', 'auto'))
     init = pf_params.get('initialization', 'auto')
 
     # Create empty network

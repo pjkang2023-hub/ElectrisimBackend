@@ -1,0 +1,247 @@
+{
+  "name": "Detroit Campus Microgrid (SLD issue 3 vector groups)",
+  "frequency_hz": 60.0,
+  "layout": "transmission",
+  "buses": [
+    {
+      "id": "B_DTE",
+      "vn_kv": 13.2
+    },
+    {
+      "id": "SWGR0",
+      "vn_kv": 13.2
+    },
+    {
+      "id": "SWGR1",
+      "vn_kv": 13.2
+    },
+    {
+      "id": "B_F4",
+      "vn_kv": 13.2
+    },
+    {
+      "id": "SWGR2",
+      "vn_kv": 13.2
+    },
+    {
+      "id": "B_CAMPUS",
+      "vn_kv": 0.48
+    },
+    {
+      "id": "B_GEN",
+      "vn_kv": 0.48
+    },
+    {
+      "id": "B_PAD",
+      "vn_kv": 0.6
+    },
+    {
+      "id": "B_BESSA",
+      "vn_kv": 0.69
+    },
+    {
+      "id": "B_BESSB",
+      "vn_kv": 0.69
+    },
+    {
+      "id": "B_PV",
+      "vn_kv": 0.48
+    }
+  ],
+  "external_grids": [
+    {
+      "id": "Grid",
+      "bus": "B_DTE",
+      "vm_pu": 1.0,
+      "name": "Utility at B_DTE"
+    }
+  ],
+  "lines": [
+    {
+      "id": "LN_0_1",
+      "from_bus": "SWGR0",
+      "to_bus": "SWGR1",
+      "length_km": 1.0,
+      "r_ohm_per_km": 0.00697,
+      "x_ohm_per_km": 0.013939,
+      "c_nf_per_km": 0.0,
+      "max_i_ka": 1.1809
+    },
+    {
+      "id": "LN_1_2",
+      "from_bus": "SWGR1",
+      "to_bus": "SWGR2",
+      "length_km": 1.0,
+      "r_ohm_per_km": 0.00697,
+      "x_ohm_per_km": 0.013939,
+      "c_nf_per_km": 0.0,
+      "max_i_ka": 1.1809
+    }
+  ],
+  "transformers": [
+    {
+      "id": "T2",
+      "hv_bus": "SWGR0",
+      "lv_bus": "B_CAMPUS",
+      "sn_mva": 2.0,
+      "vn_hv_kv": 13.2,
+      "vn_lv_kv": 0.48,
+      "vk_percent": 5.7522,
+      "vkr_percent": 0.16,
+      "pfe_kw": 0.0,
+      "i0_percent": 0.0
+    },
+    {
+      "id": "T_GEN",
+      "hv_bus": "SWGR1",
+      "lv_bus": "B_GEN",
+      "sn_mva": 0.5,
+      "vn_hv_kv": 13.2,
+      "vn_lv_kv": 0.48,
+      "vk_percent": 5.7502,
+      "vkr_percent": 0.05,
+      "pfe_kw": 0.0,
+      "i0_percent": 0.0
+    },
+    {
+      "id": "T1",
+      "hv_bus": "B_F4",
+      "lv_bus": "B_PAD",
+      "sn_mva": 2.0,
+      "vn_hv_kv": 13.2,
+      "vn_lv_kv": 0.6,
+      "vk_percent": 5.7522,
+      "vkr_percent": 0.16,
+      "pfe_kw": 0.0,
+      "i0_percent": 0.0
+    },
+    {
+      "id": "T_BESSA",
+      "hv_bus": "SWGR2",
+      "lv_bus": "B_BESSA",
+      "sn_mva": 3.44,
+      "vn_hv_kv": 13.2,
+      "vn_lv_kv": 0.69,
+      "vk_percent": 6.0035,
+      "vkr_percent": 0.2064,
+      "pfe_kw": 0.0,
+      "i0_percent": 0.0
+    },
+    {
+      "id": "T_BESSB",
+      "hv_bus": "SWGR2",
+      "lv_bus": "B_BESSB",
+      "sn_mva": 3.44,
+      "vn_hv_kv": 13.2,
+      "vn_lv_kv": 0.69,
+      "vk_percent": 6.0035,
+      "vkr_percent": 0.2064,
+      "pfe_kw": 0.0,
+      "i0_percent": 0.0
+    },
+    {
+      "id": "T_PVESS",
+      "hv_bus": "B_PAD",
+      "lv_bus": "B_PV",
+      "sn_mva": 0.5,
+      "vn_hv_kv": 0.6,
+      "vn_lv_kv": 0.48,
+      "vk_percent": 5.7502,
+      "vkr_percent": 0.05,
+      "pfe_kw": 0.0,
+      "i0_percent": 0.0
+    }
+  ],
+  "switches": [
+    {
+      "id": "VCB_M",
+      "bus": "B_DTE",
+      "element": "SWGR0",
+      "et": "bus",
+      "closed": true
+    },
+    {
+      "id": "VCB_F1",
+      "bus": "SWGR0",
+      "element": "LN_0_1",
+      "et": "line",
+      "closed": true
+    },
+    {
+      "id": "VCB_1F1",
+      "bus": "SWGR1",
+      "element": "LN_1_2",
+      "et": "line",
+      "closed": true
+    },
+    {
+      "id": "VCB_1F4",
+      "bus": "SWGR1",
+      "element": "B_F4",
+      "et": "bus",
+      "closed": true
+    }
+  ],
+  "loads": [
+    {
+      "id": "L_CAMPUS",
+      "bus": "B_CAMPUS",
+      "p_mw": 0.4,
+      "q_mvar": 0.13
+    },
+    {
+      "id": "L_XFC",
+      "bus": "SWGR0",
+      "p_mw": 0.4,
+      "q_mvar": 0.0
+    },
+    {
+      "id": "L_SST_DC",
+      "bus": "SWGR2",
+      "p_mw": 0.05,
+      "q_mvar": 0.0
+    }
+  ],
+  "storage": [
+    {
+      "id": "BESS_A",
+      "bus": "B_BESSA",
+      "p_mw": 0.0,
+      "max_e_mwh": 5.0,
+      "name": "BESS_A 3.44 MVA / 5 MWh"
+    },
+    {
+      "id": "BESS_B",
+      "bus": "B_BESSB",
+      "p_mw": 0.0,
+      "max_e_mwh": 5.0,
+      "name": "BESS_B 3.44 MVA / 5 MWh"
+    },
+    {
+      "id": "ESS",
+      "bus": "B_PAD",
+      "p_mw": 0.0,
+      "max_e_mwh": 2.8,
+      "name": "ESS 1.4 MVA / 2.8 MWh"
+    }
+  ],
+  "static_generators": [
+    {
+      "id": "PV_AGG",
+      "bus": "B_PV",
+      "p_mw": 0.0,
+      "q_mvar": 0.0,
+      "name": "PV_AGG 0.42 MVA"
+    }
+  ],
+  "generators": [
+    {
+      "id": "GEN",
+      "bus": "B_GEN",
+      "p_mw": 0.0,
+      "vm_pu": 1.0,
+      "sn_mva": 0.375,
+      "name": "GEN 0.375 MVA"
+    }
+  ]
+}

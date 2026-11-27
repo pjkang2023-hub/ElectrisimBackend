@@ -415,6 +415,27 @@ def _strip_dc_for_ac_lf(net):
             pass
 
 
+def _keep_poc_island(net, params):
+    """
+    Drop every bus not connected to the POC. The wizard's plant has its own
+    external grid, so on a page that also holds another network the study
+    took that network along: its losses counted as the plant's (0.09 MW of
+    0.45 MW beside the transmission reference grid), its lines and buses
+    filled the rating table and voltage profile, and its overloads or low
+    voltages would have failed every case. Returns the number of buses dropped.
+    """
+    import pandapower.topology as top
+    poc = _find_bus_idx(net, params.get('pocBusName'))
+    if poc is None:
+        return 0
+    graph = top.create_nxgraph(net, respect_switches=True, include_out_of_service=False)
+    keep = set(top.connected_component(graph, poc))
+    drop = [b for b in net.bus.index if b not in keep]
+    if drop:
+        pp.drop_buses(net, drop, drop_elements=True)
+    return len(drop)
+
+
 def _apply_storage_p_limits(net, params):
     """Write wizard Pmax (including Battery DC Pmax) onto storage min/max P."""
     p_dis, p_chg = _unit_p_limits(params)
@@ -1427,6 +1448,34 @@ def _run_pq_envelope(net, params, in_data, progress_cb=None):
         return {'error': str(ex)}
 
 
+def _pcs_as_storage(net):
+    """
+    The builder's PCS and Battery pair, as the Storage element the study
+    dispatches: one row of the PCS's name and rating, its battery's energy and
+    state of charge, its P limits the tighter of its rating and its battery's
+    C-rates. Electrisim storage charges at positive P.
+    """
+    for rec in list(getattr(net, 'electrisim_pcs', None) or []):
+        src = rec['source']
+        if src['kind'] != 'Battery':
+            continue
+        bat = src['obj']
+        table, idx = rec['table'], rec['index']
+        if idx in net[table].index:
+            net[table].drop(idx, inplace=True)
+        e_mwh = bat.energy_kwh / 1e3
+        p_dis = min(rec['s_rated'], bat.c_rate_dis * e_mwh)
+        p_chg = min(rec['s_rated'], bat.c_rate_ch * e_mwh)
+        i_rated = rec['s_rated'] / (math.sqrt(3.0) * rec['vn_kv'])
+        st = pp.create_storage(net, rec['bus'], p_mw=-rec['p_set_ac'], max_e_mwh=e_mwh, q_mvar=0.0,
+                               sn_mva=rec['s_rated'], soc_percent=100.0 * bat.soc0, min_e_mwh=0.0,
+                               name=rec['name'], in_service=rec['in_service'], max_p_mw=p_chg, min_p_mw=-p_dis,
+                               max_q_mvar=rec['s_rated'], min_q_mvar=-rec['s_rated'])
+        for col, value in (('id', rec['id']), ('max_ik_ka', rec['k'] * i_rated), ('current_source', True), ('rx', 0.1)):
+            net.storage.at[st, col] = value
+        net.electrisim_pcs.remove(rec)
+
+
 def bess_preliminary_study(net, params, in_data=None):
     """
     Main entry: named cases + ratings + P/Q envelope + tap sweep.
@@ -1438,8 +1487,12 @@ def bess_preliminary_study(net, params, in_data=None):
             progress_cb('Building named load-flow cases…')
 
         params = dict(params or {})
+        _pcs_as_storage(net)
         params['_dc_snapshot'] = _dc_rack_snapshot(net)
         _strip_dc_for_ac_lf(net)
+        dropped = _keep_poc_island(net, params)
+        if dropped and progress_cb:
+            progress_cb(f'Studying the plant only: {dropped} buses not connected to the POC left out.')
         _apply_storage_p_limits(net, params)
 
         case_defs = _build_named_cases(params)
@@ -1493,6 +1546,7 @@ def bess_preliminary_study(net, params, in_data=None):
                 'tap_sweep': tap_results,
                 'summary': summary,
                 'params': {
+                    'buses_not_connected': dropped,
                     'pocBusName': params.get('pocBusName'),
                     'storageNames': params.get('storageNames'),
                     'poc_convention': 'export_positive',

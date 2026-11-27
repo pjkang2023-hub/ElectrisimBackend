@@ -1,0 +1,128 @@
+{
+  "battery": {
+    "_": "A 16-cell LFP pack (51.2 V, 100 Ah) at 60 %: 100 A drawn from 1 s to 11 s, then rest to 21 s. OCV per cell 3.2 V x the LFP table.",
+    "cells": 16,
+    "ah": 100.0,
+    "soc0": 0.6,
+    "r0": 0.02,
+    "r1": 0.008,
+    "tau1": 2.0,
+    "soc_table": [
+      0.0,
+      0.05,
+      0.1,
+      0.2,
+      0.3,
+      0.5,
+      0.7,
+      0.9,
+      0.95,
+      1.0
+    ],
+    "ocv_cell": [
+      2.5,
+      3.0,
+      3.19,
+      3.25,
+      3.28,
+      3.3,
+      3.32,
+      3.35,
+      3.4,
+      3.6
+    ],
+    "i_load": 100.0,
+    "t_on": 1.0,
+    "t_off": 11.0,
+    "t_end": 21.0,
+    "dt": 0.001
+  },
+  "pv": {
+    "_": "The default module (550 W, 72 cells) fitted as der_electrisim does, 18 in series and 4 strings, no losses, at 25 C: I-V curves at three irradiances.",
+    "modules_series": 18,
+    "strings_parallel": 4,
+    "irradiances": [
+      1000,
+      600,
+      200
+    ],
+    "points": 60,
+    "n_cells": 72,
+    "i0": 1.3631401271159677e-08,
+    "iph": 14.002678498100396,
+    "a": 1.3,
+    "rs_cell": 0.0010720012729078991,
+    "rp_cell": 5.603146710649284,
+    "v_oc_array": 897.8243759128098
+  },
+  "smoothing": {
+    "_": "A store behind its smoothing converter (averaged, acting every step) on a rack bus its feed holds through R_feed; the racks a constant-power load cycling high and low.",
+    "cases": {
+      "rack48": {
+        "v_feed": 48.0,
+        "r_feed": 0.002,
+        "p_high": 10000.0,
+        "p_low": 2000.0,
+        "modules_series": 1,
+        "strings_parallel": 2,
+        "module_c": 130.0,
+        "module_v": 54.0,
+        "module_esr": 0.004,
+        "v0_percent": 90,
+        "r_leak": 10000.0,
+        "rated": 20000.0,
+        "tau": 0.02,
+        "eta": 0.98
+      },
+      "row800": {
+        "v_feed": 800.0,
+        "r_feed": 0.05,
+        "p_high": 200000.0,
+        "p_low": 40000.0,
+        "modules_series": 15,
+        "strings_parallel": 1,
+        "module_c": 130.0,
+        "module_v": 54.0,
+        "module_esr": 0.004,
+        "v0_percent": 90,
+        "r_leak": 10000.0,
+        "rated": 400000.0,
+        "tau": 0.02,
+        "eta": 0.98
+      }
+    },
+    "period": 0.1,
+    "high": 0.06,
+    "t_end": 0.3,
+    "dt": 1e-05,
+    "switching_khz": 20.0
+  },
+  "flywheel": {
+    "_": "A 54 V, 5 kW flywheel at 40 % speed (base 50 %: 4 kW available) feeding a resistor; at 10 ms a second resistor asks 6.5 kW at 54 V - over its limit, its DC link sags.",
+    "v_dc": 54.0,
+    "p_rated": 5000.0,
+    "e_max_kwh": 0.07,
+    "speed": 0.4,
+    "speed_min": 0.2,
+    "speed_base": 0.5,
+    "efficiency": 0.95,
+    "standby_percent_h": 2.0,
+    "r_dc": 0.001,
+    "r_load": 1.458,
+    "r_step": 0.81,
+    "t_step": 0.01,
+    "t_end": 0.2,
+    "dt": 1e-05,
+    "w_max": 1000.0
+  },
+  "sofc": {
+    "_": "The Padulles 100 kW stack at 800 V; its current stepped from 60 kW's to 90 kW's at 1 s.",
+    "p_rated_kw": 100,
+    "v_rated": 800,
+    "p0_kw": 60,
+    "p1_kw": 90,
+    "t_step": 1.0,
+    "t_end": 60.0,
+    "dt": 0.002
+  }
+}

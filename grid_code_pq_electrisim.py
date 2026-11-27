@@ -113,26 +113,32 @@ def _pq_interp_q_in_span(p_target, p_list, q_list, p_tol=1e-3):
     return float(np.interp(pt_clip, np.array(px, dtype=float), np.array(qy, dtype=float)))
 
 
-def _pq_max_abs_p(arr):
+def _pq_max_export(arr, sign_out):
+    """Highest export (MW) among curve P values plotted as sign_out x export."""
     best = None
     for p in arr or []:
         try:
-            a = abs(float(p))
+            export = float(p) * sign_out
         except (TypeError, ValueError):
             continue
-        if best is None or a > best:
-            best = a
+        if export > 0 and (best is None or export > best):
+            best = export
     return best
 
 
-def _pq_pmax_pcc_for_req(curve):
+def _pq_pmax_pcc_for_req(curve, sign_out=1.0):
     """
-    Grid-code Pmax at the PCC: the highest |P| that both Qmax and Qmin
+    Grid-code Pmax at the PCC: the highest export that both Qmax and Qmin
     branches reach, so the required P = 1.0 p.u. point lies on the red
     envelope. Templates are Q/Pmax; this value replaces generator Pn.
+
+    Only export counts. Taking the largest |P| made a PCC that only imports
+    (a plant behind load) report its import - 7.5 MW on the transmission
+    grid, three times the plant - as the plant's Pmax. With no export, None:
+    the requirement stays at Pn.
     """
-    a = _pq_max_abs_p(curve.get('p_max_mw') or curve.get('p_mw'))
-    b = _pq_max_abs_p(curve.get('p_min_mw') or curve.get('p_mw'))
+    a = _pq_max_export(curve.get('p_max_mw') or curve.get('p_mw'), sign_out)
+    b = _pq_max_export(curve.get('p_min_mw') or curve.get('p_mw'), sign_out)
     if a is None:
         return b
     if b is None:
@@ -682,7 +688,9 @@ def _pq_storage_q_caps(net, storage_idx, p_gen, sn_mva, q_mode, element_data=Non
         if lim is not None:
             q_mi, q_ma = lim
             return max(0.0, float(q_ma)), max(0.0, float(-q_mi))
-    if q_mode == 'from_rating' and sn_mva > 0:
+    # Without a curve the circular Sn-P limit, as for a static generator: the
+    # flat 0.5 Sn gave a battery at full discharge Q beyond its rating.
+    if q_mode in ('from_rating', 'from_sgen_curve') and sn_mva > 0:
         fr = math.sqrt(max(sn_mva ** 2 - abs(p_gen) ** 2, 0))
         return fr, fr
     half = sn_mva * 0.5 if sn_mva > 0 else 0.0
@@ -712,6 +720,38 @@ def _pq_gen_p(net, g):
         return 0.0 if pd.isna(val) else -float(val)
     val = net.sgen.at[g['idx'], 'p_mw']
     return 0.0 if pd.isna(val) else float(val)
+
+
+def _pq_other_sources_at_bus(net, bus_idx, gen_info):
+    """Friendly names of in-service sources on bus_idx that are not plant units."""
+    plant = {(g.get('type'), g['idx']) for g in gen_info}
+    friendly = getattr(net, 'user_friendly_names', None) or {}
+    names = []
+    for table, kind in (('sgen', 'sgen'), ('storage', 'storage'), ('gen', 'gen')):
+        tbl = getattr(net, table, None)
+        if tbl is None or tbl.empty:
+            continue
+        for idx in tbl.index:
+            if (kind, idx) in plant or int(tbl.at[idx, 'bus']) != int(bus_idx):
+                continue
+            if 'in_service' in tbl.columns and not bool(tbl.at[idx, 'in_service']):
+                continue
+            p = tbl.at[idx, 'p_mw']
+            if pd.isna(p) or abs(float(p)) < 1e-6:
+                continue
+            name = str(tbl.at[idx, 'name'])
+            names.append(str(friendly.get(name, name)))
+    return names
+
+
+def _pq_gens_have_q_limits(net):
+    """Whether any in-service generator carries a usable reactive range."""
+    if net.gen.empty or not {'min_q_mvar', 'max_q_mvar'} <= set(net.gen.columns):
+        return False
+    gen = net.gen[net.gen['in_service']]
+    q_min = pd.to_numeric(gen['min_q_mvar'], errors='coerce')
+    q_max = pd.to_numeric(gen['max_q_mvar'], errors='coerce')
+    return bool((q_max > q_min).any())
 
 
 def _pq_set_gen_pq(net, g, p_gen, q_mvar):
@@ -962,7 +1002,52 @@ def _pq_run_pf(net_pf, verbose_iwamoto=False, rc2=False, rc3=False, rcs=False, f
     return False
 
 
+#: How closely the PCC is held at each voltage level, and how many load flows
+#: that may take per trial.
+_PQ_PCC_V_TOL = 5e-4
+_PQ_PCC_V_ITER = 6
+
+
+def _pq_at_pcc_voltage(ctx, run, net_of, direction=None):
+    """
+    Run a trial with the PCC at the voltage level (ctx['v_applied']).
+
+    The level is set where it can be set - the external grid's voltage - so a
+    PCC elsewhere (a plant behind its own cable or transformer) sat off the
+    level by the drop between the two, while results were labelled with the
+    level. Correct the grid setpoint by the PCC's error until it is within
+    _PQ_PCC_V_TOL. Each correction re-runs the trial from its base network;
+    the setpoint that worked at this level, for this direction of plant Q
+    (which moves the PCC voltage the most), starts the next trial.
+    """
+    target = float(ctx['v_applied'])
+    if ctx['pcc_bus_idx'] == ctx['ext_grid_bus_idx']:
+        return run(target)
+    known = ctx.setdefault('v_grid_by_level', {})
+    key = (target, direction)
+    v_grid = known.get(key, known.get((target, None), target))
+    result = None
+    for _ in range(_PQ_PCC_V_ITER):
+        result = run(v_grid)
+        net = net_of(result) if result is not None else None
+        if net is None:
+            return result
+        error = target - float(net.res_bus.at[ctx['pcc_bus_idx'], 'vm_pu'])
+        if abs(error) <= _PQ_PCC_V_TOL:
+            known[key] = v_grid
+            return result
+        v_grid += error
+    return result
+
+
 def _pq_settle_and_freeze_taps(base_net, ctx, p_val, tap_bound):
+    """_pq_settle_and_freeze_taps_at with the PCC held at the voltage level."""
+    return _pq_at_pcc_voltage(
+        ctx, lambda v_grid: _pq_settle_and_freeze_taps_at(base_net, ctx, p_val, tap_bound, v_grid),
+        lambda net: net)
+
+
+def _pq_settle_and_freeze_taps_at(base_net, ctx, p_val, tap_bound, v_grid):
     """Warm-start discrete tap_pos at Q = 0 for the lower/upper voltage target.
 
     Controllers are cleared on the returned net so the next trial can re-attach
@@ -974,7 +1059,7 @@ def _pq_settle_and_freeze_taps(base_net, ctx, p_val, tap_bound):
     _pq_apply_tap_family_filter(net_try, ctx)
     if tap_bound:
         _pq_pin_taps(net_try, tap_bound)
-    net_try.ext_grid.at[ctx['ext_grid_idx'], 'vm_pu'] = float(ctx['v_applied'])
+    net_try.ext_grid.at[ctx['ext_grid_idx'], 'vm_pu'] = float(v_grid)
     _pq_dispatch_p(net_try, ctx['gen_info'], p_val, ctx['exclude_names'])
     for g in ctx['gen_info']:
         try:
@@ -1017,6 +1102,16 @@ def _pq_apply_local_q(net, gen_info, p_val, q_mode, direction, frac, exclude_nam
 
 def _pq_eval_trial(base_net, ctx, p_val, direction, frac_or_q, tap_bound=None, use_park=False,
                   q_cap=None):
+    """_pq_eval_trial_at with the PCC held at the voltage level."""
+    return _pq_at_pcc_voltage(
+        ctx, lambda v_grid: _pq_eval_trial_at(
+            base_net, ctx, p_val, direction, frac_or_q, v_grid, tap_bound=tap_bound,
+            use_park=use_park, q_cap=q_cap),
+        lambda r: r.get('net') if r.get('converged') else None, direction)
+
+
+def _pq_eval_trial_at(base_net, ctx, p_val, direction, frac_or_q, v_grid, tap_bound=None,
+                      use_park=False, q_cap=None):
     """
     One load-flow trial. frac_or_q is capability fraction (local) or plant Q setpoint (park).
     Returns dict: converged, overloaded, volt_viol, q_pcc, p_pcc, net.
@@ -1026,7 +1121,7 @@ def _pq_eval_trial(base_net, ctx, p_val, direction, frac_or_q, tap_bound=None, u
     _pq_apply_tap_family_filter(net_try, ctx)
     if tap_bound:
         _pq_pin_taps(net_try, tap_bound)
-    net_try.ext_grid.at[ctx['ext_grid_idx'], 'vm_pu'] = float(ctx['v_applied'])
+    net_try.ext_grid.at[ctx['ext_grid_idx'], 'vm_pu'] = float(v_grid)
     _pq_dispatch_p(net_try, ctx['gen_info'], p_val, ctx['exclude_names'])
 
     force_ctrl = False
@@ -1529,6 +1624,13 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
         if pcc_bus_idx is None:
             return json.dumps({'error': f'PCC bus "{pcc_bus_name}" not found in network'}, separators=(',', ':'))
 
+        # The sweep drives the grid to 0.9-1.1 pu. A voltage-controlled
+        # generator outside the plant then held its own bus with no limit -
+        # a 1.8 MVA gas engine took 23 Mvar, overloading feeders and swamping
+        # the exchange at the PCC. Hold every generator to its reactive limits.
+        if _pq_gens_have_q_limits(net):
+            net._electrisim_enforce_q_lims = True
+
         ext_grid_idx = None
         for idx in net.ext_grid.index:
             if net.ext_grid.at[idx, 'name'] == ext_grid_name:
@@ -1580,6 +1682,16 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
             # which includes Battery DC Pmax when the wizard wrote it onto
             # max_p_mw / min_p_mw.
             p_rated = min(caps) if caps else 0.0
+            if p_rated <= 0:
+                # No rating on the diagram: its P there, as for a static
+                # generator. A rating of 0 held a battery discharging 0.5 MW
+                # at zero through the whole sweep.
+                try:
+                    p_rated = abs(float(net.storage.at[idx, 'p_mw']))
+                except (TypeError, ValueError):
+                    p_rated = 0.0
+                if pd.isna(p_rated):
+                    p_rated = 0.0
             gen_info.append({
                 'type': 'storage',
                 'idx': idx,
@@ -1623,6 +1735,7 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
             pcc_bus_friendly = net.user_friendly_names[pcc_bus_name]
 
         warnings_list = []
+        limited_at = {}
         extra_parks = []
         for park in pp_el._electrisim_collect_park_payloads(in_data or {}):
             if i_park and _pq_match_park(park, park_name, park_id):
@@ -1742,6 +1855,7 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
             'pn_mw': pn,
             'iLDF': iLDF,
             'v_applied': 1.0,
+            'ext_grid_bus_idx': int(net.ext_grid.at[ext_grid_idx, 'bus']),
             'progress_cb': progress_cb,
             'cancel_event': pq_params.get('_cancel_event'),
             'tap_health': {'points': 0, 'out_points': 0, 'by_trafo': {}},
@@ -1895,10 +2009,10 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
                 for rsn, side in ((reasons_max, 'max'), (reasons_min, 'min')):
                     uniq = [x for x in rsn if x]
                     if uniq:
-                        warnings_list.append(
-                            f"V={v_pu}pu, P={p_val:.1f}MW: Q_{side} limited "
-                            f"({', '.join(sorted(set(uniq)))})"
-                        )
+                        # Grouped below: one line per voltage, side and
+                        # reason. Listing every P point gave 84 lines.
+                        limited_at.setdefault(
+                            (v_pu, side, ', '.join(sorted(set(uniq)))), []).append(float(p_val))
 
                 p_disp_plot = sign_out * float(p_val)
                 p_plot_max = _pq_pcc_plot_from_net(snap_max, ctx, sign_out)
@@ -1950,7 +2064,7 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
                 'limit_max': limit_max_result,
                 'limit_min': limit_min_result,
             }
-            pmax_pcc = _pq_pmax_pcc_for_req(curves[v_key])
+            pmax_pcc = _pq_pmax_pcc_for_req(curves[v_key], sign_out)
             v_req = requirements.get(v_key) if requirements else None
             if (
                 scale_requirement_to_pcc
@@ -1980,21 +2094,27 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
                 compliance[v_key] = None
 
         pq0 = None
-        if i_show_pq0:
-            net0 = deepcopy(net)
-            _pq_clear_controllers(net0)
-            _pq_apply_tap_family_filter(net0, ctx)
-            for g in gen_info:
-                _pq_set_gen_pq(net0, g, 0.0, 0.0)
-            net0.ext_grid.at[ext_grid_idx, 'vm_pu'] = float(voltage_levels[0]) * u_scale if voltage_levels else 1.0
-            iLDF[0] += 1
-            if _pq_run_pf(
-                    net0, verbose, rc2, rc3, rcs, force_control=False,
-                    cancel_event=ctx.get('cancel_event')):
-                p0 = _pq_pcc_p(net0, pcc_bus_idx, ext_grid_idx)
-                q0 = pp_el._rpc_pcc_q_for_chart(net0, pcc_bus_idx, ext_grid_idx)
-                # Residual exchange at the PCC with plant units off. This is not the
-                # P=0 capability on the red envelope (units still supplying Q there).
+        units_off_p = None
+        # Always: with the units off, a PCC that is the plant's carries next
+        # to nothing. One carrying the network's load measures that load - a
+        # 2.3 MW plant "at" a 110 kV busbar importing 7.5 MW - and its P-Q
+        # says nothing about the plant.
+        net0 = deepcopy(net)
+        _pq_clear_controllers(net0)
+        _pq_apply_tap_family_filter(net0, ctx)
+        for g in gen_info:
+            _pq_set_gen_pq(net0, g, 0.0, 0.0)
+        net0.ext_grid.at[ext_grid_idx, 'vm_pu'] = float(voltage_levels[0]) * u_scale if voltage_levels else 1.0
+        iLDF[0] += 1
+        if _pq_run_pf(
+                net0, verbose, rc2, rc3, rcs, force_control=False,
+                cancel_event=ctx.get('cancel_event')):
+            p0 = _pq_pcc_p(net0, pcc_bus_idx, ext_grid_idx)
+            q0 = pp_el._rpc_pcc_q_for_chart(net0, pcc_bus_idx, ext_grid_idx)
+            units_off_p = float(p0)
+            # Residual exchange at the PCC with plant units off. This is not the
+            # P=0 capability on the red envelope (units still supplying Q there).
+            if i_show_pq0:
                 pq0 = {
                     'p_mw': round(float(p0), 4),
                     'q_mvar': round(float(q0), 4),
@@ -2002,8 +2122,20 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
                 _pq_emit(
                     f'  Units off (not the P=0 envelope): P={p0:.3f} MW  Q={q0:.3f} Mvar',
                     ctx, progress=True)
-            else:
-                _pq_emit('  Units off (PQ0): load flow failed', ctx, progress=True)
+        elif i_show_pq0:
+            _pq_emit('  Units off (PQ0): load flow failed', ctx, progress=True)
+        assessable = True
+        if units_off_p is not None and abs(units_off_p) > max(0.05 * pn, 0.05):
+            assessable = False
+            message = (
+                f"With the plant's units off the PCC still carries {abs(units_off_p):.2f} MW: loads or "
+                "other sources sit behind it, so what the PCC measures is not the plant's and compliance "
+                "cannot be judged. Choose the bus where the plant connects.")
+            others = _pq_other_sources_at_bus(net, pcc_bus_idx, gen_info)
+            if others:
+                message += (" Sources at the PCC that are not among the plant's units: "
+                            + ', '.join(others) + " - tick them if they belong to the plant.")
+            warnings_list.append(message)
 
         tap_health = ctx['tap_health']
         tap_warnings = _pq_tap_health_warnings(tap_health)
@@ -2038,11 +2170,16 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
         pmax_pcc_by_voltage = {}
         pmax_pcc_vals = []
         for vk, curve in (curves or {}).items():
-            pm = _pq_pmax_pcc_for_req(curve)
+            pm = _pq_pmax_pcc_for_req(curve, sign_out)
             pmax_pcc_by_voltage[vk] = None if pm is None else round(float(pm), 4)
             if pm:
                 pmax_pcc_vals.append(float(pm))
         pmax_pcc_mw = round(max(pmax_pcc_vals), 4) if pmax_pcc_vals else None
+
+        for (v_pu, side, why), p_vals in limited_at.items():
+            span = (f'P={p_vals[0]:.1f} MW' if len(p_vals) == 1 else
+                    f'{len(p_vals)} points, P={min(p_vals):.1f} to {max(p_vals):.1f} MW')
+            warnings_list.append(f'V={v_pu}pu: Q_{side} limited ({why}) at {span}')
 
         result = {
             'grid_code_pq_results': {
@@ -2055,6 +2192,8 @@ def grid_code_pq_capability(net, pq_params, in_data=None):
                     ('pn' if requirements else None)
                 ),
                 'compliance': compliance,
+                'assessable': assessable,
+                'pcc_units_off_p_mw': None if units_off_p is None else round(units_off_p, 4),
                 'warnings': warnings_list,
                 'total_installed_mw': round(total_installed_mw, 4),
                 'pn_mw': round(pn, 4),

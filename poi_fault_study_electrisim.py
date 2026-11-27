@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import pandapower as pp
 from pandapower import shortcircuit as sc
 
+import sc_current_sources
+sc_current_sources.install()     # IEC 60909's single-phase share of a current source
 import ansi_shortcircuit_electrisim as ansi_sc
 
 
@@ -76,23 +78,33 @@ def classify_buses(net, poi_idx: int) -> Tuple[List[int], List[int], List[int]]:
 
 
 def apply_ngr_to_net(net) -> None:
-    """Fold transformer rn_ohm / xn_ohm into vk0_percent for zero-sequence studies."""
+    """Fold transformer rn_ohm / xn_ohm into vk0_percent / vkr0_percent for
+    pandapower's zero-sequence studies, which do not read them.
+
+    3 Z_N joins the grounded winding's zero-sequence path, so its ohms go to
+    percent on that winding's base, as the ANSI study places it: the LV
+    winding when it is grounded (Dyn, Yyn, YNyn), else the HV (YNd, YNy,
+    ZN-). R_N adds to vkr0 and X_N to the reactive part, not in quadrature to
+    |vk0|, which made a resistor a reactance.
+    """
     if not hasattr(net, "trafo") or net.trafo.empty:
         return
     for idx, row in net.trafo.iterrows():
-        rn = _f(row.get("rn_ohm"), 0.0)
-        xn = _f(row.get("xn_ohm"), 0.0)
+        rn = max(_f(row.get("rn_ohm"), 0.0), 0.0)
+        xn = max(_f(row.get("xn_ohm"), 0.0), 0.0)
         if rn <= 0 and xn <= 0:
             continue
-        zn = math.sqrt(rn * rn + xn * xn)
         sn = _f(row.get("sn_mva"), 1.0) or 1.0
-        vn_hv = _f(row.get("vn_hv_kv"), 20.0) or 20.0
-        z_base = (vn_hv ** 2) / sn
-        if z_base <= 0:
+        groups = ansi_sc._windings(row.get("vector_group"), 2)
+        on_lv = groups is not None and groups[1] in ("yn", "zn") and groups[0] != "zn"
+        vn = _f(row.get("vn_lv_kv" if on_lv else "vn_hv_kv"), 0.0)
+        if vn <= 0:
             continue
-        extra_pct = 100.0 * (3.0 * zn) / z_base
-        vk0 = _f(row.get("vk0_percent"), _f(row.get("vk_percent"), 6.0))
-        net.trafo.at[idx, "vk0_percent"] = math.sqrt(vk0 * vk0 + extra_pct * extra_pct)
+        z_base = vn * vn / sn
+        z0 = ansi_sc._zero_seq_vk(row, "vk_percent", "vkr_percent", "vk0_percent", "vkr0_percent")
+        z0 += 100.0 * 3.0 * complex(rn, xn) / z_base
+        net.trafo.at[idx, "vk0_percent"] = abs(z0)
+        net.trafo.at[idx, "vkr0_percent"] = z0.real
 
 
 def _set_table_out_of_service(net, attr: str, indices: Optional[Set[int]] = None, out: bool = True) -> None:
@@ -179,7 +191,6 @@ def _merge_duty_pre_post(pre: dict, post: dict) -> List[dict]:
 
 
 def _source_contributions(net, poi_idx: int, freq_hz: float) -> List[dict]:
-    apply_ngr_to_net(net)
     base_net = copy.deepcopy(net)
     set_all_onsite_out_of_service(base_net, True)
     i_utility = _poi_ikss_ansi(base_net, poi_idx, freq_hz, "3ph")
@@ -221,10 +232,17 @@ def _iec_bus_sc(
 ) -> dict:
     work = copy.deepcopy(net)
     apply_ngr_to_net(work)
-    if hasattr(work, "sgen") and not work.sgen.empty and "k" in work.sgen.columns:
-        work.sgen["k"] = 1.1
-    from pandapower_electrisim import ensure_ext_grid_zero_sequence_min
+    from pandapower_electrisim import (_electrisim_set_aside_dc_network, ensure_ext_grid_zero_sequence_min,
+                                       ensure_sgen_k)
+    if fault == "1ph":
+        # pandapower's zero sequence has no VSC: with one on the network every earth
+        # fault failed and its row read 0 kA. A three-wire converter adds no zero-sequence path.
+        _electrisim_set_aside_dc_network(work, "The POI study's earth faults",
+                                         why="pandapower's zero-sequence model has no VSC")
 
+    # As the short-circuit study does: 1.1 here for every sgen overrode a
+    # ratio set on the element.
+    ensure_sgen_k(work)
     ensure_ext_grid_zero_sequence_min(work)
     try:
         sc.calc_sc(
@@ -236,7 +254,10 @@ def _iec_bus_sc(
             ith=True,
             tk_s=tk_s,
             kappa_method="C",
-            check_connectivity=False,
+            # With False a fresh net fails in pandapower's gen lookup
+            # (net._is_elements_final is never set), so every coordination
+            # row was an error and every grounding SLG current 0.
+            check_connectivity=True,
             branch_results=False,
             return_all_currents=False,
         )
@@ -261,10 +282,21 @@ def _grounding_rows(net, slg_target_a: float, freq_hz: float) -> List[dict]:
         hv = int(tr["hv_bus"])
         rn = _f(tr.get("rn_ohm"), 0.0)
         xn = _f(tr.get("xn_ohm"), 0.0)
+        grounding = bool(tr.get("electrisim_grounding") == True)
+        if grounding:
+            # A zigzag: its "LV" is its own unloaded delta, where no fault is anything; the
+            # fault is at the bus it grounds, through its own neutral resistor.
+            lv = hv
+            rn = _f(tr.get("electrisim_gt_r_n"), 0.0)
+            xn = _f(tr.get("electrisim_gt_x_n"), 0.0)
         vn_lv = _f(net.bus.at[lv, "vn_kv"], 0.69)
         slg = _iec_bus_sc(net, lv, "1ph", "max")
         i_slg = _f(slg.get("ikss_ka"), 0.0)
         i_neutral = i_slg
+        if grounding:
+            # Its neutral current alone at its bus: 3 V_ph / |Z0 + 3 Z_N|.
+            z = complex(_f(tr.get("electrisim_gt_r0"), 0.0) + 3 * rn, _f(tr.get("electrisim_gt_x0"), 0.0) + 3 * xn)
+            i_neutral = 3.0 * vn_lv / math.sqrt(3.0) / abs(z) if abs(z) > 0 else None
         v_rn = rn * i_slg * 1000.0 if rn > 0 else None
         v_phase = vn_lv * 1000.0 / math.sqrt(3.0)
         rn_suggest = None
@@ -323,6 +355,14 @@ def run_poi_fault_study(net, in_data: dict, in_data_full=None) -> str:
     if poi_idx is None:
         return json.dumps({"error": True, "message": "No external grid (POI) found in the network."})
 
+    # As the IEC and ANSI studies do: a cut-off bus made the ANSI solve fail
+    # without a message, or came out at 0 kA in the grounding table.
+    from pandapower_electrisim import isolated_buses_message
+
+    isolated = isolated_buses_message(net, machines=True)
+    if isolated:
+        return json.dumps({"error": True, "message": isolated})
+
     _, close_in, remote = classify_buses(net, poi_idx)
 
     ansi_params = {
@@ -333,13 +373,14 @@ def run_poi_fault_study(net, in_data: dict, in_data_full=None) -> str:
         "fault_bus_mode": "all",
     }
 
+    # ANSI reads the transformers' rn_ohm / xn_ohm itself; folding them into
+    # vk0_percent as well (apply_ngr_to_net, for the IEC rows) would count
+    # them twice.
     net_post = copy.deepcopy(net)
-    apply_ngr_to_net(net_post)
     post_ansi = json.loads(ansi_sc.shortcircuit_ansi(net_post, ansi_params))
 
     net_pre = copy.deepcopy(net)
     set_all_onsite_out_of_service(net_pre, True)
-    apply_ngr_to_net(net_pre)
     pre_ansi = json.loads(ansi_sc.shortcircuit_ansi(net_pre, ansi_params))
 
     breaker_duties = _merge_duty_pre_post(pre_ansi, post_ansi)

@@ -1,0 +1,9 @@
+{
+  "_": "A 0.5 MVA, 400 V synchronous machine (classical: x'd 0.3 pu, H 3.5 s, no exciter) alone in an island with a GAST governor (R 4 %, T1 0.4 s, T2 0.1 s), supplying a 0.25 MW + 0.05 Mvar load; at 0.5 s a 0.1 MW resistive load steps on (1.6 ohm per phase to a floating star). Checked against ANDES's GENCLS and GAST on the same case.",
+  "f_hz": 50.0,
+  "machine": {"s_rated_mva": 0.5, "v_ll_kv": 0.4, "xd1_pu": 0.3, "h_s": 3.5},
+  "governor": {"r": 0.04, "t1": 0.4, "t2": 0.1, "t3": 0.1, "vmax": 1.2, "vmin": 0.0},
+  "load": {"p_mw": 0.25, "q_mvar": 0.05},
+  "step": {"p_mw": 0.1, "t_s": 0.5},
+  "t_end_s": 4.0, "dt_us": 200
+}

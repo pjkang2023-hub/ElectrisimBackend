@@ -1,0 +1,1439 @@
+{
+ "id": "CAMPAIGN-003-v9",
+ "name": "Recommended design v1.3: closed ring, 21 SOFC (20+1, A7 closed: aux outside IT load), 5 PCS, GT-A/GT-B, genset",
+ "base": {
+  "s_base_mva": 50.0,
+  "v_base_kv": 33.0,
+  "f_base_hz": 50.0
+ },
+ "buses": [
+  {
+   "id": "RING_A",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "RING_B",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "MVA",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "MVB",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "GEN_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC01_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC02_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC03_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC04_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC05_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC06_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC07_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC08_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC09_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC10_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC11_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC12_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC13_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC14_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC15_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC16_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC17_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC18_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC19_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC20_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "PCS1_LV",
+   "v_nom_kv": 0.69,
+   "is_poi": false
+  },
+  {
+   "id": "PCS2_LV",
+   "v_nom_kv": 0.69,
+   "is_poi": false
+  },
+  {
+   "id": "PCS3_LV",
+   "v_nom_kv": 0.69,
+   "is_poi": false
+  },
+  {
+   "id": "PCS4_LV",
+   "v_nom_kv": 0.69,
+   "is_poi": false
+  },
+  {
+   "id": "PCS5_LV",
+   "v_nom_kv": 0.69,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC21_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  }
+ ],
+ "branches": [
+  {
+   "id": "SEG_AB1",
+   "from_bus": "RING_A",
+   "to_bus": "RING_B",
+   "r_pu": 0.001,
+   "x_pu": 0.002,
+   "b_pu": 0.0,
+   "s_base_mva": 50.0,
+   "v_base_kv": 33.0,
+   "rating_mva": 60.0
+  },
+  {
+   "id": "LN_A_MVA",
+   "from_bus": "RING_A",
+   "to_bus": "MVA",
+   "r_pu": 0.001,
+   "x_pu": 0.002,
+   "b_pu": 0.0,
+   "s_base_mva": 50.0,
+   "v_base_kv": 33.0,
+   "rating_mva": 60.0
+  },
+  {
+   "id": "LN_B_MVB",
+   "from_bus": "RING_B",
+   "to_bus": "MVB",
+   "r_pu": 0.001,
+   "x_pu": 0.002,
+   "b_pu": 0.0,
+   "s_base_mva": 50.0,
+   "v_base_kv": 33.0,
+   "rating_mva": 60.0
+  },
+  {
+   "id": "TIE_AB",
+   "from_bus": "MVA",
+   "to_bus": "MVB",
+   "r_pu": 0.001,
+   "x_pu": 0.002,
+   "b_pu": 0.0,
+   "s_base_mva": 50.0,
+   "v_base_kv": 33.0,
+   "rating_mva": 60.0
+  }
+ ],
+ "transformers": [
+  {
+   "id": "TR_SOFC01",
+   "hv_bus": "RING_A",
+   "lv_bus": "SOFC01_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_SOFC02",
+   "hv_bus": "RING_A",
+   "lv_bus": "SOFC02_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_SOFC03",
+   "hv_bus": "RING_A",
+   "lv_bus": "SOFC03_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_SOFC04",
+   "hv_bus": "RING_A",
+   "lv_bus": "SOFC04_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_SOFC05",
+   "hv_bus": "RING_A",
+   "lv_bus": "SOFC05_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_SOFC06",
+   "hv_bus": "RING_A",
+   "lv_bus": "SOFC06_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_SOFC07",
+   "hv_bus": "RING_A",
+   "lv_bus": "SOFC07_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_SOFC08",
+   "hv_bus": "RING_A",
+   "lv_bus": "SOFC08_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_SOFC09",
+   "hv_bus": "RING_A",
+   "lv_bus": "SOFC09_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_SOFC10",
+   "hv_bus": "RING_A",
+   "lv_bus": "SOFC10_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_SOFC11",
+   "hv_bus": "RING_B",
+   "lv_bus": "SOFC11_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_SOFC12",
+   "hv_bus": "RING_B",
+   "lv_bus": "SOFC12_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_SOFC13",
+   "hv_bus": "RING_B",
+   "lv_bus": "SOFC13_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_SOFC14",
+   "hv_bus": "RING_B",
+   "lv_bus": "SOFC14_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_SOFC15",
+   "hv_bus": "RING_B",
+   "lv_bus": "SOFC15_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_SOFC16",
+   "hv_bus": "RING_B",
+   "lv_bus": "SOFC16_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_SOFC17",
+   "hv_bus": "RING_B",
+   "lv_bus": "SOFC17_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_SOFC18",
+   "hv_bus": "RING_B",
+   "lv_bus": "SOFC18_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_SOFC19",
+   "hv_bus": "RING_B",
+   "lv_bus": "SOFC19_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_SOFC20",
+   "hv_bus": "RING_B",
+   "lv_bus": "SOFC20_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_PCS1",
+   "hv_bus": "RING_A",
+   "lv_bus": "PCS1_LV",
+   "s_rated_mva": 5.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.69,
+   "x_pu": 0.5454545454545454,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_ungrounded"
+  },
+  {
+   "id": "TR_PCS2",
+   "hv_bus": "RING_A",
+   "lv_bus": "PCS2_LV",
+   "s_rated_mva": 5.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.69,
+   "x_pu": 0.5454545454545454,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_ungrounded"
+  },
+  {
+   "id": "TR_PCS3",
+   "hv_bus": "RING_A",
+   "lv_bus": "PCS3_LV",
+   "s_rated_mva": 5.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.69,
+   "x_pu": 0.5454545454545454,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_ungrounded"
+  },
+  {
+   "id": "TR_PCS4",
+   "hv_bus": "RING_B",
+   "lv_bus": "PCS4_LV",
+   "s_rated_mva": 5.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.69,
+   "x_pu": 0.5454545454545454,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_ungrounded"
+  },
+  {
+   "id": "TR_PCS5",
+   "hv_bus": "RING_B",
+   "lv_bus": "PCS5_LV",
+   "s_rated_mva": 5.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.69,
+   "x_pu": 0.5454545454545454,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_ungrounded"
+  },
+  {
+   "id": "TR_GEN",
+   "hv_bus": "MVA",
+   "lv_bus": "GEN_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  },
+  {
+   "id": "TR_SOFC21",
+   "hv_bus": "RING_B",
+   "lv_bus": "SOFC21_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 1.0,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded"
+  }
+ ],
+ "switches": [
+  {
+   "id": "CB_SEG_AB1",
+   "from_bus": "RING_A",
+   "to_bus": "RING_B",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_A_MVA",
+   "from_bus": "RING_A",
+   "to_bus": "MVA",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_B_MVB",
+   "from_bus": "RING_B",
+   "to_bus": "MVB",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_TIE",
+   "from_bus": "MVA",
+   "to_bus": "MVB",
+   "normally_closed": true,
+   "is_pcc": false
+  }
+ ],
+ "relays": [],
+ "converters": [
+  {
+   "id": "SOFC01",
+   "bus": "SOFC01_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC02",
+   "bus": "SOFC02_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC03",
+   "bus": "SOFC03_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC04",
+   "bus": "SOFC04_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC05",
+   "bus": "SOFC05_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC06",
+   "bus": "SOFC06_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC07",
+   "bus": "SOFC07_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC08",
+   "bus": "SOFC08_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC09",
+   "bus": "SOFC09_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC10",
+   "bus": "SOFC10_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC11",
+   "bus": "SOFC11_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC12",
+   "bus": "SOFC12_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC13",
+   "bus": "SOFC13_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC14",
+   "bus": "SOFC14_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC15",
+   "bus": "SOFC15_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC16",
+   "bus": "SOFC16_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC17",
+   "bus": "SOFC17_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC18",
+   "bus": "SOFC18_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC19",
+   "bus": "SOFC19_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC20",
+   "bus": "SOFC20_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "PCS1",
+   "bus": "PCS1_LV",
+   "s_rated_mva": 5.5,
+   "control": "grid_forming_vsm",
+   "params": {
+    "p_f_droop_pu": 0.04,
+    "q_v_droop_pu": 0.05,
+    "h_sec": 2.0,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.1,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": 0.635
+  },
+  {
+   "id": "PCS2",
+   "bus": "PCS2_LV",
+   "s_rated_mva": 5.5,
+   "control": "grid_forming_vsm",
+   "params": {
+    "p_f_droop_pu": 0.04,
+    "q_v_droop_pu": 0.05,
+    "h_sec": 2.0,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.1,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": 0.635
+  },
+  {
+   "id": "PCS3",
+   "bus": "PCS3_LV",
+   "s_rated_mva": 5.5,
+   "control": "grid_forming_vsm",
+   "params": {
+    "p_f_droop_pu": 0.04,
+    "q_v_droop_pu": 0.05,
+    "h_sec": 2.0,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.1,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": 0.635
+  },
+  {
+   "id": "PCS4",
+   "bus": "PCS4_LV",
+   "s_rated_mva": 5.5,
+   "control": "grid_forming_vsm",
+   "params": {
+    "p_f_droop_pu": 0.04,
+    "q_v_droop_pu": 0.05,
+    "h_sec": 2.0,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.1,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": 0.635
+  },
+  {
+   "id": "PCS5",
+   "bus": "PCS5_LV",
+   "s_rated_mva": 5.5,
+   "control": "grid_forming_vsm",
+   "params": {
+    "p_f_droop_pu": 0.04,
+    "q_v_droop_pu": 0.05,
+    "h_sec": 2.0,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.1,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": 0.635
+  },
+  {
+   "id": "SOFC21",
+   "bus": "SOFC21_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  }
+ ],
+ "machines": [
+  {
+   "id": "GEN_BS",
+   "bus": "GEN_LV",
+   "s_rated_mva": 3.0,
+   "h_sec": 1.0,
+   "xd_subtransient_pu": 0.15,
+   "droop_pu": 0.05,
+   "isochronous_capable": true,
+   "neutral_grounded": false
+  }
+ ],
+ "loads": [
+  {
+   "id": "DH_A",
+   "bus": "MVA",
+   "p_mw": 15.8,
+   "q_mvar": 5.2,
+   "model": "zip",
+   "zip_p": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "zip_q": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "critical": true,
+   "sign": "load"
+  },
+  {
+   "id": "DH_B",
+   "bus": "MVB",
+   "p_mw": 15.8,
+   "q_mvar": 5.2,
+   "model": "zip",
+   "zip_p": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "zip_q": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "critical": true,
+   "sign": "load"
+  },
+  {
+   "id": "AUX1",
+   "bus": "MVA",
+   "p_mw": 2.0,
+   "q_mvar": 0.0,
+   "model": "zip",
+   "zip_p": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "zip_q": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "critical": true,
+   "sign": "load"
+  },
+  {
+   "id": "AUX2",
+   "bus": "MVB",
+   "p_mw": 2.0,
+   "q_mvar": 0.0,
+   "model": "zip",
+   "zip_p": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "zip_q": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "critical": true,
+   "sign": "load"
+  }
+ ],
+ "grounding": [
+  {
+   "id": "IT_PCS1",
+   "bus": "PCS1_LV",
+   "kind": "ungrounded",
+   "z0_ohm": 0.0,
+   "available_when_islanded": true,
+   "notes": "declared IT per PCS vendor; IMD; first-fault rule"
+  },
+  {
+   "id": "IT_PCS2",
+   "bus": "PCS2_LV",
+   "kind": "ungrounded",
+   "z0_ohm": 0.0,
+   "available_when_islanded": true,
+   "notes": "declared IT per PCS vendor; IMD; first-fault rule"
+  },
+  {
+   "id": "IT_PCS3",
+   "bus": "PCS3_LV",
+   "kind": "ungrounded",
+   "z0_ohm": 0.0,
+   "available_when_islanded": true,
+   "notes": "declared IT per PCS vendor; IMD; first-fault rule"
+  },
+  {
+   "id": "IT_PCS4",
+   "bus": "PCS4_LV",
+   "kind": "ungrounded",
+   "z0_ohm": 0.0,
+   "available_when_islanded": true,
+   "notes": "declared IT per PCS vendor; IMD; first-fault rule"
+  },
+  {
+   "id": "IT_PCS5",
+   "bus": "PCS5_LV",
+   "kind": "ungrounded",
+   "z0_ohm": 0.0,
+   "available_when_islanded": true,
+   "notes": "declared IT per PCS vendor; IMD; first-fault rule"
+  },
+  {
+   "id": "GT_A",
+   "bus": "MVA",
+   "kind": "low_resistance_grounded",
+   "z0_ohm": 38.0,
+   "available_when_islanded": true,
+   "notes": "zig-zag + NER 38 ohm, 51G"
+  },
+  {
+   "id": "GT_B",
+   "bus": "MVB",
+   "kind": "low_resistance_grounded",
+   "z0_ohm": 38.0,
+   "available_when_islanded": true,
+   "notes": "zig-zag + NER 38 ohm, 51G"
+  }
+ ],
+ "islands": [
+  {
+   "id": "NORMAL",
+   "description": "",
+   "open_switches": [],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "SOFC01",
+    "SOFC02",
+    "SOFC03",
+    "SOFC04",
+    "SOFC05",
+    "SOFC06",
+    "SOFC07",
+    "SOFC08",
+    "SOFC09",
+    "SOFC10",
+    "SOFC11",
+    "SOFC12",
+    "SOFC13",
+    "SOFC14",
+    "SOFC15",
+    "SOFC16",
+    "SOFC17",
+    "SOFC18",
+    "SOFC19",
+    "SOFC20",
+    "PCS1",
+    "PCS2",
+    "PCS3",
+    "PCS4",
+    "PCS5",
+    "SOFC21"
+   ]
+  },
+  {
+   "id": "N1_PCS",
+   "description": "",
+   "open_switches": [],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "SOFC01",
+    "SOFC02",
+    "SOFC03",
+    "SOFC04",
+    "SOFC05",
+    "SOFC06",
+    "SOFC07",
+    "SOFC08",
+    "SOFC09",
+    "SOFC10",
+    "SOFC11",
+    "SOFC12",
+    "SOFC13",
+    "SOFC14",
+    "SOFC15",
+    "SOFC16",
+    "SOFC17",
+    "SOFC18",
+    "SOFC19",
+    "SOFC20",
+    "PCS2",
+    "PCS3",
+    "PCS4",
+    "PCS5",
+    "SOFC21"
+   ]
+  },
+  {
+   "id": "N1_SOFC",
+   "description": "",
+   "open_switches": [],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "SOFC02",
+    "SOFC03",
+    "SOFC04",
+    "SOFC05",
+    "SOFC06",
+    "SOFC07",
+    "SOFC08",
+    "SOFC09",
+    "SOFC10",
+    "SOFC11",
+    "SOFC12",
+    "SOFC13",
+    "SOFC14",
+    "SOFC15",
+    "SOFC16",
+    "SOFC17",
+    "SOFC18",
+    "SOFC19",
+    "SOFC20",
+    "PCS1",
+    "PCS2",
+    "PCS3",
+    "PCS4",
+    "PCS5",
+    "SOFC21"
+   ]
+  },
+  {
+   "id": "RING_SPLIT",
+   "description": "ring open at the A/B segment and the tie: two halves",
+   "open_switches": [
+    "CB_SEG_AB1",
+    "CB_TIE"
+   ],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "SOFC01",
+    "SOFC02",
+    "SOFC03",
+    "SOFC04",
+    "SOFC05",
+    "SOFC06",
+    "SOFC07",
+    "SOFC08",
+    "SOFC09",
+    "SOFC10",
+    "SOFC11",
+    "SOFC12",
+    "SOFC13",
+    "SOFC14",
+    "SOFC15",
+    "SOFC16",
+    "SOFC17",
+    "SOFC18",
+    "SOFC19",
+    "SOFC20",
+    "PCS1",
+    "PCS2",
+    "PCS3",
+    "PCS4",
+    "PCS5",
+    "SOFC21"
+   ]
+  },
+  {
+   "id": "BUS_MVB_FAULT",
+   "description": "MVB isolated: its loads lost, all sources on the ring",
+   "open_switches": [
+    "CB_B_MVB",
+    "CB_TIE"
+   ],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "SOFC01",
+    "SOFC02",
+    "SOFC03",
+    "SOFC04",
+    "SOFC05",
+    "SOFC06",
+    "SOFC07",
+    "SOFC08",
+    "SOFC09",
+    "SOFC10",
+    "SOFC11",
+    "SOFC12",
+    "SOFC13",
+    "SOFC14",
+    "SOFC15",
+    "SOFC16",
+    "SOFC17",
+    "SOFC18",
+    "SOFC19",
+    "SOFC20",
+    "PCS1",
+    "PCS2",
+    "PCS3",
+    "PCS4",
+    "PCS5",
+    "SOFC21"
+   ]
+  },
+  {
+   "id": "BLACKSTART_GEN",
+   "description": "genset forms MVA + ring for SOFC balance-of-plant",
+   "open_switches": [
+    "CB_B_MVB"
+   ],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "GEN_BS"
+   ]
+  },
+  {
+   "id": "BLACKSTART_PCS",
+   "description": "PCS-formed alternative",
+   "open_switches": [],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "PCS1",
+    "PCS2",
+    "PCS3",
+    "PCS4",
+    "PCS5"
+   ]
+  }
+ ]
+}

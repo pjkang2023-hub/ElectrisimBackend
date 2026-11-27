@@ -48,3 +48,6 @@ dist/
 build/
 *.egg-info/
 
+
+# OpenDSS output: solved voltages, rewritten on every run (<circuit>_SavedVoltages.dbl)
+*_SavedVoltages.dbl

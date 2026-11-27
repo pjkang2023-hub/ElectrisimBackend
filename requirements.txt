@@ -11,3 +11,6 @@ arcflash-calc>=0.1.0
 pint>=0.20.1
 andes>=1.9.0
 opender>=2.2.0
+# AC/DC optimal power flow (acdc_opf_electrisim): Pyomo with Ipopt (tools/ipopt or ELECTRISIM_IPOPT); HiGHS
+pyomo>=6.10
+highspy>=1.15

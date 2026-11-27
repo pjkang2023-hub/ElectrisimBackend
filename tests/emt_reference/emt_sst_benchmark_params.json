@@ -1,0 +1,32 @@
+{
+  "description": "EMT benchmark for a solid-state transformer through a fault on its LV DC port: its rectifier (a VSC's average-value model) holding its DC link from a 10 kV grid, its DC/DC stage (a dual active bridge's average-value model) holding its 800 V LV DC port, which feeds a 1 MW resistive load. simscape_emt_sst_benchmark.m builds it in Simscape, the controllers in a MATLAB Function block acting every dt, and tests/test_emt_sst.py builds it with Electrisim's solver and controllers, both from this file. SI units; phasors are amplitudes, phase a = cos(w t + angle).",
+  "f_hz": 50.0,
+  "grid": {
+    "description": "A three-phase source, star-grounded, behind R_g and L_g, L_g damped by R_p across it; filter capacitors c_f at the rectifier's AC bus, star-grounded.",
+    "v_ll": 10000.0, "s_sc": 5e7, "xr": 10.0, "r_p": 20.0, "c_f": 1e-6
+  },
+  "rectifier": {
+    "description": "Averaged phase voltages, star-grounded, behind its reactor r, l; rated s_rated, its current limited to i_limit_pu; its DC link c_link held at v_dc, behind r_dc to the link bus; its carrier at f_sw, when it samples as in the study (not in the Simscape benchmark, whose controllers act every dt).",
+    "s_rated": 2e6, "i_limit_pu": 1.2, "r": 0.25, "l": 0.023873241463784303, "block_pu": 0.8,
+    "v_dc": 16000.0, "c_link": 6.25e-5, "r_dc": 0.01, "f_sw": 5000.0
+  },
+  "dab": {
+    "description": "A dual active bridge from the link bus (behind r_in) to its output capacitor (behind r_out to the LV DC bus): rated p_rated at its output's nominal v_out, efficiency eta, switching at f_sw (its leakage sized for its rating at 30 degrees), its output current limited to i_limit_pu either way, holding v_out; it blocks below block_pu of its input's or output's nominal voltage.",
+    "p_rated": 2e6, "eta": 0.98, "f_sw": 20000.0, "i_limit_pu": 1.2, "block_pu": 0.8,
+    "v_out": 800.0, "r_in": 0.01, "r_out": 0.001
+  },
+  "load": {"r_load": 0.64},
+  "cases": {
+    "limited": {
+      "description": "A 0.4 ohm fault on the LV DC bus from t_on to t_off: the load and the fault together need more than the bridge's current limit, which holds the bus at some 0.92 pu; it recovers when the fault clears.",
+      "r_fault": 0.4, "t_on": 0.01, "t_off": 0.03, "t_end": 0.06
+    },
+    "bolted": {
+      "description": "A 1 mohm fault on the LV DC bus at t_on: the bus collapses and the bridge blocks on undervoltage; the rectifier holds its link.",
+      "r_fault": 0.001, "t_on": 0.01, "t_off": null, "t_end": 0.04
+    }
+  },
+  "switch_r_on": 1e-5,
+  "switch_r_off": 1e7,
+  "dt": 5e-6
+}

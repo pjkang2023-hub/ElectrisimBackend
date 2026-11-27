@@ -4,12 +4,16 @@ import contextlib
 import pandapower as pp
 import pandapower.contingency as contingency
 import pandapower.shortcircuit as sc
+import sc_current_sources
+sc_current_sources.install()     # IEC 60909's single-phase current-source share
 import pandapower.plotting as plt
 from pandapower.diagnostic import diagnostic
 import pandapower.topology as top
 from typing import List
 import math
+import re
 import json
+import warnings
 import numpy as np
 import pandas as pd
 import pandapower.control as control
@@ -17,6 +21,8 @@ import pandapower.timeseries as ts
 from pandapower.timeseries import DFData
 from copy import deepcopy
 import weakref
+import der_electrisim
+import converter_rating
 
 from storage_q_capability import resolve_storage_pq
 from sc_fault_location import (
@@ -98,8 +104,13 @@ def _json_serialize_default(obj):
 
 
 def _jsonify_safe(obj):
-    """Deep-convert numpy/pandas scalars and arrays so Flask jsonify succeeds."""
-    return json.loads(json.dumps(obj, default=_json_serialize_default))
+    """
+    Deep-convert numpy/pandas scalars and arrays so Flask jsonify succeeds, and
+    NaN/Inf to None: a DC OPF has no reactive power, every Q NaN, and the
+    browser's JSON.parse rejected the whole answer.
+    """
+    plain = json.loads(json.dumps(obj, default=_json_serialize_default))
+    return _sanitize_for_strict_json(plain)
 
 
 def _blank_numeric(value):
@@ -118,6 +129,88 @@ def _ext_grid_zero_seq_min(data, min_key, max_value):
     if _blank_numeric(raw):
         return max_value
     return safe_float(raw, max_value)
+
+
+def ensure_sgen_k(net):
+    """Each static generator's short-circuit ratio k: 1.1 where the diagram
+    gives none, a value set on the element kept."""
+    if 'k' not in net.sgen.columns:
+        net.sgen['k'] = 1.1
+    else:
+        net.sgen['k'] = net.sgen['k'].where(net.sgen['k'] > 0, 1.1)
+
+
+def isolated_buses_message(net, advice="Check your network connectivity.", machines=False):
+    """The studies' refusal of buses no source supplies, naming them as the
+    diagram does, then the advice; None when every bus is supplied.
+
+    machines: a short circuit's sources - every synchronous machine in service
+    feeds a fault, slack or not. Islanded, a campus's turbines carried its
+    buses and every one was refused as isolated, its earth faults unstudied.
+    """
+    isolated_names = isolated_bus_names(net, machines)
+    if not isolated_names:
+        return None
+    return f"Isolated buses found: {', '.join(isolated_names)}. {advice}"
+
+
+def isolated_bus_names(net, machines=False):
+    """The buses no source supplies, named as the diagram does (see isolated_buses_message)."""
+    slacks = None
+    if machines:
+        slacks = set(int(b) for b in net.ext_grid.loc[net.ext_grid['in_service'].astype(bool), 'bus'])
+        if len(net.gen):
+            slacks |= set(int(b) for b in net.gen.loc[net.gen['in_service'].astype(bool), 'bus'])
+    isolated_buses = top.unsupplied_buses(net, slacks=slacks)
+    # A grounding transformer's own delta is cut off with it when its breaker opens: not a fault in the network.
+    isolated_buses = {b for b in isolated_buses if not _electrisim_is_grounding(net.bus, b)}
+    if len(isolated_buses) == 0:
+        return []
+    isolated_refs = resolve_element_refs(net, 'bus', isolated_buses)
+    return [r.get('name') or r.get('id') or str(r.get('index')) for r in isolated_refs]
+
+
+def _electrisim_json_finite(obj):
+    """A result with every NaN or infinite float (Python or numpy) as None, through dicts, lists and tuples."""
+    if isinstance(obj, dict):
+        return {k: _electrisim_json_finite(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_electrisim_json_finite(v) for v in obj]
+    if isinstance(obj, (float, np.floating)):
+        return float(obj) if math.isfinite(float(obj)) else None
+    return obj
+
+
+def _electrisim_sc_drop_dead_buses(net):
+    """
+    A short circuit's de-energised buses (no grid, machine or forming PCS reaches them) out of service, with every
+    element on them and every branch to them, and named in a warning; nothing when every bus is supplied.
+    """
+    slacks = set(int(b) for b in net.ext_grid.loc[net.ext_grid['in_service'].astype(bool), 'bus'])
+    if len(net.gen):
+        slacks |= set(int(b) for b in net.gen.loc[net.gen['in_service'].astype(bool), 'bus'])
+    dead = {int(b) for b in top.unsupplied_buses(net, slacks=slacks) if not _electrisim_is_grounding(net.bus, b)}
+    if not dead:
+        return
+    if not slacks or len(dead) >= len(net.bus):
+        raise ValueError(isolated_buses_message(net, machines=True) or 'No source energises any bus.')
+    names = [r.get('name') or r.get('id') or str(r.get('index')) for r in resolve_element_refs(net, 'bus', dead)]
+    net.bus.loc[list(dead), 'in_service'] = False
+    for table in ('load', 'sgen', 'gen', 'storage', 'shunt', 'motor', 'ward', 'xward', 'ext_grid', 'asymmetric_load',
+                  'asymmetric_sgen'):
+        df = net.get(table)
+        if df is not None and len(df) and 'bus' in df.columns:
+            df.loc[df['bus'].isin(dead), 'in_service'] = False
+    for table, cols in (('line', ('from_bus', 'to_bus')), ('trafo', ('hv_bus', 'lv_bus')),
+                        ('trafo3w', ('hv_bus', 'mv_bus', 'lv_bus')), ('impedance', ('from_bus', 'to_bus'))):
+        df = net.get(table)
+        if df is not None and len(df):
+            hit = np.zeros(len(df), dtype=bool)
+            for c in cols:
+                hit |= df[c].isin(dead).to_numpy()
+            df.loc[hit, 'in_service'] = False
+    shown = ', '.join(names[:12]) + (f' and {len(names) - 12} more' if len(names) > 12 else '')
+    _electrisim_warn(net, f"{len(names)} bus(es) no source energises are left out of the short circuit, de-energised: {shown}.")
 
 
 def ensure_ext_grid_zero_sequence_min(net):
@@ -857,7 +950,8 @@ def _append_electrisim_sgen_setup_python(lines, net):
         for idx, row in net.sgen.iterrows():
             if has_ids:
                 sid = row.get('id')
-                if sid is not None and str(sid).strip():
+                # An sgen Electrisim builds (an SST's inverter) has none: NaN, which was written as nan.
+                if sid is not None and sid == sid and str(sid).strip():
                     lines.append(f"net.sgen.at[{idx}, 'id'] = {sid!r}")
             if has_sn:
                 sn = row.get('sn_mva')
@@ -910,6 +1004,117 @@ _EXT_GRID_SC_EXPORT_COLS = (
     'r0x0_max', 'x0x_max',
     'r0x0_min', 'x0x_min',
 )
+
+# Columns the exported create_* calls carry beyond their fixed arguments:
+# whatever pandapower's short circuit reads (motor cos_phi_n, generator
+# subtransient data, sgen k / kappa, line end temperature and zero sequence,
+# trafo neutral and power-station data) and in_service. Each was left out, so
+# the script either failed in calc_sc or ran a different network.
+_EXPORT_EXTRA_COLS = {
+    'motor': ('pn_mech_mw', 'cos_phi', 'cos_phi_n', 'efficiency_n_percent', 'lrc_pu', 'rx', 'vn_kv',
+              'efficiency_percent', 'loading_percent', 'scaling', 'in_service'),
+    'line': ('in_service', 'r0_ohm_per_km', 'x0_ohm_per_km', 'c0_nf_per_km', 'g0_us_per_km',
+             'endtemp_degree'),
+    'trafo': ('in_service', 'xn_ohm', 'rn_ohm', 'pt_percent', 'oltc', 'power_station_unit'),
+    'trafo3w': ('in_service',),
+    'gen': ('in_service', 'sn_mva', 'vn_kv', 'xdss_pu', 'rdss_ohm', 'cos_phi', 'pg_percent',
+            'power_station_trafo'),
+    'sgen': ('in_service', 'k', 'rx', 'generator_type', 'kappa', 'lrc_pu', 'max_ik_ka',
+             'current_source'),
+    'load': ('in_service',),
+    'shunt': ('in_service', 'vn_kv', 'step', 'max_step'),
+    'ext_grid': ('in_service',),
+    # The DC side, as pandapower 3.3 names its columns (the EMT study's line data rides along).
+    'bus_dc': ('type', 'zone', 'max_vm_pu', 'min_vm_pu', 'in_service'),
+    'load_dc': ('scaling', 'type', 'controllable', 'in_service'),
+    'source_dc': ('type', 'in_service'),
+    'line_dc': ('g_us_per_km', 'df', 'parallel', 'type', 'max_loading_percent', 'alpha',
+                'temperature_degree_celsius', 'l_mh_per_km', 'c_uf_per_km', 'in_service'),
+    'vsc': ('pl_dc_mw', 'controllable', 'in_service'),
+    'b2b_vsc': ('pl_dc_mw', 'controllable', 'in_service'),
+}
+
+
+def _export_extra_kwargs(table, row):
+    """', col=value' for each of the table's extra columns the live row sets.
+    A null column is skipped so pandapower keeps its own NaN default."""
+    return ''.join(
+        f", {col}={_export_py_literal(row[col])}" for col in _EXPORT_EXTRA_COLS[table]
+        if col in row.index and not pd.isnull(row[col]))
+
+
+def _export_vsc_control_kwargs(row):
+    """A VSC's (or back-to-back VSC's) impedances and AC and DC control, as create_vsc takes them."""
+    return ', '.join(f"{col}={_export_py_literal(row[col])}" for col in (
+        'r_ohm', 'x_ohm', 'r_dc_ohm', 'control_mode_ac', 'control_value_ac', 'control_mode_dc', 'control_value_dc'))
+
+
+def _export_text(row, col):
+    """A text column's value, or None when the row has none."""
+    value = row.get(col) if col in row.index else None
+    return value if isinstance(value, str) and value else None
+
+
+def _export_load_dc_notes(row):
+    """Comment lines for a DC load Electrisim built or settles: what it stands for."""
+    name = row.get('name')
+    role = _export_text(row, 'electrisim_dcdc_role')
+    conv = _export_text(row, 'electrisim_dcdc_name')
+    if role == 'input':
+        eta = row.get('electrisim_dcdc_eta')
+        p_nl = row.get('electrisim_dcdc_p_nl_mw')
+        return [f"# {name}: DC/DC converter {conv}'s input - what its output delivers over its efficiency "
+                f"({100 * float(eta):g} %) plus its no-load loss ({float(p_nl):g} MW), as settled"]
+    if role == 'output':
+        return [f"# {name}: DC/DC converter {conv}'s output in power mode - its set power, injected"]
+    if role == 'der':
+        return [f"# {name}: a source's output - the power its curve gives at its bus's settled voltage"]
+    if role == 'frozen':
+        return [f"# {name}: a converter's or source's power from a settled load flow"]
+    share_p = row.get('electrisim_share_p') if 'electrisim_share_p' in row.index else None
+    if share_p is None or pd.isnull(share_p):
+        return []
+    v_min = float(row.get('electrisim_v_min_pu') or 0.0)
+    if share_p >= 1.0 - 1e-12 and not v_min > 0:
+        return []
+    shares = ', '.join(f"{100 * float(row.get(col)):g} % {kind}" for col, kind in (
+        ('electrisim_share_p', 'constant power'), ('electrisim_share_i', 'constant current'),
+        ('electrisim_share_r', 'constant resistance')) if float(row.get(col) or 0.0) > 0)
+    below = (f"; below {v_min:g} p.u. its constant-power part draws constant current" if v_min > 0 else '')
+    return [f"# {name}: a voltage-dependent DC load, rated {float(row.get('electrisim_p_rated_mw')):g} MW "
+            f"({shares}){below}.",
+            "# pandapower's DC load draws a fixed power: this is the power it settled at."]
+
+
+def _export_settled_notes(net):
+    """
+    Comment lines for the exported load flow when Electrisim settles some
+    elements by repeating the load flow, which a single pp.runpp cannot.
+    """
+    settled = []
+    if _electrisim_has_dc_load_models(net):
+        settled.append("voltage-dependent DC loads at the power their voltage gives")
+    convs = getattr(net, 'electrisim_dc_dc_converters', None) or []
+    if convs or _electrisim_dc_dc_rows(net):
+        settled.append("DC/DC converters' inputs at what their outputs deliver over their efficiency")
+    if any(c.get('control') == 'droop' for c in convs):
+        settled.append("DC/DC converters in droop at the voltage (or power) their droop gives")
+    if getattr(net, 'electrisim_ders', None):
+        settled.append("sources and stores at their terminal voltage and the power their curves give")
+    if getattr(net, 'electrisim_ssts', None):
+        settled.append("solid-state transformers' stages")
+    if _electrisim_pcs_to_settle(net):
+        settled.append("PCS set points")
+    if not settled:
+        return []
+    return ["# Note: Electrisim repeats the load flow until these agree with the voltages it",
+            "# gives, which this script cannot do:",
+            *[f"#   - {item}" for item in settled],
+            "# Their powers and set points above are the settled ones from Electrisim's last",
+            "# load flow, held fixed, so this single load flow reproduces that operating point.",
+            "# Change the network and they no longer follow it: a DC load stays at its power,",
+            "# a converter's input no longer follows its output.",
+            ""]
 
 
 def _export_float_from_payload(val):
@@ -1006,7 +1211,7 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
             sc_kwargs = _ext_grid_sc_kwargs_for_export(row, in_elem)
             lines.append(
                 f"pp.create_ext_grid(net, bus=bus_{bus}, vm_pu={vm_pu}, va_degree={va_degree}, "
-                f"name='{name}'{sc_kwargs})"
+                f"name='{name}'{sc_kwargs}{_export_extra_kwargs('ext_grid', row)})"
             )
         lines.append("")
     
@@ -1038,7 +1243,8 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
             line_code = (f"pp.create_line_from_parameters(net, from_bus=bus_{from_bus}, to_bus=bus_{to_bus}, "
                         f"length_km={length_km}, r_ohm_per_km={r_ohm_per_km}, x_ohm_per_km={x_ohm_per_km}, "
                         f"c_nf_per_km={c_nf_per_km}, g_us_per_km={g_us_per_km}, max_i_ka={max_i_ka}, "
-                        f"type='{line_type}', parallel={parallel}, df={df}, name='{name}')")
+                        f"type='{line_type}', parallel={parallel}, df={df}, name='{name}'"
+                        f"{_export_extra_kwargs('line', row)})")
             lines.append(line_code)
         lines.append("")
     
@@ -1098,7 +1304,8 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
                          f"vector_group='{vector_group}', "
                          f"vk0_percent={vk0_percent}, vkr0_percent={vkr0_percent}, "
                          f"mag0_percent={mag0_percent}, mag0_rx={mag0_rx}, "
-                         f"si0_hv_partial={si0_hv_partial}, name='{name}')")
+                         f"si0_hv_partial={si0_hv_partial}, name='{name}'"
+                         f"{_export_extra_kwargs('trafo', row)})")
             lines.append(trafo_code)
         lines.append("")
     
@@ -1168,7 +1375,7 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
                            f"vector_group='{vector_group}', "
                            f"vk0_hv_percent={vk0_hv_percent}, vk0_mv_percent={vk0_mv_percent}, vk0_lv_percent={vk0_lv_percent}, "
                            f"vkr0_hv_percent={vkr0_hv_percent}, vkr0_mv_percent={vkr0_mv_percent}, vkr0_lv_percent={vkr0_lv_percent}, "
-                           f"name='{name}')")
+                           f"name='{name}'{_export_extra_kwargs('trafo3w', row)})")
             lines.append(trafo3w_code)
         lines.append("")
     
@@ -1180,7 +1387,8 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
             p_mw = row['p_mw']
             q_mvar = row['q_mvar']
             name = row['name'] if 'name' in row else f"Load_{idx}"
-            lines.append(f"pp.create_load(net, bus=bus_{bus}, p_mw={p_mw}, q_mvar={q_mvar}, name='{name}')")
+            lines.append(f"pp.create_load(net, bus=bus_{bus}, p_mw={p_mw}, q_mvar={q_mvar}, name='{name}'"
+                         f"{_export_extra_kwargs('load', row)})")
         lines.append("")
     
     # Create static generators
@@ -1216,7 +1424,7 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
                     type_part = f", type={str(st)!r}"
             lines.append(
                 f"pp.create_sgen(net, bus=bus_{bus}, p_mw={p_mw}, q_mvar={q_mvar}, name='{name}'"
-                f"{sn_part}{scale_part}{type_part})"
+                f"{sn_part}{scale_part}{type_part}{_export_extra_kwargs('sgen', row)})"
             )
         lines.append("")
     
@@ -1228,7 +1436,8 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
             p_mw = row['p_mw']
             vm_pu = row['vm_pu']
             name = row['name'] if 'name' in row else f"Gen_{idx}"
-            lines.append(f"pp.create_gen(net, bus=bus_{bus}, p_mw={p_mw}, vm_pu={vm_pu}, name='{name}')")
+            lines.append(f"pp.create_gen(net, bus=bus_{bus}, p_mw={p_mw}, vm_pu={vm_pu}, name='{name}'"
+                         f"{_export_extra_kwargs('gen', row)})")
         lines.append("")
     
     # Create shunts
@@ -1239,7 +1448,8 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
             q_mvar = row['q_mvar']
             p_mw = row['p_mw']
             name = row['name'] if 'name' in row else f"Shunt_{idx}"
-            lines.append(f"pp.create_shunt(net, bus=bus_{bus}, q_mvar={q_mvar}, p_mw={p_mw}, name='{name}')")
+            lines.append(f"pp.create_shunt(net, bus=bus_{bus}, q_mvar={q_mvar}, p_mw={p_mw}, name='{name}'"
+                         f"{_export_extra_kwargs('shunt', row)})")
         lines.append("")
     
     # Create storage elements
@@ -1287,10 +1497,10 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
     if hasattr(net, 'bus_dc') and not net.bus_dc.empty:
         lines.append("# Create DC buses")
         for idx, row in net.bus_dc.iterrows():
-            name = row['name'] if 'name' in row else f"BusDC_{idx}"
-            vn_kv = row.get('vn_kv', 0.0)
-            in_service = row.get('in_service', True)
-            lines.append(f"bus_dc_{idx} = pp.create_dc_bus(net, vn_kv={vn_kv}, name='{name}', in_service={in_service})")
+            if _electrisim_is_hidden(net.bus_dc, idx):
+                lines.append(f"# {row['name']!s}: a battery's cells, at their open-circuit voltage")
+            lines.append(f"bus_dc_{idx} = pp.create_bus_dc(net, vn_kv={_export_py_literal(row['vn_kv'])}, "
+                         f"name={_export_py_literal(row.get('name'))}{_export_extra_kwargs('bus_dc', row)})")
         lines.append("")
     
     # Create asymmetric static generators
@@ -1392,21 +1602,8 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
         for idx, row in net.motor.iterrows():
             bus = row['bus']
             name = row['name'] if 'name' in row else f"Motor_{idx}"
-            pn_mech_mw = row.get('pn_mech_mw', 0.0)
-            cos_phi = row.get('cos_phi', 0.85)
-            efficiency_n_percent = row.get('efficiency_n_percent', 90.0)
-            lrc_pu = row.get('lrc_pu')
-            rx = row.get('rx', 0.0)
-            vn_kv = row.get('vn_kv', 0.4)
-            efficiency_percent = row.get('efficiency_percent', 90.0)
-            loading_percent = row.get('loading_percent', 100.0)
-            scaling = row.get('scaling', 1.0)
-            in_service = row.get('in_service', True)
-            lrc_param = f"lrc_pu={lrc_pu}" if lrc_pu is not None else "lrc_pu=None"
-            lines.append(f"pp.create_motor(net, bus=bus_{bus}, name='{name}', "
-                        f"pn_mech_mw={pn_mech_mw}, cos_phi={cos_phi}, efficiency_n_percent={efficiency_n_percent}, "
-                        f"{lrc_param}, rx={rx}, vn_kv={vn_kv}, efficiency_percent={efficiency_percent}, "
-                        f"loading_percent={loading_percent}, scaling={scaling}, in_service={in_service})")
+            lines.append(f"pp.create_motor(net, bus=bus_{bus}, name='{name}'"
+                         f"{_export_extra_kwargs('motor', row)})")
         lines.append("")
     
     # Create SVC elements
@@ -1469,26 +1666,44 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
                         f"controllable={controllable}, in_service={in_service})")
         lines.append("")
     
+    # Create DC lines (cables between two DC buses)
+    if hasattr(net, 'line_dc') and not net.line_dc.empty:
+        lines.append("# Create DC lines")
+        for idx, row in net.line_dc.iterrows():
+            if _electrisim_is_hidden(net.line_dc, idx):
+                lines.append(f"# {row['name']!s}: a battery's internal resistance, from its cells to its bus")
+            elif 'electrisim_dc_breaker' in row.index and row['electrisim_dc_breaker'] == True:
+                lines.append(f"# DC breaker {row['name']!s}: a low-resistance coupler, in service when closed")
+            elif 'electrisim_dc_diode' in row.index and row['electrisim_dc_diode'] == True:
+                lines.append(f"# DC diode {row['name']!s}: r_on + v_f / I at its settled current; "
+                             "out of service while it blocks")
+            lines.append(f"pp.create_line_dc_from_parameters(net, from_bus_dc=bus_dc_{int(row['from_bus_dc'])}, "
+                         f"to_bus_dc=bus_dc_{int(row['to_bus_dc'])}, length_km={_export_py_literal(row['length_km'])}, "
+                         f"r_ohm_per_km={_export_py_literal(row['r_ohm_per_km'])}, "
+                         f"max_i_ka={_export_py_literal(row['max_i_ka'])}, name={_export_py_literal(row.get('name'))}"
+                         f"{_export_extra_kwargs('line_dc', row)})")
+        lines.append("")
+
     # Create load DC elements
     if hasattr(net, 'load_dc') and not net.load_dc.empty:
         lines.append("# Create DC load elements")
+        lines.append("# Each with its index: pandapower 3.3's create_load_dc takes a new index from")
+        lines.append("# net.source_dc, so without one each DC load overwrote the first. (So the DC")
+        lines.append("# loads come before the DC sources, whose indices it checks them against.)")
         for idx, row in net.load_dc.iterrows():
-            bus = row['bus']
-            name = row['name'] if 'name' in row else f"LoadDC_{idx}"
-            p_mw = row.get('p_mw', 0.0)
-            in_service = row.get('in_service', True)
-            lines.append(f"pp.create_load_dc(net, bus=bus_{bus}, name='{name}', p_mw={p_mw}, in_service={in_service})")
+            lines.extend(_export_load_dc_notes(row))
+            lines.append(f"pp.create_load_dc(net, bus_dc=bus_dc_{int(row['bus_dc'])}, "
+                         f"p_dc_mw={_export_py_literal(row['p_dc_mw'])}, name={_export_py_literal(row.get('name'))}, "
+                         f"index={int(idx)}{_export_extra_kwargs('load_dc', row)})")
         lines.append("")
-    
+
     # Create source DC elements
     if hasattr(net, 'source_dc') and not net.source_dc.empty:
         lines.append("# Create DC source elements")
         for idx, row in net.source_dc.iterrows():
-            bus = row['bus']
-            name = row['name'] if 'name' in row else f"SourceDC_{idx}"
-            vm_pu = row.get('vm_pu', 1.0)
-            in_service = row.get('in_service', True)
-            lines.append(f"pp.create_source_dc(net, bus=bus_{bus}, name='{name}', vm_pu={vm_pu}, in_service={in_service})")
+            lines.append(f"pp.create_source_dc(net, bus_dc=bus_dc_{int(row['bus_dc'])}, "
+                         f"vm_pu={_export_py_literal(row['vm_pu'])}, name={_export_py_literal(row.get('name'))}"
+                         f"{_export_extra_kwargs('source_dc', row)})")
         lines.append("")
     
     # Create switch elements (no in_service - Switch is always in service)
@@ -1511,38 +1726,24 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
     if hasattr(net, 'vsc') and not net.vsc.empty:
         lines.append("# Create VSC (Voltage Source Converter) elements")
         for idx, row in net.vsc.iterrows():
-            bus = row['bus']
-            bus_dc = row.get('bus_dc')
-            name = row['name'] if 'name' in row else f"VSC_{idx}"
-            p_mw = row.get('p_mw', 0.0)
-            vm_pu = row.get('vm_pu', 1.0)
-            sn_mva = row.get('sn_mva', 0.0)
-            rx = row.get('rx', 0.1)
-            max_ik_ka = row.get('max_ik_ka', 0.0)
-            in_service = row.get('in_service', True)
-            # bus_dc refers to a DC bus index, so use bus_dc_{bus_dc} variable name
-            bus_dc_var = f"bus_dc_{bus_dc}" if bus_dc is not None else "None"
-            lines.append(f"pp.create_vsc(net, bus=bus_{bus}, bus_dc={bus_dc_var}, name='{name}', "
-                        f"p_mw={p_mw}, vm_pu={vm_pu}, sn_mva={sn_mva}, rx={rx}, max_ik_ka={max_ik_ka}, in_service={in_service})")
+            if _electrisim_is_aux(net.vsc, idx):
+                lines.append(f"# {row['name']!s}: an Electrisim DC/DC converter's or source's output stage - a "
+                             "near-lossless VSC from its own auxiliary AC bus and grid, holding its DC bus voltage")
+            ref_bus = row.get('ref_bus')   # an AC bus (not pd here: the storage block imports it locally)
+            ref_part = f", ref_bus=bus_{int(ref_bus)}" if ref_bus is not None and ref_bus == ref_bus else ''
+            lines.append(f"pp.create_vsc(net, bus=bus_{int(row['bus'])}, bus_dc=bus_dc_{int(row['bus_dc'])}, "
+                         f"{_export_vsc_control_kwargs(row)}, name={_export_py_literal(row.get('name'))}"
+                         f"{ref_part}{_export_extra_kwargs('vsc', row)})")
         lines.append("")
-    
+
     # Create B2B VSC elements
     if hasattr(net, 'b2b_vsc') and not net.b2b_vsc.empty:
         lines.append("# Create B2B VSC (Back-to-Back Voltage Source Converter) elements")
         for idx, row in net.b2b_vsc.iterrows():
-            bus1 = row['bus1']
-            bus2 = row['bus2']
-            name = row['name'] if 'name' in row else f"B2BVSC_{idx}"
-            p_mw = row.get('p_mw', 0.0)
-            vm1_pu = row.get('vm1_pu', 1.0)
-            vm2_pu = row.get('vm2_pu', 1.0)
-            sn_mva = row.get('sn_mva', 0.0)
-            rx = row.get('rx', 0.1)
-            max_ik_ka = row.get('max_ik_ka', 0.0)
-            in_service = row.get('in_service', True)
-            lines.append(f"pp.create_b2b_vsc(net, bus1=bus_{bus1}, bus2=bus_{bus2}, name='{name}', "
-                        f"p_mw={p_mw}, vm1_pu={vm1_pu}, vm2_pu={vm2_pu}, sn_mva={sn_mva}, "
-                        f"rx={rx}, max_ik_ka={max_ik_ka}, in_service={in_service})")
+            lines.append(f"pp.create_b2b_vsc(net, bus=bus_{int(row['bus'])}, "
+                         f"bus_dc_plus=bus_dc_{int(row['bus_dc_plus'])}, bus_dc_minus=bus_dc_{int(row['bus_dc_minus'])}, "
+                         f"{_export_vsc_control_kwargs(row)}, name={_export_py_literal(row.get('name'))}"
+                         f"{_export_extra_kwargs('b2b_vsc', row)})")
         lines.append("")
     
     # Create DC line elements
@@ -1581,8 +1782,8 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
         if sc_bus is not None and len(sc_bus) == 1:
             sc_bus = sc_bus[0]
         lines.append("# Short-circuit calculation (matches Electrisim IEC 60909 run)")
-        if not net.sgen.empty:
-            lines.append('net.sgen["k"] = 1.1')
+        # Each sgen's k is written on its create_sgen line: the 1.1 set here
+        # for all of them overrode a ratio set on the element.
         lines.append("")
         lines.append("sc.calc_sc(")
         lines.append("    net,")
@@ -1595,11 +1796,43 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
         lines.append("    kappa_method='C',")
         lines.append(f"    r_fault_ohm={r_fault_ohm},")
         lines.append(f"    x_fault_ohm={x_fault_ohm},")
-        lines.append("    check_connectivity=False,")
+        # As the backend runs it: with False a fresh net fails in pandapower's
+        # gen lookup (net._is_elements_final is never set).
+        lines.append("    check_connectivity=True,")
         lines.append("    branch_results=True,")
         lines.append("    return_all_currents=False,")
+        for key, value in _sc_iec_options(sc).items():
+            lines.append(f"    {key}={value!r},")
         lines.append(")")
         lines.append("")
+        if fault_type == '1ph':
+            # As Electrisim does: a bus with no earth return path gets no earth-fault current,
+            # whatever pandapower's current sources added there.
+            lines.append("# No earth return path (behind an ungrounded delta): no earth-fault current.")
+            lines.append("# Without the current sources such a bus has none (under 1 A).")
+            lines.append("import copy")
+            lines.append("_bare = copy.deepcopy(net)")
+            lines.append("for _t in ('sgen', 'storage'):")
+            lines.append("    if len(_bare[_t]):")
+            lines.append("        _bare[_t]['in_service'] = False")
+            lines.append("sc.calc_sc(")
+            lines.append("    _bare,")
+            lines.append(f"    fault={fault_type!r},")
+            lines.append(f"    case={fault_location!r},")
+            lines.append(f"    bus={_export_py_literal(sc_bus)},")
+            lines.append("    kappa_method='C',")
+            lines.append(f"    r_fault_ohm={r_fault_ohm},")
+            lines.append(f"    x_fault_ohm={x_fault_ohm},")
+            lines.append("    check_connectivity=True,")
+            lines.append("    branch_results=False,")
+            for key, value in _sc_iec_options(sc).items():
+                lines.append(f"    {key}={value!r},")
+            lines.append(")")
+            lines.append("_no_path = _bare.res_bus_sc.index[_bare.res_bus_sc['ikss_ka'].fillna(0.0) < 1e-3]")
+            lines.append("for _c in ('ikss_ka', 'ip_ka', 'ith_ka'):")
+            lines.append("    if _c in net.res_bus_sc.columns:")
+            lines.append("        net.res_bus_sc.loc[net.res_bus_sc.index.intersection(_no_path), _c] = 0.0")
+            lines.append("")
         lines.append("# Print short-circuit results")
         lines.append("print('\\nBus SC Results:')")
         lines.append("print(net.res_bus_sc)")
@@ -1621,19 +1854,34 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
     need_seed = bool(getattr(net, '_electrisim_export_park_need_seed', False))
     enforce_q = bool(getattr(net, '_electrisim_enforce_q_lims', False))
 
+    # The backend's angle start for a FACTS device with phase-shifting transformers.
+    init_kwargs = [f"init='{init}'"]
+    if _electrisim_facts_angle_start_applies(
+            net, {'algorithm': algorithm, 'calculate_voltage_angles': calculate_voltage_angles, 'init': init}):
+        if init == 'flat':
+            lines.append("# Note: with a VSC or other FACTS device and phase-shifting transformers, a flat")
+            lines.append("# start can converge to a wrong, collapsed solution - check the bus voltages.")
+        else:
+            lines.extend(_FACTS_ANGLE_START_PY.splitlines())
+            lines.append("")
+            lines.append("va_start = facts_angle_start(net)")
+            init_kwargs = ["init='auto'", "init_va_degree=va_start"] + (["init_vm_pu='flat'"] if init == 'dc' else [])
+        lines.append("")
+
     if need_seed:
         lines.append("# Seed load flow (park cosphi(P)/Q(V) measurements)")
         lines.append(
             f"pp.runpp(net, algorithm='{algorithm}', calculate_voltage_angles={cva_str}, "
-            f"init='{init}', run_control=False)"
+            f"{', '.join(init_kwargs)}, run_control=False)"
         )
         lines.append("")
 
+    lines.extend(_export_settled_notes(net))
     lines.append("# Run power flow")
     run_kwargs = [
         f"algorithm='{algorithm}'",
         f"calculate_voltage_angles={cva_str}",
-        f"init='{init}'",
+        *init_kwargs,
     ]
     if run_control:
         run_kwargs.append("run_control=True")
@@ -1648,11 +1896,3357 @@ def generate_pandapower_python_code(net, in_data, Busbars, algorithm, calculate_
     lines.append("print(net.res_bus)")
     lines.append("print('\\nLine Results:')")
     lines.append("print(net.res_line)")
+    if hasattr(net, 'bus_dc') and not net.bus_dc.empty:
+        lines.append("print('\\nDC Bus Results:')")
+        lines.append("print(net.res_bus_dc)")
+        for table, title in (('vsc', 'VSC'), ('line_dc', 'DC Line'), ('load_dc', 'DC Load')):
+            if table in net and len(net[table]):
+                lines.append(f"print('\\n{title} Results:')")
+                lines.append(f"print(net.res_{table})")
     lines.append("if hasattr(net, 'controller') and net.controller is not None and not net.controller.empty:")
     lines.append("    print('\\nControllers:')")
     lines.append("    print(net.controller)")
     
     return '\n'.join(lines)
+
+# --- Voltage-dependent DC loads ---------------------------------------------------------
+#
+# pandapower's DC load draws a fixed power. A DC load can also be constant
+# current, constant resistance, or a mix; its constant-power part changes to
+# constant current below v_min_pu (a converter's input current limit). The
+# model is kept as columns on net.load_dc, so it survives network copies, and
+# _electrisim_runpp repeats the load flow until those loads settle.
+
+_DC_LOAD_MODEL_COLUMNS = ('electrisim_p_rated_mw', 'electrisim_share_p', 'electrisim_share_i',
+                          'electrisim_share_r', 'electrisim_v_min_pu')
+_DC_LOAD_SHARES = {
+    'constant_power': (1.0, 0.0, 0.0),
+    'constant_current': (0.0, 1.0, 0.0),
+    'constant_resistance': (0.0, 0.0, 1.0),
+}
+
+
+def _electrisim_dc_load_shares(el):
+    """(constant power, constant current, constant resistance) shares of a DC load's rated power."""
+    model = str(el.get('load_model') or 'constant_power').strip().lower()
+    if model in _DC_LOAD_SHARES:
+        return _DC_LOAD_SHARES[model]
+    shares = [max(0.0, safe_float(el.get(k), d)) for k, d in
+              (('share_p_percent', 100.0), ('share_i_percent', 0.0), ('share_r_percent', 0.0))]
+    total = sum(shares)
+    return tuple(x / total for x in shares) if total > 0 else (1.0, 0.0, 0.0)
+
+
+def _electrisim_dc_load_power(p_rated, share_p, share_i, share_r, v_min, v):
+    """A DC load's power (MW) at its bus voltage v (p.u.)."""
+    v = max(float(v), 0.0)
+    p_part = 1.0 if v >= v_min else (v / v_min if v_min > 0 else 1.0)
+    return p_rated * (share_p * p_part + share_i * v + share_r * v * v)
+
+
+def _electrisim_has_dc_load_models(net):
+    ld = getattr(net, 'load_dc', None)
+    return (ld is not None and len(ld) and 'electrisim_share_p' in ld.columns
+            and bool((ld['electrisim_share_p'].fillna(1.0) < 1.0 - 1e-12).any()
+                     | (ld['electrisim_v_min_pu'].fillna(0.0) > 0).any()))
+
+
+# The settling loops' tolerance: 0.1 W. pandapower's DC results flicker by some 2e-9 MW between
+# load flows (a float rounding), so a tighter one never settled a converter holding a closed tie.
+_SETTLE_TOL_MW = 1e-7
+
+
+def _electrisim_drop_unsupplied_converters(net):
+    """
+    Take out of the load flow the converters on an AC bus no source reaches -
+    a grid, a slack generator (an island's, a grid-forming PCS's when it holds
+    one) or a VSC forming its AC network, as pandapower supplies a bus - naming
+    them once: a rectifier or SST cannot draw from a dead bus. A lineup's breaker open left its four rectifiers on their dead 0.48 kV
+    bus beside a live 800 V one, and no load flow solved; an SST, fed from its
+    own auxiliary grid, went on delivering from a dead one.
+    """
+    vsc = _electrisim_in_service_rows(getattr(net, 'vsc', None))
+    ssts = [r for r in getattr(net, 'electrisim_ssts', None) or [] if r.get('in_service')]
+    if (vsc is None or not len(vsc)) and not ssts:
+        return
+    forming = vsc['control_mode_ac'].astype(str).eq('slack') if vsc is not None and len(vsc) else None
+    sources = set(int(b) for b in net.ext_grid.loc[net.ext_grid['in_service'].fillna(False).astype(bool), 'bus'])
+    if len(net.gen) and 'slack' in net.gen.columns:
+        on = net.gen['in_service'].fillna(False).astype(bool) & net.gen['slack'].fillna(False).astype(bool)
+        sources |= set(int(b) for b in net.gen.loc[on, 'bus'])
+    if forming is not None:
+        sources |= set(int(b) for b in vsc.loc[forming, 'bus'])
+    try:
+        dead = set(int(b) for b in top.unsupplied_buses(net, slacks=sources))
+    except Exception as err:   # noqa: BLE001 - the load flow says what it finds without this
+        print(f"Unsupplied converters not looked for: {type(err).__name__}: {err}")
+        return
+    if not dead:
+        return
+    names = getattr(net, 'user_friendly_names', {}) or {}
+    out = []
+    if vsc is not None and len(vsc):
+        for i in vsc.index:
+            if int(vsc.at[i, 'bus']) in dead and not forming[i] and not _electrisim_is_aux(net.vsc, i):
+                net.vsc.at[i, 'in_service'] = False
+                out.append(str(names.get(net.vsc.at[i, 'name'], net.vsc.at[i, 'name'])))
+    for rec in ssts:
+        if int(rec['bus_mv']) in dead:
+            rec['in_service'] = False
+            for table, i in rec['aux'] + [st['input'] for st in rec['stages']] + [st['output'] for st in rec['stages']]:
+                if i in net[table].index:
+                    net[table].at[i, 'in_service'] = False
+            out.append(str(rec['label']))
+    if out:
+        _electrisim_warn(net, f"{', '.join(sorted(out))} {'have' if len(out) > 1 else 'has'} no AC supply - no "
+                              "source reaches the AC bus - and " + ('are' if len(out) > 1 else 'is')
+                         + " out of this load flow.")
+
+
+def _electrisim_runpp(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, **kwargs):
+    """
+    The load flow, and again for each DC/DC converter it finds with no supply
+    at its input: such a converter is out, and what only it held goes with it.
+    Its output was a source of its own (an auxiliary converter holding it), so
+    with its input dead it still supplied it: on the AI factory, rack A1's
+    800/50 V supply out left its 50 V bus dead but its 12 V GPUs served - none
+    of their 1 MW counted lost.
+    """
+    out = _electrisim_runpp_once(net, max_rounds, tolerance_mw, **kwargs)
+    for _ in range(len(getattr(net, 'electrisim_dc_dc_converters', None) or [])):
+        if not _electrisim_drop_dc_dc_without_input(net):
+            break
+        out = _electrisim_runpp_once(net, max_rounds, tolerance_mw, **kwargs)
+    return out
+
+
+def _electrisim_false_zero_volt(net):
+    """
+    Why a converged load flow is false, or None. pandapower's Newton-Raphson leaves a
+    load's voltage dependence out of its Jacobian, and constant-impedance or
+    constant-current loads have a second root of the same equations: their bus at 0 V,
+    drawing nothing. Heavy enough, it converges there. (A dead bus is NaN, not 0.)
+    """
+    res = getattr(net, 'res_bus', None)
+    if res is None or not len(res):
+        return None
+    dead = res.index[res.vm_pu < 1e-3]
+    if not len(dead):
+        return None
+    names = getattr(net, 'user_friendly_names', {}) or {}
+    labels = ', '.join(str(names.get(net.bus.at[i, 'name'], net.bus.at[i, 'name'])) for i in dead)
+    return (f'Newton-Raphson only reached a false solution with bus {labels} at 0 V. Constant-impedance and '
+            'constant-current loads this heavy for the network are beyond it: set const_z_percent and '
+            'const_i_percent to 0, or lighten the load.')
+
+
+def _electrisim_drop_dc_dc_without_input(net):
+    """Each in-service DC/DC converter whose input bus has no voltage, out, said so. True if any."""
+    res = getattr(net, 'res_bus_dc', None)
+    if res is None or not len(res):
+        return False
+    names = getattr(net, 'user_friendly_names', {}) or {}
+    dropped = []
+    for rec in getattr(net, 'electrisim_dc_dc_converters', None) or []:
+        if not rec.get('in_service', True):
+            continue
+        bus = rec.get('bus_in')
+        if bus is None or bus not in res.index or not bool(net.bus_dc.at[bus, 'in_service']):
+            continue
+        if np.isfinite(res.at[bus, 'vm_pu']):
+            continue
+        _electrisim_set_dc_dc_in_service(net, rec, False)
+        bus_label = names.get(net.bus_dc.at[bus, 'name'], net.bus_dc.at[bus, 'name'])
+        dropped.append(f"{rec['label']} (input {bus_label})")
+    if dropped:
+        _electrisim_warn(net, 'No supply at the input of ' + ', '.join(dropped) + ': out of service, '
+                              'and what only it supplied with it.')
+    return bool(dropped)
+
+
+def _electrisim_runpp_once(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, **kwargs):
+    """
+    The load flow with the DC diodes settled around it: each conducting or
+    blocking as the voltages of the last load flow set it, its forward drop
+    at the current it carries - repeating until none changes. Converters with
+    no AC supply out of it first.
+    """
+    _electrisim_drop_unsupplied_converters(net)
+    if not _electrisim_live_dc_diodes(net):
+        out = _electrisim_runpp_settled(net, max_rounds, tolerance_mw, **kwargs)
+        _electrisim_warn_island_short(net)
+        _electrisim_warn_rectifier_limits(net)
+        return out
+    _electrisim_start_dc_diodes(net)
+    calm = 0                                    # rounds since a diode last switched
+    for _ in range(30):
+        _electrisim_runpp_settled(net, max_rounds, tolerance_mw, **kwargs)
+        states = [bool(net.line_dc.at[d['line'], 'in_service']) for d in _electrisim_live_dc_diodes(net)]
+        changed = _electrisim_settle_dc_diodes(net, noise_ok=calm >= _DC_DIODE_NOISE_ROUNDS)
+        calm = calm + 1 if states == [bool(net.line_dc.at[d['line'], 'in_service'])
+                                      for d in _electrisim_live_dc_diodes(net)] else 0
+        if not changed:
+            _electrisim_warn_unsupplied_dc(net)
+            _electrisim_warn_island_short(net)
+            _electrisim_warn_rectifier_limits(net)
+            return None
+        kwargs = {**kwargs, 'init': 'results'}
+    _electrisim_warn(net, 'The DC diodes had not settled after 30 load flows: '
+                          'each is as the last one left it.')
+    _electrisim_warn_island_short(net)
+    _electrisim_warn_rectifier_limits(net)
+    return None
+
+
+def _electrisim_runpp_settled(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, **kwargs):
+    """
+    The load flow, with the microgrid sources and stores settled: each one's
+    terminal voltage at the current it delivers, each directly connected
+    PV array or SOFC at the power its curve gives at its bus's voltage, each
+    DC/DC converter in droop within its rating - repeating until they agree.
+    Without them, _electrisim_runpp_converters alone.
+    """
+    droop = any(c.get('control') == 'droop' for c in getattr(net, 'electrisim_dc_dc_converters', None) or [])
+    for conv in getattr(net, 'electrisim_dc_dc_converters', None) or []:
+        conv.pop('limit_hold', None)            # its limit may hold again, the network having changed
+    rated = _electrisim_rated_rectifiers(net)
+    for st in rated.values():
+        st['hold'] = False
+    pcs = _electrisim_pcs_to_settle(net)
+    if (not getattr(net, 'electrisim_ders', None) and not droop and not pcs and not rated
+            and not _electrisim_follow_load_vscs(net)):
+        return _electrisim_runpp_converters(net, max_rounds, tolerance_mw, **kwargs)
+    # A VSC following its bus's load starts each round as the first did: from the last results, a
+    # rectifier whose power had moved converged to a collapsed root (its 505 V bus at 0 p.u.) or not at
+    # all - pandapower's VSC is started from its last internal voltages, far from its new operating point.
+    warm = not _electrisim_follow_load_vscs(net)
+    for _ in range(60):
+        _electrisim_runpp_converters(net, max_rounds, tolerance_mw, **kwargs)
+        if max(_electrisim_settle_ders(net), _electrisim_settle_pcs(net)) <= 1e-8:
+            return None
+        if warm:
+            kwargs = {**kwargs, 'init': 'results'}
+    _electrisim_warn(net, 'The sources, stores and PCS had not settled after 60 load flows: '
+                          'their voltages and powers are those of the last one.')
+    return None
+
+
+def _electrisim_runpp_converters(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, **kwargs):
+    """
+    pp.runpp with the DC/DC converters' inputs matched to their outputs, and
+    voltage-dependent DC loads settled: plain runpp when there is neither.
+
+    Each round solves the load flow, then sets each converter's input to what
+    its output delivered, divided by its efficiency, plus its no-load loss -
+    until they agree. A chain of converters settles in a round per converter.
+    """
+    rows = _electrisim_dc_dc_rows(net)
+    if not rows:
+        return _electrisim_runpp_dc_loads(net, max_rounds, tolerance_mw, **kwargs)
+    for _ in range(max_rounds):
+        _electrisim_runpp_dc_loads(net, max_rounds, tolerance_mw, **kwargs)
+        worst = 0.0
+        for table, i in rows:
+            df, col = net[table], _STAGE_P_COLUMN[table]
+            p_out = _electrisim_dc_dc_output_mw(net, i, table)
+            if not np.isfinite(p_out):
+                continue
+            target = _electrisim_dc_dc_input_power(p_out, float(df.at[i, 'electrisim_dcdc_eta']),
+                                                   float(df.at[i, 'electrisim_dcdc_p_nl_mw']))
+            worst = max(worst, abs(target - float(df.at[i, col])))
+            df.at[i, col] = target
+        if worst <= tolerance_mw:
+            return None
+        kwargs = {**kwargs, 'init': 'results'}
+    _electrisim_warn(net, f"The DC/DC converters' inputs had not settled after {max_rounds} load flows.")
+    return None
+
+
+def _electrisim_gens_beside_vscs(net):
+    """In-service generators, not slack, holding the voltage of an AC bus an in-service VSC is on."""
+    gen = _electrisim_in_service_rows(net.gen)
+    vsc = _electrisim_in_service_rows(getattr(net, 'vsc', None))
+    if gen is None or not len(gen) or vsc is None or not len(vsc):
+        return []
+    beside = gen['bus'].isin(set(vsc['bus']))
+    if 'slack' in gen.columns:
+        beside &= ~gen['slack'].fillna(False).astype(bool)
+    return [int(i) for i in gen.index[beside]]
+
+
+def _electrisim_pp_runpp(net, kwargs):
+    """
+    pp.runpp; and when it does not converge with a generator holding the
+    voltage of a bus a VSC is on, again from a start beside the solution.
+    pandapower's Newton-Raphson can fail from its own start there: the 800 V
+    AI factory's back-up genset on its lineup's 0.48 kV bus, beside the
+    rectifiers holding the 800 V, failed every start and setting, though the
+    network solves with 0.15 Mvar from it. Each such generator is first a PQ
+    source at its power, then, from that solution, as it is.
+
+    A cold start ('auto') that does not converge is tried once from a flat
+    start first. On the PCS3750 reference's 30 min time series, a step's DC/DC
+    converter inputs settling sent one load flow wandering from its 'auto'
+    start - not converged in 30 iterations, though 50 reached it - and every
+    later round through the DC loads' halving to 62.6 MWh "not served" (with
+    some BLAS kernels; others had it). From flat it converged in 11.
+    """
+    try:
+        return pp.runpp(net, **kwargs)
+    except pp.LoadflowNotConverged:
+        if kwargs.get('init', 'auto') == 'auto':
+            flat = {k: v for k, v in kwargs.items() if k not in ('init_va_degree', 'init_vm_pu')}
+            try:
+                return pp.runpp(net, **{**flat, 'init': 'flat'})
+            except pp.LoadflowNotConverged:
+                pass
+        gens = _electrisim_gens_beside_vscs(net)
+        if not gens:
+            raise
+    added = []
+    try:
+        for i in gens:
+            scaling = net.gen.at[i, 'scaling'] if 'scaling' in net.gen.columns else 1.0
+            added.append(pp.create_sgen(net, int(net.gen.at[i, 'bus']), p_mw=float(net.gen.at[i, 'p_mw']), q_mvar=0.0,
+                                        scaling=1.0 if pd.isna(scaling) else float(scaling),
+                                        name='_electrisim_pq_start'))
+            net.gen.at[i, 'in_service'] = False
+        pp.runpp(net, **kwargs)
+    finally:
+        net.sgen.drop(added, inplace=True)
+        for i in gens:
+            net.gen.at[i, 'in_service'] = True
+    start = {k: v for k, v in kwargs.items() if k not in ('init_va_degree', 'init_vm_pu')}
+    return pp.runpp(net, **{**start, 'init': 'results'})
+
+
+def _electrisim_runpp_dc_loads(net, max_rounds=60, tolerance_mw=_SETTLE_TOL_MW, **kwargs):
+    """
+    pp.runpp with voltage-dependent DC loads settled: plain runpp when there
+    is none.
+
+    Each such load is solved for the power it draws at the voltage that power
+    gives, g(p) = p - P(v(p)) = 0. A round sets each load to the power its
+    voltage gave in the last one - which settles normal cases in a few rounds -
+    while each load keeps a bracket on g's sign change and bisects when the
+    next power would leave it. A load flow that does not solve counts as too
+    much load. Near the voltage-collapse point, where repeating alone swings
+    back and forth, the bracket still closes on the answer.
+
+    Until a round has solved, the powers halve towards none with each load flow
+    that does not: one with none is tried first, and when that does not solve
+    either - the load flow fails for another reason, an oversized AC load, a
+    supply out - nor will the rest, which then are not run (they were 60 load
+    flows, each with its own angle start, 8 s). The loads are left at the
+    powers they would have reached.
+    """
+    if not _electrisim_has_dc_load_models(net):
+        try:
+            return _electrisim_pp_runpp(net, _electrisim_facts_angle_start(net, kwargs))
+        except pp.LoadflowNotConverged:
+            if kwargs.get('init') != 'results':
+                raise
+            # A warm start that cannot reach a point far from the last: once more, cold. The SSTs'
+            # inputs stepping from no load to 11 MW in one round, with one PCS holding the island's
+            # balance, sent every later load flow of a block-out case through the halving below.
+            return _electrisim_pp_runpp(net, _electrisim_facts_angle_start(net, {**kwargs, 'init': 'auto'}))
+    ld = net.load_dc
+    rows = [i for i in ld.index if pd.notna(ld.at[i, 'electrisim_share_p'])]
+    lo = {i: 0.0 for i in rows}       # powers known to be too low (g < 0)
+    hi = {i: None for i in rows}      # powers known to be too high (g > 0), once one is
+    # The angle start sees the AC network alone, which the rounds do not change: one per start.
+    starts = {}
+
+    def runpp():
+        init = kwargs.get('init', 'auto')
+        if init not in starts:
+            starts[init] = _electrisim_facts_angle_start(net, kwargs)
+        try:
+            _electrisim_pp_runpp(net, starts[init])
+        except pp.LoadflowNotConverged:
+            if init != 'results':
+                raise
+            # From the last results it may not reach a point far from them; from a cold start it may.
+            if 'auto' not in starts:
+                starts['auto'] = _electrisim_facts_angle_start(net, {**kwargs, 'init': 'auto'})
+            _electrisim_pp_runpp(net, starts['auto'])
+
+    def halve():
+        for i in rows:
+            p = float(ld.at[i, 'p_dc_mw'])
+            hi[i] = p if hi[i] is None else min(hi[i], p)
+            ld.at[i, 'p_dc_mw'] = 0.5 * (lo[i] + hi[i])
+
+    probe = True
+    for k in range(max_rounds):
+        try:
+            runpp()
+        except pp.LoadflowNotConverged:
+            halve()
+            kwargs = {**kwargs, 'init': 'auto'}
+            if probe and k + 1 < max_rounds and not _electrisim_dc_loads_none_solve(net, rows, runpp):
+                for _ in range(max_rounds - k - 1):
+                    halve()
+                break
+            probe = False    # it solves with none: the halving goes on
+            continue
+        probe = False
+        worst = 0.0
+        proposals = {}
+        for i in rows:
+            bus = ld.at[i, 'bus_dc']
+            v = net.res_bus_dc.at[bus, 'vm_pu'] if bus in net.res_bus_dc.index else np.nan
+            if not np.isfinite(v):
+                continue
+            p = float(ld.at[i, 'p_dc_mw'])
+            target = _electrisim_dc_load_power(*(float(ld.at[i, c]) for c in _DC_LOAD_MODEL_COLUMNS), v)
+            worst = max(worst, abs(target - p))
+            if target > p:
+                lo[i] = max(lo[i], p)
+            elif target < p:
+                hi[i] = p if hi[i] is None else min(hi[i], p)
+            inside = target > lo[i] and (hi[i] is None or target < hi[i])
+            proposals[i] = target if inside else 0.5 * (lo[i] + (hi[i] if hi[i] is not None else 2 * p))
+        if worst <= tolerance_mw:
+            # The powers this round used are those its voltages give.
+            return None
+        for i, p_next in proposals.items():
+            ld.at[i, 'p_dc_mw'] = p_next
+        if kwargs.get('init') != 'results':
+            kwargs = {**kwargs, 'init': 'results'}
+    _electrisim_warn(net, f"Voltage-dependent DC loads had not settled after {max_rounds} load flows: "
+                          "their powers are those of the last one.")
+    return None
+
+
+def _electrisim_dc_loads_none_solve(net, rows, runpp):
+    """Whether the load flow solves with the voltage-dependent DC loads drawing nothing; their powers kept."""
+    ld = net.load_dc
+    kept = {i: ld.at[i, 'p_dc_mw'] for i in rows}
+    for i in rows:
+        ld.at[i, 'p_dc_mw'] = 0.0
+    try:
+        runpp()
+        return True
+    except pp.LoadflowNotConverged:
+        return False
+    except Exception:   # noqa: BLE001 - not known: the halving goes on, as without the probe
+        return True
+    finally:
+        for i, p in kept.items():
+            ld.at[i, 'p_dc_mw'] = p
+
+
+def _electrisim_warn(net, message):
+    """A warning returned with the results (net.warnings), and printed."""
+    if not hasattr(net, 'warnings'):
+        net.warnings = []
+    net.warnings.append(message)
+    print(f"WARNING: {message}")
+
+
+# --- Voltage angles with a VSC or other FACTS device --------------------------------------
+#
+# pandapower 3.3 starts the load flow of a network with an in-service VSC, SSC,
+# SVC or TCSC flat - 0 degrees at every bus - even when it calculates voltage
+# angles (auxiliary._init_runpp_options: init_va_degree is 'dc' only "if
+# calculate_voltage_angles and not with_facts"), since its usual start, a DC
+# load flow, finds the VSC's internal bus isolated and returns NaN. A flat
+# start cannot follow transformer phase shifts: with two 330-degree shifts in
+# series Newton-Raphson converges to a second, collapsed root of the load-flow
+# equations (0.08 p.u. at the load) and reports it as converged. The start
+# pandapower uses without the FACTS devices - its DC load flow, with each VSC
+# holding the AC voltage as an AC slack in its place - is passed instead.
+
+_FACTS_TABLES = ('vsc', 'b2b_vsc', 'ssc', 'svc', 'tcsc')
+
+
+def _electrisim_in_service_rows(df):
+    if df is None or not len(df):
+        return df
+    return df[df['in_service'].fillna(False).astype(bool)] if 'in_service' in df.columns else df
+
+
+def _electrisim_angles_calculated(net, calculate_voltage_angles):
+    """Whether pp.runpp calculates voltage angles: pandapower's own reading of 'auto' (runpp default True)."""
+    if not (isinstance(calculate_voltage_angles, str) and calculate_voltage_angles == 'auto'):
+        return bool(calculate_voltage_angles)
+    is_hv_bus = np.where(net.bus.vn_kv.values > 70)[0]
+    if any(is_hv_bus) > 0:   # as pandapower writes it
+        line_buses = set(net.line.from_bus.values) & set(net.line.to_bus.values)
+        return any(a in line_buses for a in net.bus.index[is_hv_bus])
+    return False
+
+
+def _electrisim_has_phase_shift(net):
+    """An in-service transformer with a phase shift: a vector group's, or a phase-shifting tap's."""
+    trafo = _electrisim_in_service_rows(net.trafo)
+    if trafo is not None and len(trafo):
+        if (np.mod(trafo['shift_degree'].fillna(0.0).astype(float), 360.0) > 1e-9).any():
+            return True
+        if 'tap_step_degree' in trafo.columns:
+            steps = (trafo['tap_pos'].fillna(0) - trafo['tap_neutral'].fillna(0)) * trafo['tap_step_degree'].fillna(0)
+            if (np.abs(steps.astype(float)) > 1e-9).any():
+                return True
+    t3 = _electrisim_in_service_rows(net.trafo3w)
+    if t3 is not None and len(t3):
+        for col in ('shift_mv_degree', 'shift_lv_degree'):
+            if col in t3.columns and (np.mod(t3[col].fillna(0.0).astype(float), 360.0) > 1e-9).any():
+                return True
+    return False
+
+
+def _electrisim_facts_angle_seed(net):
+    """
+    Bus voltage angles (degrees, net.bus order) from pandapower's DC load flow
+    of the network without its FACTS devices: each VSC (or back-to-back VSC)
+    holding its AC bus in slack mode an external grid there, each TCSC a closed
+    bus-bus switch. A bus it leaves unsolved starts at 0, as before.
+    """
+    probe = deepcopy(net)
+    for table in ('vsc', 'b2b_vsc'):
+        df = _electrisim_in_service_rows(getattr(probe, table, None))
+        if df is not None and len(df) and 'control_mode_ac' in df.columns:
+            for bus in df.loc[df['control_mode_ac'] == 'slack', 'bus'].unique():
+                if not (probe.ext_grid['bus'] == bus).any():
+                    pp.create_ext_grid(probe, int(bus), vm_pu=1.0, va_degree=0.0)
+    tcsc = _electrisim_in_service_rows(getattr(probe, 'tcsc', None))
+    if tcsc is not None and len(tcsc):
+        for _, row in tcsc.iterrows():
+            pp.create_switch(probe, int(row['from_bus']), int(row['to_bus']), et='b', closed=True)
+    for table in _FACTS_TABLES:
+        if table in probe and len(probe[table]):
+            probe[table] = probe[table].iloc[0:0]
+    if 'controller' in probe and len(probe.controller):
+        probe.controller = probe.controller.iloc[0:0]
+    pp.rundcpp(probe, calculate_voltage_angles=True)
+    va = probe.res_bus['va_degree'].reindex(net.bus.index).to_numpy(dtype=float)
+    # A list: pandapower 3.3 compares init_va_degree with 'results' and fails on an array.
+    return np.nan_to_num(va, nan=0.0).tolist()
+
+
+# _electrisim_facts_angle_seed as the exported Python script runs it.
+_FACTS_ANGLE_START_PY = '''\
+# Voltage-angle start, as Electrisim runs it: pandapower starts a network with a
+# VSC or other FACTS device flat even when it calculates voltage angles, and with
+# phase-shifting transformers a flat start can converge to a collapsed solution.
+# Start instead from the DC load flow of the network without the FACTS devices,
+# each VSC in AC slack mode an external grid, each TCSC a closed switch.
+def facts_angle_start(net):
+    import copy
+    probe = copy.deepcopy(net)
+    for table in ('vsc', 'b2b_vsc'):
+        df = probe[table][probe[table]['in_service'].fillna(False).astype(bool)]
+        for bus in df.loc[df['control_mode_ac'] == 'slack', 'bus'].unique():
+            if not (probe.ext_grid['bus'] == bus).any():
+                pp.create_ext_grid(probe, int(bus), vm_pu=1.0, va_degree=0.0)
+    tcsc = probe.tcsc[probe.tcsc['in_service'].fillna(False).astype(bool)]
+    for _, row in tcsc.iterrows():
+        pp.create_switch(probe, int(row['from_bus']), int(row['to_bus']), et='b', closed=True)
+    for table in ('vsc', 'b2b_vsc', 'ssc', 'svc', 'tcsc', 'controller'):
+        probe[table] = probe[table].iloc[0:0]
+    pp.rundcpp(probe, calculate_voltage_angles=True)
+    # A list: pandapower 3.3 fails on an array here.
+    return probe.res_bus['va_degree'].reindex(net.bus.index).fillna(0.0).astype(float).tolist()
+'''
+
+
+def _electrisim_facts_angle_start_applies(net, kwargs):
+    """
+    Whether a load flow with these pp.runpp keyword arguments is one the angle
+    start is for: Newton-Raphson, started 'auto', 'dc' or 'flat', on a network
+    with a FACTS device and a phase-shifting transformer, angles calculated.
+    """
+    if (kwargs.get('algorithm', 'nr') != 'nr' or kwargs.get('init', 'auto') not in ('auto', 'dc', 'flat')
+            or kwargs.get('init_va_degree') is not None
+            or not _electrisim_net_has_facts(net)):
+        return False
+    try:
+        return bool(_electrisim_angles_calculated(net, kwargs.get('calculate_voltage_angles', True))
+                    and _electrisim_has_phase_shift(net))
+    except Exception as err:
+        print(f"Angle start for the FACTS devices skipped: {type(err).__name__}: {err}")
+        return False
+
+
+def _electrisim_facts_angle_start(net, kwargs):
+    """
+    pp.runpp keyword arguments with the angle start above, for a network with
+    a FACTS device and a phase-shifting transformer whose voltage angles are
+    calculated. init='auto' (and 'dc', which pandapower cannot run with a VSC)
+    get the start; an explicit flat start is kept, with a warning that it can
+    converge to a collapsed solution.
+    """
+    if not _electrisim_facts_angle_start_applies(net, kwargs):
+        return kwargs
+    init = kwargs.get('init', 'auto')
+    cause = ("Voltage angles are calculated and the network has a VSC or other FACTS device and "
+             "phase-shifting transformers. pandapower 3.3 starts such a load flow flat, which can "
+             "converge to a wrong, collapsed solution")
+    if init == 'flat':
+        message = (cause + " - a flat start (init='flat') was used here: check the bus voltages, or run "
+                           "with Initialization 'Auto' or 'DC', which start from the transformers' angles.")
+    else:
+        try:
+            seed = _electrisim_facts_angle_seed(net)
+        except Exception as err:
+            seed = None
+            message = (cause + f"; its angles could not be estimated for a better start ({type(err).__name__}: "
+                       f"{err}) - check the bus voltages.")
+        if seed is not None:
+            start = {**kwargs, 'init': 'auto', 'init_va_degree': seed}
+            if init == 'dc':
+                start['init_vm_pu'] = 'flat'
+            return start
+    if message not in (getattr(net, 'warnings', None) or []):
+        _electrisim_warn(net, message)
+    return kwargs
+
+
+# --- DC/DC converters --------------------------------------------------------------------
+#
+# pandapower has no DC/DC converter, so one is built from parts it has. Its
+# input is a DC load drawing what the output delivers divided by the
+# efficiency, plus the no-load loss. Its output, in voltage mode, is a
+# near-lossless VSC from an auxiliary AC grid holding the output voltage (a DC
+# network held by a DC source alone does not converge); in power mode, an
+# injection of the set power into an output network another element holds.
+# _electrisim_runpp repeats the load flow until each input matches its
+# output. The converter's data is kept as columns on its input load, so it
+# survives network copies; the auxiliary elements are marked electrisim_aux
+# and left out of the results.
+
+_DCDC_AUX_R_PU, _DCDC_AUX_X_PU, _DCDC_AUX_RDC_PU = 1e-4, 1e-3, 1e-6
+_DCDC_CONTROLS = ('voltage', 'power', 'droop', 'dispatch', 'mppt', 'follower', 'smoothing')
+
+
+def _electrisim_is_pcs(df, index):
+    """Whether a generator or static generator row is a PCS, reported with the PCS."""
+    return 'electrisim_pcs' in df.columns and index in df.index and df.at[index, 'electrisim_pcs'] == True
+
+
+def _electrisim_is_hidden(df, index):
+    """Whether a row is a source's or store's own part, reported with it."""
+    return 'electrisim_hidden' in df.columns and index in df.index and df.at[index, 'electrisim_hidden'] == True
+
+
+def _electrisim_is_aux(df, index):
+    """Whether a row is a DC/DC converter's auxiliary element, kept out of the results."""
+    return 'electrisim_aux' in df.columns and index in df.index and df.at[index, 'electrisim_aux'] == True
+
+
+def _electrisim_without_aux(df):
+    """A results table without the DC/DC converters' auxiliary rows."""
+    if df is None or 'electrisim_aux' not in getattr(df, 'columns', ()):
+        return df
+    return df[df['electrisim_aux'] != True]
+
+
+def _electrisim_res_without_aux(net, table):
+    """A copy of ``table``'s results without the converters' auxiliary rows."""
+    res = net[f'res_{table}']
+    df = net[table]
+    if 'electrisim_aux' in df.columns:
+        aux = df.index[df['electrisim_aux'] == True]
+        res = res.drop(index=res.index.intersection(aux))
+    return res.copy()
+
+
+def _electrisim_dc_dc_input_power(p_out, eta, p_nl):
+    """What a DC/DC converter draws (MW) for ``p_out`` delivered; losses either way."""
+    return p_out / eta + p_nl if p_out >= 0 else p_out * eta + p_nl
+
+
+def _electrisim_stage_columns(name, eta, p_nl_mw, output):
+    """
+    The columns that make a load a converter stage's input: _electrisim_runpp
+    sets its power from what ``output`` (table, index) delivers.
+    """
+    return dict(electrisim_aux=True, electrisim_dcdc_role='input', electrisim_dcdc_name=name,
+                electrisim_dcdc_eta=eta, electrisim_dcdc_p_nl_mw=p_nl_mw,
+                electrisim_dcdc_out_table=output[0], electrisim_dcdc_out_idx=float(output[1]))
+
+
+def _electrisim_aux_dc_source(net, bus_dc, vm_pu, rated_mw, name, in_service):
+    """
+    A near-lossless VSC from an auxiliary AC grid, holding ``bus_dc`` at
+    ``vm_pu``: a converter's output stage. Returns (vsc, AC bus, grid).
+    """
+    vn = float(net.bus_dc.at[bus_dc, 'vn_kv'])
+    z_base = vn ** 2 / max(rated_mw, 1.0)
+    aux_bus = pp.create_bus(net, vn_kv=vn, name=f'{name} auxiliary AC', in_service=in_service)
+    net.bus.at[aux_bus, 'electrisim_aux'] = True
+    aux_grid = pp.create_ext_grid(net, aux_bus, vm_pu=1.0, name=f'{name} auxiliary grid', in_service=in_service,
+                                  s_sc_max_mva=1000.0, s_sc_min_mva=1000.0, rx_max=0.1, rx_min=0.1)
+    net.ext_grid.at[aux_grid, 'electrisim_aux'] = True
+    vsc = pp.create_vsc(net, aux_bus, bus_dc, r_ohm=_DCDC_AUX_R_PU * z_base, x_ohm=_DCDC_AUX_X_PU * z_base,
+                        r_dc_ohm=_DCDC_AUX_RDC_PU * z_base, control_mode_ac='q_mvar', control_value_ac=0.0,
+                        control_mode_dc='vm_pu', control_value_dc=vm_pu, name=f'{name} output',
+                        in_service=in_service)
+    net.vsc.at[vsc, 'electrisim_aux'] = True
+    return int(vsc), int(aux_bus), int(aux_grid)
+
+
+def _electrisim_new_load_dc(net, bus, p_mw, name, in_service, **columns):
+    idx = int(net.load_dc.index.max()) + 1 if len(net.load_dc) else 0
+    pp.create_load_dc(net, bus_dc=bus, p_dc_mw=p_mw, name=name, in_service=in_service, index=idx)
+    for key, value in columns.items():
+        net.load_dc.at[idx, key] = value
+    return idx
+
+
+def _electrisim_build_dc_dc_converters(net):
+    pending = getattr(net, '_electrisim_pending_dc_dc', None) or []
+    net.electrisim_dc_dc_converters = []
+    for el in pending:
+        name = el.get('name')
+        label = el.get('userFriendlyName') or name
+        b_in, b_out = _electrisim_dc_bus(net, el.get('bus_in')), _electrisim_dc_bus(net, el.get('bus_out'))
+        if b_in is None or b_out is None or b_in == b_out:
+            _electrisim_warn(net, f"DC/DC Converter '{label}' needs a DC bus at its input and another at its output, "
+                                  "so it is left out.")
+            continue
+        # Its control: voltage and power, and the modes its sources need - droop (voltage, lowered
+        # with its power), dispatch (power), MPPT and follower (power: its PV array's maximum
+        # power, its SOFC's set power) and smoothing (power: none in a load flow).
+        control = str(el.get('control_mode') or 'voltage').strip().lower()
+        if control not in _DCDC_CONTROLS:
+            control = 'power' if control.startswith('p') else 'voltage'
+        mode = 'voltage' if control in ('voltage', 'droop') else 'power'
+        eta = safe_float(el.get('efficiency_percent'), 98.0) / 100.0
+        if not 0 < eta <= 1:
+            _electrisim_warn(net, f"DC/DC Converter '{label}': an efficiency of {100 * eta:g} % is taken as 100 %.")
+            eta = 1.0
+        rec = {
+            'name': name, 'id': el.get('id', ''), 'label': label, 'mode': mode, 'bus_in': int(b_in), 'bus_out': int(b_out),
+            'rated_mw': safe_float(el.get('rated_mw'), 0.0), 'eta': eta,
+            'p_nl_mw': safe_float(el.get('no_load_loss_kw'), 0.0) / 1e3,
+            'vm_out_pu': safe_float(el.get('vm_out_pu'), 1.0), 'p_set_mw': safe_float(el.get('p_set_mw'), 0.0),
+            'bidirectional': _electrisim_flag(el.get('bidirectional'), False),
+            'in_service': _electrisim_in_service(el),
+            'control': control, 'droop_percent': safe_float(el.get('droop_percent'), 5.0),
+            'smoothing': {'tau_s': safe_float(el.get('smoothing_tau_s'), 10.0),
+                          'soc_ref_percent': safe_float(el.get('soc_ref_percent'), 50.0),
+                          'soc_gain': safe_float(el.get('soc_gain'), 0.1)},
+            'input': None, 'vsc': None, 'output_load': None, 'aux_bus': None, 'aux_ext_grid': None,
+            'droop_bus': None, 'droop_line': None,
+            # For the EMT study: its model (a dual active bridge), switching frequency, current limit, output
+            # capacitor; for it and the DC fault study, its capacitors' ESR and ESL (0: none).
+            'emt': {'model': 'switching' if el.get('emt_model') == 'switching' else 'average',
+                    'switching_khz': safe_float(el.get('switching_khz'), 20.0),
+                    'current_limit_pu': safe_float(el.get('current_limit_pu'), 1.2),
+                    'c_out_mf': safe_float(el.get('c_out_mf'), 0.0),
+                    # smoothing: its output bus below this (pu), its store holds it (0: none)
+                    'hold_up_pu': min(max(safe_float(el.get('hold_up_pu'), 0.0), 0.0), 1.0),
+                    **{k: max(safe_float(el.get(k), 0.0), 0.0)
+                       for k in ('c_out_esr_mohm', 'c_out_esl_uh', 'c_in_esr_mohm', 'c_in_esl_uh')}},
+        }
+        for side, bus, key in (('input', b_in, 'vn_in_kv'), ('output', b_out, 'vn_out_kv')):
+            rated_kv, vn = safe_float(el.get(key), 0.0), float(net.bus_dc.at[bus, 'vn_kv'])
+            if rated_kv > 0 and abs(rated_kv - vn) > 0.1 * vn:
+                _electrisim_warn(net, f"DC/DC Converter '{label}': its {side} is rated {rated_kv:g} kV, "
+                                      f"its {side} bus is {vn:g} kV.")
+        on = rec['in_service']
+        if control == 'smoothing':
+            rec['p_set_mw'] = 0.0      # its store's power follows its loads' swings: none in a load flow
+        if control == 'droop':
+            # In droop: its set voltage behind a virtual resistance, R = droop V0^2 / P_rated - its
+            # voltage the droop's share lower at its rated current - solved inside the load flow, so
+            # beside another source on its bus, or a diode, it delivers what its droop gives there.
+            # Settled outside it, a lineup's store and its catcher's diodes chased each other.
+            vn = float(net.bus_dc.at[b_out, 'vn_kv'])
+            v0 = rec['vm_out_pu'] * vn
+            rated = rec['rated_mw'] if rec['rated_mw'] > 0 else 1.0
+            r = max(rec['droop_percent'] / 100.0, 1e-6) * v0 * v0 / rated
+            src = pp.create_bus_dc(net, vn_kv=vn, name=f'{name} droop source', in_service=on)
+            net.bus_dc.at[src, 'electrisim_hidden'] = True
+            vsc, aux_bus, aux_grid = _electrisim_aux_dc_source(net, src, rec['vm_out_pu'], rec['rated_mw'], name, on)
+            line = pp.create_line_dc_from_parameters(net, from_bus_dc=src, to_bus_dc=b_out, length_km=1.0,
+                                                     r_ohm_per_km=r, max_i_ka=1e3, name=f'{name} droop',
+                                                     in_service=on)
+            net.line_dc.at[line, 'electrisim_hidden'] = True
+            rec.update(vsc=vsc, aux_bus=aux_bus, aux_ext_grid=aux_grid, droop_bus=int(src), droop_line=int(line),
+                       droop_r_ohm=r, droop_v0_kv=v0)
+            p_in0 = rec['p_nl_mw']
+        elif mode == 'voltage':
+            vsc, aux_bus, aux_grid = _electrisim_aux_dc_source(net, b_out, rec['vm_out_pu'], rec['rated_mw'], name, on)
+            rec.update(vsc=vsc, aux_bus=aux_bus, aux_ext_grid=aux_grid)
+            p_in0 = rec['p_nl_mw']
+        else:
+            out = _electrisim_new_load_dc(net, b_out, -rec['p_set_mw'], f'{name} output', on,
+                                          electrisim_aux=True, electrisim_dcdc_role='output', electrisim_dcdc_name=name)
+            rec['output_load'] = int(out)
+            p_in0 = _electrisim_dc_dc_input_power(rec['p_set_mw'], eta, rec['p_nl_mw'])
+        output = (('line_dc', rec['droop_line']) if rec['droop_line'] is not None
+                  else ('vsc', rec['vsc']) if rec['vsc'] is not None else ('load_dc', rec['output_load']))
+        rec['input'] = int(_electrisim_new_load_dc(
+            net, b_in, p_in0, f'{name} input', on, **_electrisim_stage_columns(name, eta, rec['p_nl_mw'], output)))
+        net.electrisim_dc_dc_converters.append(rec)
+        if not hasattr(net, 'user_friendly_names'):
+            net.user_friendly_names = {}
+        net.user_friendly_names[name] = label
+
+
+def _electrisim_dc_dc_parts(rec):
+    return [('load_dc', rec['input']), ('load_dc', rec['output_load']), ('vsc', rec['vsc']),
+            ('ext_grid', rec['aux_ext_grid']), ('bus', rec['aux_bus']), ('bus_dc', rec.get('droop_bus')),
+            ('line_dc', rec.get('droop_line'))]
+
+
+def _electrisim_set_dc_dc_in_service(net, rec, on):
+    rec['in_service'] = on
+    for table, idx in _electrisim_dc_dc_parts(rec):
+        if idx is not None and idx in net[table].index:
+            net[table].at[idx, 'in_service'] = on
+
+
+def _electrisim_finish_dc_dc(net):
+    """
+    Leave out a DC/DC converter one of whose networks was set aside: its
+    input network must be held by a converter, and in power mode so must its
+    output network. Its output network may then be set aside in turn.
+    """
+    removed = False
+    kept = []
+    for rec in getattr(net, 'electrisim_dc_dc_converters', None) or []:
+        has_in = rec['input'] in net.load_dc.index
+        has_out = (rec['vsc'] in net.vsc.index) if rec['vsc'] is not None else (rec['output_load'] in net.load_dc.index)
+        if (has_in and has_out) or (has_in and not rec['in_service']):
+            # Out of service (a breaker opened it), it stays to be reported so.
+            kept.append(rec)
+            continue
+        for table, idx in _electrisim_dc_dc_parts(rec):
+            if idx is not None and idx in net[table].index:
+                net[table].drop(idx, inplace=True)
+        side = 'input' if not has_in else 'output'
+        _electrisim_warn(net, f"DC/DC Converter '{rec['label']}' is left out: its {side} network is held by no "
+                              "converter" + (", and in power mode another element must hold its output voltage."
+                                             if side == 'output' and rec['mode'] == 'power' else "."))
+        removed = True
+    net.electrisim_dc_dc_converters = kept
+    if removed:
+        _electrisim_drop_uncoupled_dc(net)
+        for b in getattr(net, 'electrisim_dc_breakers', None) or []:
+            if _electrisim_dc_breaker_target_gone(net, b):
+                b['target'] = None
+
+
+# The studies that model DC/DC converters; the others see each as the power its input draws.
+_DCDC_STUDIES = ('PowerFlowPandaPower', 'TimeSeriesSimulationPandaPower', 'ContingencyAnalysisPandaPower', 'EmtStudy',
+                 'DcFaultStudy', 'AcDcOpfPandaPower')
+
+
+def _electrisim_freeze_dc_dc(net):
+    """
+    For a study that does not model DC/DC converters: a load flow settles each
+    converter's input, which then stays at that power, and the auxiliary grids
+    and the DC networks they held are left out.
+    """
+    convs = getattr(net, 'electrisim_dc_dc_converters', None) or []
+    ssts = getattr(net, 'electrisim_ssts', None) or []
+    ders = getattr(net, 'electrisim_ders', None) or []
+    if not convs and not ssts and not ders:
+        return
+    solved = None
+    try:
+        # On a copy: the study starts from a network without load-flow results.
+        solved = deepcopy(net)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            _electrisim_runpp(solved, algorithm='nr', calculate_voltage_angles=True, init='auto')
+        # Each VSC's AC power while its DC network is whole, for a study that later sets that network aside.
+        if len(solved.vsc) and len(solved.res_vsc):
+            net.electrisim_vsc_ac_draw = {int(i): (float(solved.res_vsc.at[i, 'p_mw']), float(solved.res_vsc.at[i, 'q_mvar']))
+                                          for i in solved.vsc.index if i in solved.res_vsc.index}
+        for table, i in _electrisim_dc_dc_rows(solved):
+            col = _STAGE_P_COLUMN[table]
+            if i in net[table].index:
+                net[table].at[i, col] = float(solved[table].at[i, col])
+        for k, rec in enumerate(ders):
+            if 'load' in rec['parts'] and rec['parts']['load'] in net.load_dc.index:
+                net.load_dc.at[rec['parts']['load'], 'p_dc_mw'] = -_electrisim_der_power(solved, solved.electrisim_ders[k])[1] / 1e6
+    except Exception:   # noqa: BLE001 - the inputs keep their first estimate
+        _electrisim_warn(net, "The load flow that settles the DC/DC converters' inputs did not solve: "
+                              "they draw their no-load loss, or their set power over their efficiency.")
+    for table, i in _electrisim_dc_dc_rows(net):
+        net[table].at[i, 'electrisim_dcdc_role'] = 'frozen'
+    held = []
+    for rec in ssts:
+        # Its rectifier and DC/DC stage are the power the MV side draws; a
+        # grid-forming inverter stays, as the source of its LV AC network.
+        held.append({'bus_out': rec['bus_lvdc']})
+        for table, idx in rec['aux']:
+            if idx is not None and idx in net[table].index:
+                net[table].drop(idx, inplace=True)
+    for rec in convs:
+        if rec['mode'] == 'voltage':
+            held.append(rec)
+            for table, idx in (('vsc', rec['vsc']), ('ext_grid', rec['aux_ext_grid']), ('bus', rec['aux_bus'])):
+                if idx is not None and idx in net[table].index:
+                    net[table].drop(idx, inplace=True)
+    if held:
+        names = getattr(net, 'user_friendly_names', {}) or {}
+        buses = sorted({str(names.get(net.bus_dc.at[r['bus_out'], 'name'], net.bus_dc.at[r['bus_out'], 'name']))
+                        for r in held if r['bus_out'] in net.bus_dc.index})
+        _electrisim_warn(net, "This study does not model DC/DC converters or solid-state transformers: each is "
+                              "the power its input draws in the load flow, and the DC networks they hold "
+                              f"({', '.join(buses)}) are left out.")
+        _electrisim_drop_uncoupled_dc(net, quiet=True)
+        for b in getattr(net, 'electrisim_dc_breakers', None) or []:
+            if _electrisim_dc_breaker_target_gone(net, b):
+                b['target'] = None
+    # The sources and stores: behind their converters, left out with the networks those held; a battery
+    # directly on a bus, the power it delivered in the load flow.
+    for k, rec in enumerate(ders):
+        parts = rec['parts']
+        if 'line' in parts:
+            p = 0.0
+            if solved is not None:
+                try:
+                    p = _electrisim_der_power(solved, solved.electrisim_ders[k])[1]
+                except Exception:   # noqa: BLE001 - it then delivers nothing
+                    p = 0.0
+            _electrisim_new_load_dc(net, rec['bus'], -p / 1e6, f"{rec['name']} output", rec['obj'].in_service,
+                                    electrisim_aux=True, electrisim_dcdc_role='frozen')
+            if parts['line'] in net.line_dc.index:
+                net.line_dc.drop(parts['line'], inplace=True)
+        for table, key in (('vsc', 'vsc'), ('ext_grid', 'aux_grid'), ('bus', 'aux_bus'),
+                           ('vsc', 'cells'), ('bus_dc', 'inner')):
+            idx = parts.get(key)
+            if idx is not None and idx in net[table].index:
+                net[table].drop(idx, inplace=True)
+    if ders:
+        _electrisim_drop_uncoupled_dc(net, quiet=True)
+    net.electrisim_ders = []
+    net.electrisim_dc_dc_converters = []
+    net.electrisim_ssts = []
+
+
+_STAGE_P_COLUMN = {'load_dc': 'p_dc_mw', 'load': 'p_mw'}
+
+
+def _electrisim_dc_dc_rows(net):
+    """Each converter stage's input, as (table, index): a DC load, or an AC load (an SST's rectifier)."""
+    rows = []
+    for table in ('load_dc', 'load'):
+        df = getattr(net, table, None)
+        if df is None or not len(df) or 'electrisim_dcdc_role' not in df.columns:
+            continue
+        rows += [(table, i) for i in df.index
+                 if df.at[i, 'electrisim_dcdc_role'] == 'input' and bool(df.at[i, 'in_service'])]
+    return rows
+
+
+def _electrisim_stage_output_mw(net, table, idx):
+    """What a stage's output delivers (MW), from the last load flow."""
+    if idx is None or not np.isfinite(idx):
+        return np.nan
+    idx = int(idx)
+    if table == 'vsc':
+        res = getattr(net, 'res_vsc', None)
+        return -float(res.at[idx, 'p_dc_mw']) if res is not None and idx in res.index else np.nan
+    if table == 'load_dc':
+        return -float(net.load_dc.at[idx, 'p_dc_mw']) if idx in net.load_dc.index else np.nan
+    if table == 'ext_grid':
+        res = getattr(net, 'res_ext_grid', None)
+        return float(res.at[idx, 'p_mw']) if res is not None and idx in res.index else np.nan
+    if table == 'sgen':
+        return float(net.sgen.at[idx, 'p_mw']) if idx in net.sgen.index else np.nan
+    if table == 'line_dc':
+        # A droop converter's: what its virtual resistance delivers into its output bus.
+        res = getattr(net, 'res_line_dc', None)
+        return -float(res.at[idx, 'p_to_mw']) if res is not None and idx in res.index else np.nan
+    return np.nan
+
+
+def _electrisim_dc_dc_output_mw(net, i, table='load_dc'):
+    """What the stage whose input is row ``i`` of ``table`` delivers (MW)."""
+    df = net[table]
+    return _electrisim_stage_output_mw(net, df.at[i, 'electrisim_dcdc_out_table'], df.at[i, 'electrisim_dcdc_out_idx'])
+
+
+def _electrisim_stage_result(net, stage):
+    """A converter stage's input and output power, loss, efficiency and loading."""
+    table, i = stage['input']
+    out = {'stage': stage['stage'], 'rated_mw': stage['rated_mw'], 'p_in_mw': 0.0, 'p_out_mw': 0.0,
+           'loss_mw': 0.0, 'efficiency_percent': None, 'loading_percent': 0.0}
+    if i is None or i not in net[table].index or not bool(net[table].at[i, 'in_service']):
+        return out
+    p_in = float(net[table].at[i, _STAGE_P_COLUMN[table]])
+    p_out = _electrisim_dc_dc_output_mw(net, i, table)
+    if not np.isfinite(p_out):
+        return out
+    out.update(p_in_mw=p_in, p_out_mw=p_out, loss_mw=p_in - p_out,
+               efficiency_percent=100.0 * p_out / p_in if p_in > 1e-12 and p_out >= 0 else None,
+               loading_percent=100.0 * max(abs(p_in), abs(p_out)) / stage['rated_mw'] if stage['rated_mw'] > 0 else None)
+    return out
+
+
+def _electrisim_dc_dc_result(net, rec):
+    out = {'name': rec['name'], 'id': rec['id'], 'mode': rec['mode'], 'control': rec.get('control', rec['mode']),
+           'in_service': rec['in_service'],
+           'rated_mw': rec['rated_mw'], 'p_in_mw': 0.0, 'p_out_mw': 0.0, 'loss_mw': 0.0,
+           'efficiency_percent': None, 'loading_percent': 0.0, 'vm_in_pu': None, 'vm_out_pu': None}
+    res_bus = getattr(net, 'res_bus_dc', None)
+    for key, bus in (('vm_in_pu', rec['bus_in']), ('vm_out_pu', rec['bus_out'])):
+        if res_bus is not None and bus in res_bus.index and np.isfinite(res_bus.at[bus, 'vm_pu']):
+            out[key] = float(res_bus.at[bus, 'vm_pu'])
+    if not rec['in_service'] or rec['input'] not in net.load_dc.index:
+        return out
+    p_in = float(net.load_dc.at[rec['input'], 'p_dc_mw'])
+    p_out = _electrisim_dc_dc_output_mw(net, rec['input'])
+    if not np.isfinite(p_out):
+        return out
+    out.update(p_in_mw=p_in, p_out_mw=p_out, loss_mw=p_in - p_out,
+               efficiency_percent=100.0 * p_out / p_in if p_in > 1e-12 and p_out >= 0 else None,
+               loading_percent=100.0 * max(abs(p_in), abs(p_out)) / rec['rated_mw'] if rec['rated_mw'] > 0 else None)
+    if p_out < -1e-9 and not rec['bidirectional']:
+        _electrisim_warn(net, f"DC/DC Converter '{rec['label']}': power flows from its output to its input "
+                              f"({-p_out:.4g} MW), but it is not bidirectional.")
+    if rec['rated_mw'] > 0 and out['loading_percent'] and out['loading_percent'] > 100.0:
+        _electrisim_warn(net, f"DC/DC Converter '{rec['label']}' is loaded to {out['loading_percent']:.1f} % "
+                              "of its rated power.")
+    return out
+
+
+# --- Microgrid sources and stores ----------------------------------------------------------
+#
+# A battery, supercapacitor, flywheel, SOFC system or PV array (der_electrisim) sits on a DC bus:
+# - behind its DC/DC converter, alone on a bus that only converters' terminals reach (its port):
+#   it holds that bus at its terminal voltage, at the current the converter draws - an auxiliary
+#   source as a converter's output is, its voltage settled with the load flow;
+# - directly on a network bus: a battery as its open-circuit voltage behind its resistance (a DC
+#   source on a hidden bus, a cable of that resistance); a supercapacitor as a DC-link capacitor
+#   (no current in a load flow); a flywheel at its set power, its machine converter's; a PV array
+#   or SOFC at the power its curve gives at the bus's voltage.
+
+def _electrisim_build_ders(net):
+    pending = getattr(net, '_electrisim_pending_der', None) or []
+    net.electrisim_ders = []
+    if not pending:
+        return
+    convs = getattr(net, 'electrisim_dc_dc_converters', None) or []
+    held = set()
+    for el in pending:
+        kind = der_electrisim.kind_of(el.get('typ'))
+        label = el.get('userFriendlyName') or el.get('name')
+        bus = _electrisim_dc_bus(net, el.get('bus'))
+        if bus is None:
+            _electrisim_warn(net, f"{kind} '{label}' is not connected to a DC bus, so it is left out.")
+            continue
+        try:
+            obj = der_electrisim.build(el)
+        except ValueError as e:
+            _electrisim_warn(net, f"{kind} '{label}' is left out: {e}")
+            continue
+        on = obj.in_service
+        vn = float(net.bus_dc.at[bus, 'vn_kv']) * 1e3
+        rec = {'obj': obj, 'kind': kind, 'name': el.get('name'), 'label': label, 'id': el.get('id', ''),
+               'bus': int(bus), 'vn': vn, 'coupling': 'direct', 'parts': {}, 'converters': []}
+        terminals = [c for c in convs if bus in (c['bus_in'], c['bus_out'])]
+        rec['converters'] = terminals
+        port = bool(terminals) and not _electrisim_dc_bus_has_network(net, bus)
+        if kind == 'Supercapacitor' and obj.direct:
+            port = False
+        if port and bus in held:
+            _electrisim_warn(net, f"{kind} '{label}' is left out: another source already holds its converter's bus. "
+                                  "Give each its own bus and converter.")
+            continue
+        if not port and not _electrisim_dc_bus_has_network(net, bus) and not terminals:
+            _electrisim_warn(net, f"{kind} '{label}' is on a DC bus nothing else reaches, so it is left out.")
+            continue
+        if abs(obj.v_nominal() - vn) > 0.25 * vn and not (kind == 'Supercapacitor' and not obj.direct):
+            _electrisim_warn(net, f"{kind} '{label}': its voltage ({obj.v_nominal():.4g} V) is far from its bus's "
+                                  f"({vn:.4g} V).")
+        if port and any(c['bus_out'] == bus for c in terminals):
+            _electrisim_warn(net, f"{kind} '{label}' is left out: it is on its DC/DC converter's output. "
+                                  "Draw the converter from the source's bus (its input) to the network (its output).")
+            continue
+        if port:
+            held.add(int(bus))
+            rec['coupling'] = 'converter'
+            rated = max(obj.p_limits()[0], obj.p_limits()[1], 1e3) / 1e6
+            vsc, aux_bus, aux_grid = _electrisim_aux_dc_source(net, bus, obj.v_terminal(0.0) / vn, rated,
+                                                               f"{el.get('name')} terminal", on)
+            rec['parts'] = {'vsc': vsc, 'aux_bus': aux_bus, 'aux_grid': aux_grid}
+            _electrisim_der_set_converters(net, rec)
+        elif kind == 'Supercapacitor':
+            # Directly on its bus: a DC-link capacitor, which the DC fault and EMT studies model.
+            if not hasattr(net, 'electrisim_dc_capacitors'):
+                net.electrisim_dc_capacitors = []
+            net.electrisim_dc_capacitors.append({
+                'name': el.get('name'), 'id': el.get('id', ''), 'bus_dc': int(bus), 'c_mf': obj.c * 1e3,
+                'esr_mohm': obj.esr * 1e3, 'esl_uh': obj.esl * 1e6, 'in_service': on, 'electrisim_der': True})
+        elif kind == 'Battery':
+            # Directly on its bus: its open-circuit voltage on a hidden bus, behind its resistance.
+            # (pandapower holds a DC voltage reliably only through a VSC: an auxiliary one, as a converter's output.)
+            inner = pp.create_bus_dc(net, vn_kv=vn / 1e3, name=f"{el.get('name')} cells", in_service=on)
+            net.bus_dc.at[inner, 'electrisim_hidden'] = True
+            rated = max(obj.p_limits()[0], obj.p_limits()[1], 1e3) / 1e6
+            vsc, aux_bus, aux_grid = _electrisim_aux_dc_source(net, inner, obj.ocv() / vn, rated,
+                                                               f"{el.get('name')} cells", on)
+            line = pp.create_line_dc_from_parameters(net, from_bus_dc=inner, to_bus_dc=bus, length_km=1.0,
+                                                     r_ohm_per_km=max(obj.r0 + obj.r1, 1e-6), max_i_ka=1e3,
+                                                     name=f"{el.get('name')} resistance", in_service=on)
+            net.line_dc.at[line, 'electrisim_hidden'] = True
+            rec['parts'] = {'inner': int(inner), 'cells': vsc, 'aux_bus': aux_bus, 'aux_grid': aux_grid, 'line': int(line)}
+        else:
+            # A flywheel at its set power; a PV array or SOFC on its curve (settled with the load flow).
+            p0 = _f_der_direct_power(obj, vn)
+            ld = _electrisim_new_load_dc(net, bus, -p0 / 1e6, f"{el.get('name')} output", on,
+                                         electrisim_aux=True, electrisim_dcdc_role='der')
+            rec['parts'] = {'load': int(ld)}
+        net.electrisim_ders.append(rec)
+        if not hasattr(net, 'user_friendly_names'):
+            net.user_friendly_names = {}
+        net.user_friendly_names[el.get('name')] = label
+        for part in ('cells', 'resistance', 'output', 'terminal', 'cells output', 'terminal output'):
+            net.user_friendly_names[f"{el.get('name')} {part}"] = f'{label} ({part.split()[0]})'
+
+
+def _electrisim_dc_bus_has_network(net, bus):
+    """Whether something other than DC/DC converters' terminals reaches a DC bus: a cable, a VSC, a source."""
+    for table, cols in (('line_dc', ('from_bus_dc', 'to_bus_dc')), ('source_dc', ('bus_dc',)), ('b2b_vsc', ('bus_dc_plus', 'bus_dc_minus'))):
+        df = net[table] if table in net else None
+        if df is not None and len(df) and df[list(cols)].isin([bus]).any(axis=None):
+            return True
+    if len(net.vsc):
+        real = net.vsc if 'electrisim_aux' not in net.vsc.columns else net.vsc[net.vsc['electrisim_aux'] != True]
+        if (real['bus_dc'] == bus).any():
+            return True
+    ld = net.load_dc
+    if len(ld):
+        # A load, or a PCS's DC side (a double-conversion UPS's inverter on its DC link).
+        real = ld if 'electrisim_dcdc_role' not in ld.columns else ld[ld['electrisim_dcdc_role'].isna()
+                                                                      | (ld['electrisim_dcdc_role'] == 'pcs')]
+        if (real['bus_dc'] == bus).any():
+            return True
+    # A DC breaker joining it to another bus: a cable once the breakers are applied, after the
+    # sources and stores. A rack's supercapacitors on their own bus behind a breaker were left out.
+    for el in getattr(net, '_electrisim_pending_dc_breakers', None) or []:
+        if el.get('et') == 'bus_dc' and bus in (_electrisim_dc_bus(net, el.get('bus')), _electrisim_dc_bus(net, el.get('element'))):
+            return True
+    return False
+
+
+def _f_der_direct_power(obj, v):
+    """What a directly connected flywheel, PV array or SOFC delivers (W) at its bus voltage ``v`` (V)."""
+    if obj.kind == 'Flywheel':
+        return min(max(obj.p_set, -obj.p_limits()[1]), obj.p_limits()[0])
+    if obj.kind == 'PV Array':
+        return v * obj.i_array(v)
+    if obj.kind == 'SOFC':
+        return v * obj.i_at_voltage(v)[0]
+    return 0.0
+
+
+def _electrisim_der_set_converters(net, rec):
+    """A converter in MPPT or follower mode delivers what its source gives: its PV array's maximum power, its SOFC's set power."""
+    obj = rec['obj']
+    for conv in rec['converters']:
+        if conv['bus_in'] != rec['bus'] or conv['output_load'] is None:
+            continue
+        p_src = None
+        if conv['control'] == 'mppt':
+            p_src = obj.mpp()[2] if obj.kind == 'PV Array' else None
+        elif conv['control'] == 'follower':
+            p_src = obj.p_operating() if obj.kind == 'SOFC' else None
+        if conv['control'] in ('mppt', 'follower') and p_src is None:
+            _electrisim_warn(net, f"DC/DC Converter '{conv['label']}': {conv['control']} mode needs a "
+                                  f"{'PV array' if conv['control'] == 'mppt' else 'SOFC system'} on its input; "
+                                  "it delivers its set power.")
+            continue
+        if p_src is None:
+            continue
+        p_out = _electrisim_stage_output(p_src / 1e6, conv['eta'], conv['p_nl_mw'])
+        conv['p_set_mw'] = p_out
+        net.load_dc.at[conv['output_load'], 'p_dc_mw'] = -p_out
+
+
+def _electrisim_stage_output(p_in, eta, p_nl):
+    """What a stage delivers (MW) for ``p_in`` drawn at its input: _electrisim_dc_dc_input_power's inverse."""
+    p = p_in - p_nl
+    return p * eta if p >= 0 else p / eta
+
+
+def _electrisim_settle_ders(net):
+    """One round of settling the sources and stores after a load flow; the largest change (p.u. or MW)."""
+    worst = 0.0
+    res_bus = net.res_bus_dc
+    for rec in getattr(net, 'electrisim_ders', None) or []:
+        obj, parts, bus = rec['obj'], rec['parts'], rec['bus']
+        if not obj.in_service or bus not in res_bus.index or not np.isfinite(res_bus.at[bus, 'vm_pu']):
+            continue
+        v = float(res_bus.at[bus, 'vm_pu']) * rec['vn']
+        if rec['coupling'] == 'converter':
+            vsc = parts['vsc']
+            if vsc not in net.res_vsc.index:
+                continue
+            i = -float(net.res_vsc.at[vsc, 'p_dc_mw']) * 1e6 / max(v, 1e-6)
+            if obj.kind == 'PV Array':
+                # Its converter takes it to its maximum power point at most: at it in MPPT, where the
+                # array's voltage would be tangent to the power drawn; past it, it cannot give more.
+                if 'mpp' not in rec:
+                    rec['mpp'] = obj.mpp()
+                v_mp, i_mp, p_mp = rec['mpp']
+                rec['beyond_mpp'] = i * v > p_mp * (1.0 + 1e-6)
+                mppt = any(c['control'] == 'mppt' and c['bus_in'] == bus for c in rec['converters'])
+                at_mpp = mppt or i >= i_mp * (1.0 - 1e-9)
+                vm_new = (v_mp if at_mpp else max(obj.v_terminal(i), v_mp)) / rec['vn']
+            else:
+                # At half its nominal voltage at least: asked far past what it can give - a lineup's
+                # store, briefly alone on its shelves while the diodes settled - its terminal went
+                # negative and the next load flow ran away.
+                vm_new = max(obj.v_terminal(i), 0.5 * obj.v_nominal()) / rec['vn']
+            worst = max(worst, abs(vm_new - float(net.vsc.at[vsc, 'control_value_dc'])))
+            net.vsc.at[vsc, 'control_value_dc'] = vm_new
+        elif 'load' in parts and obj.kind in ('PV Array', 'SOFC'):
+            p_new = -_f_der_direct_power(obj, v) / 1e6
+            worst = max(worst, abs(p_new - float(net.load_dc.at[parts['load'], 'p_dc_mw'])))
+            net.load_dc.at[parts['load'], 'p_dc_mw'] = p_new
+    # Converters in droop: within their rating.
+    for conv in getattr(net, 'electrisim_dc_dc_converters', None) or []:
+        worst = max(worst, _electrisim_droop_within_rating(net, conv))
+    worst = max(worst, _electrisim_rectifiers_within_rating(net))
+    worst = max(worst, _electrisim_settle_follow_load(net))
+    return worst
+
+
+def _electrisim_vsc_rating_result(net, vi):
+    """
+    A VSC's rating where it runs and its loading against it - its rating at
+    its AC bus's voltage (current-limited below nominal) - and its DC current.
+    """
+    out = {'rated_mva': None, 'loading_percent': None, 'i_dc_ka': None, 'derating_factor': None}
+    df = net.vsc
+    rated = safe_float(df.at[vi, 'rated_mva'], 0.0) if 'rated_mva' in df.columns else 0.0
+    if 'derating_factor' in df.columns and pd.notna(df.at[vi, 'derating_factor']):
+        out['derating_factor'] = float(df.at[vi, 'derating_factor'])
+    if vi not in net.res_vsc.index:
+        return out
+    p, q, p_dc = (float(net.res_vsc.at[vi, c]) for c in ('p_mw', 'q_mvar', 'p_dc_mw'))
+    if rated > 0:
+        out['rated_mva'] = rated
+        bus = int(df.at[vi, 'bus'])
+        vm = float(net.res_bus.at[bus, 'vm_pu']) if bus in net.res_bus.index else 1.0
+        if np.isfinite(p) and np.isfinite(q):
+            out['loading_percent'] = 100.0 * math.hypot(p, q) / (rated * converter_rating.voltage_factor(vm))
+    b = int(df.at[vi, 'bus_dc'])
+    if b in net.res_bus_dc.index and np.isfinite(p_dc):
+        v_kv = float(net.res_bus_dc.at[b, 'vm_pu']) * float(net.bus_dc.at[b, 'vn_kv'])
+        out['i_dc_ka'] = abs(p_dc) / v_kv if v_kv > 0 else None
+    return out
+
+
+def _electrisim_follow_load_vscs(net):
+    """The VSCs following their DC bus's load: {index: the charge (MW) they add for its batteries}."""
+    df = net.get('vsc')
+    if df is None or not len(df) or 'electrisim_follow_charge_mw' not in df.columns:
+        return {}
+    on = df['in_service'].fillna(False).astype(bool) & df['electrisim_follow_charge_mw'].notna()
+    return {int(i): float(df.at[i, 'electrisim_follow_charge_mw']) for i in df.index[on]}
+
+
+def _electrisim_settle_follow_load(net):
+    """
+    Each VSC following its DC bus's load: it delivers what its bus's loads
+    draw plus its charge for the batteries that hold the bus - moved each
+    round by what those batteries deliver above the charge they should take,
+    shared between the bus's followers by rating - within its rating, the
+    batteries taking the rest. A bus with no battery to hold it: the follower
+    holds it at 1.0 p.u. instead, said once. Returns how far it moved (MW).
+    """
+    follow = _electrisim_follow_load_vscs(net)
+    if not follow or 'res_vsc' not in net or not len(net.res_vsc):
+        return 0.0
+    bats = {}
+    for rec in getattr(net, 'electrisim_ders', None) or []:
+        if rec['kind'] == 'Battery' and rec['coupling'] == 'direct' and rec['obj'].in_service:
+            bats.setdefault(rec['bus'], []).append(rec)
+    by_bus = {}
+    for vi in follow:
+        by_bus.setdefault(int(net.vsc.at[vi, 'bus_dc']), []).append(vi)
+    worst = 0.0
+    names = getattr(net, 'user_friendly_names', {}) or {}
+    for bus, vscs in by_bus.items():
+        if bus not in bats:
+            for vi in vscs:
+                net.vsc.at[vi, 'control_mode_dc'] = 'vm_pu'
+                net.vsc.at[vi, 'control_value_dc'] = 1.0
+                net.vsc.at[vi, 'electrisim_follow_charge_mw'] = np.nan
+                _electrisim_warn(net, f"VSC '{names.get(net.vsc.at[vi, 'name'], net.vsc.at[vi, 'name'])}' follows its "
+                                      "DC bus's load, but no battery on that bus holds its voltage: it holds it at "
+                                      "1.0 p.u. instead.")
+            worst = max(worst, 1.0)
+            continue
+        line = net.res_line_dc['p_to_mw'] if 'res_line_dc' in net and 'p_to_mw' in net.res_line_dc.columns else None
+        delivered = 0.0                              # by the bus's batteries, MW
+        for rec in bats[bus]:
+            li = rec['parts'].get('line')
+            if line is None or li not in line.index or not np.isfinite(line.at[li]):
+                delivered = np.nan
+                break
+            delivered += -float(line.at[li])
+        if not np.isfinite(delivered):
+            continue
+        charge = sum(follow[vi] for vi in vscs)
+        shift = delivered + charge                   # what the followers should add, MW
+        weights = [max(safe_float(net.vsc.at[vi, 'rated_mva'], 0.0), 0.0) or 1.0 for vi in vscs]
+        for vi, w in zip(vscs, weights):
+            if vi not in net.res_vsc.index:
+                continue
+            now = -float(net.vsc.at[vi, 'control_value_dc'])          # into its DC bus, MW
+            target = now + shift * w / sum(weights)
+            rated = safe_float(net.vsc.at[vi, 'rated_mva'], 0.0)
+            p_ac, q = float(net.res_vsc.at[vi, 'p_mw']), float(net.res_vsc.at[vi, 'q_mvar'])
+            ac = int(net.vsc.at[vi, 'bus'])
+            if ac in net.res_bus.index and np.isfinite(net.res_bus.at[ac, 'vm_pu']):
+                rated *= converter_rating.voltage_factor(float(net.res_bus.at[ac, 'vm_pu']))   # current-limited
+            if rated > 0:
+                # Within its rating: its AC side scales with what it delivers (its own losses with it).
+                allowed = math.sqrt(max(rated * rated - (q * q if np.isfinite(q) else 0.0), 0.0))
+                scale = now / p_ac if np.isfinite(p_ac) and p_ac > 1e-9 and now > 1e-9 else 1.0
+                target = min(max(target, -allowed * scale), allowed * scale)
+            worst = max(worst, abs(target - now))
+            net.vsc.at[vi, 'control_value_dc'] = -target
+    return worst
+
+
+def _electrisim_rated_rectifiers(net):
+    """
+    The VSCs that hold their DC bus's voltage and have a rating: {index: their
+    state}, kept on the network - each one's set voltage, and its limit (the
+    share of its power it is held to) when its rating binds.
+    """
+    states = getattr(net, 'electrisim_rectifier_limits', None)
+    if states is None:
+        states = {}
+        df = net.get('vsc')
+        if df is not None and len(df) and 'rated_mva' in df.columns:
+            for vi in df.index:
+                if _electrisim_is_aux(df, vi) or str(df.at[vi, 'control_mode_dc']) != 'vm_pu':
+                    continue
+                rated = safe_float(df.at[vi, 'rated_mva'], 0.0)
+                if rated > 0:
+                    states[int(vi)] = {'rated': rated, 'vm': float(df.at[vi, 'control_value_dc']),
+                                       'limit': None, 'hold': False}
+        net.electrisim_rectifier_limits = states
+    return states
+
+
+def _electrisim_rectifiers_within_rating(net):
+    """
+    A VSC holding its DC bus beyond its rating delivers its rating instead -
+    its apparent power at its AC side at most its rated MVA - and its bus
+    sags: whatever else holds it, a store in droop, takes the rest. Back to
+    holding its voltage once its bus would rise to its set voltage. With
+    nothing else to hold its bus, it holds it beyond its rating until the
+    next settling. Before, a rectifier held its 800 V whatever it carried,
+    so its bus's stores never helped. Returns how far its power moved (MW).
+    """
+    worst = 0.0
+    for vi, st in _electrisim_rated_rectifiers(net).items():
+        if vi not in net.vsc.index or not bool(net.vsc.at[vi, 'in_service']) or vi not in net.res_vsc.index:
+            continue
+        p, q = float(net.res_vsc.at[vi, 'p_mw']), float(net.res_vsc.at[vi, 'q_mvar'])
+        p_dc = float(net.res_vsc.at[vi, 'p_dc_mw'])
+        bus = int(net.vsc.at[vi, 'bus_dc'])
+        v = float(net.res_bus_dc.at[bus, 'vm_pu']) if bus in net.res_bus_dc.index else np.nan
+        if st['limit'] is None:
+            if st['hold'] or not np.isfinite(p) or math.hypot(p, q) <= st['rated'] * (1.0 + 1e-9) or p <= 0:
+                continue
+            st['limit'] = True
+            net.vsc.at[vi, 'control_mode_dc'] = 'p_mw'
+        elif not np.isfinite(v):
+            # Nothing else holds its bus: it holds it, beyond its rating.
+            st['limit'], st['hold'] = None, True
+            net.vsc.at[vi, 'control_mode_dc'] = 'vm_pu'
+            net.vsc.at[vi, 'control_value_dc'] = st['vm']
+            worst = max(worst, 1.0)
+            continue
+        elif v >= st['vm'] * (1.0 - 1e-6):
+            # Within its rating again: it holds its voltage.
+            st['limit'] = None
+            net.vsc.at[vi, 'control_mode_dc'] = 'vm_pu'
+            net.vsc.at[vi, 'control_value_dc'] = st['vm']
+            worst = max(worst, 1.0)
+            continue
+        # Its DC power scaled by the share of its AC power its rating allows.
+        allowed = math.sqrt(max(st['rated'] ** 2 - q * q, 0.0))
+        target = p_dc * allowed / p if p > 0 else p_dc
+        if abs(target - p_dc) > 1e-9 or str(net.vsc.at[vi, 'control_mode_dc']) == 'p_mw':
+            worst = max(worst, abs(target - p_dc))
+            net.vsc.at[vi, 'control_value_dc'] = target
+    return worst
+
+
+def _electrisim_warn_branch_overloads(net):
+    """
+    Each line and transformer past its rating after the load flow, named, as a
+    converter past its rating is: the result boxes colour them, but nothing
+    said so - a block's 3.75 MVA T1 carried 3.89 MVA (103.9 %) at full load
+    unremarked. Electrisim's own aids (a DC/DC converter's or an SST's
+    internal stages, a zigzag's) are left out.
+    """
+    names = getattr(net, 'user_friendly_names', None) or {}
+    for kind, table, rating in (('Line', 'line', 'its thermal rating (max_i_ka)'),
+                                ('Transformer', 'trafo', 'its rating (sn_mva)'),
+                                ('Three-winding transformer', 'trafo3w', 'its rating')):
+        df, res = net.get(table), net.get(f'res_{table}')
+        if df is None or res is None or not len(df) or 'loading_percent' not in res.columns:
+            continue
+        for i in df.index:
+            if i not in res.index or not bool(df.at[i, 'in_service']) or _electrisim_is_aux(df, i):
+                continue
+            loading = res.at[i, 'loading_percent']
+            if pd.notna(loading) and float(loading) > 100.05:
+                name = df.at[i, 'name']
+                _electrisim_warn(net, f"{kind} '{names.get(name, name)}' is loaded to {float(loading):.1f} % of {rating}.")
+
+
+def _electrisim_warn_rectifier_limits(net):
+    """Each VSC its rating holds, named once, with the voltage its bus sags to."""
+    for vi, st in (getattr(net, 'electrisim_rectifier_limits', None) or {}).items():
+        label = net.user_friendly_names.get(net.vsc.at[vi, 'name'], net.vsc.at[vi, 'name']) \
+            if hasattr(net, 'user_friendly_names') else net.vsc.at[vi, 'name']
+        bus = int(net.vsc.at[vi, 'bus_dc'])
+        if st['limit']:
+            v = float(net.res_bus_dc.at[bus, 'vm_pu']) if bus in net.res_bus_dc.index else np.nan
+            _electrisim_warn(net, f"VSC '{label}' is at its rating, {st['rated']:g} MVA: its DC bus sags to "
+                                  f"{v:.4f} pu and what else holds it carries the rest.")
+        elif st['hold']:
+            _electrisim_warn(net, f"VSC '{label}' carries more than its rating, {st['rated']:g} MVA: nothing "
+                                  "else holds its DC bus, so it holds it beyond its rating.")
+    for vi in _electrisim_follow_load_vscs(net):
+        rated = safe_float(net.vsc.at[vi, 'rated_mva'], 0.0)
+        if rated <= 0 or vi not in net.res_vsc.index:
+            continue
+        s = math.hypot(float(net.res_vsc.at[vi, 'p_mw']), float(net.res_vsc.at[vi, 'q_mvar']))
+        ac = int(net.vsc.at[vi, 'bus'])
+        vm = float(net.res_bus.at[ac, 'vm_pu']) if ac in net.res_bus.index else 1.0
+        rated *= converter_rating.voltage_factor(vm)
+        if np.isfinite(s) and s >= rated * (1.0 - 1e-6):
+            label = (getattr(net, 'user_friendly_names', {}) or {}).get(net.vsc.at[vi, 'name'], net.vsc.at[vi, 'name'])
+            _electrisim_warn(net, f"VSC '{label}' follows its DC bus's load to its rating, {rated:.4g} MVA: the "
+                                  "batteries on its bus carry the rest.")
+
+
+def _electrisim_droop_within_rating(net, conv):
+    """
+    A converter in droop beyond its rating - or reversed, one way only -
+    delivers its limit, a power source; back in droop once its droop would
+    give less. When its limit leaves its bus with no voltage - nothing else
+    holds it - it stays in droop beyond its rating until the next settling:
+    a lineup's store, briefly alone on its shelves before the catcher's
+    diodes turned on, swapped between the two for 60 load flows. Returns
+    how far its power moved (MW).
+    """
+    line, vsc = conv.get('droop_line'), conv.get('vsc')
+    if (line is None or not conv['in_service'] or line not in net.res_line_dc.index
+            or vsc not in net.vsc.index or not bool(net.vsc.at[vsc, 'in_service'])):
+        return 0.0
+    delivered = -float(net.res_line_dc.at[line, 'p_to_mw'])
+    if not np.isfinite(delivered):
+        return 0.0
+    rated = conv['rated_mw'] if conv['rated_mw'] > 0 else 1.0
+    low = -rated if conv['bidirectional'] else 0.0
+    r, v0 = conv['droop_r_ohm'], conv['droop_v0_kv']
+    hand = conv.get('handover_mw')
+    if hand is not None:
+        # Handed its bus's load in an island short of power (the time series): its source delivers
+        # that, within its rating, whatever its droop would - the rectifiers holding the bus draw
+        # the less. With nothing else to hold its bus it holds it in droop, as at its limit.
+        v_out = float(net.res_bus_dc.at[conv['bus_out'], 'vm_pu']) * float(net.bus_dc.at[conv['bus_out'], 'vn_kv'])
+        if not np.isfinite(v_out) or v_out <= 0:
+            conv['handover_mw'] = None
+            net.vsc.at[vsc, 'control_mode_dc'] = 'vm_pu'
+            net.vsc.at[vsc, 'control_value_dc'] = conv['vm_out_pu']
+            return 1.0
+        p = min(max(hand, low), rated)
+        conv['limit'] = None
+        net.vsc.at[vsc, 'control_mode_dc'] = 'p_mw'
+        net.vsc.at[vsc, 'control_value_dc'] = -(p + (p / v_out) ** 2 * r)
+        return abs(delivered - p)
+    if conv.get('limit') is None:
+        if low - 1e-9 * rated <= delivered <= rated * (1.0 + 1e-9) or conv.get('limit_hold'):
+            return 0.0
+        conv['limit'] = rated if delivered > rated else low
+        net.vsc.at[vsc, 'control_mode_dc'] = 'p_mw'
+    else:
+        v = float(net.res_bus_dc.at[conv['bus_out'], 'vm_pu']) * float(net.bus_dc.at[conv['bus_out'], 'vn_kv'])
+        if not np.isfinite(v):
+            conv['limit'], conv['limit_hold'] = None, True
+            net.vsc.at[vsc, 'control_mode_dc'] = 'vm_pu'
+            net.vsc.at[vsc, 'control_value_dc'] = conv['vm_out_pu']
+            return 1.0
+        if low <= (v0 - v) * v / r <= rated:
+            conv['limit'] = None
+            net.vsc.at[vsc, 'control_mode_dc'] = 'vm_pu'
+            net.vsc.at[vsc, 'control_value_dc'] = conv['vm_out_pu']
+            return abs(delivered - (v0 - v) * v / r) + 1.0
+    # Its source delivers the limit and the virtual resistance's I^2 R.
+    v_out = float(net.res_bus_dc.at[conv['bus_out'], 'vm_pu']) * float(net.bus_dc.at[conv['bus_out'], 'vn_kv'])
+    i_ka = conv['limit'] / v_out if np.isfinite(v_out) and v_out > 0 else 0.0
+    net.vsc.at[vsc, 'control_value_dc'] = -(conv['limit'] + i_ka * i_ka * r)
+    return abs(delivered - conv['limit'])
+
+
+def _electrisim_dc_dc_delivered_mw(net, rec):
+    """What a DC/DC converter delivers into its output bus (MW), from the last load flow."""
+    if rec.get('droop_line') is not None:
+        return _electrisim_stage_output_mw(net, 'line_dc', rec['droop_line'])
+    if rec.get('vsc') is not None:
+        return _electrisim_stage_output_mw(net, 'vsc', rec['vsc'])
+    return rec['p_set_mw']
+
+
+def _electrisim_der_power(net, rec):
+    """A source's or store's bus voltage (V) and the power it delivers into its bus (W), from the last load flow."""
+    parts, bus = rec['parts'], rec['bus']
+    v = float(net.res_bus_dc.at[bus, 'vm_pu']) * rec['vn']
+    p = 0.0
+    if rec['coupling'] == 'converter' and parts['vsc'] in net.res_vsc.index:
+        p = -float(net.res_vsc.at[parts['vsc'], 'p_dc_mw']) * 1e6
+    elif 'line' in parts and parts['line'] in net.res_line_dc.index:
+        # From its cells through its resistance into its bus.
+        p = -float(net.res_line_dc.at[parts['line'], 'p_to_mw']) * 1e6
+    elif 'load' in parts and parts['load'] in net.load_dc.index:
+        p = -float(net.load_dc.at[parts['load'], 'p_dc_mw']) * 1e6
+    return v, p
+
+
+def _electrisim_der_result(net, rec):
+    """A source's or store's power, voltage, current and state; its warnings."""
+    obj, parts, bus = rec['obj'], rec['parts'], rec['bus']
+    out = {'name': rec['name'], 'id': rec['id'], 'label': rec['label'], 'kind': rec['kind'],
+           'coupling': rec['coupling'], 'in_service': obj.in_service, 'p_mw': None, 'v_kv': None, 'i_ka': None}
+    res_bus = getattr(net, 'res_bus_dc', None)
+    if not obj.in_service or res_bus is None or bus not in res_bus.index or not np.isfinite(res_bus.at[bus, 'vm_pu']):
+        return out
+    v, p = _electrisim_der_power(net, rec)
+    return _electrisim_der_report(net, rec, out, v, p)
+
+
+def _electrisim_der_report(net, rec, out, v, p):
+    """``out`` with its power ``p`` (W) at voltage ``v`` (V), its state, and its notes warned about."""
+    obj = rec['obj']
+    i = p / max(v, 1e-6)
+    out.update(p_mw=p / 1e6 + 0.0, v_kv=v / 1e3, i_ka=i / 1e3 + 0.0)
+    if rec['kind'] == 'Supercapacitor' and obj.direct:
+        obj.v0 = v                                   # a capacitor on its bus: at its bus's voltage
+    out.update({k: (float(x) if isinstance(x, (int, float, np.floating)) and x is not None else x)
+                for k, x in obj.state(i, v).items()})
+    if rec['kind'] == 'SOFC' and rec['coupling'] == 'direct' and obj.i_at_voltage(v)[1]:
+        obj.notes.append(f"its bus ({v:.4g} V) is above its voltage at its minimum load: it runs at its minimum load")
+    if rec.get('beyond_mpp'):
+        obj.notes.append(f"its converter draws {p / 1e3:.4g} kW, more than its maximum power "
+                         f"({rec['mpp'][2] / 1e3:.4g} kW) at its irradiance and temperature")
+    for note in obj.notes:
+        _electrisim_warn(net, f"{rec['kind']} '{rec['label']}': {note}.")
+    obj.notes = []
+    return out
+
+
+# --- Grounding transformers ----------------------------------------------------------------
+#
+# A zigzag grounding transformer gives a three-wire network its ground: no
+# positive- or negative-sequence current (its magnetising impedance), its
+# zero-sequence impedance Z0 per phase to its star point, and its star point to
+# ground through a neutral resistor (or reactor) Z_N. A ground fault then sees
+# Z0 + 3 Z_N from it. pandapower has no such element; a YNd unit whose delta is
+# left unloaded has exactly that zero-sequence path, so the grounding
+# transformer is one, on a bus of its own (its delta, flagged and kept out of
+# the results). Z0 + 3 Z_N is its vk0 / vkr0. IEC 60909 corrects transformer
+# impedances by K_T = 0.95 c_max / (1 + 0.6 x_T) but not 3 Z_N: its positive
+# sequence is set to x_T = 7.5 % with its delta above 1 kV (c_max 1.1), so
+# K_T = 1 and pandapower corrects neither. Unloaded, it carries nothing in a
+# balanced load flow.
+
+GT_X_T_PERCENT = 7.5          # K_T = 0.95 x 1.1 / (1 + 0.6 x 0.075) = 1
+
+
+def _electrisim_is_grounding(df, index):
+    """Whether a transformer or bus row is a grounding transformer's own, reported with it."""
+    return 'electrisim_grounding' in df.columns and index in df.index and df.at[index, 'electrisim_grounding'] == True
+
+
+def _electrisim_grounding_params(el, vn_kv):
+    """
+    Its zero-sequence data (ohm): its neutral resistor by default the one that
+    passes its rated neutral current, V_ph / I_rated; its own Z0 by default
+    12 % of that, X/R 10.
+    """
+    v_ph = vn_kv * 1e3 / math.sqrt(3.0)
+    i_rated = safe_float(el.get('i_rated_a'), 400.0)
+    i_rated = i_rated if i_rated and i_rated > 0 else 400.0
+    r_n = safe_float(el.get('r_n_ohm'), float('nan'))
+    r_n = v_ph / i_rated if not np.isfinite(r_n) else max(r_n, 0.0)
+    x_n = max(safe_float(el.get('x_n_ohm'), 0.0) or 0.0, 0.0)
+    x0 = safe_float(el.get('x0_ohm'), float('nan'))
+    x0 = 0.12 * v_ph / i_rated if not np.isfinite(x0) else max(x0, 0.0)
+    r0 = safe_float(el.get('r0_ohm'), float('nan'))
+    r0 = 0.1 * x0 if not np.isfinite(r0) else max(r0, 0.0)
+    return {'r0': r0, 'x0': x0, 'r_n': r_n, 'x_n': x_n, 'i_rated_a': i_rated,
+            't_rated_s': safe_float(el.get('t_rated_s'), 10.0)}
+
+
+HARMONIC_FILTER_TYPES = ('high_pass', 'single_tuned')
+HARMONIC_FILTER_DEFAULT_Q = {'high_pass': 2.0, 'single_tuned': 50.0}
+
+
+def harmonic_filter(q_mvar, vn_kv, order, filter_type='high_pass', quality=None):
+    """
+    A capacitor bank with its tuning reactor: its components (ohm, per phase,
+    star equivalent) and its fundamental draw at vn_kv. q_mvar is its net
+    reactive power at the fundamental, capacitive (> 0); order the harmonic
+    its reactor tunes it to, X_L = X_C / h^2. Single-tuned: R in series,
+    X_n / quality (some 30-100). High-pass (second-order damped): R across the
+    reactor, quality x X_n (some 0.5-5) - above its tuning it is that
+    resistance, which damps a resonance there. X_n = X_C / h.
+    """
+    h, q, v = float(order), float(q_mvar), float(vn_kv)
+    if not (h > 1.0 and q > 0 and v > 0):
+        raise ValueError('a harmonic filter needs q_mvar > 0, vn_kv > 0 and a tuning order above 1')
+    filter_type = filter_type if filter_type in HARMONIC_FILTER_TYPES else 'high_pass'
+    quality = float(quality) if quality and float(quality) > 0 else HARMONIC_FILTER_DEFAULT_Q[filter_type]
+    x_c = v * v / (q * (1.0 - 1.0 / (h * h)))
+    x_l = x_c / (h * h)
+    x_n = x_c / h
+    if filter_type == 'single_tuned':
+        r = x_n / quality
+        z1 = complex(r, x_l - x_c)
+    else:
+        r = quality * x_n
+        z1 = complex(0.0, -x_c) + (1j * x_l * r) / (r + 1j * x_l)
+    s1 = v * v / z1.conjugate()                    # MVA drawn at vn_kv (q < 0: it supplies)
+    return {'type': filter_type, 'order': h, 'quality': quality, 'x_c_ohm': x_c, 'x_l_ohm': x_l, 'r_ohm': r,
+            'p_mw': s1.real, 'q_mvar': s1.imag}
+
+
+def _electrisim_build_grounding_transformer(net, el, Busbars, TrafoDict, in_data):
+    name = el.get('name')
+    label = el.get('userFriendlyName') or name
+    bus = Busbars.get(el.get('bus')) if el.get('bus') is not None else None
+    if bus is None:
+        # Behind its breaker: the bus the switch wired to it stands on.
+        for row in in_data.values():
+            if (isinstance(row, dict) and str(row.get('typ', '')).startswith('Switch')
+                    and row.get('element') == name and Busbars.get(row.get('bus')) is not None):
+                bus = Busbars[row['bus']]
+                break
+    if bus is None:
+        _electrisim_warn(net, f"Grounding transformer '{label}' is not connected to a bus, so it is left out.")
+        return None
+    vn = float(net.bus.at[bus, 'vn_kv'])
+    vn_rated = safe_float(el.get('vn_kv'), 0.0)
+    if vn_rated and vn_rated > 0 and abs(vn_rated - vn) > 0.1 * vn:
+        _electrisim_warn(net, f"Grounding transformer '{label}' is rated {vn_rated:g} kV on a {vn:g} kV bus.")
+    z = _electrisim_grounding_params(el, vn)
+    r_tot, x_tot = z['r0'] + 3.0 * z['r_n'], z['x0'] + 3.0 * z['x_n']
+    sn = 1.0
+    vn_delta = max(vn, 1.1)                    # its delta above 1 kV, so c_max = 1.1 there
+    z_base = vn * vn / sn
+    delta = pp.create_bus(net, vn_kv=vn_delta, name=f'{label} delta', in_service=True)
+    net.bus.at[delta, 'electrisim_grounding'] = True
+    idx = pp.create_transformer_from_parameters(
+        net, hv_bus=bus, lv_bus=delta, sn_mva=sn, vn_hv_kv=vn, vn_lv_kv=vn_delta,
+        vk_percent=GT_X_T_PERCENT, vkr_percent=0.0, pfe_kw=0.0, i0_percent=0.0,
+        vk0_percent=100.0 * math.hypot(r_tot, x_tot) / z_base, vkr0_percent=100.0 * r_tot / z_base,
+        mag0_percent=1e6, mag0_rx=0.0, si0_hv_partial=0.9, vector_group='YNd', shift_degree=0.0,
+        name=name, in_service=_electrisim_in_service(el))
+    net.trafo.at[idx, 'id'] = el.get('id', '')
+    net.trafo.at[idx, 'electrisim_grounding'] = True
+    for k in ('r0', 'x0', 'r_n', 'x_n', 'i_rated_a', 't_rated_s'):
+        net.trafo.at[idx, f'electrisim_gt_{k}'] = z[k]
+    TrafoDict[name] = idx
+    if el.get('userFriendlyName') not in (None, '') and str(el['userFriendlyName']) != str(name):
+        TrafoDict[str(el['userFriendlyName'])] = idx
+    if not hasattr(net, 'user_friendly_names'):
+        net.user_friendly_names = {}
+    net.user_friendly_names[name] = label
+    return idx
+
+
+def _electrisim_grounding_follow_breakers(net):
+    """A grounding transformer whose breaker is open, or out of service, takes its delta out with it."""
+    if 'electrisim_grounding' not in net.trafo.columns:
+        return
+    for i in net.trafo.index[net.trafo['electrisim_grounding'] == True]:
+        sw = net.switch[(net.switch['et'] == 't') & (net.switch['element'] == i)]
+        on = bool(net.trafo.at[i, 'in_service']) and bool(sw['closed'].all() if len(sw) else True)
+        net.trafo.at[i, 'in_service'] = on
+        net.bus.at[int(net.trafo.at[i, 'lv_bus']), 'in_service'] = on
+
+
+def _electrisim_fold_neutral_impedance(net, lv_tol_percent=10):
+    """
+    A transformer's neutral resistor and reactor (rn_ohm / xn_ohm) in pandapower's
+    IEC zero sequence, which does not read them: 3 Z_N joins its grounded
+    winding's zero-sequence impedance, on the base pandapower puts it on (the
+    LV winding but for YNd and YNy). IEC 60909 corrects a transformer's
+    impedance by K_T but not 3 Z_N, and pandapower scales the whole of vk0 by
+    K_T, so 3 Z_N / K_T goes in: K_T from its positive sequence and its LV
+    bus's c_max, as pandapower computes it. A winding that is not grounded
+    leaves Z_N with no current; a power station unit takes X_N in pandapower
+    itself. Grounding transformers carry their Z_N in vk0 already.
+    """
+    if net.trafo.empty or not {'rn_ohm', 'xn_ohm'} & set(net.trafo.columns):
+        return []
+    folded = []
+    for i in net.trafo.index:
+        row = net.trafo.loc[i]
+        rn = max(safe_float(row.get('rn_ohm'), 0.0) or 0.0, 0.0)
+        xn = max(safe_float(row.get('xn_ohm'), 0.0) or 0.0, 0.0)
+        if (rn <= 0 and xn <= 0) or _electrisim_is_grounding(net.trafo, i) or bool(row.get('power_station_unit') == True):
+            continue
+        group = re.sub(r'[^a-z]', '', str(row.get('vector_group') or '').lower())
+        if group not in ('dyn', 'yyn', 'ynyn', 'yzn', 'ynd', 'yny'):
+            continue
+        on_hv = group in ('ynd', 'yny')
+        vn = float(row['vn_hv_kv'] if on_hv else row['vn_lv_kv'])
+        sn = float(row['sn_mva'])
+        vk, vkr = float(row['vk_percent']), float(row['vkr_percent'])
+        c_max = 1.1 if float(net.bus.at[int(row['lv_bus']), 'vn_kv']) >= 1.0 else (1.1 if lv_tol_percent == 10 else 1.05)
+        k_t = 0.95 * c_max / (1.0 + 0.6 * math.sqrt(max(vk * vk - vkr * vkr, 0.0)) / 100.0)
+        vk0 = safe_float(row.get('vk0_percent'), 0.0) or 0.0
+        vkr0 = safe_float(row.get('vkr0_percent'), 0.0) or 0.0
+        vk0, vkr0 = (vk0 if vk0 > 0 else vk), (vkr0 if abs(vkr0) > 1e-8 else vkr)
+        z0 = complex(vkr0, math.sqrt(max(vk0 * vk0 - vkr0 * vkr0, 0.0)))
+        z0 += 100.0 * 3.0 * complex(rn, xn) * sn / (vn * vn) / k_t
+        net.trafo.at[i, 'vk0_percent'] = abs(z0)
+        net.trafo.at[i, 'vkr0_percent'] = z0.real
+        folded.append(i)
+    return folded
+
+
+def _electrisim_grounding_results(net):
+    """Each grounding transformer: its bus, its zero-sequence data and its rating."""
+    out = []
+    if 'electrisim_grounding' not in net.trafo.columns:
+        return out
+    for i in net.trafo.index[net.trafo['electrisim_grounding'] == True]:
+        row = net.trafo.loc[i]
+        name = row['name']
+        bus = int(row['hv_bus'])
+        out.append({
+            'name': name, 'id': row.get('id', ''), 'label': getattr(net, 'user_friendly_names', {}).get(name, name),
+            'bus': net.bus.at[bus, 'name'], 'in_service': bool(row['in_service']),
+            'r0_ohm': float(row['electrisim_gt_r0']), 'x0_ohm': float(row['electrisim_gt_x0']),
+            'r_n_ohm': float(row['electrisim_gt_r_n']), 'x_n_ohm': float(row['electrisim_gt_x_n']),
+            'i_rated_a': float(row['electrisim_gt_i_rated_a']), 't_rated_s': float(row['electrisim_gt_t_rated_s']),
+            # Its neutral current for a bolted ground fault at its own bus, alone on an otherwise ungrounded network.
+            'i_ground_alone_a': float(3.0 * float(net.bus.at[bus, 'vn_kv']) * 1e3 / math.sqrt(3.0) / abs(complex(
+                row['electrisim_gt_r0'] + 3 * row['electrisim_gt_r_n'], row['electrisim_gt_x0'] + 3 * row['electrisim_gt_x_n']))),
+        })
+    return out
+
+
+# --- Power conversion systems (PCS) --------------------------------------------------------
+#
+# A PCS joins one source or store (der_electrisim) to an AC bus: the source wired straight to
+# its DC side, or alone on a DC bus its DC side reaches (that bus is then the PCS's own, and
+# not reported). Grid-following, it is a current source (pandapower sgen) at the power its
+# source gives - a PV array's maximum power, an SOFC's set power, a battery's or flywheel's set
+# power - and a Q by set point, power factor or Q(V). Grid-forming, it holds its bus's voltage
+# (pandapower gen); on the grid it delivers its set power, islanded the grid-forming PCS of an
+# island share its imbalance by their P-f droops - each takes S_rated / droop of it - one of
+# them the island's reference (slack), its frequency f_n (1 - droop (P - P_set) / S_rated). A
+# Q-V droop lowers its voltage set point with its Q. Its DC side is its source at the power
+# it draws: the AC power over its efficiency, plus its no-load loss.
+#
+# In the short-circuit studies each is a current source at its current limit (k x I_rated),
+# grid-forming or grid-following; an island no grid or machine feeds has its largest
+# grid-forming PCS as a source giving that current at its own bus.
+
+_PCS_SC_STUDIES = ('ShortCircuit', 'ArcFlash', 'ProtectionCoordination', 'PoiFault', 'FuseCharacteristic')
+
+
+def _electrisim_build_pcs(net, Busbars, study):
+    pending = getattr(net, '_electrisim_pending_pcs', None) or []
+    net.electrisim_pcs = []
+    if not pending:
+        return
+    ders = getattr(net, '_electrisim_pending_der', None) or []
+    convs = getattr(net, 'electrisim_dc_dc_converters', None) or []
+    sc_study = any(k in str(study) for k in _PCS_SC_STUDIES)
+    for el in pending:
+        name = el.get('name')
+        label = el.get('userFriendlyName') or name
+        bus = Busbars.get(el.get('bus')) if el.get('bus') is not None else None
+        if bus is None:
+            _electrisim_warn(net, f"PCS '{label}' needs an AC bus on its AC side, so it is left out.")
+            continue
+        # Its source: wired to its DC side, or alone on the DC bus its DC side reaches.
+        src = next((d for d in ders if el.get('der') and d.get('name') == el.get('der')), None)
+        bus_dc = _electrisim_dc_bus(net, el.get('bus_dc')) if el.get('bus_dc') else None
+        network = False
+        if src is None and bus_dc is not None:
+            on_bus = [d for d in ders if _electrisim_dc_bus(net, d.get('bus')) == bus_dc]
+            elsewhere = (_electrisim_dc_bus_has_network(net, bus_dc)
+                         or any(bus_dc in (c['bus_in'], c['bus_out']) for c in convs))
+            if len(on_bus) == 1 and not elsewhere:
+                src = on_bus[0]
+            elif on_bus or elsewhere:
+                # Its DC side a DC network - a double-conversion UPS's DC link, its rectifier's and its
+                # batteries' bus: it draws its AC power's input from that bus, whatever holds it.
+                # Refused before: a PCS took one source alone on its bus, or none.
+                network = True
+        if src is None and not network:
+            _electrisim_warn(net, f"PCS '{label}' has no battery, supercapacitor, flywheel, SOFC system or PV array "
+                                  "on its DC side, so it is left out.")
+            continue
+        if network:
+            kind, src_label, obj = 'DC bus', str(net.bus_dc.at[bus_dc, 'name']), None
+            src = {'name': net.bus_dc.at[bus_dc, 'name'], 'id': ''}
+        else:
+            ders.remove(src)
+            kind = der_electrisim.kind_of(src.get('typ'))
+            src_label = src.get('userFriendlyName') or src.get('name')
+            if bus_dc is not None and bus_dc in net.bus_dc.index:
+                net.bus_dc.drop(bus_dc, inplace=True)       # the PCS's own DC link: its source's terminals
+            # A supercapacitor behind a PCS, grid-forming, is an eSTATCOM: a STATCOM with an energy store
+            # (GE Vernova's FACTSFLEX). It was refused - a supercapacitor joined a DC bus only - so the
+            # 800 V AI factory reference had no way to draw one.
+            try:
+                obj = der_electrisim.build(src)
+            except ValueError as e:
+                _electrisim_warn(net, f"PCS '{label}' is left out: {e}")
+                continue
+        on = _electrisim_in_service(el) and (network or obj.in_service)
+        s_nameplate = safe_float(el.get('s_rated_mva'), 1.0)
+        if s_nameplate <= 0:
+            s_nameplate = 1.0
+        # Its rating where it runs: derated by its inlet air and altitude (converter_rating).
+        derate = converter_rating.derating(el)
+        for note in derate['notes']:
+            _electrisim_warn(net, f"PCS '{label}': {note}.")
+        s_rated = s_nameplate * derate['factor']
+        if s_rated <= 0:
+            _electrisim_warn(net, f"PCS '{label}' is derated to nothing at its inlet air and altitude, so it is "
+                                  "left out.")
+            continue
+        eta = safe_float(el.get('efficiency_percent'), 98.0) / 100.0
+        if not 0 < eta <= 1:
+            eta = 1.0
+        control = 'grid_forming' if str(el.get('control') or '').strip().lower() == 'grid_forming' else 'grid_following'
+        vn = float(net.bus.at[bus, 'vn_kv'])
+        rec = {
+            'name': name, 'id': el.get('id', ''), 'label': label, 'bus': int(bus), 'vn_kv': vn,
+            'control': control, 'in_service': on, 's_rated': s_rated, 'eta': eta,
+            'p_nl_mw': safe_float(el.get('no_load_loss_kw'), 0.0) / 1e3,
+            'p_set_mw': safe_float(el.get('p_set_mw'), 0.0),
+            'q_mode': str(el.get('q_mode') or 'q'), 'q_set_mvar': safe_float(el.get('q_set_mvar'), 0.0),
+            'pf': safe_float(el.get('pf'), 1.0), 'qv_droop': safe_float(el.get('qv_droop_percent'), 5.0) / 100.0,
+            'vm_set_pu': safe_float(el.get('vm_set_pu'), 1.0),
+            'droop_pf': max(safe_float(el.get('droop_pf_percent'), 2.0), 1e-3) / 100.0,
+            'droop_qv': max(safe_float(el.get('droop_qv_percent'), 5.0), 0.0) / 100.0,
+            'k': safe_float(el.get('current_limit_pu'), 1.2),
+            'current_loop_hz': safe_float(el.get('current_loop_hz'), 500.0),   # the EMT study's
+            'source': {'obj': obj, 'kind': kind, 'name': src.get('name'), 'label': src_label, 'id': src.get('id', ''),
+                       'coupling': 'pcs', 'parts': {}, 'bus': int(bus_dc) if network else None},
+            'table': None, 'index': None, 'island': None, 'reference': False, 'df_pu': 0.0, 'qv_hist': None,
+            's_nameplate': s_nameplate, 'derating': derate, 'q_max_pu': converter_rating.q_max_pu(el),
+            'overload': converter_rating.overload_steps(el.get('overload_curve')),
+            'dc_bus': int(bus_dc) if network else None, 'dc_load': None,
+            # The EMT study's: grid-forming, its bus's negative-sequence voltage held at zero.
+            'unbalance_control': _electrisim_boolish(el.get('unbalance_control'), False),
+            'i2_limit_pu': safe_float(el.get('i2_limit_pu'), 0.3),
+            # The time series': grid-forming on a DC network, its share biased by its bus's charge.
+            'soc_share_gain': max(safe_float(el.get('soc_share_gain'), 0.0), 0.0),
+            # On a DC network, its DC-link capacitor (0: 4 ms of its rating), its ESR and ESL: EMT and DC fault.
+            'dc_link_mf': max(safe_float(el.get('dc_link_mf'), 0.0), 0.0),
+            'dc_link_esr_mohm': max(safe_float(el.get('dc_link_esr_mohm'), 0.0), 0.0),
+            'dc_link_esl_uh': max(safe_float(el.get('dc_link_esl_uh'), 0.0), 0.0),
+        }
+        if network:
+            # Its DC side: what its AC side delivers, drawn from its bus with its losses (settled with the load flow).
+            rec['dc_load'] = _electrisim_new_load_dc(net, int(bus_dc), 0.0, f'{name} DC side', on,
+                                                     electrisim_aux=True, electrisim_dcdc_role='pcs')
+        vn_ac = safe_float(el.get('vn_ac_kv'), 0.0)
+        if vn_ac > 0 and abs(vn_ac - vn) > 0.1 * vn:
+            _electrisim_warn(net, f"PCS '{label}': its AC side is rated {vn_ac:g} kV, its bus is {vn:g} kV - "
+                                  "draw its transformer between them.")
+        p_ac, q = _electrisim_pcs_set_point(net, rec)
+        rec['p_set_ac'] = p_ac
+        rec['p_max_mw'], rec['p_min_mw'] = _electrisim_pcs_window(rec)
+        rec['opf_cost'] = safe_float(el.get('opf_marginal_cost_eur_per_mwh'), float('nan'))
+        i_rated_ka = s_rated / (math.sqrt(3.0) * vn)
+        common = dict(name=name, id=el.get('id', ''), in_service=on, sn_mva=s_rated, controllable=False)
+        if sc_study or control == 'grid_following':
+            idx = pp.create_sgen(net, bus, p_mw=p_ac, q_mvar=q, k=rec['k'], rx=0.1, generator_type='current_source',
+                                 current_source=True, type='PCS', **common)
+            # Its short-circuit data, as the IEC (k, sn_mva) and ANSI (max_ik_ka) studies read them.
+            for col, value in (('k', rec['k']), ('rx', 0.1), ('current_source', True),
+                               ('generator_type', 'current_source'), ('max_ik_ka', rec['k'] * i_rated_ka)):
+                net.sgen.at[idx, col] = value
+            rec.update(table='sgen', index=int(idx))
+        else:
+            q_cap = s_rated * (rec['q_max_pu'] or 1.0)
+            idx = pp.create_gen(net, bus, p_mw=p_ac, vm_pu=rec['vm_set_pu'], max_q_mvar=q_cap, min_q_mvar=-q_cap,
+                                max_p_mw=s_rated, min_p_mw=-s_rated, **common)
+            rec.update(table='gen', index=int(idx))
+        net[rec['table']].at[rec['index'], 'electrisim_pcs'] = True
+        if network:
+            net.load_dc.at[rec['dc_load'], 'p_dc_mw'] = _electrisim_dc_dc_input_power(p_ac, eta, rec['p_nl_mw'])
+        if 'OptimalPowerFlow' in str(study):
+            _electrisim_pcs_opf_limits(net, rec)
+        net.electrisim_pcs.append(rec)
+        if not hasattr(net, 'user_friendly_names'):
+            net.user_friendly_names = {}
+        net.user_friendly_names[name] = label
+    if sc_study:
+        _electrisim_pcs_sc_islands(net)
+    else:
+        _electrisim_pcs_islands(net)
+
+
+def _electrisim_pcs_set_point(net, rec):
+    """The AC power (MW) and Q (Mvar) a PCS is asked for, within its rating: its source's, or its set power."""
+    src, obj = rec['source'], rec['source']['obj']
+    if src['kind'] == 'PV Array':
+        p_dc = obj.mpp()[2] / 1e6
+        p_ac = _electrisim_stage_output(p_dc, rec['eta'], rec['p_nl_mw'])
+    elif src['kind'] == 'SOFC':
+        p_ac = _electrisim_stage_output(obj.p_operating() / 1e6, rec['eta'], rec['p_nl_mw'])
+    else:
+        p_ac = rec['p_set_mw']
+    s = rec['s_rated']
+    if abs(p_ac) > s:
+        _electrisim_warn(net, f"PCS '{rec['label']}': {p_ac:.4g} MW is more than its rating ({s:g} MVA), "
+                              f"so it delivers {math.copysign(s, p_ac):.4g} MW.")
+        p_ac = math.copysign(s, p_ac)
+    q_max = converter_rating.q_limit(s, p_ac, rec.get('q_max_pu'))
+    if rec['q_mode'] == 'pf':
+        pf = min(max(abs(rec['pf']), 1e-3), 1.0)
+        q = math.copysign(abs(p_ac) * math.tan(math.acos(pf)), rec['pf'])
+    elif rec['q_mode'] == 'qv':
+        q = 0.0
+    else:
+        q = rec['q_set_mvar']
+    if abs(q) > q_max + 1e-12:
+        _electrisim_warn(net, f"PCS '{rec['label']}': its Q ({q:.4g} Mvar) is held to {math.copysign(q_max, q):.4g} "
+                              f"Mvar by its rating, its active power first"
+                              + (f", within {100 * rec['q_max_pu']:g} % of it." if rec.get('q_max_pu') else "."))
+        q = math.copysign(q_max, q)
+    rec['q_max'] = q_max
+    return p_ac, q
+
+
+def _electrisim_pcs_window(rec):
+    """
+    The most a PCS can deliver and take at its AC side (MW), from its source's
+    state and its rating: a battery or flywheel within its window (nothing
+    more out at its window's bottom, nothing more in at its top), an SOFC
+    system between its minimum load and its rating, a PV array up to its MPP.
+    """
+    src, obj = rec['source'], rec['source']['obj']
+    eta, p_nl, s = rec['eta'], rec['p_nl_mw'], rec['s_rated']
+    if src['kind'] == 'SOFC':
+        p_hi = _electrisim_stage_output(obj.p_rated * (1.0 - obj.aux_frac) / 1e6, eta, p_nl)
+        p_lo = _electrisim_stage_output(obj.p_min_frac * obj.p_rated / 1e6, eta, p_nl)
+    elif src['kind'] == 'PV Array':
+        p_hi, p_lo = max(_electrisim_stage_output(obj.mpp()[2] / 1e6, eta, p_nl), 0.0), 0.0
+    elif src['kind'] == 'DC bus':
+        # On a DC network: its rating, either way - what holds its bus answers for the energy.
+        p_hi, p_lo = math.inf, -math.inf
+    else:
+        dis, ch = obj.p_limits()
+        p_hi = _electrisim_stage_output(dis / 1e6, eta, p_nl) if dis > 0 else 0.0
+        p_lo = _electrisim_stage_output(-ch / 1e6, eta, p_nl) if ch > 0 else 0.0
+    # With a short-time overload, up to its highest step: an island's grid-forming PCS then share a load
+    # beyond their ratings equally by droop - each warned of its overload - where three held at 100 %
+    # and the reference carried the rest (118 %).
+    s = s * max([m for _, m in rec.get('overload') or []] or [1.0])
+    return min(p_hi, s), max(p_lo, -s)
+
+
+def _electrisim_pcs_opf_limits(net, rec):
+    """
+    In the OPF a PCS is dispatched within its power window, its Q within the
+    box its rating leaves at either end of that window (inside its circle,
+    which pandapower's OPF cannot take): sqrt(S^2 - max(|P_max|, |P_min|)^2).
+    On supercapacitors - seconds of energy, not a dispatch's hour - it holds
+    its set power and gives reactive power: the 800 VDC AI factory's
+    eSTATCOM, free to the OPF, exported 14.7 MW from 7.5 MW-s.
+    """
+    s = rec['s_rated']
+    # A steady-state dispatch: its continuous rating, not its short-time overload's ceiling.
+    p_hi, p_lo = min(rec['p_max_mw'], s), max(rec['p_min_mw'], -s)
+    if rec['source']['kind'] == 'Supercapacitor':
+        p_hi = p_lo = min(max(rec.get('p_set_ac', 0.0), p_lo), p_hi)
+    if rec['source']['kind'] == 'DC bus':
+        # On a DC network its window is its whole rating either way, which left it no Q at the window's
+        # ends: an island of such PCS (the PCS3750C-MV's backbone) had no source of reactive power and
+        # its OPF never converged. Its Q up to its cap (or its rating) instead; the box's corners lie
+        # outside its circle, so a result beyond its rating is warned of after the OPF.
+        q_box = s * (rec.get('q_max_pu') or 1.0)
+        rec['opf_box_outside_circle'] = True
+    else:
+        q_box = converter_rating.q_limit(s, max(abs(p_hi), abs(p_lo)), rec.get('q_max_pu'))
+    table, idx = rec['table'], rec['index']
+    for col, value in (('controllable', True), ('min_p_mw', p_lo), ('max_p_mw', max(p_hi, p_lo + 1e-6)),
+                       ('min_q_mvar', -q_box), ('max_q_mvar', q_box)):
+        net[table].at[idx, col] = value
+    # Start it inside its window.
+    net[table].at[idx, 'p_mw'] = min(max(float(net[table].at[idx, 'p_mw']), p_lo), p_hi)
+
+
+def _electrisim_pcs_opf_circle_check(net):
+    """After the OPF: a PCS whose box let it past its rating (its P and Q together) is warned of."""
+    for rec in getattr(net, 'electrisim_pcs', None) or []:
+        if not rec.get('opf_box_outside_circle') or rec['table'] not in ('gen', 'sgen'):
+            continue
+        res = net[f"res_{rec['table']}"]
+        if rec['index'] not in res.index:
+            continue
+        p, q = float(res.at[rec['index'], 'p_mw']), float(res.at[rec['index'], 'q_mvar'])
+        s = math.hypot(p, q)
+        if math.isfinite(s) and s > rec['s_rated'] * 1.001:
+            _electrisim_warn(net, f"PCS '{rec['label']}': the OPF dispatched {p:.4g} MW and {q:.4g} Mvar, "
+                                  f"{s:.4g} MVA - past its {rec['s_rated']:.4g} MVA rating (the OPF limits P and Q "
+                                  "separately, not together).")
+
+
+def _electrisim_opf_island_shortfalls(net):
+    """
+    Each island with no external grid whose load is more than its sources can
+    give at their OPF limits: a reason the OPF cannot converge that no solver
+    setting changes (the PCS3750C-MV with a block out: eight PCS at their
+    continuous rating against the three blocks' load).
+    """
+    try:
+        graph = top.create_nxgraph(net, respect_switches=True)
+        grids = set(int(b) for b in net.ext_grid.loc[net.ext_grid['in_service'] == True, 'bus']) \
+            if len(net.ext_grid) else set()
+        out = []
+        for comp in top.connected_components(graph):
+            comp = set(int(b) for b in comp)
+            if comp & grids:
+                continue
+            load = 0.0
+            if len(net.load):
+                ld = net.load[net.load['bus'].isin(comp) & (net.load['in_service'] == True)]
+                scale = ld['scaling'] if 'scaling' in ld.columns else 1.0
+                load = float((ld['p_mw'] * scale).sum())
+            if not len(net.gen) or not ((net.gen['bus'].isin(comp)) & (net.gen['in_service'] == True)).any():
+                continue        # nothing holds its voltage: an isolated island, which the diagnostic names
+            cap, n = 0.0, 0
+            for table in ('gen', 'sgen', 'storage'):
+                df = net[table] if table in net else None
+                if df is None or not len(df):
+                    continue
+                on = df[df['bus'].isin(comp) & (df['in_service'] == True)]
+                for i in on.index:
+                    controllable = 'controllable' in on.columns and bool(on.at[i, 'controllable'])
+                    if table == 'storage':
+                        # Positive charging: the most it gives is its lowest p.
+                        lo = on.at[i, 'min_p_mw'] if controllable and 'min_p_mw' in on.columns else on.at[i, 'p_mw']
+                        cap += -float(lo) if pd.notna(lo) else 0.0
+                    else:
+                        hi = on.at[i, 'max_p_mw'] if controllable and 'max_p_mw' in on.columns else on.at[i, 'p_mw']
+                        cap += float(hi) if pd.notna(hi) else 0.0
+                    n += 1
+            if load > 1e-6 and load > cap * 1.0001:
+                friendly = getattr(net, 'user_friendly_names', {}) or {}
+                names = [str(friendly.get(net.bus.at[b, 'name'], net.bus.at[b, 'name'])) for b in sorted(comp)[:3]]
+                out.append(f"The island with {', '.join(names)}{' and others' if len(comp) > 3 else ''} draws "
+                           f"{load:.3g} MW, more than its {n} source(s) can give at their limits ({cap:.3g} MW, "
+                           "at their continuous ratings): no dispatch exists. Shed load, or run the load flow, "
+                           "which lets grid-forming PCS share an overload within their short-time rating.")
+        return out
+    except Exception:
+        return []
+
+
+def _electrisim_pcs_opf_costs(net, gen_cp1, sgen_cp1):
+    """Each PCS's own marginal cost (EUR/MWh) where the diagram gives one and the study's costs do not."""
+    for rec in getattr(net, 'electrisim_pcs', None) or []:
+        cost = rec.get('opf_cost')
+        if cost is None or not math.isfinite(cost) or rec['table'] not in ('gen', 'sgen'):
+            continue
+        target = gen_cp1 if rec['table'] == 'gen' else sgen_cp1
+        target.setdefault(str(rec['id']), cost)
+
+
+def _electrisim_pcs_weight(rec):
+    return rec['s_rated'] / rec['droop_pf']
+
+
+def _electrisim_governor_droop(el):
+    """A generator's governor droop R (p.u.): its Dynamics tab's, TGOV1's 0.05 by default; none without a governor."""
+    model = str(el.get('dyn_governor_model') or 'TGOV1').strip().upper()
+    if model in ('NONE', 'OFF'):
+        return np.nan
+    from andes_electrisim import _GOVERNOR_DEFAULTS
+    r = safe_float(el.get('dyn_gov_R'), np.nan)
+    if not (np.isfinite(r) and r > 0):
+        r = _GOVERNOR_DEFAULTS.get(model, _GOVERNOR_DEFAULTS['TGOV1']).get('R', 0.05)
+    return float(r)
+
+
+def _electrisim_island_gens(net, comp):
+    """
+    The synchronous generators in an island with a governor: each shares the
+    island's imbalance with its grid-forming PCS by its droop, its weight its
+    rated MVA / R as a PCS's is S_rated / droop. Each record: index, set point,
+    weight, droop, rating, power limit.
+    """
+    if not len(net.gen) or 'electrisim_gov_r' not in net.gen.columns:
+        return []
+    out = []
+    for i in net.gen.index:
+        if (not bool(net.gen.at[i, 'in_service']) or int(net.gen.at[i, 'bus']) not in comp
+                or _electrisim_is_pcs(net.gen, i) or bool(net.gen.at[i, 'slack'])):
+            continue
+        r = float(net.gen.at[i, 'electrisim_gov_r']) if pd.notna(net.gen.at[i, 'electrisim_gov_r']) else np.nan
+        s = safe_float(net.gen.at[i, 'sn_mva'], np.nan) if 'sn_mva' in net.gen.columns else np.nan
+        if not (np.isfinite(r) and r > 0 and np.isfinite(s) and s > 0):
+            continue
+        cos = safe_float(net.gen.at[i, 'cos_phi'], np.nan) if 'cos_phi' in net.gen.columns else np.nan
+        out.append({'index': int(i), 'p_set': float(net.gen.at[i, 'p_mw']), 'weight': s / r, 'r': r, 's_rated': s,
+                    'p_max': s * cos if np.isfinite(cos) and 0 < cos <= 1 else np.inf})
+    return out
+
+
+def _electrisim_pcs_islands(net):
+    """
+    Each grid-forming PCS's island: with an external grid it delivers its set
+    power; without one, the island's grid-forming PCS share its imbalance by
+    droop, the one with the largest S_rated / droop its reference (slack).
+    """
+    gf = [r for r in net.electrisim_pcs if r['table'] == 'gen' and r['in_service']]
+    if not gf:
+        return
+    graph = top.create_nxgraph(net, respect_switches=True)
+    grid_buses = set(int(b) for b in net.ext_grid.loc[net.ext_grid['in_service'] == True, 'bus']) \
+        if len(net.ext_grid) else set()
+    slack_gens = set(int(b) for b in net.gen.loc[(net.gen['slack'] == True) & (net.gen['in_service'] == True), 'bus']) \
+        if len(net.gen) and 'slack' in net.gen.columns else set()
+    islands = {}
+    for rec in gf:
+        if rec['bus'] in grid_buses:
+            # On the grid's own bus the grid holds its voltage: it takes the grid's set point, and no Q-V droop.
+            g = net.ext_grid.index[(net.ext_grid['bus'] == rec['bus']) & (net.ext_grid['in_service'] == True)][0]
+            net.gen.at[rec['index'], 'vm_pu'] = float(net.ext_grid.at[g, 'vm_pu'])
+            rec['vm_set_pu'] = float(net.ext_grid.at[g, 'vm_pu'])
+            rec['droop_qv_lf'] = 0.0
+        comp = frozenset(top.connected_component(graph, rec['bus']))
+        if comp & (grid_buses | slack_gens):
+            continue
+        islands.setdefault(comp, []).append(rec)
+    net.electrisim_island_gens = {}
+    for n, (comp, recs) in enumerate(islands.items()):
+        ref = max(recs, key=_electrisim_pcs_weight)
+        for rec in recs:
+            rec['island'] = n
+        net.electrisim_island_gens[n] = _electrisim_island_gens(net, comp)
+        ref['reference'] = True
+        net.gen.at[ref['index'], 'slack'] = True
+        net.gen.at[ref['index'], 'slack_weight'] = 1.0
+
+
+# A PCS's reactor (pu of its rating): EMT's, which it builds each PCS behind (emt_electrisim._pcs).
+PCS_SC_REACTOR_PU = 0.15
+
+
+def electrisim_pcs_1ph_limits(net, fault='1ph'):
+    """
+    {bus: kA} for every bus of each PCS island the network holds, from its
+    topology as it stands - a line split at its fault: an earth fault's
+    ('1ph') or a line-to-line fault's ('2ph') most.
+    """
+    out = {}
+    key = '_electrisim_pcs_1ph_islands' if fault == '1ph' else '_electrisim_pcs_islands'
+    for forming in net.get(key) or []:
+        out.update(_electrisim_pcs_1ph_limits(net, None, forming, fault))
+    return out
+
+
+def _electrisim_pcs_1ph_limits(net, comp, forming, fault='1ph'):
+    """
+    {bus: kA}: the most a single-phase fault at each bus of a PCS island can
+    draw before its inverters reach their current limit. An earth fault draws
+    I1 = I2 = I0, in phase at the fault; behind a transformer shifting them by
+    theta (each sequence its own way) a converter's worst phase carries
+    2 max|cos(theta + n 120 deg)| of it - sqrt(3) through a delta-star, 2
+    with none. Each converter then gives at most k I_rated over that, and the
+    fault three times their sum. (EMT: a backbone with both zigzags, 427 A, at
+    this limit; IEC behind 1/k pu in each sequence gave 312 A.)
+
+    A line-to-line fault ('2ph') draws I1 = -I2: a converter's worst phase
+    carries 2 max|sin(theta + n 120 deg)| of either - 2 through a delta-star,
+    sqrt(3) with none - and the faulted phases sqrt(3) times their sum. As the
+    positive sequence alone was limited, an island's 2ph fault through T2's
+    delta read 236 A, its inverters' worst phase some 1.6 pu (EMT, 262 A).
+    """
+    angle, queue = {}, []
+    start = int(forming[0]['bus'])
+    angle[start], queue = 0.0, [start]
+    edges = {}
+    open_lines = {int(sw['element']) for _, sw in net.switch.iterrows() if sw['et'] == 'l' and not bool(sw['closed'])}
+    for i, line in net.line.iterrows():
+        if bool(line['in_service']) and int(i) not in open_lines:
+            a, b = int(line['from_bus']), int(line['to_bus'])
+            edges.setdefault(a, []).append((b, 0.0))
+            edges.setdefault(b, []).append((a, 0.0))
+    for _, sw in net.switch.iterrows():
+        if sw['et'] == 'b' and bool(sw['closed']):
+            a, b = int(sw['bus']), int(sw['element'])
+            edges.setdefault(a, []).append((b, 0.0))
+            edges.setdefault(b, []).append((a, 0.0))
+    for _, tr in net.trafo.iterrows():
+        if bool(tr['in_service']):
+            hv, lv, shift = int(tr['hv_bus']), int(tr['lv_bus']), float(tr.get('shift_degree') or 0.0)
+            edges.setdefault(hv, []).append((lv, -shift))
+            edges.setdefault(lv, []).append((hv, shift))
+    for node in queue:
+        for nxt, d in edges.get(node, ()):
+            if (comp is None or nxt in comp) and nxt not in angle and bool(net.bus.at[nxt, 'in_service']):
+                angle[nxt] = angle[node] + d
+                queue.append(nxt)
+    out = {}
+    for b in angle:
+        vn = float(net.bus.at[b, 'vn_kv'])
+        total = 0.0
+        for r in forming:
+            if int(r['bus']) not in angle:
+                continue
+            theta = math.radians(angle[b] - angle[int(r['bus'])])
+            wave = math.sin if fault == '2ph' else math.cos
+            m = 2.0 * max(abs(wave(theta + n * 2.0 * math.pi / 3.0)) for n in range(3))
+            total += r['k'] * r['s_rated'] / (math.sqrt(3.0) * vn) / m
+        out[int(b)] = (math.sqrt(3.0) if fault == '2ph' else 3.0) * total
+    return out
+
+
+def _electrisim_pcs_sc_islands(net):
+    """
+    A short-circuit study needs a voltage source in each island: one no grid or
+    machine feeds gets its largest grid-forming PCS as an external grid that
+    gives k x I_rated at its bus - a converter at its current limit.
+
+    For a single-phase fault, each of its grid-forming PCS is: IEC 60909's
+    single-phase share of a current source, 3 Z(1) / (2 Z(1) + Z(0)) of its
+    current, takes Z(1) as the network's, here the one source's - its eleven
+    mates' current through that impedance a voltage several times nominal.
+    An ungrounded backbone's earth fault came to 114 A (EMT: 6.5 A, its
+    cables' capacitance). Each is a voltage source behind its own reactor, as
+    EMT builds it, and the fault capped where the inverters reach their
+    current limit (electrisim_pcs_1ph_limits, at the fault). Behind 1/k pu in each
+    sequence - the limit's impedance - an earth fault far below the limit
+    still met it twice: 312 A on the backbone with both zigzags, where EMT,
+    at the limit, gives 427 A.
+    """
+    pcs = [r for r in net.electrisim_pcs if r['in_service']]
+    if not pcs:
+        return
+    graph = top.create_nxgraph(net, respect_switches=True)
+    sources = set(int(b) for b in net.ext_grid.loc[net.ext_grid['in_service'] == True, 'bus']) if len(net.ext_grid) else set()
+    if len(net.gen):
+        real = net.gen[(net.gen['in_service'] == True)]
+        if 'electrisim_pcs' in real.columns:
+            real = real[real['electrisim_pcs'] != True]
+        sources |= set(int(b) for b in real['bus'])
+    done = set()
+    for rec in pcs:
+        comp = frozenset(top.connected_component(graph, rec['bus']))
+        if comp in done or comp & sources:
+            continue
+        done.add(comp)
+        mates = [r for r in pcs if r['bus'] in comp]
+        forming = [r for r in mates if r['control'] == 'grid_forming'] or mates
+        ref = max(forming, key=lambda r: r['k'] * r['s_rated'])
+        one_phase = bool(getattr(net, '_electrisim_sc_1ph', False))
+        for rec_src in (forming if one_phase else [ref]):
+            s_sc = rec_src['s_rated'] / PCS_SC_REACTOR_PU if one_phase else rec_src['k'] * rec_src['s_rated']
+            # No zero sequence: a converter is three-wire. As a grounded source (X0 = X1) it gave an earth
+            # fault behind an ungrounded transformer winding - a UPS's 505 V load bus - 16 kA.
+            g = pp.create_ext_grid(net, rec_src['bus'], vm_pu=1.0, name=f"{rec_src['name']} (as a source)",
+                                   s_sc_max_mva=s_sc, s_sc_min_mva=s_sc, rx_max=0.1, rx_min=0.1, x0x_max=1e6,
+                                   r0x0_max=0.1, x0x_min=1e6, r0x0_min=0.1)
+            net.ext_grid.at[g, 'id'] = rec_src['id']
+            net.sgen.at[rec_src['index'], 'in_service'] = False
+            rec_src['as_source'] = int(g)
+        island = [{'bus': int(r['bus']), 'k': r['k'], 's_rated': r['s_rated']} for r in forming]
+        net['_electrisim_pcs_islands'] = (net.get('_electrisim_pcs_islands') or []) + [island]
+        if one_phase:
+            net['_electrisim_pcs_1ph_islands'] = (net.get('_electrisim_pcs_1ph_islands') or []) + [island]
+            _electrisim_warn(net, f"{len(forming)} grid-forming PCS form an island no grid or machine feeds: in the "
+                                  f"single-phase short circuit each is a source behind its reactor "
+                                  f"({PCS_SC_REACTOR_PU:g} pu), with no zero sequence of its own, and an earth fault "
+                                  "is capped where they reach their current limit (k x their rated current).")
+        else:
+            _electrisim_warn(net, f"PCS '{ref['label']}' forms an island no grid or machine feeds: in the short-circuit "
+                                  f"study it is a source giving its current limit ({ref['k']:g} x its rated current) at "
+                                  "its own bus, the other PCS current sources at theirs.")
+
+
+def _electrisim_pcs_to_settle(net):
+    return [r for r in getattr(net, 'electrisim_pcs', None) or []
+            if r['in_service'] and r['table'] in ('gen', 'sgen')
+            and (r['table'] == 'gen' and (r['island'] is not None or r.get('droop_qv_lf', r['droop_qv']) > 0)
+                 or r['q_mode'] == 'qv' or r.get('dc_load') is not None)]
+
+
+def _electrisim_secant(rec, key, x, g, x_min, x_max):
+    """One secant step on g(x) = 0 for a PCS's set point, from the last; bounded."""
+    hist = rec.get(key)
+    rec[key] = (x, g)
+    if hist is not None and abs(x - hist[0]) > 1e-12 and abs(g - hist[1]) > 1e-15:
+        slope = (g - hist[1]) / (x - hist[0])
+        x_new = x - g / slope if slope > 0 else x - 0.5 * g
+    else:
+        x_new = x - 0.5 * g
+    step = max(min(x_new - x, 0.05), -0.05)
+    return min(max(x + step, x_min), x_max)
+
+
+def _electrisim_settle_pcs(net):
+    """One round of settling the PCS after a load flow; the largest change (MW or p.u.)."""
+    worst = 0.0
+    recs = _electrisim_pcs_to_settle(net)
+    if not recs or not hasattr(net, 'res_bus'):
+        return 0.0
+    # Islanded grid-forming PCS: their island's imbalance shared by droop.
+    islands = {}
+    for rec in recs:
+        if rec['table'] == 'gen' and rec['island'] is not None and rec['index'] in net.res_gen.index:
+            islands.setdefault(rec['island'], []).append(rec)
+    island_gens = getattr(net, 'electrisim_island_gens', None) or {}
+    if not hasattr(net, 'electrisim_island_short'):
+        net.electrisim_island_short = {}
+    for n, group in islands.items():
+        worst = max(worst, _electrisim_share_island(net, n, group, island_gens.get(n, [])))
+    # On a DC network: its DC side draws what its AC side delivers, with its losses.
+    for rec in recs:
+        res = net[f"res_{rec['table']}"]
+        if rec.get('dc_load') is None or rec['index'] not in res.index:
+            continue
+        p = float(res.at[rec['index'], 'p_mw'])
+        if np.isfinite(p):
+            p_dc = _electrisim_dc_dc_input_power(p, rec['eta'], rec['p_nl_mw'])
+            worst = max(worst, abs(p_dc - float(net.load_dc.at[rec['dc_load'], 'p_dc_mw'])))
+            net.load_dc.at[rec['dc_load'], 'p_dc_mw'] = p_dc
+    # Q-V droop of the grid-forming PCS: its voltage set point lowered by its Q.
+    for rec in recs:
+        if rec['table'] == 'gen' and rec.get('droop_qv_lf', rec['droop_qv']) > 0 and rec['index'] in net.res_gen.index:
+            q = float(net.res_gen.at[rec['index'], 'q_mvar'])
+            v_set = float(net.gen.at[rec['index'], 'vm_pu'])
+            g = v_set - (rec['vm_set_pu'] - rec['droop_qv'] * q / rec['s_rated'])
+            worst = max(worst, abs(g))
+            if abs(g) > 1e-9:
+                # Within 0.8-1.2 of its set point (a black start's ramp sets it low, at 0.05 pu).
+                lo, hi = min(0.8, 0.8 * rec['vm_set_pu']), max(1.2, 1.2 * rec['vm_set_pu'])
+                net.gen.at[rec['index'], 'vm_pu'] = _electrisim_secant(rec, 'qv_hist', v_set, g, lo, hi)
+        elif rec['table'] == 'sgen' and rec['q_mode'] == 'qv' and rec['index'] in net.res_sgen.index:
+            # Grid-following Q(V): Q = -(V - V_set) / droop x S_rated, within its capability.
+            v = float(net.res_bus.at[rec['bus'], 'vm_pu'])
+            q_now = float(net.sgen.at[rec['index'], 'q_mvar'])
+            target = -(v - rec['vm_set_pu']) / max(rec['qv_droop'], 1e-3) * rec['s_rated']
+            target = max(min(target, rec['q_max']), -rec['q_max'])
+            new = q_now + 0.5 * (target - q_now)
+            worst = max(worst, abs(target - q_now))
+            net.sgen.at[rec['index'], 'q_mvar'] = new
+    return worst
+
+
+def _electrisim_share_island(net, n, group, gens):
+    """
+    An island's power shared by droop within each member's limits, at one
+    frequency: each gives P_set + W d (W its S / droop, d the frequency's
+    fall), held within its window - a PCS its source's (in a time series
+    the step's, what its store can give for it), a machine 0 to its rating -
+    with d where together they give what the island needs, the reference
+    (slack) PCS one with room. All at their limits, the island is short.
+    Shared by weight alone, an eSTATCOM on seconds of supercapacitors took
+    58 % of an island's 20 MW, and the substation BESS with hours of it 42 %.
+    Returns the largest change of a set point (MW).
+    """
+    units = []
+    for rec in group:
+        lo = rec.get('p_min_step', rec['p_min_mw'])
+        hi = rec.get('p_max_step', rec['p_max_mw'])
+        units.append({'rec': rec, 'index': rec['index'], 'p_set': rec['p_set_ac'], 'w': _electrisim_pcs_weight(rec),
+                      'lo': min(lo, hi), 'hi': max(lo, hi), 'pcs': True})
+    for g in gens:
+        if g['index'] in net.res_gen.index:
+            units.append({'rec': g, 'index': g['index'], 'p_set': g['p_set'], 'w': g['weight'], 'lo': 0.0,
+                          'hi': g['p_max'], 'pcs': False})
+    if not units:
+        return 0.0
+    need = sum(float(net.res_gen.at[u['index'], 'p_mw']) for u in units)
+    clamp = lambda u, d: min(max(u['p_set'] + u['w'] * d, u['lo']), u['hi'])    # noqa: E731
+    total = lambda d: sum(clamp(u, d) for u in units)                           # noqa: E731
+    lo_d, hi_d = -1.0, 1.0
+    while total(hi_d) < need and hi_d < 1e6:
+        hi_d *= 2.0
+    while total(lo_d) > need and lo_d > -1e6:
+        lo_d *= 2.0
+    for _ in range(200):
+        mid = 0.5 * (lo_d + hi_d)
+        if total(mid) < need:
+            lo_d = mid
+        else:
+            hi_d = mid
+    d = 0.5 * (lo_d + hi_d)
+    room = sum(u['hi'] for u in units)
+    floor = sum(u['lo'] for u in units)
+    weighted = [u for u in units if u['w'] > 0]
+    if need > room and weighted:
+        d = max((u['hi'] - u['p_set']) / u['w'] for u in weighted)     # where the last reached its limit
+    elif need < floor and weighted:
+        d = min((u['lo'] - u['p_set']) / u['w'] for u in weighted)
+    for u in units:
+        u['target'] = clamp(u, d)
+        u['free'] = u['lo'] + 1e-9 < u['p_set'] + u['w'] * d < u['hi'] - 1e-9
+    net.electrisim_island_short[n] = max(need - room, 0.0) if need > room else min(need - floor, 0.0)
+    # The reference: the PCS with room and the largest weight; with none, the one it was.
+    pcs_units = [u for u in units if u['pcs']]
+    ref = next((u for u in pcs_units if u['rec']['reference']), None)
+    if ref is None or not ref['free']:
+        free = [u for u in pcs_units if u['free']]
+        new = max(free, key=lambda u: u['w']) if free else ref
+        if new is not None and new is not ref:
+            if ref is not None:
+                ref['rec']['reference'] = False
+                net.gen.at[ref['index'], 'slack'] = False
+            new['rec']['reference'] = True
+            net.gen.at[new['index'], 'slack'] = True
+            net.gen.at[new['index'], 'slack_weight'] = 1.0
+            ref = new
+    worst = 0.0
+    for u in units:
+        u['rec']['df_pu'] = -d                 # one frequency: f = f0 (1 - d)
+        if u is ref:
+            continue
+        worst = max(worst, abs(u['target'] - float(net.gen.at[u['index'], 'p_mw'])))
+        net.gen.at[u['index'], 'p_mw'] = u['target']
+    return worst
+
+
+def _electrisim_store_seconds(obj, p_mw):
+    """How long (s) a supercapacitor or flywheel delivers ``p_mw`` from its usable energy; None for another source."""
+    if p_mw <= 1e-9 or obj is None:
+        return None
+    if obj.kind == 'Supercapacitor':
+        usable = obj.energy()[1]
+    elif obj.kind == 'Flywheel':
+        usable = obj.e_max * max(obj.s0 ** 2 - obj.s_min ** 2, 0.0)
+    else:
+        return None
+    return usable / (p_mw * 1e6)
+
+
+def _electrisim_warn_island_short(net):
+    """
+    An island its PCS and machines cannot balance within their limits, named once: by how much, what its
+    reference PCS then carries past its rating, how much of its supply only supercapacitors and flywheels give
+    (for seconds), and where to find the least load to shed.
+    """
+    for n, short in (getattr(net, 'electrisim_island_short', None) or {}).items():
+        if abs(short) <= 1e-6:
+            continue
+        recs = [r for r in getattr(net, 'electrisim_pcs', None) or [] if r.get('island') == n]
+        members = [r['label'] for r in recs]
+        what = (f"short by {short:.3f} MW: its grid-forming PCS and machines are at their limits"
+                if short > 0 else f"{-short:.3f} MW over what its PCS and machines can take in")
+        p_of = lambda r: (float(net[f"res_{r['table']}"].at[r['index'], 'p_mw'])            # noqa: E731
+                          if r.get('table') and r.get('index') in getattr(net, f"res_{r['table']}", pd.DataFrame()).index else None)
+        ref = next((r for r in recs if r.get('reference')), None)
+        p_ref = p_of(ref) if ref is not None else None
+        if ref is not None and p_ref is not None and np.isfinite(p_ref):
+            s = float(ref.get('s_rated') or 0.0)
+            past = abs(p_ref) - s
+            carry = (f"its reference PCS '{ref['label']}' carries {p_ref:.3f} MW"
+                     + (f", {past:.3f} MW past its {s:g} MVA rating" if s > 0 and past > 1e-3 else "") + ".")
+        else:
+            carry = "its reference PCS carries the difference beyond its limit."
+        brief = []
+        for r in recs:
+            src = r.get('source') or {}
+            p_r = p_of(r)
+            if src.get('kind') in ('Supercapacitor', 'Flywheel') and p_r is not None and p_r > 1e-3:
+                t = _electrisim_store_seconds(src.get('obj'), p_r)
+                brief.append((r['label'], p_r, t))
+        stores = ''
+        if short > 0 and brief:
+            stores = (f" {sum(b[1] for b in brief):.3f} MW of its supply comes from supercapacitors or flywheels, which hold it "
+                      "for seconds, not as a steady state: "
+                      + ', '.join(f"'{lab}' {pw:.3f} MW" + (f" for about {t:.3g} s" if t is not None else '') for lab, pw, t in brief) + ".")
+        _electrisim_warn(net, f"The island formed by {', '.join(members)} is {what}; {carry}{stores}"
+                              + (" Simulate, AC/DC Optimal Power Flow (least shed) gives the least load to shed." if short > 0 else ''))
+
+
+def _electrisim_der_dc_point(obj, p):
+    """
+    A source's or store's terminal voltage (V) delivering power ``p`` (W) into
+    its PCS: (voltage, note or None).
+    """
+    if obj.kind == 'PV Array':
+        v_mp, _, p_mp = obj.mpp()
+        if p >= p_mp * (1.0 - 1e-9):
+            note = (f"its PCS draws {p / 1e3:.4g} kW, more than its maximum power ({p_mp / 1e3:.4g} kW)"
+                    if p > p_mp * (1.0 + 1e-6) else None)
+            return v_mp, note
+        lo, hi = v_mp, obj.n_s * obj.v_oc_t
+        for _ in range(80):
+            mid = 0.5 * (lo + hi)
+            if mid * obj.i_array(mid) > p:
+                lo = mid
+            else:
+                hi = mid
+        return 0.5 * (lo + hi), None
+    if obj.kind == 'SOFC':
+        i_min = max(obj.p_min_frac * obj.p_rated, 1e-3 * obj.p_rated) / obj.v_rated
+        if p <= i_min * obj.v_terminal(i_min):
+            return obj.v_terminal(i_min), (f"its PCS draws {p / 1e3:.4g} kW, below its minimum load"
+                                           if p < i_min * obj.v_terminal(i_min) * (1 - 1e-6) else None)
+        lo, hi = i_min, 3.0 * obj.i_rated
+        for _ in range(80):
+            mid = 0.5 * (lo + hi)
+            if mid * obj.v_terminal(mid) < p:
+                lo = mid
+            else:
+                hi = mid
+        i = 0.5 * (lo + hi)
+        note = (f"its PCS draws {p / 1e3:.4g} kW, more than its rating less its auxiliary load"
+                if p > obj.p_limits()[0] * (1 + 1e-6) else None)
+        return obj.v_terminal(i), note
+    if obj.kind == 'Battery':
+        # Past OCV^2 / 4R no terminal voltage delivers it: the iteration below would run its voltage to nothing
+        # and its current (and C-rate) to billions. At its maximum-power point instead, and said so.
+        ocv, r = obj.ocv(), obj.r0 + obj.r1
+        if r > 0 and p > ocv * ocv / (4.0 * r):
+            return 0.5 * ocv, (f"its PCS draws {p / 1e3:.4g} kW, more than it can deliver at any terminal voltage "
+                               f"({ocv * ocv / (4.0 * r) / 1e3:.4g} kW, at half its open-circuit voltage)")
+    v = obj.v_nominal()
+    for _ in range(100):
+        v_new = obj.v_terminal(p / max(v, 1e-6))
+        if abs(v_new - v) < 1e-9 * max(abs(v), 1.0):
+            v = v_new
+            break
+        v = v_new
+    note = None
+    if obj.kind == 'Flywheel' and not -obj.p_limits()[1] - 1e-6 <= p <= obj.p_limits()[0] + 1e-6:
+        note = f"its PCS asks {p / 1e3:.4g} kW, beyond its power limit at its speed ({obj.p_limits()[0] / 1e3:.4g} kW)"
+    return v, note
+
+
+def _electrisim_overload_note(steps, ratio):
+    """What a converter's short-time overload makes of a load flow's loading above its rating, as a clause."""
+    if not steps:
+        return ''
+    t = converter_rating.overload_time(steps, ratio)
+    if t <= 0:
+        return f", beyond its short-time overload ({100 * max(m for _, m in steps):g} %)"
+    return f" - within its short-time overload for {t:g} s, not continuously"
+
+
+def _electrisim_pcs_result(net, rec):
+    """A PCS's AC and DC power, loading, losses and frequency; its source's report, under '_source'."""
+    src = rec['source']
+    out = {'name': rec['name'], 'id': rec['id'], 'label': rec['label'], 'control': rec['control'],
+           'source': src['label'], 'source_kind': src['kind'], 'in_service': rec['in_service'],
+           'islanded': rec['island'] is not None, 'p_mw': None, 'q_mvar': None, 's_mva': None,
+           'loading_percent': None, 'vm_pu': None, 'p_dc_mw': None, 'loss_mw': None, 'frequency_hz': None,
+           's_rated_mva': rec['s_rated'], 'current_limit_pu': rec['k'], 'p_max_mw': rec.get('p_max_mw'),
+           'p_min_mw': rec.get('p_min_mw'), 'q_capability_mvar': None}
+    res = getattr(net, f"res_{rec['table']}", None)
+    if not rec['in_service'] or res is None or rec['index'] not in res.index:
+        return out
+    p, q = float(res.at[rec['index'], 'p_mw']), float(res.at[rec['index'], 'q_mvar'])
+    if not (np.isfinite(p) and np.isfinite(q)):
+        return out
+    s = math.hypot(p, q)
+    p_dc = _electrisim_dc_dc_input_power(p, rec['eta'], rec['p_nl_mw'])
+    f_n = float(getattr(net, 'f_hz', 50.0) or 50.0)
+    vm = float(net.res_bus.at[rec['bus'], 'vm_pu']) if rec['bus'] in net.res_bus.index else None
+    # Its rating at its bus's voltage: current-limited below nominal (converter_rating).
+    s_avail = rec['s_rated'] * converter_rating.voltage_factor(vm if vm is not None else 1.0)
+    out.update(p_mw=p + 0.0, q_mvar=q + 0.0, s_mva=s, loading_percent=100.0 * s / rec['s_rated'],
+               q_capability_mvar=converter_rating.q_limit(rec['s_rated'], p, rec.get('q_max_pu')),
+               vm_pu=vm, p_dc_mw=p_dc, loss_mw=p_dc - p, frequency_hz=f_n * (1.0 + rec['df_pu']),
+               s_nameplate_mva=rec.get('s_nameplate', rec['s_rated']), s_available_mva=s_avail,
+               derating_factor=rec.get('derating', {}).get('factor', 1.0))
+    if s > s_avail * 1.0001:
+        _electrisim_warn(net, f"PCS '{rec['label']}' is loaded to {100.0 * s / s_avail:.1f} % of its rating"
+                         + (f" at its bus's {vm:.3f} pu" if vm is not None and vm < 1.0 else "")
+                         + _electrisim_overload_note(rec.get('overload'), s / s_avail) + ".")
+    if src['kind'] == 'DC bus':
+        v = (float(net.res_bus_dc.at[rec['dc_bus'], 'vm_pu']) * float(net.bus_dc.at[rec['dc_bus'], 'vn_kv']) * 1e3
+             if rec['dc_bus'] in net.res_bus_dc.index else None)
+        out['v_dc_v'] = v if v is not None and np.isfinite(v) else None
+        return out
+    v, note = _electrisim_der_dc_point(src['obj'], p_dc * 1e6)
+    if note:
+        src['obj'].notes.append(note)
+    report = {'name': src['name'], 'id': src['id'], 'label': src['label'], 'kind': src['kind'], 'coupling': 'pcs',
+              'pcs': rec['label'], 'in_service': rec['in_service'], 'p_mw': None, 'v_kv': None, 'i_ka': None}
+    out['_source'] = _electrisim_der_report(net, src, report, v, p_dc * 1e6)
+    out['v_dc_v'] = v
+    return out
+
+
+# --- Solid-state transformers -------------------------------------------------------------
+#
+# One element, three ports: MV AC, LV DC, and an optional LV AC. It is built
+# as three stages on the DC/DC converter's parts, each stage's input drawing
+# its output divided by its efficiency plus its no-load loss:
+#   rectifier   the power the MV bus supplies, with a set Q, into an internal
+#               DC link held at the voltage the user sets;
+#   DC/DC       from the link to the LV DC port, holding its voltage;
+#   inverter    from the LV DC port to the LV AC port: grid-following, a set
+#               P and Q into an LV AC network another source holds, or
+#               grid-forming, holding an islanded LV AC network's voltage.
+# The rectifier is the P and Q it draws at the MV bus rather than a lossy VSC,
+# so each stage's efficiency holds exactly, as the DC/DC converter's does.
+
+def _electrisim_build_ssts(net, Busbars):
+    pending = getattr(net, '_electrisim_pending_sst', None) or []
+    net.electrisim_ssts = []
+    for el in pending:
+        name = el.get('name')
+        label = el.get('userFriendlyName') or name
+        b_mv, b_lvac = Busbars.get(el.get('bus_mv')), Busbars.get(el.get('bus_lv_ac'))
+        b_lvdc = _electrisim_dc_bus(net, el.get('bus_lv_dc'))
+        if b_mv is not None and b_lvac is not None and float(net.bus.at[b_lvac, 'vn_kv']) > float(net.bus.at[b_mv, 'vn_kv']):
+            b_mv, b_lvac = b_lvac, b_mv   # the MV port is the higher voltage, whichever pin it is on
+        if b_mv is None or b_lvdc is None:
+            _electrisim_warn(net, f"Solid-State Transformer '{label}' needs an AC bus at its MV port and a DC bus at "
+                                  "its LV DC port, so it is left out.")
+            continue
+        on = _electrisim_in_service(el)
+
+        def stage_params(prefix, eta_default, rated_default):
+            eta = safe_float(el.get(f'{prefix}_efficiency_percent'), eta_default) / 100.0
+            if not 0 < eta <= 1:
+                _electrisim_warn(net, f"Solid-State Transformer '{label}': a {prefix} efficiency of {100 * eta:g} % "
+                                      "is taken as 100 %.")
+                eta = 1.0
+            return eta, safe_float(el.get(f'{prefix}_no_load_kw'), 0.0) / 1e3, safe_float(el.get(f'{prefix}_rated_mw'), rated_default)
+
+        rec = {'name': name, 'id': el.get('id', ''), 'label': label, 'in_service': on, 'bus_mv': int(b_mv),
+               'bus_lvdc': int(b_lvdc), 'bus_lvac': int(b_lvac) if b_lvac is not None else None,
+               'link_kv': safe_float(el.get('link_kv'), 0.0), 'stages': [], 'aux': [], 'inverter_mode': None,
+               # Easing in an island short of power, as a rectifier's: its MV voltage below uv_ease_pu, or its
+               # frequency between ease_f_start_hz and ease_f_end_hz, its LV DC output eases off and its bus's
+               # stores take the rest (ANDES and EMT; 0: none).
+               'ease': {k: safe_float(el.get(k), d) for k, d in (
+                   ('uv_ease_pu', 0.0), ('uv_floor_pu', 0.5), ('uv_restore_s', 5.0),
+                   ('ease_f_start_hz', 0.0), ('ease_f_end_hz', 0.0))},
+               # For the EMT study: its stages' model, switching frequencies, current limit and its rectifier's
+               # and inverter's current loop bandwidth.
+               'emt': {'model': 'switching' if el.get('emt_model') == 'switching' else 'average',
+                       'switching_khz': safe_float(el.get('switching_khz'), 5.0),
+                       'current_loop_hz': safe_float(el.get('current_loop_hz'), 500.0),
+                       'dcdc_switching_khz': safe_float(el.get('dcdc_switching_khz'), 20.0),
+                       'current_limit_pu': safe_float(el.get('current_limit_pu'), 1.2),
+                       # its link below this (pu), its DC/DC stage pauses rather than block (0: none)
+                       'ride_through_pu': min(max(safe_float(el.get('ride_through_pu'), 0.0), 0.0), 1.0),
+                       # its stages' capacitors' ESR and ESL (0: none), for it and the DC fault study
+                       **{k: max(safe_float(el.get(k), 0.0), 0.0) for k in (
+                           'rect_dc_link_esr_mohm', 'rect_dc_link_esl_uh', 'dcdc_c_in_esr_mohm', 'dcdc_c_in_esl_uh',
+                           'dcdc_c_out_esr_mohm', 'dcdc_c_out_esl_uh', 'inv_dc_link_esr_mohm', 'inv_dc_link_esl_uh')}}}
+        if rec['link_kv'] <= 0:
+            rec['link_kv'] = float(net.bus.at[b_mv, 'vn_kv']) * math.sqrt(2) * 1.1
+        for key, bus, vn in (('vn_mv_kv', b_mv, float(net.bus.at[b_mv, 'vn_kv'])),
+                             ('vn_lv_dc_kv', b_lvdc, float(net.bus_dc.at[b_lvdc, 'vn_kv'])),
+                             ('vn_lv_ac_kv', b_lvac, float(net.bus.at[b_lvac, 'vn_kv']) if b_lvac is not None else None)):
+            rated_kv = safe_float(el.get(key), 0.0)
+            if vn and rated_kv > 0 and abs(rated_kv - vn) > 0.1 * vn:
+                port = {'vn_mv_kv': 'MV', 'vn_lv_dc_kv': 'LV DC', 'vn_lv_ac_kv': 'LV AC'}[key]
+                _electrisim_warn(net, f"Solid-State Transformer '{label}': its {port} port is rated {rated_kv:g} kV, "
+                                      f"its bus is {vn:g} kV.")
+
+        # The internal DC link, held by the rectifier.
+        link = pp.create_bus_dc(net, vn_kv=rec['link_kv'], name=f'{name} DC link', in_service=on)
+        net.bus_dc.at[link, 'electrisim_aux'] = True
+        r_eta, r_nl, r_rated = stage_params('rect', 98.5, 1.0)
+        r_vsc, r_bus, r_grid = _electrisim_aux_dc_source(net, link, 1.0, r_rated, f'{name} rectifier', on)
+        mv_load = pp.create_load(net, b_mv, p_mw=r_nl, q_mvar=safe_float(el.get('q_mv_mvar'), 0.0), name=name,
+                                 in_service=on)
+        for key, value in _electrisim_stage_columns(name, r_eta, r_nl, ('vsc', r_vsc)).items():
+            net.load.at[mv_load, key] = value
+        if 'id' in net.load.columns:
+            net.load.at[mv_load, 'id'] = el.get('id', '')
+        rec['stages'].append({'stage': 'rectifier', 'input': ('load', int(mv_load)), 'rated_mw': r_rated,
+                              'output': ('vsc', int(r_vsc)), 'link': int(link)})
+
+        # The DC/DC stage, holding the LV DC port.
+        d_eta, d_nl, d_rated = stage_params('dcdc', 98.0, 1.0)
+        d_vsc, d_bus, d_grid = _electrisim_aux_dc_source(net, b_lvdc, safe_float(el.get('vm_lv_dc_pu'), 1.0),
+                                                         d_rated, f'{name} DC/DC', on)
+        d_in = _electrisim_new_load_dc(net, link, d_nl, f'{name} DC/DC input', on,
+                                       **_electrisim_stage_columns(name, d_eta, d_nl, ('vsc', d_vsc)))
+        rec['stages'].append({'stage': 'dcdc', 'input': ('load_dc', int(d_in)), 'rated_mw': d_rated,
+                              'output': ('vsc', int(d_vsc))})
+        rec['aux'] = [('vsc', r_vsc), ('ext_grid', r_grid), ('bus', r_bus), ('vsc', d_vsc), ('ext_grid', d_grid),
+                      ('bus', d_bus), ('load_dc', int(d_in)), ('bus_dc', int(link))]
+
+        # The inverter, when the LV AC port is connected.
+        if b_lvac is not None:
+            i_eta, i_nl, i_rated = stage_params('inv', 97.5, 0.5)
+            mode = 'grid_forming' if str(el.get('inverter_mode') or '').strip().lower() == 'grid_forming' else 'grid_following'
+            rec['inverter_mode'] = mode
+            if mode == 'grid_following':
+                out = pp.create_sgen(net, b_lvac, p_mw=safe_float(el.get('p_ac_mw'), 0.0),
+                                     q_mvar=safe_float(el.get('q_ac_mvar'), 0.0), name=f'{name} inverter',
+                                     in_service=on, k=1.2, rx=0.1)
+                net.sgen.at[out, 'electrisim_aux'] = True
+                output = ('sgen', int(out))
+            else:
+                # Its short-circuit power: an inverter's current limit, some 1.2 times its rating.
+                s_sc = max(1.2 * i_rated, 0.01)
+                out = pp.create_ext_grid(net, b_lvac, vm_pu=safe_float(el.get('vm_lv_ac_pu'), 1.0), name=f'{name} inverter',
+                                         in_service=on, s_sc_max_mva=s_sc, s_sc_min_mva=s_sc, rx_max=0.1, rx_min=0.1)
+                net.ext_grid.at[out, 'electrisim_aux'] = True
+                output = ('ext_grid', int(out))
+                _electrisim_sst_check_island(net, rec, int(out))
+            p0 = _electrisim_dc_dc_input_power(safe_float(el.get('p_ac_mw'), 0.0), i_eta, i_nl) if mode == 'grid_following' else i_nl
+            i_in = _electrisim_new_load_dc(net, b_lvdc, p0, f'{name} inverter input', on,
+                                           **_electrisim_stage_columns(name, i_eta, i_nl, output))
+            rec['stages'].append({'stage': 'inverter', 'input': ('load_dc', int(i_in)), 'rated_mw': i_rated,
+                                  'output': output})
+            rec['aux'].append(('load_dc', int(i_in)))
+        net.electrisim_ssts.append(rec)
+        if not hasattr(net, 'user_friendly_names'):
+            net.user_friendly_names = {}
+        net.user_friendly_names[name] = label
+        for part in ('inverter', 'inverter input', 'DC/DC input', 'DC link'):
+            net.user_friendly_names[f'{name} {part}'] = f'{label} {part}'
+
+
+def _electrisim_sst_check_island(net, rec, grid):
+    """A grid-forming inverter holds an LV AC network nothing else holds."""
+    try:
+        mg = top.create_nxgraph(net, respect_switches=True)
+        island = set(top.connected_component(mg, rec['bus_lvac']))
+    except Exception:   # noqa: BLE001 - the check is advisory
+        return
+    others = [i for i in net.ext_grid.index if i != grid and bool(net.ext_grid.at[i, 'in_service'])
+              and int(net.ext_grid.at[i, 'bus']) in island]
+    others += [('gen', i) for i in net.gen.index if bool(net.gen.at[i, 'in_service']) and int(net.gen.at[i, 'bus']) in island]
+    if others or rec['bus_mv'] in island:
+        _electrisim_warn(net, f"Solid-State Transformer '{rec['label']}': its grid-forming inverter holds an LV AC "
+                              "network another source also holds; a grid-following inverter suits a network that "
+                              "is not an island.")
+
+
+def _electrisim_sst_result(net, rec):
+    out = {'name': rec['name'], 'id': rec['id'], 'in_service': rec['in_service'], 'inverter_mode': rec['inverter_mode'],
+           'link_kv': rec['link_kv'], 'stages': [_electrisim_stage_result(net, st) for st in rec['stages']],
+           'p_mv_mw': 0.0, 'q_mv_mvar': 0.0, 'vm_mv_pu': None, 'vm_lv_dc_pu': None, 'vm_lv_ac_pu': None,
+           'p_lv_ac_mw': None, 'q_lv_ac_mvar': None}
+    table, i = rec['stages'][0]['input']
+    if rec['in_service'] and i in net.load.index:
+        out['p_mv_mw'] = float(net.load.at[i, 'p_mw'])
+        out['q_mv_mvar'] = float(net.load.at[i, 'q_mvar'])
+    for key, res, bus in (('vm_mv_pu', 'res_bus', rec['bus_mv']), ('vm_lv_dc_pu', 'res_bus_dc', rec['bus_lvdc']),
+                          ('vm_lv_ac_pu', 'res_bus', rec['bus_lvac'])):
+        df = getattr(net, res, None)
+        if bus is not None and df is not None and bus in df.index and np.isfinite(df.at[bus, 'vm_pu']):
+            out[key] = float(df.at[bus, 'vm_pu'])
+    inverter = next((st for st in rec['stages'] if st['stage'] == 'inverter'), None)
+    if inverter and rec['in_service']:
+        table, idx = inverter['output']
+        if table == 'sgen':
+            out['p_lv_ac_mw'], out['q_lv_ac_mvar'] = float(net.sgen.at[idx, 'p_mw']), float(net.sgen.at[idx, 'q_mvar'])
+        elif idx in getattr(net, 'res_ext_grid', pd.DataFrame()).index:
+            out['p_lv_ac_mw'] = float(net.res_ext_grid.at[idx, 'p_mw'])
+            out['q_lv_ac_mvar'] = float(net.res_ext_grid.at[idx, 'q_mvar'])
+    for st in out['stages']:
+        if st['loading_percent'] and st['loading_percent'] > 100.0:
+            _electrisim_warn(net, f"Solid-State Transformer '{rec['label']}': its {st['stage']} stage is loaded to "
+                                  f"{st['loading_percent']:.1f} % of its rated power.")
+    return out
+
+
+# --- DC circuit breakers ----------------------------------------------------------------
+#
+# pandapower has no DC switch. A DC breaker sits between a DC bus and what it
+# switches: a DC cable, a VSC's DC terminal, a DC load or source - which is
+# taken out of service while the breaker is open - or a second DC bus, joined
+# by a near-zero-resistance DC line (a coupler) in service while it is closed.
+# Breakers are applied once every element exists, as the payload may list a
+# breaker before what it switches.
+
+_DC_BREAKER_TARGETS = ('line_dc', 'vsc', 'b2b_vsc', 'load_dc', 'source_dc')
+_DC_COUPLER_R_OHM = 1e-6
+
+
+def _electrisim_flag(value, default=True):
+    if value is None or value == '':
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ('false', '0', 'no', 'off', 'open')
+
+
+def _electrisim_apply_dc_breakers(net):
+    pending = getattr(net, '_electrisim_pending_dc_breakers', None) or []
+    net.electrisim_dc_breakers = []
+    for el in pending:
+        label = el.get('userFriendlyName') or el.get('name')
+        bus = _electrisim_dc_bus(net, el.get('bus'))
+        if bus is None:
+            _electrisim_warn(net, f"DC Breaker '{label}' is not connected to a DC bus, so it is left out.")
+            continue
+        closed = _electrisim_flag(el.get('closed'), True)
+        rated_kv = safe_float(el.get('rated_voltage_kv'), 0.0)
+        rec = {
+            'name': el.get('name'), 'id': el.get('id', ''), 'label': label, 'closed': closed, 'bus_dc': int(bus),
+            'et': el.get('et'), 'target': None, 'breaker_type': el.get('breaker_type') or 'solid_state',
+            'rated_voltage_kv': rated_kv,
+            'rated_current_ka': safe_float(el.get('rated_current_ka'), 0.0),
+            'breaking_capacity_ka': safe_float(el.get('breaking_capacity_ka'), 0.0),
+            'opening_time_ms': safe_float(el.get('opening_time_ms'), 0.0),
+            'limiting_inductance_mh': safe_float(el.get('limiting_inductance_mh'), 0.0),
+            'arrester_clamp_kv': safe_float(el.get('arrester_clamp_kv'), 0.0),
+            'arrester_energy_kj': safe_float(el.get('arrester_energy_kj'), 0.0),
+            # The EMT study trips it above this (0: twice its rated current).
+            'trip_current_ka': safe_float(el.get('trip_current_ka'), 0.0),
+        }
+        vn = float(net.bus_dc.at[bus, 'vn_kv'])
+        if 0 < rated_kv < vn:
+            _electrisim_warn(net, f"DC Breaker '{label}' is rated {rated_kv:g} kV, below its bus's {vn:g} kV.")
+        et, element = el.get('et'), el.get('element')
+        if et == 'bus_dc':
+            other = _electrisim_dc_bus(net, element)
+            if other is None:
+                _electrisim_warn(net, f"DC Breaker '{label}' joins a DC bus to something that is not a DC bus, so it is left out.")
+                continue
+            idx = pp.create_line_dc_from_parameters(
+                net, from_bus_dc=bus, to_bus_dc=other, length_km=1.0, r_ohm_per_km=_DC_COUPLER_R_OHM,
+                max_i_ka=rec['rated_current_ka'] or 10.0, name=el.get('name'), in_service=closed)
+            net.line_dc.at[idx, 'electrisim_dc_breaker'] = True
+            if 'id' in net.line_dc.columns:
+                net.line_dc.at[idx, 'id'] = el.get('id', '')
+            rec['target'] = ('line_dc', int(idx))
+        elif et == 'dc_dc_converter':
+            conv = next((c for c in getattr(net, 'electrisim_dc_dc_converters', None) or [] if c['name'] == element), None)
+            if conv is None:
+                _electrisim_warn(net, f"DC Breaker '{label}': the DC/DC converter it switches was not built, so it is left out.")
+                continue
+            if int(bus) == conv['bus_in']:
+                rec['target'] = ('load_dc', conv['input'])
+            elif int(bus) == conv['bus_out']:
+                rec['target'] = ('vsc', conv['vsc']) if conv['vsc'] is not None else ('load_dc', conv['output_load'])
+            else:
+                _electrisim_warn(net, f"DC Breaker '{label}' is not on either of its DC/DC converter's buses, so it is left out.")
+                continue
+            if not closed:
+                _electrisim_set_dc_dc_in_service(net, conv, False)
+        elif et in _DC_BREAKER_TARGETS:
+            table = net[et]
+            hit = table.index[table['name'] == element] if len(table) else []
+            if not len(hit):
+                _electrisim_warn(net, f"DC Breaker '{label}': what it switches was not built, so it is left out.")
+                continue
+            idx = int(hit[0])
+            if not closed:
+                table.at[idx, 'in_service'] = False
+                if et == 'line_dc' and _electrisim_is_dc_diode(net, idx):
+                    # A diode behind an open breaker: out, whatever its voltages.
+                    for d in getattr(net, 'electrisim_dc_diodes', None) or []:
+                        if d.get('line') == idx:
+                            d['in_service'] = False
+            rec['target'] = (et, idx)
+        elif et in der_electrisim.KINDS:
+            # A battery's or other store's own breaker, between it and its bus (the payload names its shape).
+            der = next((d for d in getattr(net, 'electrisim_ders', None) or [] if d['name'] == element), None)
+            if der is None:
+                _electrisim_warn(net, f"DC Breaker '{label}': the {et.lower()} it switches was not built, so it is left out.")
+                continue
+            if der['bus'] != int(bus) or der['coupling'] == 'converter':
+                _electrisim_warn(net, f"DC Breaker '{label}' is left out: it goes between {der['label']} and the DC "
+                                      "bus it is directly on.")
+                continue
+            if not closed:
+                _electrisim_set_der_in_service(net, der, False)
+            rec['target'] = ('der', der['name'])
+        else:
+            _electrisim_warn(net, f"DC Breaker '{label}' is left out: it goes between a DC bus and a DC cable, "
+                                  "a VSC, a DC load or source, a battery or other store, or a second DC bus.")
+            continue
+        net.electrisim_dc_breakers.append(rec)
+        if not hasattr(net, 'user_friendly_names'):
+            net.user_friendly_names = {}
+        net.user_friendly_names[el.get('name')] = label
+
+
+def _electrisim_der_by_name(net, name):
+    return next((d for d in getattr(net, 'electrisim_ders', None) or [] if d['name'] == name), None)
+
+
+def _electrisim_dc_breaker_target_gone(net, rec):
+    """Whether what a DC breaker switched has been taken out of the network (a study left it out)."""
+    if rec['target'] is None:
+        return False
+    table, idx = rec['target']
+    if table == 'der':
+        return _electrisim_der_by_name(net, idx) is None
+    return idx not in net[table].index
+
+
+def _electrisim_set_der_in_service(net, rec, on):
+    """A source or store directly on its bus, in or out of the network with all its parts."""
+    rec['obj'].in_service = on
+    for key, table in (('inner', 'bus_dc'), ('aux_bus', 'bus'), ('line', 'line_dc'), ('load', 'load_dc'),
+                       ('cells', 'vsc'), ('vsc', 'vsc'), ('aux_grid', 'ext_grid')):
+        idx = rec['parts'].get(key)
+        if idx is not None and table in net and idx in net[table].index:
+            net[table].at[idx, 'in_service'] = on
+    for cap in getattr(net, 'electrisim_dc_capacitors', None) or []:
+        if cap.get('electrisim_der') and cap['name'] == rec['name']:
+            cap['in_service'] = on
+
+
+def _electrisim_dc_breaker_current_ka(net, rec):
+    """The current through a DC breaker (kA), from what it switches; 0 while it is open."""
+    if not rec['closed'] or rec['target'] is None:
+        return 0.0
+    table, idx = rec['target']
+    bus = rec['bus_dc']
+    res_bus = getattr(net, 'res_bus_dc', None)
+    vm = float(res_bus.at[bus, 'vm_pu']) if res_bus is not None and bus in res_bus.index else np.nan
+    v_kv = vm * float(net.bus_dc.at[bus, 'vn_kv'])
+    if table == 'der':
+        der = _electrisim_der_by_name(net, idx)
+        if der is None or not np.isfinite(vm):
+            return np.nan
+        v, p = _electrisim_der_power(net, der)
+        return abs(p) / max(v, 1e-6) / 1e3
+    if table == 'line_dc':
+        res = net.res_line_dc
+        if idx not in res.index:
+            return np.nan
+        if 'electrisim_dc_breaker' in net.line_dc.columns and net.line_dc.at[idx, 'electrisim_dc_breaker'] == True:
+            return abs(float(res.at[idx, 'i_ka']))
+        side = 'from' if int(net.line_dc.at[idx, 'from_bus_dc']) == bus else 'to'
+        return abs(float(res.at[idx, f'i_{side}_ka']))
+    if table == 'vsc':
+        p = net.res_vsc.at[idx, 'p_dc_mw'] if idx in net.res_vsc.index else np.nan
+    elif table == 'b2b_vsc':
+        row = net.res_b2b_vsc.loc[idx] if idx in net.res_b2b_vsc.index else None
+        p = np.nan if row is None else (row['p_dc_mw_p'] if int(net.b2b_vsc.at[idx, 'bus_dc_plus']) == bus else row['p_dc_mw_m'])
+    elif table in ('load_dc', 'source_dc'):
+        res = net[f'res_{table}']
+        p = res.at[idx, 'p_dc_mw'] if idx in res.index else np.nan
+    else:
+        return np.nan
+    return abs(float(p)) / v_kv if v_kv and np.isfinite(v_kv) else np.nan
+
+
+def _electrisim_dc_bus(net, name):
+    """Index of the DC bus drawn as ``name``, or None: an AC bus is not a DC bus."""
+    return (getattr(net, 'dc_buses', None) or {}).get(name)
+
+
+def _electrisim_in_service(el):
+    value = el.get('in_service', True)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ('false', '0', 'no', 'off')
+
+
+# A DC diode - a server shelf's OR-ing diode in the GE Vernova / NVIDIA 800 V
+# designs, fed from its own lineup and a catcher - conducts from its anode
+# (busFrom, its left pin) to its cathode (busTo) only. Conducting, it is a
+# line_dc of resistance r_on + v_f / I: once the load flow has settled it at
+# the current I it carries, it drops exactly v_f + r_on I. Blocking - its
+# current would reverse, or its anode is not v_f above its cathode - the line
+# is out of service.
+_DC_DIODE_MIN_I_FRACTION = 1e-3     # of its rating: the current its resistance is held at, near none
+_DC_DIODE_TOL_V = 1e-4              # its forward drop settled to 0.1 mV
+# ... or to 1 mV after 10 rounds with none switching: a shelf fed through both its diodes, one from a store in
+# droop, jittered 0.1-0.8 mV round to round - the load flows' own noise - and never settled to 0.1 mV.
+_DC_DIODE_NOISE_V = 1e-3
+_DC_DIODE_NOISE_ROUNDS = 10
+
+
+def _electrisim_create_dc_diode(net, row):
+    label = row.get('userFriendlyName', row.get('name'))
+    anode, cathode = _electrisim_dc_bus(net, row.get('busFrom')), _electrisim_dc_bus(net, row.get('busTo'))
+    if anode is None or cathode is None or anode == cathode:
+        _electrisim_warn(net, f"DC Diode '{label}' is left out: it joins two DC buses, "
+                              "its anode on its left pin and its cathode on its right.")
+        return
+    rec = {
+        'name': row.get('name'), 'id': row.get('id', ''), 'label': label,
+        'bus_from': int(anode), 'bus_to': int(cathode),
+        'v_f_v': max(safe_float(row.get('v_f_v'), 1.6), 0.0),
+        'r_on_ohm': max(safe_float(row.get('r_on_mohm'), 0.1), 0.0) / 1e3,
+        'rated_current_ka': safe_float(row.get('rated_current_ka'), 1.5),
+        'in_service': _electrisim_in_service(row),
+    }
+    rated = rec['rated_current_ka'] if rec['rated_current_ka'] > 0 else 1.0
+    idx = pp.create_line_dc_from_parameters(
+        net, from_bus_dc=anode, to_bus_dc=cathode, length_km=1.0,
+        r_ohm_per_km=_electrisim_dc_diode_r(rec, rated * 1e3), max_i_ka=rated,
+        name=row.get('name'), in_service=rec['in_service'])
+    for col, default in (('id', ''), ('electrisim_dc_diode', False)):
+        if col not in net.line_dc.columns:
+            net.line_dc[col] = default
+    net.line_dc.at[idx, 'id'] = rec['id']
+    net.line_dc.at[idx, 'electrisim_dc_diode'] = True
+    rec['line'] = int(idx)
+    if not hasattr(net, 'electrisim_dc_diodes'):
+        net.electrisim_dc_diodes = []
+    net.electrisim_dc_diodes.append(rec)
+    if not hasattr(net, 'user_friendly_names'):
+        net.user_friendly_names = {}
+    net.user_friendly_names[row.get('name')] = label
+
+
+def _electrisim_is_dc_diode(net, idx):
+    return 'electrisim_dc_diode' in net.line_dc.columns and net.line_dc.at[idx, 'electrisim_dc_diode'] == True
+
+
+def _electrisim_dc_diode_r(rec, amps):
+    """Its resistance at a forward current (A): r_on + v_f / I."""
+    rated = rec['rated_current_ka'] * 1e3 if rec['rated_current_ka'] > 0 else 1e3
+    return max(rec['r_on_ohm'] + rec['v_f_v'] / max(amps, _DC_DIODE_MIN_I_FRACTION * rated), 1e-9)
+
+
+def _electrisim_dc_bus_volts(net, bus):
+    res = getattr(net, 'res_bus_dc', None)
+    if res is None or bus not in res.index or bus not in net.bus_dc.index:
+        return float('nan')
+    return float(res.at[bus, 'vm_pu']) * float(net.bus_dc.at[bus, 'vn_kv']) * 1e3
+
+
+def _electrisim_live_dc_diodes(net):
+    return [d for d in getattr(net, 'electrisim_dc_diodes', None) or []
+            if d['in_service'] and d.get('line') in net.line_dc.index]
+
+
+def _electrisim_dc_diode_amps(net, d):
+    """Its forward current (A) in the load flow just run; NaN when it has none."""
+    i = d['line']
+    if not bool(net.line_dc.at[i, 'in_service']) or i not in net.res_line_dc.index:
+        return float('nan')
+    p = float(net.res_line_dc.at[i, 'p_from_mw'])
+    va = _electrisim_dc_bus_volts(net, d['bus_from'])
+    return p * 1e6 / va if np.isfinite(p) and np.isfinite(va) and va > 0 else float('nan')
+
+
+def _electrisim_start_dc_diodes(net):
+    """
+    Each diode blocking before the first load flow, so it gives every source
+    bus its own voltage; the settling then turns them on as an ideal OR does.
+    All conducting from the start, two from buses 16 V apart drove kiloamps
+    round between them and no load flow solved; all near no current, none
+    could carry its shelf.
+    """
+    for d in _electrisim_live_dc_diodes(net):
+        if not d.get('started'):
+            net.line_dc.at[d['line'], 'in_service'] = False
+            d['started'] = True
+
+
+def _electrisim_settle_dc_diodes(net, noise_ok=False):
+    """
+    Each diode set by the load flow just run. Returns whether any changed.
+    noise_ok: a conducting diode whose drop is within _DC_DIODE_NOISE_V counts as settled.
+    """
+    changed = False
+    ld = net.line_dc
+    # Into a bus with no supply, only the diode from the highest anode turns on this round.
+    feeding = {}
+    for d in _electrisim_live_dc_diodes(net):
+        va, vk = _electrisim_dc_bus_volts(net, d['bus_from']), _electrisim_dc_bus_volts(net, d['bus_to'])
+        if not bool(ld.at[d['line'], 'in_service']) and np.isfinite(va) and not np.isfinite(vk):
+            best = feeding.get(d['bus_to'])
+            if best is None or va > _electrisim_dc_bus_volts(net, best['bus_from']):
+                feeding[d['bus_to']] = d
+    for d in _electrisim_live_dc_diodes(net):
+        i = d['line']
+        va, vk = _electrisim_dc_bus_volts(net, d['bus_from']), _electrisim_dc_bus_volts(net, d['bus_to'])
+        if bool(ld.at[i, 'in_service']):
+            amps = _electrisim_dc_diode_amps(net, d)
+            if not np.isfinite(amps):
+                continue
+            if amps < 0:
+                ld.at[i, 'in_service'] = False      # its current would reverse: it blocks
+                d.pop('last_iv', None)
+                changed = True
+                continue
+            r = _electrisim_dc_diode_r(d, amps)
+            r_now = float(ld.at[i, 'r_ohm_per_km'])
+            if abs(r - r_now) * amps > (_DC_DIODE_NOISE_V if noise_ok else _DC_DIODE_TOL_V):
+                ld.at[i, 'r_ohm_per_km'] = _electrisim_dc_diode_secant(d, amps, r_now * amps, r)
+                changed = True
+            d['last_iv'] = (amps, r_now * amps)
+        elif np.isfinite(va) and (va - vk > d['v_f_v'] if np.isfinite(vk) else feeding.get(d['bus_to']) is d):
+            # Its anode v_f above its cathode, or the highest into a bus with no supply: it conducts.
+            ld.at[i, 'in_service'] = True
+            ld.at[i, 'r_ohm_per_km'] = _electrisim_dc_diode_r(d, d['rated_current_ka'] * 1e3)
+            d.pop('last_iv', None)
+            changed = True
+    return changed
+
+
+def _electrisim_dc_diode_secant(d, amps, v_ak, r_proxy):
+    """
+    Its next resistance. As r_on + v_f / I, from the current it carried, it
+    settles slowly or not at all when a bus has two supplies: a shelf fed
+    through both its diodes, one from a store in droop, had its share of
+    current change the resistance that set it, nearly one for one, and drifted
+    for 30 rounds. Two load flows give the line the network draws across it,
+    V = E - R I; its current is where that meets v_f + r_on I (a secant step).
+    """
+    last = d.get('last_iv')
+    if last is None or abs(amps - last[0]) < 1e-6 * max(amps, 1.0) or not np.isfinite(last[1]):
+        return r_proxy
+    r_th = -(v_ak - last[1]) / (amps - last[0])
+    e_th = v_ak + r_th * amps
+    if not (r_th > 0 and e_th > d['v_f_v']):
+        return r_proxy
+    i_star = (e_th - d['v_f_v']) / (r_th + d['r_on_ohm'])
+    return _electrisim_dc_diode_r(d, i_star) if i_star > 0 else r_proxy
+
+
+def _electrisim_warn_unsupplied_dc(net):
+    """The DC buses left with no voltage - every diode into them blocking - named, once."""
+    res = getattr(net, 'res_bus_dc', None)
+    if res is None:
+        return
+    names = getattr(net, 'user_friendly_names', {}) or {}
+    dead = sorted(str(names.get(net.bus_dc.at[b, 'name'], net.bus_dc.at[b, 'name'])) for b in net.bus_dc.index
+                  if bool(net.bus_dc.at[b, 'in_service']) and b in res.index and not np.isfinite(res.at[b, 'vm_pu'])
+                  and not _electrisim_is_hidden(net.bus_dc, b) and not _electrisim_is_aux(net.bus_dc, b))
+    if not dead:
+        return
+    message = (f"DC bus{'es' if len(dead) > 1 else ''} {', '.join(dead)} "
+               f"{'have' if len(dead) > 1 else 'has'} no supply: the diodes into "
+               f"{'them' if len(dead) > 1 else 'it'} block, and what is on "
+               f"{'them' if len(dead) > 1 else 'it'} is not served.")
+    if message not in (getattr(net, 'warnings', None) or []):
+        _electrisim_warn(net, message)
+
+
+def _electrisim_dc_diode_result(net, d):
+    i = d.get('line')
+    alive = i in net.line_dc.index
+    conducting = bool(alive and d['in_service'] and net.line_dc.at[i, 'in_service'])
+    amps = _electrisim_dc_diode_amps(net, d) if conducting else 0.0
+    va, vk = _electrisim_dc_bus_volts(net, d['bus_from']), _electrisim_dc_bus_volts(net, d['bus_to'])
+    pl = float(net.res_line_dc.at[i, 'pl_mw']) if conducting and i in net.res_line_dc.index else 0.0
+    fin = lambda v: float(v) if v is not None and np.isfinite(v) else None   # noqa: E731
+    rated = d['rated_current_ka']
+    return {
+        'name': d['name'], 'id': d['id'], 'in_service': d['in_service'], 'conducting': conducting,
+        'i_ka': fin(amps / 1e3 if np.isfinite(amps) else amps),
+        'p_mw': fin(amps * va / 1e6 if conducting and np.isfinite(amps) else 0.0),
+        # Anode less cathode: its forward drop conducting, minus its reverse voltage blocking.
+        'v_ak_v': fin(va - vk),
+        'loss_kw': fin(pl * 1e3),
+        'loading_percent': fin(100.0 * amps / (rated * 1e3)) if rated > 0 and np.isfinite(amps) else None,
+        'v_f_v': d['v_f_v'], 'rated_current_ka': rated,
+    }
+
+
+def _electrisim_drop_uncoupled_dc(net, quiet=False):
+    """
+    Set aside the DC buses no converter ties to the AC network, with what is on them.
+
+    pandapower solves a DC network only through a VSC: one held by a DC source
+    alone does not converge, and an uncoupled DC island upsets the AC
+    Jacobian too (bess_preliminary_electrisim._strip_dc_for_ac_lf). The BESS
+    plant builder draws battery racks this way, for the drawing only.
+    """
+    bus_dc = getattr(net, 'bus_dc', None)
+    if bus_dc is None or not len(bus_dc):
+        return
+    parent = {int(b): int(b) for b in bus_dc.index}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for _, row in net.line_dc.iterrows():
+        if bool(row['in_service']):
+            parent[find(int(row['from_bus_dc']))] = find(int(row['to_bus_dc']))
+    coupled = set()
+    for _, row in net.vsc.iterrows():
+        if bool(row['in_service']):
+            coupled.add(find(int(row['bus_dc'])))
+    for _, row in net.b2b_vsc.iterrows():
+        if bool(row['in_service']):
+            coupled.update({find(int(row['bus_dc_plus'])), find(int(row['bus_dc_minus']))})
+    drop = {int(b) for b in bus_dc.index if find(int(b)) not in coupled}
+    if not drop:
+        return
+    names = getattr(net, 'user_friendly_names', {}) or {}
+    # A converter's own hidden bus (an SST's DC link) is no bus of the drawing: an SST out of service leaves it.
+    labels = sorted(str(names.get(bus_dc.at[b, 'name'], bus_dc.at[b, 'name'])) for b in drop
+                    if not _electrisim_is_hidden(bus_dc, b) and not _electrisim_is_aux(bus_dc, b))
+    for table, cols in (('line_dc', ('from_bus_dc', 'to_bus_dc')), ('load_dc', ('bus_dc',)),
+                        ('source_dc', ('bus_dc',)), ('vsc', ('bus_dc',)),
+                        ('b2b_vsc', ('bus_dc_plus', 'bus_dc_minus'))):
+        df = net[table]
+        if len(df):
+            hit = df[list(cols)].isin(drop).any(axis=1)
+            df.drop(df.index[hit], inplace=True)
+    bus_dc.drop(sorted(drop), inplace=True)
+    if getattr(net, 'electrisim_dc_capacitors', None):
+        net.electrisim_dc_capacitors = [c for c in net.electrisim_dc_capacitors if c['bus_dc'] not in drop]
+    if getattr(net, 'electrisim_ders', None):
+        net.electrisim_ders = [r for r in net.electrisim_ders if r['bus'] not in drop]
+    if getattr(net, 'electrisim_dc_diodes', None):
+        net.electrisim_dc_diodes = [d for d in net.electrisim_dc_diodes if d.get('line') in net.line_dc.index]
+    if getattr(net, 'electrisim_dc_breakers', None):
+        # A breaker stays while its own bus does; what it switched may be gone.
+        net.electrisim_dc_breakers = [b for b in net.electrisim_dc_breakers if b['bus_dc'] not in drop]
+        for b in net.electrisim_dc_breakers:
+            if _electrisim_dc_breaker_target_gone(net, b):
+                b['target'] = None
+    if quiet or not labels:
+        return
+    _electrisim_warn(net, f"DC bus{'es' if len(labels) > 1 else ''} {', '.join(labels)} "
+                          f"{'are' if len(labels) > 1 else 'is'} not connected to the AC network through a VSC, "
+                          f"so {'they and what is on them are' if len(labels) > 1 else 'it and what is on it are'} left out: "
+                          "pandapower solves a DC network only "
+                          "through a converter.")
+
+
+def _electrisim_set_aside_dc_network(net, study, why="pandapower's optimal power flow does not model VSCs or DC networks",
+                                     keep_ac_draw=False):
+    """
+    Leave a DC network out of a study that cannot model it, and say so.
+
+    pandapower's optimal power flow has no VSC or DC network model: with one it
+    failed (with init='pf', a divide by zero on the DC branches) or, started
+    flat, returned the AC result as if the DC loads were not there.
+
+    keep_ac_draw: each VSC stays as the load it is on its AC bus - its P and Q
+    in Electrisim's own load flow, which solves the DC network - so a data
+    hall behind a rectifier does not vanish from the study with its network.
+    """
+    bus_dc = getattr(net, 'bus_dc', None)
+    if bus_dc is None or not len(bus_dc):
+        return
+    n_bus, n_load = len(bus_dc), len(net.load_dc)
+    p_load = float(net.load_dc['p_dc_mw'].sum()) if n_load else 0.0
+    kept = []
+    if keep_ac_draw and len(net.vsc):
+        real = [i for i in net.vsc.index if not _electrisim_is_aux(net.vsc, i) and bool(net.vsc.at[i, 'in_service'])]
+        if real:
+            try:
+                # The DC/DC converters' and SSTs' stand-ins recorded each VSC's power while the DC
+                # network was whole; without them, a load flow of this one.
+                draw = getattr(net, 'electrisim_vsc_ac_draw', None)
+                if not draw:
+                    solved = deepcopy(net)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore')
+                        _electrisim_runpp(solved, algorithm='nr', calculate_voltage_angles='auto', init='auto')
+                    draw = {int(i): (float(solved.res_vsc.at[i, 'p_mw']), float(solved.res_vsc.at[i, 'q_mvar']))
+                            for i in solved.vsc.index if i in solved.res_vsc.index}
+                names = getattr(net, 'user_friendly_names', {}) or {}
+                for i in real:
+                    p, q = draw.get(int(i), (np.nan, np.nan))
+                    if not (np.isfinite(p) and np.isfinite(q)):
+                        continue
+                    name = str(net.vsc.at[i, 'name'])
+                    label = str(names.get(name, name))
+                    ld = pp.create_load(net, int(net.vsc.at[i, 'bus']), p_mw=p, q_mvar=q, name=f'{name} AC side')
+                    net.load.at[ld, 'electrisim_aux'] = True
+                    if 'id' in net.vsc.columns and 'id' in net.load.columns:
+                        # Its VSC's cell: with none, NaN in the result, which is not JSON - the
+                        # frontend could not read the OPF's answer at all.
+                        net.load.at[ld, 'id'] = net.vsc.at[i, 'id']
+                    names[f'{name} AC side'] = f'{label} (AC side)'
+                    kept.append(f'{label} {p:.4g} MW')
+                net.user_friendly_names = names
+            except Exception:   # noqa: BLE001 - said below
+                _electrisim_warn(net, f"{study}: the load flow that gives the VSCs' AC power did not solve, "
+                                      "so they are left out with the DC network.")
+    for table in ('line_dc', 'load_dc', 'source_dc', 'vsc', 'b2b_vsc', 'bus_dc'):
+        df = net[table]
+        if len(df):
+            df.drop(df.index, inplace=True)
+    # The converters' auxiliary AC grids go with them; a grid-forming
+    # inverter, on a real bus, stays as the source of its LV AC network.
+    if 'electrisim_aux' in net.bus.columns:
+        aux_buses = net.bus.index[net.bus['electrisim_aux'] == True]
+        net.ext_grid.drop(net.ext_grid.index[net.ext_grid['bus'].isin(aux_buses)], inplace=True)
+        net.bus.drop(aux_buses, inplace=True)
+        # pandapower's OPF takes the external grids as numbered 0, 1, ...: renumber
+        # them, and the cost rows that name them.
+        renumber = {old: new for new, old in enumerate(net.ext_grid.index)}
+        if any(old != new for old, new in renumber.items()):
+            net.ext_grid.index = [renumber[i] for i in net.ext_grid.index]
+            for cost in ('poly_cost', 'pwl_cost'):
+                df = net[cost] if cost in net else None
+                if df is not None and len(df):
+                    hit = df['et'] == 'ext_grid'
+                    df.loc[hit, 'element'] = df.loc[hit, 'element'].map(lambda e: renumber.get(int(e), e))
+    if getattr(net, 'electrisim_ssts', None):
+        net.electrisim_ssts = []
+    if getattr(net, 'electrisim_dc_dc_converters', None):
+        net.electrisim_dc_dc_converters = []
+    for records in ('electrisim_dc_breakers', 'electrisim_dc_capacitors', 'electrisim_ders'):
+        if getattr(net, records, None):
+            setattr(net, records, [])
+    _electrisim_warn(net, f"{study} leaves the DC network out ({n_bus} DC bus{'es' if n_bus != 1 else ''}"
+                          + (f", {n_load} DC load{'s' if n_load != 1 else ''} of {p_load:.3g} MW" if n_load else '')
+                          + (f"): {why}. Each VSC is the load its AC side draws in the load flow: "
+                             + ', '.join(kept) + '.' if kept else f"): {why}, so this result does not include them."))
+
+
+def _electrisim_row_id(df, index):
+    return df.at[index, 'id'] if 'id' in df.columns else str(index)
+
+
+def _electrisim_source_dc_currents_ka(net):
+    """
+    Each DC source's current into its bus (kA), by Kirchhoff's current law
+    there: what its loads draw and its cables carry away, less what its VSCs
+    inject, shared among the bus's sources. pandapower 3.3's res_source_dc
+    does not give it: a source holding a bus with a 0.15 MW load reports 0 MW.
+    """
+    out = {}
+    res_bus = getattr(net, 'res_bus_dc', None)
+    if res_bus is None or 'source_dc' not in net or not len(net.source_dc):
+        return out
+    by_bus = {}
+    for si in net.source_dc.index:
+        bus = int(net.source_dc.at[si, 'bus_dc'])
+        if bool(net.source_dc.at[si, 'in_service']) and bus in res_bus.index and np.isfinite(res_bus.at[bus, 'vm_pu']):
+            by_bus.setdefault(bus, []).append(si)
+    for bus, sources in by_bus.items():
+        v_kv = float(res_bus.at[bus, 'vm_pu']) * float(net.bus_dc.at[bus, 'vn_kv'])
+        if v_kv <= 0:
+            continue
+        i_out = 0.0
+        ld = net.load_dc
+        for li in ld.index[(ld['bus_dc'] == bus) & ld['in_service'].astype(bool)]:
+            i_out += float(ld.at[li, 'p_dc_mw']) / v_kv
+        res_line = getattr(net, 'res_line_dc', None)
+        for li in net.line_dc.index:
+            if not bool(net.line_dc.at[li, 'in_service']) or res_line is None or li not in res_line.index:
+                continue
+            if int(net.line_dc.at[li, 'from_bus_dc']) == bus:
+                i_out += float(res_line.at[li, 'i_from_ka'])
+            if int(net.line_dc.at[li, 'to_bus_dc']) == bus:
+                i_out += float(res_line.at[li, 'i_to_ka'])
+        res_vsc = getattr(net, 'res_vsc', None)
+        for vi in net.vsc.index:
+            if int(net.vsc.at[vi, 'bus_dc']) == bus and bool(net.vsc.at[vi, 'in_service']) and res_vsc is not None and vi in res_vsc.index:
+                i_out += float(res_vsc.at[vi, 'p_dc_mw']) / v_kv     # negative when the VSC injects
+        for si in sources:
+            out[si] = i_out / len(sources)
+    return out
+
+
+def _electrisim_source_dc_vm(net, index):
+    """res_source_dc has only its power: its voltage is its DC bus's."""
+    bus = net.source_dc.at[index, 'bus_dc']
+    return net.res_bus_dc.at[bus, 'vm_pu'] if bus in net.res_bus_dc.index else None
+
 
 def create_busbars(in_data, net):
     Busbars = {}
@@ -1736,8 +5330,9 @@ def create_busbars(in_data, net):
             # Store the user-friendly name mapping
             net.user_friendly_names[bus_name] = user_friendly_name
     
-    # Store DC buses in Busbars dict for compatibility
-    Busbars.update(DcBuses)
+    # DC buses keep their own map: in Busbars, a DC bus index read as an AC bus
+    # put an AC element drawn on a DC bus on whichever AC bus had that index.
+    net.dc_buses = dict(DcBuses)
     
     # Store DC bus names in net object for later use (to distinguish DC vs AC buses)
     net.dc_bus_names = set(DcBuses.keys())
@@ -2987,6 +6582,10 @@ def _electrisim_attach_line_flow_shunt_controllers(net):
 
 
 def create_other_elements(in_data,net,x, Busbars):
+    # The study's own parameters (x is reused below for each element).
+    study = str(in_data[x].get('typ', '')) if isinstance(in_data.get(x), dict) else ''
+    # A single-phase short circuit: an island's grid-forming PCS are built as its sources for it.
+    net._electrisim_sc_1ph = isinstance(in_data.get(x), dict) and str(in_data[x].get('fault_type', '')) == '1ph'
 
     #tworzymy zmienne ktorych nazwa odpowiada modelowi z js - np.Hwap0ntfbV98zYtkLMVm-8
 
@@ -3041,7 +6640,11 @@ def create_other_elements(in_data,net,x, Busbars):
     for x in _ordered_keys:
         if not isinstance(in_data[x], dict) or not isinstance(in_data[x].get('typ'), str):
             continue
-      
+        # Study settings ride in the same payload ("MotorStartingPandaPower
+        # Parameters" matched the Motor branch below and failed on 'bus').
+        if in_data[x]['typ'].endswith(' Parameters'):
+            continue
+
         #eval - rozwiazuje problem z wartosciami NaN
         if (in_data[x]['typ'].startswith("Line")):
             try:
@@ -3392,8 +6995,10 @@ def create_other_elements(in_data,net,x, Busbars):
             if _xd > 0:
                 gen_kw['xdss_pu'] = _xd
             _rd = safe_float(in_data[x]['rdss_ohm'])
-            if _rd > 0:
-                gen_kw['rdss_ohm'] = _rd
+            # A machine given its reactance may well have zero resistance, and the
+            # short-circuit calculation needs the column either way.
+            if _rd > 0 or _xd > 0:
+                gen_kw['rdss_ohm'] = max(_rd, 0.0)
             _cos = safe_float(in_data[x]['cos_phi'])
             if 0 < _cos <= 1:
                 gen_kw['cos_phi'] = _cos
@@ -3417,8 +7022,19 @@ def create_other_elements(in_data,net,x, Busbars):
                 gen_kw['min_p_mw'] = safe_float(in_data[x]['min_p_mw'], 0.0)
             if in_data[x].get('max_p_mw') is not None and str(in_data[x].get('max_p_mw')).lower() not in ('null', 'none', ''):
                 gen_kw['max_p_mw'] = safe_float(in_data[x]['max_p_mw'], safe_float(in_data[x]['p_mw']) * 1.2)
+            # Reactive limits for the OPF, when they form a range: the canvas
+            # stores 0 / 0 for a generator nobody gave limits, and passing that
+            # on would pin it at zero reactive power instead of leaving it free.
+            _q = _electrisim_opf_optional_fields_from_payload(
+                in_data[x], float_keys=('min_q_mvar', 'max_q_mvar'))
+            if 'min_q_mvar' in _q and 'max_q_mvar' in _q and _q['max_q_mvar'] > _q['min_q_mvar']:
+                gen_kw['min_q_mvar'] = _q['min_q_mvar']
+                gen_kw['max_q_mvar'] = _q['max_q_mvar']
             pp.create_gen(net, **gen_kw)
             gen_idx = net.gen.index[-1]
+            # Its governor's droop R (p.u. on its rated MVA), from its Dynamics tab as ANDES reads it:
+            # islanded with grid-forming PCS, it takes its share of the imbalance by it.
+            net.gen.at[gen_idx, 'electrisim_gov_r'] = _electrisim_governor_droop(in_data[x])
             ansi_mt = in_data[x].get('ansi_machine_type')
             if ansi_mt and str(ansi_mt).strip().lower() not in ('', 'none', 'null'):
                 if 'ansi_machine_type' not in net.gen.columns:
@@ -3471,7 +7087,8 @@ def create_other_elements(in_data,net,x, Busbars):
                 bool_keys=('controllable',),
             )
             pp.create_sgen(net, bus=bus_idx, name=in_data[x]['name'], id=in_data[x]['id'], p_mw=safe_float(in_data[x]['p_mw']), q_mvar=safe_float(in_data[x]['q_mvar']), sn_mva=safe_float(in_data[x]['sn_mva']), scaling=safe_float(in_data[x].get('scaling'), 1.0), type=in_data[x]['type'],
-                           k=1.1, rx=safe_float(in_data[x]['rx']), generator_type=in_data[x]['generator_type'], lrc_pu=safe_float(in_data[x]['lrc_pu']), max_ik_ka=safe_float(in_data[x]['max_ik_ka']), current_source=in_data[x]['current_source'], kappa = 1.5, in_service=in_service,
+                           k=safe_float(in_data[x].get('k'), 0.0) if safe_float(in_data[x].get('k'), 0.0) > 0 else 1.1,
+                           rx=safe_float(in_data[x]['rx']), generator_type=in_data[x]['generator_type'], lrc_pu=safe_float(in_data[x]['lrc_pu']), max_ik_ka=safe_float(in_data[x]['max_ik_ka']), current_source=in_data[x]['current_source'], kappa = 1.5, in_service=in_service,
                            **_sgen_opf)
             
             # Store user-friendly name for static generator
@@ -3498,6 +7115,9 @@ def create_other_elements(in_data,net,x, Busbars):
             #si0_hv_partial** - zero sequence short circuit impedance  distribution in hv side
             #vk0_percent=in_data[x]['vk0_percent'], vkr0_percent=in_data[x]['vkr0_percent'], mag0_percent=in_data[x]['mag0_percent'], si0_hv_partial=in_data[x]['si0_hv_partial'],
         _typ = in_data[x].get('typ') or ''
+        if _typ.startswith("Grounding Transformer"):
+            _electrisim_build_grounding_transformer(net, in_data[x], Busbars, TrafoDict, in_data)
+            continue
         if (_typ.startswith("Transformer") or _typ.startswith("Two Winding Transformer")) and not _typ.startswith("Three Winding Transformer"):
             # Get values with default fallbacks and proper type conversion
             parallel_value = safe_int(in_data[x].get('parallel', 1), 1)
@@ -3710,9 +7330,20 @@ def create_other_elements(in_data,net,x, Busbars):
                 value = in_data[x].get(param)
                 if value is not None and value not in ('None', '', 'null'):
                     if param == 'vector_group':
-                        transformer_params[param] = vector_group  # Use parsed base group
+                        # pandapower names three-winding groups without clock
+                        # numbers ("YNynd"); parse_vector_group only strips a
+                        # trailing one, so "YNyn0d5" reached it unrecognised.
+                        transformer_params[param] = re.sub(r'\d+', '', str(value))
                     else:
                         transformer_params[param] = safe_float(value)  # Convert to float
+            # A zero zero-sequence voltage is the canvas placeholder, and a
+            # zero impedance; fall back to the positive-sequence value, the rule
+            # pandapower itself applies to two-winding transformers.
+            for winding in ('hv', 'mv', 'lv'):
+                for kind in ('vk', 'vkr'):
+                    zero_key = f'{kind}0_{winding}_percent'
+                    if not (safe_float(transformer_params.get(zero_key), 0.0) > 0):
+                        transformer_params[zero_key] = transformer_params[f'{kind}_{winding}_percent']
             
             # Add in_service parameter (default to True if not specified)
             if 'in_service' in in_data[x]:
@@ -3853,9 +7484,24 @@ def create_other_elements(in_data,net,x, Busbars):
             in_service = True
             if 'in_service' in in_data[x]:
                 in_service = bool(in_data[x]['in_service']) if isinstance(in_data[x]['in_service'], bool) else (in_data[x]['in_service'] == 'true' or in_data[x]['in_service'] == True)
-            pp.create_shunt_as_capacitor(net, typ="capacitor", bus=bus_idx, name=in_data[x]['name'], id=in_data[x]['id'], q_mvar=safe_float(in_data[x]['q_mvar']), loss_factor=safe_float(in_data[x]['loss_factor']), vn_kv=safe_float(in_data[x]['vn_kv']), step=float(safe_float(in_data[x].get('step', 1)) or 1), max_step=float(safe_float(in_data[x].get('max_step', 1)) or 1), in_service=in_service)        
+            filter_order = safe_float(in_data[x].get('filter_order'), 0.0) or 0.0
+            if filter_order > 1:
+                # A harmonic filter: the bank with its tuning reactor and damping resistor, its exact
+                # fundamental draw (the OpenDSS study builds the components themselves).
+                vn = safe_float(in_data[x].get('vn_kv'), 0.0) or float(net.bus.at[bus_idx, 'vn_kv'])
+                hf = harmonic_filter(safe_float(in_data[x]['q_mvar']), vn, filter_order,
+                                     str(in_data[x].get('filter_type') or 'high_pass'), safe_float(in_data[x].get('filter_q'), 0.0))
+                idx = pp.create_shunt(net, bus=bus_idx, q_mvar=hf['q_mvar'], p_mw=hf['p_mw'], vn_kv=vn,
+                                      name=in_data[x]['name'], in_service=in_service)
+                net.shunt.at[idx, 'id'] = in_data[x]['id']
+                net.shunt.at[idx, 'typ'] = 'capacitor'   # the results read a capacitor's rows by it
+                for k in ('type', 'order', 'quality'):
+                    net.shunt.at[idx, f'electrisim_filter_{k}'] = hf[k]
+                net.shunt.at[idx, 'electrisim_filter_rated_q_mvar'] = safe_float(in_data[x]['q_mvar'])
+            else:
+                pp.create_shunt_as_capacitor(net, typ="capacitor", bus=bus_idx, name=in_data[x]['name'], id=in_data[x]['id'], q_mvar=safe_float(in_data[x]['q_mvar']), loss_factor=safe_float(in_data[x]['loss_factor']), vn_kv=safe_float(in_data[x]['vn_kv']), step=float(safe_float(in_data[x].get('step', 1)) or 1), max_step=float(safe_float(in_data[x].get('max_step', 1)) or 1), in_service=in_service)        
         
-        if (in_data[x]['typ'].startswith("Load")):
+        if (in_data[x]['typ'].startswith("Load") and not in_data[x]['typ'].startswith("Load DC")):
             bus_idx = Busbars.get(in_data[x]['bus'])
             if bus_idx is None:
                 element_name = in_data[x].get('userFriendlyName', in_data[x].get('name', 'Unknown'))
@@ -3957,8 +7603,7 @@ def create_other_elements(in_data,net,x, Busbars):
             if 'in_service' in in_data[x]:
                 in_service = bool(in_data[x]['in_service']) if isinstance(in_data[x]['in_service'], bool) else (in_data[x]['in_service'] == 'true' or in_data[x]['in_service'] == True)
             
-            # Handle Irc_pu / lrc_pu - frontend sends Irc_pu, Pandapower expects lrc_pu
-            # Try both key names, handle None values
+            # The diagram's attribute is lrc_pu; older payloads spelt it Irc_pu.
             lrc_pu_value = in_data[x].get('lrc_pu') or in_data[x].get('Irc_pu')
             if lrc_pu_value is None or lrc_pu_value == 'None' or lrc_pu_value == '':
                 lrc_pu_value = None
@@ -3968,6 +7613,10 @@ def create_other_elements(in_data,net,x, Busbars):
             pp.create_motor(net, bus=bus_idx, name=in_data[x]['name'], id=in_data[x]['id'], 
                             pn_mech_mw=safe_float_local(in_data[x].get('pn_mech_mw'), 0.0),
                             cos_phi=safe_float_local(in_data[x].get('cos_phi'), 0.85),
+                            # The short circuit needs the rated power factor; it
+                            # was never passed, so any motor failed every max case.
+                            cos_phi_n=safe_float_local(in_data[x].get('cos_phi_n'), None)
+                            or safe_float_local(in_data[x].get('cos_phi'), 0.85),
                             efficiency_n_percent=safe_float_local(in_data[x].get('efficiency_n_percent'), 90.0),
                             lrc_pu=lrc_pu_value,
                             rx=safe_float_local(in_data[x].get('rx'), 0.0),
@@ -3975,9 +7624,12 @@ def create_other_elements(in_data,net,x, Busbars):
                             efficiency_percent=safe_float_local(in_data[x].get('efficiency_percent'), 90.0),
                             loading_percent=safe_float_local(in_data[x].get('loading_percent'), 100.0),
                             scaling=safe_float_local(in_data[x].get('scaling'), 1.0),
-                            in_service=in_service)         
-   
-        
+                            in_service=in_service)
+            if in_data[x].get('userFriendlyName'):
+                if not hasattr(net, 'user_friendly_names'):
+                    net.user_friendly_names = {}
+                net.user_friendly_names[in_data[x]['name']] = in_data[x]['userFriendlyName']
+
         if (in_data[x]['typ'].startswith("SVC")):
             bus_idx = Busbars.get(in_data[x]['bus'])
             if bus_idx is None:
@@ -4031,8 +7683,12 @@ def create_other_elements(in_data,net,x, Busbars):
             scaling = safe_float(in_data[x].get('scaling'), 1.0)
             if max_e_mwh <= 0:
                 max_e_mwh = sn_mva if sn_mva > 0 else max(abs(p_mw), 0.001)
+            # No MVA rating stays 0 = unrated, as every reader of sn_mva
+            # treats it. It was max(|P|, MWh): the energy capacity posing as
+            # a power rating, which capped BESS sizing at 2 MVA for a 2 MWh
+            # battery.
             if sn_mva <= 0:
-                sn_mva = max(abs(p_mw), max_e_mwh, 0.001)
+                sn_mva = 0.0
             storage_type = str(in_data[x].get('type', ''))
             # OPF parameters (optional)
             controllable_raw = in_data[x].get('controllable', False)
@@ -4107,8 +7763,10 @@ def create_other_elements(in_data,net,x, Busbars):
             net.user_friendly_names[stor_nm] = uf_storage
    
         if (in_data[x]['typ'].startswith("Load DC")):
-            bus_idx = Busbars.get(in_data[x]['bus'])
+            bus_idx = _electrisim_dc_bus(net, in_data[x].get('bus'))
             if bus_idx is None:
+                _electrisim_warn(net, f"Load DC '{in_data[x].get('userFriendlyName', in_data[x].get('name'))}' "
+                                      "is not connected to a DC bus, so it is left out.")
                 continue
             # Get in_service parameter (default to True if not specified)
             in_service = True
@@ -4118,6 +7776,19 @@ def create_other_elements(in_data,net,x, Busbars):
             dc_extra = {}
             if in_data[x].get('id') is not None:
                 dc_extra['id'] = in_data[x]['id']
+            # An explicit index: pandapower 3.3 takes create_load_dc's next index
+            # from the DC source table, so each DC load overwrote the last.
+            dc_extra['index'] = int(net.load_dc.index.max()) + 1 if len(net.load_dc) else 0
+            # Its model: shares of constant power, current and resistance, and
+            # the voltage below which the constant-power part draws constant
+            # current; the input filter is for the EMT and DC fault studies.
+            share_p, share_i, share_r = _electrisim_dc_load_shares(in_data[x])
+            dc_extra.update(electrisim_p_rated_mw=p_dc, electrisim_share_p=share_p, electrisim_share_i=share_i,
+                            electrisim_share_r=share_r,
+                            electrisim_v_min_pu=safe_float(in_data[x].get('v_min_pu'), 0.0),
+                            filter_l_mh=safe_float(in_data[x].get('filter_l_mh'), 0.0),
+                            filter_r_mohm=max(safe_float(in_data[x].get('filter_r_mohm'), 0.0), 0.0),
+                            filter_c_uf=safe_float(in_data[x].get('filter_c_uf'), 0.0))
             try:
                 pp.create_load_dc(net, bus_dc=bus_idx, name=in_data[x]['name'],
                                   p_dc_mw=p_dc, in_service=in_service, **dc_extra)
@@ -4139,9 +7810,73 @@ def create_other_elements(in_data,net,x, Busbars):
                 net.user_friendly_names = {}
             net.user_friendly_names[load_dc_name] = user_friendly_name
         
-        if (in_data[x]['typ'].startswith("Source DC")):
-            bus_idx = Busbars.get(in_data[x]['bus'])
+        if (in_data[x]['typ'].startswith("Solid-State Transformer")):
+            # Built once every element exists: see _electrisim_build_ssts.
+            if not hasattr(net, '_electrisim_pending_sst'):
+                net._electrisim_pending_sst = []
+            net._electrisim_pending_sst.append(in_data[x])
+            continue
+
+        if str(in_data[x]['typ']).startswith("PCS"):
+            # A power conversion system: built once its source and the buses exist, see _electrisim_build_pcs.
+            if not hasattr(net, '_electrisim_pending_pcs'):
+                net._electrisim_pending_pcs = []
+            net._electrisim_pending_pcs.append(in_data[x])
+            continue
+
+        if der_electrisim.kind_of(in_data[x]['typ']):
+            # A battery, supercapacitor, flywheel, SOFC system or PV array: built once every
+            # converter exists, see _electrisim_build_ders.
+            if not hasattr(net, '_electrisim_pending_der'):
+                net._electrisim_pending_der = []
+            net._electrisim_pending_der.append(in_data[x])
+            continue
+
+        if (in_data[x]['typ'].startswith("DC/DC Converter")):
+            # Built once every DC bus exists: see _electrisim_build_dc_dc_converters.
+            if not hasattr(net, '_electrisim_pending_dc_dc'):
+                net._electrisim_pending_dc_dc = []
+            net._electrisim_pending_dc_dc.append(in_data[x])
+            continue
+
+        if (in_data[x]['typ'].startswith("DC Breaker")):
+            # Applied once every element exists: see _electrisim_apply_dc_breakers.
+            if not hasattr(net, '_electrisim_pending_dc_breakers'):
+                net._electrisim_pending_dc_breakers = []
+            net._electrisim_pending_dc_breakers.append(in_data[x])
+            continue
+
+        if (in_data[x]['typ'].startswith("DC Diode")):
+            _electrisim_create_dc_diode(net, in_data[x])
+            continue
+
+        if (in_data[x]['typ'].startswith("DC Capacitor")):
+            cap_name = in_data[x].get('name')
+            cap_label = in_data[x].get('userFriendlyName', cap_name)
+            bus_idx = _electrisim_dc_bus(net, in_data[x].get('bus'))
             if bus_idx is None:
+                _electrisim_warn(net, f"DC Capacitor '{cap_label}' is not connected to a DC bus, so it is left out.")
+                continue
+            # A DC-link capacitor draws no current in steady state: it is kept
+            # for the DC fault and EMT studies, and its stored energy reported.
+            if not hasattr(net, 'electrisim_dc_capacitors'):
+                net.electrisim_dc_capacitors = []
+            net.electrisim_dc_capacitors.append({
+                'name': cap_name, 'id': in_data[x].get('id', ''), 'bus_dc': int(bus_idx),
+                'c_mf': safe_float(in_data[x].get('c_mf'), 0.0),
+                'esr_mohm': safe_float(in_data[x].get('esr_mohm'), 0.0),
+                'esl_uh': safe_float(in_data[x].get('esl_uh'), 0.0),
+                'in_service': _electrisim_in_service(in_data[x]),
+            })
+            if not hasattr(net, 'user_friendly_names'):
+                net.user_friendly_names = {}
+            net.user_friendly_names[cap_name] = cap_label
+
+        if (in_data[x]['typ'].startswith("Source DC")):
+            bus_idx = _electrisim_dc_bus(net, in_data[x].get('bus'))
+            if bus_idx is None:
+                _electrisim_warn(net, f"Source DC '{in_data[x].get('userFriendlyName', in_data[x].get('name'))}' "
+                                      "is not connected to a DC bus, so it is left out.")
                 continue
             # Get in_service parameter (default to True if not specified)
             in_service = True
@@ -4151,12 +7886,12 @@ def create_other_elements(in_data,net,x, Busbars):
             if in_data[x].get('id') is not None:
                 src_extra['id'] = in_data[x]['id']
             try:
-                pp.create_source_dc(net, bus_dc=bus_idx, name=in_data[x]['name'],
+                src_idx = pp.create_source_dc(net, bus_dc=bus_idx, name=in_data[x]['name'],
                                     vm_pu=safe_float(in_data[x].get('vm_pu', 1.0)),
                                     in_service=in_service, **src_extra)
             except TypeError:
                 try:
-                    pp.create_source_dc(net, bus=bus_idx, name=in_data[x]['name'],
+                    src_idx = pp.create_source_dc(net, bus=bus_idx, name=in_data[x]['name'],
                                         vm_pu=safe_float(in_data[x].get('vm_pu', 1.0)),
                                         in_service=in_service, **src_extra)
                 except Exception as src_dc_err:
@@ -4166,6 +7901,10 @@ def create_other_elements(in_data,net,x, Busbars):
                 print(f"Warning: Source DC '{in_data[x].get('name')}' not created: {src_dc_err}")
                 continue
             
+            # Its internal resistance and inductance, for the DC fault study: the load flow holds its voltage.
+            net.source_dc.at[src_idx, 'electrisim_r_sc_mohm'] = safe_float(in_data[x].get('r_sc_mohm'), 0.0)
+            net.source_dc.at[src_idx, 'electrisim_l_sc_uh'] = safe_float(in_data[x].get('l_sc_uh'), 0.0)
+
             # Store user-friendly name for source DC
             source_dc_name = in_data[x]['name']
             user_friendly_name = in_data[x].get('userFriendlyName', source_dc_name)
@@ -4270,15 +8009,13 @@ def create_other_elements(in_data,net,x, Busbars):
                 print(f"Warning: VSC '{element_name}' skipped - VSC not supported in pandapower {pp.__version__}. Upgrade to pandapower 3.1+")
                 continue
                 
+            element_name = in_data[x].get('userFriendlyName', in_data[x].get('name', 'Unknown'))
             bus_idx = Busbars.get(in_data[x].get('bus', ''))
-            if bus_idx is None:
-                element_name = in_data[x].get('userFriendlyName', in_data[x].get('name', 'Unknown'))
-                print(f"Warning: VSC '{element_name}' skipped - AC bus not found")
-                continue
-            bus_dc_idx = Busbars.get(in_data[x].get('bus_dc', ''))
-            if bus_dc_idx is None:
-                element_name = in_data[x].get('userFriendlyName', in_data[x].get('name', 'Unknown'))
-                print(f"Warning: VSC '{element_name}' skipped - DC bus not connected. VSC requires connection to both AC bus and DC bus.")
+            bus_dc_idx = _electrisim_dc_bus(net, in_data[x].get('bus_dc', ''))
+            if bus_idx is None or bus_dc_idx is None:
+                missing = ' and '.join(k for k, v in (('an AC bus', bus_idx), ('a DC bus', bus_dc_idx)) if v is None)
+                _electrisim_warn(net, f"VSC '{element_name}' is not connected to {missing}, so it is left out: "
+                                      "a VSC joins one AC bus and one DC bus.")
                 continue
             # Get in_service parameter (default to True if not specified)
             in_service = True
@@ -4294,10 +8031,17 @@ def create_other_elements(in_data,net,x, Busbars):
             # Control parameters
             control_mode_ac = in_data[x].get('control_mode_ac', 'vm_pu')  # 'vm_pu' or 'q_mvar'
             control_value_ac = safe_float(in_data[x].get('control_value_ac', in_data[x].get('vm_pu', 1.0)))
-            control_mode_dc = in_data[x].get('control_mode_dc', 'p_mw')  # 'vm_pu' or 'p_mw'
+            control_mode_dc = in_data[x].get('control_mode_dc', 'p_mw')  # 'vm_pu', 'p_mw' or 'follow_load'
             control_value_dc = safe_float(in_data[x].get('control_value_dc', in_data[x].get('p_mw', 0.0)))
-            
-            vsc_idx = pp.create_vsc(net, bus=bus_idx, bus_dc=bus_dc_idx, 
+            # Follow its DC bus's load: a double-conversion UPS's rectifier, no DC voltage loop - it delivers
+            # what its bus's loads draw plus control_value_dc MW into its batteries, which hold the bus's
+            # voltage (settled with the load flow, _electrisim_settle_follow_load).
+            follow = str(control_mode_dc).strip().lower() == 'follow_load'
+            charge_mw = control_value_dc if follow else None
+            if follow:
+                control_mode_dc, control_value_dc = 'p_mw', -control_value_dc
+
+            vsc_idx = pp.create_vsc(net, bus=bus_idx, bus_dc=bus_dc_idx,
                          r_ohm=r_ohm, x_ohm=x_ohm, r_dc_ohm=r_dc_ohm,
                          control_mode_ac=control_mode_ac, control_value_ac=control_value_ac,
                          control_mode_dc=control_mode_dc, control_value_dc=control_value_dc,
@@ -4307,7 +8051,51 @@ def create_other_elements(in_data,net,x, Busbars):
             if 'id' not in net.vsc.columns:
                 net.vsc['id'] = ''
             net.vsc.at[vsc_idx, 'id'] = in_data[x].get('id', '')
-            
+            # For the EMT study: its rating, DC link and current limit (0: from its load flow), its model and
+            # current loop's bandwidth; for it and the DC fault study, its DC link's ESR and ESL (0: none)
+            for col, default in (('rated_mva', 0.0), ('dc_link_mf', 0.0), ('dc_link_esr_mohm', 0.0),
+                                 ('dc_link_esl_uh', 0.0), ('current_limit_pu', 1.2), ('switching_khz', 5.0),
+                                 ('current_loop_hz', 500.0), ('ease_f_start_hz', 0.0), ('ease_f_end_hz', 0.0),
+                                 ('uv_ease_pu', 0.0), ('uv_floor_pu', 0.5), ('uv_restore_s', 5.0)):
+                if col not in net.vsc.columns:
+                    net.vsc[col] = default
+                net.vsc.at[vsc_idx, col] = safe_float(in_data[x].get(col, default), default)
+            if 'emt_model' not in net.vsc.columns:
+                net.vsc['emt_model'] = 'average'
+            net.vsc.at[vsc_idx, 'emt_model'] = in_data[x].get('emt_model') if in_data[x].get('emt_model') in ('switching', 'mmc') else 'average'
+            for mmc_field in ('mmc_levels', 'mmc_energy_kj_per_mva', 'mmc_x_arm_pu', 'mmc_submodules'):
+                if mmc_field not in net.vsc.columns:
+                    net.vsc[mmc_field] = 0.0
+                net.vsc.at[vsc_idx, mmc_field] = safe_float(in_data[x].get(mmc_field), 0.0)
+            # Its submodules: half- or full-bridge, and whether its capacitors are balanced by sorting.
+            for mmc_field, default in (('mmc_cell', 'half'), ('mmc_balancing', 'true')):
+                if mmc_field not in net.vsc.columns:
+                    net.vsc[mmc_field] = default
+                net.vsc.at[vsc_idx, mmc_field] = str(in_data[x].get(mmc_field) or default).strip().lower()
+            # Its rating where it runs: derated by its inlet air and altitude (converter_rating); its
+            # short-time overload; following its bus's load, the charge it adds.
+            derate = converter_rating.derating(in_data[x])
+            for note in derate['notes']:
+                _electrisim_warn(net, f"VSC '{element_name}': {note}.")
+            for col, value in (('rated_mva_nameplate', float(net.vsc.at[vsc_idx, 'rated_mva'])),
+                               ('derating_factor', derate['factor']),
+                               ('overload_curve', str(in_data[x].get('overload_curve') or '')),
+                               ('electrisim_follow_charge_mw', charge_mw if follow else np.nan),
+                               # The time series': following its bus's load through a low-pass of this
+                               # time constant (0: at once) - a UPS rectifier ramp-limited to the load's
+                               # average, its batteries taking the swing.
+                               ('electrisim_follow_tau_s', max(safe_float(in_data[x].get('follow_tau_s'), 0.0), 0.0)
+                                if follow else np.nan),
+                               # The time series': its set point biased by its bus's batteries' charge against
+                               # the other balancing rectifiers' buses - this share of its rating per unit of
+                               # charge below their average (0: none).
+                               ('electrisim_soc_balance_gain',
+                                max(safe_float(in_data[x].get('soc_balance_gain'), 0.0), 0.0) if follow else np.nan)):
+                if col not in net.vsc.columns:
+                    net.vsc[col] = np.nan if col != 'overload_curve' else ''
+                net.vsc.at[vsc_idx, col] = value
+            net.vsc.at[vsc_idx, 'rated_mva'] = float(net.vsc.at[vsc_idx, 'rated_mva']) * derate['factor']
+
             # Store user-friendly name for VSC
             vsc_name = in_data[x]['name']
             user_friendly_name = in_data[x].get('userFriendlyName', vsc_name)
@@ -4323,7 +8111,7 @@ def create_other_elements(in_data,net,x, Busbars):
             # 2. Full mode: AC bus to DC bus pair (bus_dc_plus/bus_dc_minus)
             
             bus_idx = Busbars.get(in_data[x].get('bus', ''))
-            bus_dc_idx = Busbars.get(in_data[x].get('bus_dc', ''))
+            bus_dc_idx = _electrisim_dc_bus(net, in_data[x].get('bus_dc', ''))
             
             # Check for simple VSC mode (AC bus to single DC bus)
             if bus_idx is not None and bus_dc_idx is not None:
@@ -4363,14 +8151,12 @@ def create_other_elements(in_data,net,x, Busbars):
                     print(f"Warning: B2B VSC '{element_name}' skipped - B2B VSC not supported in pandapower {pp.__version__}. Upgrade to pandapower 3.1+")
                     continue
                     
-                bus_dc_plus_idx = Busbars.get(in_data[x].get('bus_dc_plus', ''))
-                bus_dc_minus_idx = Busbars.get(in_data[x].get('bus_dc_minus', ''))
+                bus_dc_plus_idx = _electrisim_dc_bus(net, in_data[x].get('bus_dc_plus', ''))
+                bus_dc_minus_idx = _electrisim_dc_bus(net, in_data[x].get('bus_dc_minus', ''))
                 
-                if bus_idx is None:
-                    print(f"Warning: B2B VSC '{element_name}' skipped - AC bus not connected. Connect B2B VSC to both an AC bus and a DC bus.")
-                    continue
-                if bus_dc_plus_idx is None or bus_dc_minus_idx is None:
-                    print(f"Warning: B2B VSC '{element_name}' skipped - DC buses not connected. For simple HVDC, connect B2B VSC to both an AC bus and a DC bus.")
+                if bus_idx is None or bus_dc_plus_idx is None or bus_dc_minus_idx is None:
+                    _electrisim_warn(net, f"B2B VSC '{element_name}' is left out: it joins one AC bus to one DC bus, "
+                                          "or to two DC buses (plus and minus poles).")
                     continue
                     
                 # Get in_service parameter
@@ -4416,77 +8202,34 @@ def create_other_elements(in_data,net,x, Busbars):
                       f"DC Lines must be connected between two buses (draw it as a line connecting buses).")
                 continue
             
-            from_bus_idx = Busbars.get(bus_from)
-            to_bus_idx = Busbars.get(bus_to)
-            
-            if from_bus_idx is None:
-                print(f"Warning: DC Line '{element_name}' skipped - from_bus '{bus_from}' not found.")
+            from_dc, to_dc = _electrisim_dc_bus(net, bus_from), _electrisim_dc_bus(net, bus_to)
+            is_dc_to_dc = from_dc is not None and to_dc is not None
+            from_bus_idx = from_dc if is_dc_to_dc else Busbars.get(bus_from)
+            to_bus_idx = to_dc if is_dc_to_dc else Busbars.get(bus_to)
+            if from_bus_idx is None or to_bus_idx is None:
+                _electrisim_warn(net, f"DC Line '{element_name}' is left out: it joins two DC buses (a DC cable) "
+                                      "or two AC buses (an HVDC link), not one of each.")
                 continue
-            if to_bus_idx is None:
-                print(f"Warning: DC Line '{element_name}' skipped - to_bus '{bus_to}' not found.")
-                continue
-            
+
             # Get in_service parameter (default to True if not specified)
-            in_service = True
-            if 'in_service' in in_data[x]:
-                in_service = bool(in_data[x]['in_service']) if isinstance(in_data[x]['in_service'], bool) else (in_data[x]['in_service'] == 'true' or in_data[x]['in_service'] == True)
-            
-            # Check if both buses are DC buses - use create_line_dc for DC-to-DC connections
-            dc_bus_names = getattr(net, 'dc_bus_names', set())
-            is_dc_to_dc = bus_from in dc_bus_names and bus_to in dc_bus_names
-            
+            in_service = _electrisim_in_service(in_data[x])
+
             if is_dc_to_dc:
-                # DC Line connecting two DC buses - use create_line_dc
-                if hasattr(pp, 'create_line_dc'):
-                    print(f"Creating DC line (line_dc) '{element_name}': DC bus {bus_from} -> DC bus {bus_to}")
-                    
-                    # Get line parameters
-                    length_km = safe_float(in_data[x].get('length_km', 100.0))  # Default 100km for HVDC
-                    r_ohm_per_km = safe_float(in_data[x].get('r_ohm_per_km', 0.01))  # Default DC cable resistance
-                    
-                    # Try to create a standard type for DC line if it doesn't exist
-                    std_type_name = "HVDC_Cable_320kV"
-                    try:
-                        # Check if std_type already exists
-                        if not hasattr(net, 'std_types') or 'line_dc' not in net.std_types or std_type_name not in net.std_types['line_dc']:
-                            # Create a standard type for DC lines
-                            if hasattr(pp, 'create_std_type'):
-                                pp.create_std_type(net, {
-                                    "r_ohm_per_km": r_ohm_per_km,
-                                    "c_nf_per_km": 0.0,  # DC cables don't have capacitance issues like AC
-                                    "max_i_ka": 2.0,  # Max current rating
-                                }, name=std_type_name, element="line_dc")
-                                print(f"Created DC line standard type: {std_type_name}")
-                    except Exception as e:
-                        print(f"Note: Could not create std_type: {e}")
-                    
-                    try:
-                        # create_line_dc requires from_bus_dc and to_bus_dc (DC bus indices)
-                        line_dc_idx = pp.create_line_dc(net, from_bus_dc=from_bus_idx, to_bus_dc=to_bus_idx,
-                                         length_km=length_km, std_type=std_type_name,
-                                         name=in_data[x]['name'], in_service=in_service)
-                        # Store custom 'id' field in the line_dc dataframe
-                        if 'id' not in net.line_dc.columns:
-                            net.line_dc['id'] = ''
-                        net.line_dc.at[line_dc_idx, 'id'] = in_data[x].get('id', '')
-                    except TypeError as e:
-                        # If std_type approach fails, try without it using different parameters
-                        print(f"Standard type approach failed: {e}. Trying direct parameters...")
-                        try:
-                            # Some pandapower versions allow direct parameters
-                            line_dc_idx = pp.create_line_dc(net, from_bus_dc=from_bus_idx, to_bus_dc=to_bus_idx,
-                                             length_km=length_km, r_ohm_per_km=r_ohm_per_km,
-                                             name=in_data[x]['name'], in_service=in_service)
-                            # Store custom 'id' field in the line_dc dataframe
-                            if 'id' not in net.line_dc.columns:
-                                net.line_dc['id'] = ''
-                            net.line_dc.at[line_dc_idx, 'id'] = in_data[x].get('id', '')
-                        except Exception as e2:
-                            print(f"Warning: Could not create DC line: {e2}. DC grid simulation may not work correctly.")
-                            continue
-                else:
-                    print(f"Warning: DC Line '{element_name}' connects DC buses but create_line_dc not available in pandapower {pp.__version__}. Skipped.")
-                    continue
+                # A DC cable between two DC buses, with its own length,
+                # resistance and rating. (One std type built from the first
+                # line used to give every DC line that line's resistance and 2 kA.)
+                line_dc_idx = pp.create_line_dc_from_parameters(
+                    net, from_bus_dc=from_bus_idx, to_bus_dc=to_bus_idx,
+                    length_km=safe_float(in_data[x].get('length_km'), 1.0),
+                    r_ohm_per_km=safe_float(in_data[x].get('r_ohm_per_km'), 0.1),
+                    max_i_ka=safe_float(in_data[x].get('max_i_ka'), 1.0),
+                    name=in_data[x]['name'], in_service=in_service,
+                    # For the EMT study; a steady-state DC load flow does not use them.
+                    l_mh_per_km=safe_float(in_data[x].get('l_mh_per_km'), 0.0),
+                    c_uf_per_km=safe_float(in_data[x].get('c_uf_per_km'), 0.0))
+                if 'id' not in net.line_dc.columns:
+                    net.line_dc['id'] = ''
+                net.line_dc.at[line_dc_idx, 'id'] = in_data[x].get('id', '')
             else:
                 # DC Line connecting two AC buses - use create_dcline (simplified HVDC model)
                 print(f"Creating DC line (dcline) '{element_name}': AC bus {bus_from} -> AC bus {bus_to}")
@@ -4511,6 +8254,14 @@ def create_other_elements(in_data,net,x, Busbars):
                 net.user_friendly_names = {}
             net.user_friendly_names[dcline_name] = element_name
 
+    _electrisim_grounding_follow_breakers(net)
+    _electrisim_build_dc_dc_converters(net)
+    _electrisim_build_ssts(net, Busbars)
+    _electrisim_build_pcs(net, Busbars, study)
+    _electrisim_build_ders(net)
+    _electrisim_apply_dc_breakers(net)
+    _electrisim_drop_uncoupled_dc(net)
+    _electrisim_finish_dc_dc(net)
     _electrisim_finalize_pending_line_flow_shunts(net)
     apply_sgen_q_capability_curves(net, in_data)
     apply_sgen_q_setpoint_from_curve(net, in_data)
@@ -4521,6 +8272,11 @@ def create_other_elements(in_data,net,x, Busbars):
         }
     except Exception:
         net._electrisim_export_sgen_q_init = {}
+    # A study that does not model DC/DC converters sees each as its input's power.
+    if (getattr(net, 'electrisim_dc_dc_converters', None) or getattr(net, 'electrisim_ssts', None)
+            or getattr(net, 'electrisim_ders', None)) and (
+            'OptimalPowerFlow' in study or not any(k in study for k in _DCDC_STUDIES)):
+        _electrisim_freeze_dc_dc(net)
 
 
 def _electrisim_boolish(v, default=False):
@@ -5568,9 +9324,190 @@ def _electrisim_attach_park_controllers(net, in_data, algorithm='nr', calculate_
 
 
 
+def _as_auto_voltage_angles(net, value):
+    """
+    'auto' resolved as pandapower's load flow resolves it: the angles only with
+    a line between buses above 70 kV. Its optimal power flow never resolves
+    'auto' and reads the text as true, so the OPF dialog's Auto always meant
+    the angles - and with 30-degree transformer shifts the OPF did not
+    converge where the load flow, on Auto, ran without them.
+    """
+    if value != 'auto':
+        return value
+    hv = net.bus.index[net.bus['vn_kv'].values > 70]
+    line_buses = set(net.line['from_bus'].values) & set(net.line['to_bus'].values)
+    return bool(len(hv)) and any(b in line_buses for b in hv)
+
+
+def _as_calculate_voltage_angles(value):
+    """
+    calculate_voltage_angles from a request as True, False or 'auto'.
+
+    The study dialogs send their radio's value as text: 'auto', 'true' or 'false'.
+    pandapower only special-cases 'auto' and reads anything else by truthiness,
+    so the text 'false' would calculate the angles. A missing value is 'auto'.
+    """
+    if value is None or isinstance(value, bool):
+        return 'auto' if value is None else value
+    if isinstance(value, (int, float, np.integer, np.floating)) and value in (0, 1):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ('', 'auto'):
+        return 'auto'
+    if text in ('true', '1', 'yes', 'on'):
+        return True
+    if text in ('false', '0', 'no', 'off'):
+        return False
+    raise ValueError(f"Calculate voltage angles must be 'auto', true or false, not {value!r}.")
+
+
+def _electrisim_dc_results(net, warn=True):
+    """
+    The DC network's results after a load flow, as the load flow returns them:
+    DC buses, loads and sources, DC capacitors, breakers and diodes, SSTs,
+    the sources and stores with their PCS, grounding transformers, DC/DC
+    converters, VSCs, B2B VSCs and DC cables. The load flow and each time
+    series step alike. ``warn``: say so of a VSC beyond its rating.
+    """
+    out = {}
+
+    # DC buses: not a converter stage's own, nor a battery's cells.
+    if hasattr(net, 'res_bus_dc') and not net.res_bus_dc.empty:
+        out['dcbuses'] = [
+            {'name': net.bus_dc.at[i, 'name'], 'id': _electrisim_row_id(net.bus_dc, i),
+             'vm_pu': row['vm_pu'], 'p_mw': row['p_mw']}
+            for i, row in net.res_bus_dc.iterrows()
+            if not (_electrisim_is_aux(net.bus_dc, i) or _electrisim_is_hidden(net.bus_dc, i))]
+
+    # DC loads: not a DC/DC converter's input or output.
+    if hasattr(net, 'res_load_dc') and not net.res_load_dc.empty:
+        out['loadsdc'] = [
+            {'name': net.load_dc.at[i, 'name'], 'id': _electrisim_row_id(net.load_dc, i), 'p_mw': row['p_dc_mw']}
+            for i, row in net.res_load_dc.iterrows() if not _electrisim_is_aux(net.load_dc, i)]
+
+    # DC sources: their power from what their bus draws (res_source_dc does not give it).
+    if hasattr(net, 'res_source_dc') and not net.res_source_dc.empty:
+        src_i = _electrisim_source_dc_currents_ka(net)
+        sources = []
+        for i, row in net.res_source_dc.iterrows():
+            if _electrisim_is_hidden(net.source_dc, i):
+                continue   # a battery's cells: reported with it
+            vm_src = _electrisim_source_dc_vm(net, i)
+            p_src = (src_i[i] * vm_src * float(net.bus_dc.at[int(net.source_dc.at[i, 'bus_dc']), 'vn_kv'])
+                     if i in src_i and vm_src is not None else row['p_dc_mw'])
+            sources.append({'name': net.source_dc.at[i, 'name'], 'id': _electrisim_row_id(net.source_dc, i),
+                            'vm_pu': vm_src, 'p_mw': p_src})
+        if sources:
+            out['sourcesdc'] = sources
+
+    # DC capacitors: their bus voltage and the energy they hold, E = C V^2 / 2.
+    if getattr(net, 'electrisim_dc_capacitors', None) and hasattr(net, 'res_bus_dc'):
+        dccaps = []
+        for cap in net.electrisim_dc_capacitors:
+            if cap.get('electrisim_der'):
+                continue   # a supercapacitor: reported with the sources and stores
+            bus = cap['bus_dc']
+            vm = net.res_bus_dc.at[bus, 'vm_pu'] if bus in net.res_bus_dc.index else None
+            v_kv = vm * float(net.bus_dc.at[bus, 'vn_kv']) if vm is not None and np.isfinite(vm) else None
+            dccaps.append({
+                'name': cap['name'], 'id': cap['id'], 'vm_pu': vm,
+                'energy_kj': 0.5 * cap['c_mf'] * 1e-3 * (v_kv * 1e3) ** 2 / 1e3 if v_kv is not None and cap['in_service'] else None,
+            })
+        out['dccapacitors'] = dccaps
+
+    # DC breakers: open or closed, the current through each and its loading.
+    if getattr(net, 'electrisim_dc_breakers', None):
+        breakers = []
+        for rec in net.electrisim_dc_breakers:
+            i_ka = _electrisim_dc_breaker_current_ka(net, rec)
+            rated = rec['rated_current_ka']
+            breakers.append({
+                'name': rec['name'], 'id': rec['id'], 'closed': rec['closed'],
+                'i_ka': i_ka if np.isfinite(i_ka) else None,
+                'loading_percent': 100.0 * i_ka / rated if rated > 0 and np.isfinite(i_ka) else None,
+                'rated_current_ka': rated, 'breaking_capacity_ka': rec['breaking_capacity_ka'],
+            })
+        out['dcbreakers'] = breakers
+
+    # DC diodes: conducting or blocking, the current through each, its drop and loss.
+    if getattr(net, 'electrisim_dc_diodes', None):
+        out['dcdiodes'] = [_electrisim_dc_diode_result(net, d) for d in net.electrisim_dc_diodes]
+
+    # Solid-state transformers: each stage's power, losses and loading; MV P and Q; port voltages.
+    if getattr(net, 'electrisim_ssts', None):
+        out['ssts'] = [_electrisim_sst_result(net, r) for r in net.electrisim_ssts]
+
+    # Sources and stores: power, voltage, current and state; the PCS, and those behind them.
+    pcs_out = [_electrisim_pcs_result(net, r) for r in getattr(net, 'electrisim_pcs', None) or []]
+    ders_out = [_electrisim_der_result(net, r) for r in getattr(net, 'electrisim_ders', None) or []]
+    ders_out += [r.pop('_source') for r in pcs_out if r.get('_source')]
+    for r in pcs_out:
+        r.pop('_source', None)
+    if ders_out:
+        out['ders'] = ders_out
+    if pcs_out:
+        out['pcs'] = pcs_out
+    gts = _electrisim_grounding_results(net)
+    if gts:
+        out['groundingtransformers'] = gts
+
+    # DC/DC converters: input and output power, losses, loading, both port voltages.
+    if getattr(net, 'electrisim_dc_dc_converters', None):
+        out['dcdcconverters'] = [_electrisim_dc_dc_result(net, c) for c in net.electrisim_dc_dc_converters]
+
+    # VSCs: not a DC/DC converter's output stage. Beyond its rating, said as an SST's or a PCS's is.
+    if hasattr(net, 'res_vsc') and not net.res_vsc.empty:
+        vscs = []
+        for i, row in net.res_vsc.iterrows():
+            if _electrisim_is_aux(net.vsc, i):
+                continue
+            vsc_name = net.vsc.at[i, 'name'] if 'name' in net.vsc.columns else f'VSC_{i}'
+            vsc_id = net.vsc.at[i, 'id'] if 'id' in net.vsc.columns else str(i)
+            rated = float(net.vsc.at[i, 'rated_mva']) if 'rated_mva' in net.vsc.columns else 0.0
+            s_vsc = math.hypot(float(row['p_mw']), float(row.get('q_mvar') or 0.0))
+            if warn and rated > 0 and np.isfinite(s_vsc) and s_vsc > rated * (1 + 1e-6):
+                label = getattr(net, 'user_friendly_names', {}).get(vsc_name, vsc_name)
+                _electrisim_warn(net, f"VSC '{label}' is loaded to {100 * s_vsc / rated:.1f} % of its rating.")
+            vscs.append({'name': vsc_name, 'id': vsc_id, 'p_mw': row['p_mw'], 'vm_pu': row.get('vm_pu', 0.0),
+                         'q_mvar': row.get('q_mvar'), 'p_dc_mw': row.get('p_dc_mw'), 'vm_dc_pu': row.get('vm_dc_pu')})
+        out['vscs'] = vscs
+
+    # B2B VSCs.
+    if hasattr(net, 'res_b2b_vsc') and not net.res_b2b_vsc.empty:
+        b2bs = []
+        for i, row in net.res_b2b_vsc.iterrows():
+            b2bs.append({
+                'name': net.b2b_vsc.at[i, 'name'] if 'name' in net.b2b_vsc.columns else f'B2B_VSC_{i}',
+                'id': net.b2b_vsc.at[i, 'id'] if 'id' in net.b2b_vsc.columns else str(i),
+                'p_mw': row['p_mw'], 'q_mvar': row.get('q_mvar'), 'vm_pu': row.get('vm_pu'),
+                'p_dc_mw_p': row.get('p_dc_mw_p'), 'p_dc_mw_m': row.get('p_dc_mw_m'),
+                'vm_dc_pu_p': row.get('vm_dc_pu_p'), 'vm_dc_pu_m': row.get('vm_dc_pu_m')})
+        if b2bs:
+            out['b2bvscs'] = b2bs
+
+    # DC cables (line_dc): not a DC breaker's coupler, a DC diode, or a battery's resistance.
+    if hasattr(net, 'res_line_dc') and not net.res_line_dc.empty:
+        lines = []
+        for i, row in net.res_line_dc.iterrows():
+            if 'electrisim_dc_breaker' in net.line_dc.columns and net.line_dc.at[i, 'electrisim_dc_breaker'] == True:
+                continue
+            if _electrisim_is_dc_diode(net, i) or _electrisim_is_hidden(net.line_dc, i):
+                continue
+            lines.append({
+                'name': net.line_dc.at[i, 'name'] if 'name' in net.line_dc.columns else f'LineDC_{i}',
+                'id': net.line_dc.at[i, 'id'] if 'id' in net.line_dc.columns else str(i),
+                'p_from_mw': row.get('p_from_mw', 0.0), 'p_to_mw': row.get('p_to_mw', 0.0),
+                'pl_mw': row.get('pl_mw', 0.0), 'vm_from_pu': row.get('vm_from_pu', 0.0),
+                'vm_to_pu': row.get('vm_to_pu', 0.0), 'i_from_ka': row.get('i_from_ka', 0.0),
+                'i_to_ka': row.get('i_to_ka', 0.0), 'loading_percent': row.get('loading_percent', 0.0)})
+        out['linedcs'] = lines
+    return out
+
+
 def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=False, in_data=None, Busbars=None,
               run_control_trafo2w=False, run_control_trafo3w=False, run_control_shunt=False):
             #pandapower - rozpływ mocy
+            calculate_voltage_angles = _as_calculate_voltage_angles(calculate_voltage_angles)
             # Initialize tap_control_results before try block so it's accessible in else block
             tap_control_results = []
             shunt_control_results = []
@@ -5587,14 +9524,15 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
             sys.stderr = _safe_buf
             
             try:
-                # Check for isolated buses before running power flow
-                isolated_buses = pp.topology.unsupplied_buses(net)
-                if len(isolated_buses) > 0:
-                    isolated_refs = resolve_element_refs(net, 'bus', isolated_buses)
-                    isolated_names = [r.get('name') or r.get('id') or str(r.get('index')) for r in isolated_refs]
-                    raise ValueError(
-                        f"Isolated buses found: {', '.join(isolated_names)}. Check your network connectivity."
-                    )
+                # Buses no source reaches - a lineup's when its breaker opens - are named and left
+                # unsolved; the rest of the network is solved. They were refused, and with them the
+                # study of a supply lost.
+                cut_off = isolated_bus_names(net)
+                if cut_off:
+                    _electrisim_warn(net, f"Bus{'es' if len(cut_off) > 1 else ''} {', '.join(cut_off)} "
+                                          f"{'have' if len(cut_off) > 1 else 'has'} no supply - no source reaches "
+                                          f"{'them' if len(cut_off) > 1 else 'it'} - and what is on "
+                                          f"{'them' if len(cut_off) > 1 else 'it'} is not served.")
                 
                 # DiscreteTapControl + DiscreteShuntController (per-family flags from UI)
                 rc2 = bool(run_control_trafo2w)
@@ -5817,6 +9755,7 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
 
                 pf_plan_used = None
                 pf_last_error = None
+                pf_false_solution = None
                 pf_attempt_log = []
                 for plan_label, plan_kwargs, plan_run_control in solve_plans:
                     if not plan_run_control and run_pp_control:
@@ -5827,8 +9766,12 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                             except Exception:
                                 pass
                     try:
-                        pp.runpp(net, calculate_voltage_angles=calculate_voltage_angles,
-                                 run_control=plan_run_control, **plan_kwargs, **pf_kwargs)
+                        _electrisim_runpp(net, calculate_voltage_angles=calculate_voltage_angles,
+                                          run_control=plan_run_control, **plan_kwargs, **pf_kwargs)
+                        false_solution = _electrisim_false_zero_volt(net)
+                        if false_solution:
+                            pf_false_solution = pp.LoadflowNotConverged(false_solution)
+                            raise pf_false_solution
                         pf_plan_used = plan_label
                         break
                     except Exception as plan_err:
@@ -5857,7 +9800,7 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                             "Attempts: " + " | ".join(pf_attempt_log) + "." + ssc_desc +
                             (" " + ssc_diag if ssc_diag else "")
                         ) from pf_last_error
-                    raise pf_last_error
+                    raise pf_false_solution or pf_last_error
 
                 # A park controller that never settled leaves machines outside their capability
                 # curve; report it instead of returning those values as a valid operating point.
@@ -6819,11 +10762,15 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                 switchesList = list()
                 
                 class VSCOut(object):
-                    def __init__(self, name: str, id: str, p_mw: float, vm_pu: float):          
+                    def __init__(self, name: str, id: str, p_mw: float, vm_pu: float, q_mvar: float = None,
+                                 p_dc_mw: float = None, vm_dc_pu: float = None):
                         self.name = name
                         self.id = id
                         self.p_mw = p_mw
                         self.vm_pu = vm_pu
+                        self.q_mvar = q_mvar
+                        self.p_dc_mw = p_dc_mw
+                        self.vm_dc_pu = vm_dc_pu
                        
                 class VSCsOut(object):
                     def __init__(self, vscs: List[VSCOut]):
@@ -6831,12 +10778,17 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                 vscsList = list()
                 
                 class B2bVSCOut(object):
-                    def __init__(self, name: str, id: str, p_mw: float, vm1_pu: float, vm2_pu: float):          
+                    def __init__(self, name: str, id: str, p_mw: float, q_mvar: float, vm_pu: float,
+                                 p_dc_mw_p: float, p_dc_mw_m: float, vm_dc_pu_p: float, vm_dc_pu_m: float):
                         self.name = name
                         self.id = id
                         self.p_mw = p_mw
-                        self.vm1_pu = vm1_pu
-                        self.vm2_pu = vm2_pu
+                        self.q_mvar = q_mvar
+                        self.vm_pu = vm_pu
+                        self.p_dc_mw_p = p_dc_mw_p
+                        self.p_dc_mw_m = p_dc_mw_m
+                        self.vm_dc_pu_p = vm_dc_pu_p
+                        self.vm_dc_pu_m = vm_dc_pu_m
                        
                 class B2bVSCsOut(object):
                     def __init__(self, b2bvscs: List[B2bVSCOut]):
@@ -6846,6 +10798,8 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                 
                 #Bus
                 for index, row in net.res_bus.iterrows():
+                    if _electrisim_is_aux(net.bus, index) or _electrisim_is_grounding(net.bus, index):
+                        continue   # a DC/DC converter's auxiliary AC bus; a grounding transformer's delta
                     p_mw = row['p_mw']
                     q_mvar = row['q_mvar']
                     denom_pf = math.sqrt(math.pow(p_mw, 2) + math.pow(q_mvar, 2))
@@ -6910,32 +10864,38 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                     pass
                 else:                    
                         for index, row in net.res_ext_grid.iterrows():    
+                            if _electrisim_is_aux(net.ext_grid, index):
+                                continue   # a DC/DC converter's auxiliary grid
                             externalgrid = ExternalGridOut(name=net.ext_grid._get_value(index, 'name'), id = net.ext_grid._get_value(index, 'id'), p_mw=row['p_mw'], q_mvar=row['q_mvar'], pf = row['p_mw']/math.sqrt(math.pow(row['p_mw'],2)+math.pow(row['q_mvar'],2)), q_p=row['q_mvar']/row['p_mw'])        
                             externalgridsList.append(externalgrid) 
                             externalgrids = ExternalGridsOut(externalgrids = externalgridsList) 
-                        result = {**result, **externalgrids.__dict__}          
+                        result = {**result, **ExternalGridsOut(externalgrids = externalgridsList).__dict__}          
                              
                 #Generator         
                 if(net.res_gen.empty):
                     pass
                 else:                    
                         for index, row in net.res_gen.iterrows():    
+                            if _electrisim_is_pcs(net.gen, index):
+                                continue   # a PCS: reported with the PCS
                             generator = GeneratorOut(name=net.gen._get_value(index, 'name'), id = net.gen._get_value(index, 'id'), p_mw=row['p_mw'], q_mvar=row['q_mvar'], va_degree=row['va_degree'], vm_pu=row['vm_pu'])        
                             generatorsList.append(generator) 
                             generators = GeneratorsOut(generators = generatorsList)
                         
-                        result = {**result, **generators.__dict__}
+                        result = {**result, **GeneratorsOut(generators = generatorsList).__dict__}
                         
                 #Static Generator                     
                 if(net.res_sgen.empty):
                     pass
                 else:                    
                         for index, row in net.res_sgen.iterrows():    
+                            if _electrisim_is_aux(net.sgen, index) or _electrisim_is_pcs(net.sgen, index):
+                                continue   # a converter stage's own element, or a PCS
                             staticgenerator = StaticGeneratorOut(name=net.sgen._get_value(index, 'name'), id = net.sgen._get_value(index, 'id'), p_mw=row['p_mw'], q_mvar=row['q_mvar'])        
                             staticgeneratorsList.append(staticgenerator) 
                             staticgenerators = StaticGeneratorsOut(staticgenerators = staticgeneratorsList)
                         
-                        result = {**result, **staticgenerators.__dict__}
+                        result = {**result, **StaticGeneratorsOut(staticgenerators = staticgeneratorsList).__dict__}
                         
                         
                 
@@ -7028,6 +10988,8 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                 if not net.trafo.empty:
                     res_tf = getattr(net, 'res_trafo', None)
                     for trafo_index in net.trafo.index:
+                        if _electrisim_is_grounding(net.trafo, trafo_index):
+                            continue   # reported under groundingtransformers
                         t_name = net.trafo._get_value(trafo_index, 'name')
                         t_raw_id = net.trafo._get_value(trafo_index, 'id')
                         t_name_s = str(t_name) if t_name is not None and not pd.isna(t_name) else str(trafo_index)
@@ -7179,12 +11141,14 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                     pass
                 else:                    
                         for index, row in net.res_load.iterrows():    
+                            if _electrisim_is_aux(net.load, index):
+                                continue   # a converter stage's own element
                             load = LoadOut(name=net.load._get_value(index, 'name'), id = net.load._get_value(index, 'id'), p_mw=row['p_mw'], q_mvar=row['q_mvar'])        
                             # print(load)  # Comment out this debug line
                             loadsList.append(load) 
                             # print(loadsList)  # Comment out this debug line
                             loads = LoadsOut(loads = loadsList) 
-                        result = {**result, **loads.__dict__}        
+                        result = {**result, **LoadsOut(loads = loadsList).__dict__}        
                         
                 #Asymmetric Load
                 if(net.res_asymmetric_load.empty):
@@ -7373,30 +11337,12 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                     result = {**result, **sscs.__dict__}                    
                        
                                         
-                #DC Bus
-                if(hasattr(net, 'res_dc_bus') and not net.res_dc_bus.empty):
-                    for index, row in net.res_dc_bus.iterrows():    
-                        dcbus = DcBusOut(name=net.dc_bus._get_value(index, 'name'), id = net.dc_bus._get_value(index, 'id'), vm_pu=row['vm_pu'], p_mw=row['p_mw'])        
-                        dcbusesList.append(dcbus) 
-                        dcbuses = DcBusesOut(dcbuses = dcbusesList) 
-                    result = {**result, **dcbuses.__dict__}
-                
-                #Load DC
-                if(hasattr(net, 'res_load_dc') and not net.res_load_dc.empty):
-                    for index, row in net.res_load_dc.iterrows():    
-                        loaddc = LoadDcOut(name=net.load_dc._get_value(index, 'name'), id = net.load_dc._get_value(index, 'id'), p_mw=row['p_mw'])        
-                        loadsdcList.append(loaddc) 
-                        loadsdc = LoadsDcOut(loadsdc = loadsdcList) 
-                    result = {**result, **loadsdc.__dict__}
-                
-                #Source DC
-                if(hasattr(net, 'res_source_dc') and not net.res_source_dc.empty):
-                    for index, row in net.res_source_dc.iterrows():    
-                        sourcedc = SourceDcOut(name=net.source_dc._get_value(index, 'name'), id = net.source_dc._get_value(index, 'id'), vm_pu=row['vm_pu'], p_mw=row['p_mw'])        
-                        sourcesdcList.append(sourcedc) 
-                        sourcesdc = SourcesDcOut(sourcesdc = sourcesdcList) 
-                    result = {**result, **sourcesdc.__dict__}
-                
+                # The DC network: buses, loads, sources, capacitors, breakers, diodes, SSTs, sources and
+                # stores, DC/DC converters, VSCs and DC cables - the time series' steps alike.
+                result = {**result, **_electrisim_dc_results(net)}
+                # Lines and transformers past their rating, said as the converters' are.
+                _electrisim_warn_branch_overloads(net)
+
                 #Switch (net.res_switch: p_from_mw, q_from_mvar, p_to_mw, q_to_mvar, i_ka, loading_percent)
                 if(hasattr(net, 'res_switch') and not net.res_switch.empty):
                     for index, row in net.res_switch.iterrows():    
@@ -7415,26 +11361,6 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                         switches = SwitchesOut(switches = switchesList) 
                     result = {**result, **switches.__dict__}
                 
-                #VSC
-                if(hasattr(net, 'res_vsc') and not net.res_vsc.empty):
-                    for index, row in net.res_vsc.iterrows():
-                        vsc_name = net.vsc.at[index, 'name'] if 'name' in net.vsc.columns else f'VSC_{index}'
-                        vsc_id = net.vsc.at[index, 'id'] if 'id' in net.vsc.columns else str(index)
-                        vsc = VSCOut(name=vsc_name, id=vsc_id, p_mw=row['p_mw'], vm_pu=row.get('vm_pu', 0.0))        
-                        vscsList.append(vsc) 
-                        vscs = VSCsOut(vscs = vscsList) 
-                    result = {**result, **vscs.__dict__}
-                
-                #B2B VSC
-                if(hasattr(net, 'res_b2b_vsc') and not net.res_b2b_vsc.empty):
-                    for index, row in net.res_b2b_vsc.iterrows():    
-                        b2b_name = net.b2b_vsc.at[index, 'name'] if 'name' in net.b2b_vsc.columns else f'B2B_VSC_{index}'
-                        b2b_id = net.b2b_vsc.at[index, 'id'] if 'id' in net.b2b_vsc.columns else str(index)
-                        b2bvsc = B2bVSCOut(name=b2b_name, id=b2b_id, p_mw=row['p_mw'], vm1_pu=row['vm1_pu'], vm2_pu=row['vm2_pu'])        
-                        b2bvscsList.append(b2bvsc) 
-                        b2bvscs = B2bVSCsOut(b2bvscs = b2bvscsList) 
-                    result = {**result, **b2bvscs.__dict__}
-                
                 #DCLine (old HVDC link element - pp.create_dcline)
                 if(net.res_dcline.empty):
                     pass
@@ -7445,51 +11371,6 @@ def powerflow(net, algorithm, calculate_voltage_angles, init, export_python=Fals
                             dclines = ImpedancesOut(dclines = dclinesList) 
                         result = {**result, **dclines.__dict__}         
                 
-                # DC Grid Line (line_dc element - pp.create_line_dc)
-                # This is part of DC grid modeling (bus_dc + line_dc + vsc)
-                if hasattr(net, 'res_line_dc') and not net.res_line_dc.empty:
-                    print(f"Processing res_line_dc results: {len(net.res_line_dc)} items")
-                    
-                    class LineDcOut(object):
-                        def __init__(self, name: str, id: str, p_from_mw: float, p_to_mw: float, pl_mw: float, 
-                                     vm_from_pu: float, vm_to_pu: float, i_from_ka: float, i_to_ka: float, loading_percent: float):
-                            self.name = name
-                            self.id = id
-                            self.p_from_mw = p_from_mw
-                            self.p_to_mw = p_to_mw
-                            self.pl_mw = pl_mw
-                            self.vm_from_pu = vm_from_pu
-                            self.vm_to_pu = vm_to_pu
-                            self.i_from_ka = i_from_ka
-                            self.i_to_ka = i_to_ka
-                            self.loading_percent = loading_percent
-                    
-                    class LineDcsOut(object):
-                        def __init__(self, linedcs: List[LineDcOut]):
-                            self.linedcs = linedcs
-                    
-                    linedcsList = []
-                    for index, row in net.res_line_dc.iterrows():
-                        line_dc_name = net.line_dc.at[index, 'name'] if 'name' in net.line_dc.columns else f'LineDC_{index}'
-                        line_dc_id = net.line_dc.at[index, 'id'] if 'id' in net.line_dc.columns else str(index)
-                        
-                        linedc = LineDcOut(
-                            name=line_dc_name,
-                            id=line_dc_id,
-                            p_from_mw=row.get('p_from_mw', 0.0),
-                            p_to_mw=row.get('p_to_mw', 0.0),
-                            pl_mw=row.get('pl_mw', 0.0),
-                            vm_from_pu=row.get('vm_from_pu', 0.0),
-                            vm_to_pu=row.get('vm_to_pu', 0.0),
-                            i_from_ka=row.get('i_from_ka', 0.0),
-                            i_to_ka=row.get('i_to_ka', 0.0),
-                            loading_percent=row.get('loading_percent', 0.0)
-                        )
-                        linedcsList.append(linedc)
-                    
-                    linedcs = LineDcsOut(linedcs=linedcsList)
-                    result = {**result, **linedcs.__dict__}
-                    print(f"Added {len(linedcsList)} line_dc results to response")
                            
                 # Generate Python code if export is requested
                 if export_python and in_data and Busbars:
@@ -7597,6 +11478,261 @@ def analyze_shortcircuit_input_data(in_data):
     return recommendations
 
 
+def _sc_iec_options(in_data):
+    """
+    The dialog's IEC 60909 settings as calc_sc takes them. They were read and
+    dropped, so pandapower's defaults always applied: the 6 % LV tolerance the
+    dialog defaults to (c max 1.05) ran as 10 % (c max 1.10), and Radial,
+    Meshed and the inverse-Y choice did nothing.
+    """
+    try:
+        lv_tol = int(float(in_data.get('lv_tol_percent', in_data.get('fault_impedance', 6))))
+    except (TypeError, ValueError):
+        lv_tol = 6
+    if lv_tol not in (6, 10):
+        lv_tol = 6
+    topology = str(in_data.get('topology') or 'auto').strip().lower()
+    if topology not in ('auto', 'radial', 'meshed'):
+        topology = 'auto'
+    inverse_y = in_data.get('inverse_y', True)
+    if not isinstance(inverse_y, bool):
+        inverse_y = str(inverse_y).strip().lower() not in ('false', '0', 'no', 'off')
+    return {'lv_tol_percent': lv_tol, 'topology': topology, 'inverse_y': inverse_y}
+
+
+def _three_phase_kappa(net, case, bus, tk_s, r_fault_ohm, x_fault_ohm, iec_options=None):
+    """
+    Each bus's peak factor kappa for a three-phase fault, as pandapower
+    computes it (method C), indexed like net.res_bus_sc.
+
+    A single-phase run computes kappa too but clears it before returning, and
+    ip / (sqrt(2) Ik'') is not kappa: pandapower adds the current-source part
+    (static generators, storage) without it. So run the three-phase fault on a
+    copy and read kappa from the result table pandapower leaves behind.
+    """
+    import copy
+    from pandapower.pypower.idx_bus_sc import KAPPA
+    net3 = copy.deepcopy(net)
+    sc.calc_sc(net3, fault='3ph', case=case, bus=bus, ip=True, ith=False, tk_s=tk_s,
+               kappa_method='C', r_fault_ohm=r_fault_ohm, x_fault_ohm=x_fault_ohm,
+               check_connectivity=True, branch_results=False, **(iec_options or {}))
+    index = net.res_bus_sc.index
+    rows = net3['_pd2ppc_lookups']['bus'][index.values]
+    ppc_bus = net3['_ppc']['bus']
+    # A bus out of service (an open grounding transformer's delta, say) is not in pandapower's model: no kappa.
+    ok = (rows >= 0) & (rows < ppc_bus.shape[0])
+    kappa = np.full(len(index), np.nan)
+    kappa[ok] = ppc_bus[rows[ok], KAPPA]
+    return pd.Series(kappa, index=index)
+
+
+def _iec_thermal_m(kappa, tk_s, f_hz):
+    """
+    IEC 60909-0 factor m, the heat effect of the DC component, for a fault of
+    tk_s seconds: m = (exp(4 f tk ln(kappa - 1)) - 1) / (2 f tk ln(kappa - 1)).
+    pandapower's own formula, with the network frequency where it assumes
+    50 Hz, and 0 as it gives for kappa > 1.99.
+    """
+    ln = np.log(kappa - 1.0)
+    m = (np.exp(4.0 * f_hz * tk_s * ln) - 1.0) / (2.0 * f_hz * tk_s * ln)
+    return m.where(kappa <= 1.99, 0.0)
+
+
+def _iec_ith_at_frequency(ikss, ith, f_hz):
+    """
+    pandapower's thermal current Ik'' sqrt(m + 1), its m taken at 50 Hz, at
+    f_hz instead. m depends on the frequency only through x = f tk ln(kappa - 1),
+    m = (exp(4 x) - 1) / (2 x), which rises from 0 to 2 as x goes from -inf to
+    0: m read back from the current, x solved for it, and m again at x f_hz / 50.
+    m = 0 (pandapower's for kappa > 1.99) stays 0; a bus without a current is kept.
+    """
+    ikss_v = np.asarray(ikss, dtype=float)
+    ith_v = np.asarray(ith, dtype=float)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        m50 = (ith_v / ikss_v) ** 2 - 1.0
+        ok = np.isfinite(m50) & (m50 > 1e-12) & (m50 < 2.0)
+        target = np.where(ok, m50, 1.0)
+
+        def m_of(x):
+            return np.expm1(4.0 * x) / (2.0 * x)
+
+        lo = np.full(target.shape, -1e9)
+        hi = np.full(target.shape, -1e-12)
+        for _ in range(200):
+            mid = 0.5 * (lo + hi)
+            above = m_of(mid) > target
+            hi = np.where(above, mid, hi)
+            lo = np.where(above, lo, mid)
+        m_f = m_of(0.5 * (lo + hi) * f_hz / 50.0)
+        out = np.where(ok, ikss_v * np.sqrt(m_f + 1.0), ith_v)
+    return pd.Series(out, index=ith.index) if isinstance(ith, pd.Series) else out
+
+
+def _sc_missing_machine_data(net):
+    """
+    In-service machines that lack what pandapower's short-circuit calculation
+    reads, one line each. Without this check the calculation stops on the first
+    missing column with "'DataFrame' object has no attribute 'vn_kv'", naming
+    neither the element nor the field.
+    """
+    out = []
+
+    def named(table, idx):
+        return get_element_display_name(net, table, idx)
+
+    def given(df, idx, column):
+        if column not in df.columns:
+            return False
+        try:
+            value = float(df.at[idx, column])
+        except (TypeError, ValueError):
+            return False
+        return value == value and value > 0
+
+    gen_fields = (('vn_kv', 'vn_kv (rated voltage)'),
+                  ('xdss_pu', 'xdss_pu (subtransient reactance, typically 0.15-0.25)'),
+                  ('cos_phi', 'cos_phi (rated power factor)'))
+    for idx in net.gen.index:
+        if not bool(net.gen.at[idx, 'in_service']):
+            continue
+        missing = [label for column, label in gen_fields if not given(net.gen, idx, column)]
+        if missing:
+            out.append(f"generator '{named('gen', idx)}' has no {', '.join(missing)}")
+    for idx in net.sgen.index:
+        if bool(net.sgen.at[idx, 'in_service']) and not given(net.sgen, idx, 'sn_mva'):
+            out.append(f"static generator '{named('sgen', idx)}' has no sn_mva (rated power)")
+    return out
+
+
+# Three-winding vector groups pandapower can fault single-phase (pd2ppc_zero).
+_SC_1PH_TRAFO3W_GROUPS = (
+    {a + b + c for a in 'dy' for b in 'dy' for c in 'dy'}
+    | {'ynyd', 'yndy', 'yynd', 'ydyn', 'ynynd', 'yndyn', 'yndd', 'ynyy', 'dynyn'}
+)
+
+
+def _sc_missing_zero_sequence_data(net):
+    """
+    What a single-phase fault needs and the network lacks, one line each:
+    an external grid with no zero-sequence impedance (a NaN in the Ybus, and
+    a diagnostic that blamed s_sc_min_mva), or a three-winding transformer in
+    a vector group pandapower cannot fault.
+    """
+    out = []
+    for idx in net.ext_grid.index:
+        if not bool(net.ext_grid.at[idx, 'in_service']):
+            continue
+        x0x = net.ext_grid.at[idx, 'x0x_max'] if 'x0x_max' in net.ext_grid.columns else None
+        try:
+            ok = float(x0x) > 0
+        except (TypeError, ValueError):
+            ok = False
+        if not ok:
+            out.append(f"external grid '{get_element_display_name(net, 'ext_grid', idx)}' has no "
+                       f"x0x_max (zero-sequence X0/X, typically 1-3) - set it with r0x0_max")
+    if 'vector_group' in net.trafo3w.columns:
+        for idx in net.trafo3w.index:
+            group = str(net.trafo3w.at[idx, 'vector_group'] or '')
+            if bool(net.trafo3w.at[idx, 'in_service']) and group.lower() not in _SC_1PH_TRAFO3W_GROUPS:
+                out.append(f"three-winding transformer '{get_element_display_name(net, 'trafo3w', idx)}' "
+                           f"has vector group {group!r}, which pandapower cannot fault single-phase; "
+                           f"use one of YNynd, YNdyn, YNdd, YNyy, Dynyn")
+    return out
+
+
+def _sc_missing_min_case_data(net):
+    """
+    What a minimum-case short circuit needs and the network lacks: each line's
+    end-of-fault temperature, to which IEC 60909-0 raises its resistance, and
+    each grid's minimum fault level. The canvas stores 0 for both; at 0 degC
+    the lines come out 8 % less resistive than at 20 degC, so the "minimum"
+    currents were higher than they should be.
+    """
+    def positive(df, idx, column):
+        try:
+            value = float(df.at[idx, column])
+        except (TypeError, ValueError, KeyError):
+            return False
+        return value == value and value > 0
+
+    out = []
+    for idx in net.line.index:
+        if bool(net.line.at[idx, 'in_service']) and not positive(net.line, idx, 'endtemp_degree'):
+            out.append(f"line '{get_element_display_name(net, 'line', idx)}' has no endtemp_degree "
+                       f"(conductor temperature at the end of the fault, typically 80-160 degC)")
+    for idx in net.ext_grid.index:
+        if bool(net.ext_grid.at[idx, 'in_service']) and not positive(net.ext_grid, idx, 's_sc_min_mva'):
+            out.append(f"external grid '{get_element_display_name(net, 'ext_grid', idx)}' has no "
+                       f"s_sc_min_mva (minimum fault level)")
+    return out
+
+
+def _electrisim_sc_storage_as_current_sources(net):
+    """
+    pandapower's IEC 60909 calculation leaves the storage table out: a Storage
+    element with a maximum short-circuit current (its converter's limit) is
+    added as a current source giving it - as the ANSI study already counts it.
+    """
+    st = getattr(net, 'storage', None)
+    if st is None or not len(st) or 'max_ik_ka' not in st.columns:
+        return
+    for i in st.index:
+        max_ik = safe_float(st.at[i, 'max_ik_ka'], 0.0)
+        if not bool(st.at[i, 'in_service']) or max_ik <= 0:
+            continue
+        bus = int(st.at[i, 'bus'])
+        sn = math.sqrt(3.0) * float(net.bus.at[bus, 'vn_kv']) * max_ik
+        idx = pp.create_sgen(net, bus, p_mw=0.0, sn_mva=sn, k=1.0, name=f"{st.at[i, 'name']} (short circuit)",
+                             current_source=True, generator_type='current_source')
+        for col, value in (('k', 1.0), ('current_source', True), ('generator_type', 'current_source'),
+                           ('electrisim_aux', True)):
+            net.sgen.at[idx, col] = value
+
+
+# Under 1 A without the current sources is no earth path: an ungrounded bus's comes out some 0.1 A
+# (a turbine's behind its delta), a resistance-earthed 34.5 kV bus's 438 A.
+_SC_EARTH_PATH_KA = 1e-3
+
+
+def _electrisim_sc_no_earth_path(net, sc_kwargs):
+    """
+    An earth fault on a bus with no earth return path - behind an ungrounded
+    delta, say - draws next to nothing. pandapower adds a current source's
+    contribution (a PCS's, a converter's) to a single-phase fault whatever
+    the zero-sequence network: on the AI factory a BESS PCS bus behind its
+    delta read 11.3 kA, the eSTATCOM's 15.3 kA, exactly their current limits,
+    where ANSI reads none. Run again with the current sources out: a bus with
+    no fault current then has no earth path, and its earth-fault current is
+    0, said so. (IEC 60909's own share of the current sources, which
+    sc_current_sources now applies, already leaves such a bus next to 0 - the
+    BESS's 2e-20 kA, the turbine's 0.1 A: each is named, not only one that
+    read over 1 A.)
+    """
+    sources = [t for t in ('sgen', 'storage') if len(net[t]) and net[t]['in_service'].any()]
+    if not sources or not len(getattr(net, 'res_bus_sc', [])):
+        return
+    probe = deepcopy(net)
+    for t in sources:
+        probe[t]['in_service'] = False
+    try:
+        sc.calc_sc(probe, **sc_kwargs)
+    except Exception:
+        return
+    res, bare = net.res_bus_sc, probe.res_bus_sc
+    cut = [b for b in res.index if b in bare.index and np.isfinite(res.at[b, 'ikss_ka']) and res.at[b, 'ikss_ka'] > 0
+           and not (np.isfinite(bare.at[b, 'ikss_ka']) and bare.at[b, 'ikss_ka'] > _SC_EARTH_PATH_KA)]
+    if not cut:
+        return
+    named = cut
+    for col in ('ikss_ka', 'ip_ka', 'ith_ka'):
+        if col in res.columns:
+            res.loc[cut, col] = 0.0
+    names = getattr(net, 'user_friendly_names', {}) or {}
+    labels = [str(names.get(net.bus.at[b, 'name'], net.bus.at[b, 'name'])) for b in named]
+    _electrisim_warn(net, f"No earth return path at {', '.join(labels)}: an earth fault there draws next to "
+                          "nothing, so its single-phase fault current is 0.")
+
+
 def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=None):
     
     # Add diagnostic prints
@@ -7604,7 +11740,7 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
     # print("\nBus Data:")
     # print(net.bus)
         
-    net.sgen["k"] = 1.1
+    ensure_sgen_k(net)
     #print(net.sgen["k"])
     
     
@@ -7631,14 +11767,11 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
   
     #print(net.line[net.line.isna().any(axis=1)])
     
-    isolated_buses = top.unsupplied_buses(net)
-    if len(isolated_buses) > 0:
-        isolated_refs = resolve_element_refs(net, 'bus', isolated_buses)
-        isolated_names = [r.get('name') or r.get('id') or str(r.get('index')) for r in isolated_refs]
-        raise ValueError(
-            f"Isolated buses found: {', '.join(isolated_names)}. Check your network connectivity."
-        )
-    
+    # Buses no source energises - a black start's dead network - are left out with what is on them, and named:
+    # the energised part is studied (a short circuit cannot be on a dead bus). Refused, every black-start state
+    # of a microgrid went unstudied.
+    _electrisim_sc_drop_dead_buses(net)
+
     pp.diagnostic(net)
     
     
@@ -7653,18 +11786,35 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
     fault_location = in_data.get('fault_location', 'max')  # Frontend 'fault_location' becomes pandapower 'case'
     fault_bus_mode = normalize_fault_bus_mode(in_data)
     bus = resolve_pp_fault_bus_indices(net, in_data, Busbars)
+    if bus is not None and len(bus):
+        # A fault bus de-energised in this state (set out of service above) has no fault current: pandapower,
+        # given one, failed on an empty array ("attempt to get argmax of an empty sequence").
+        live = [b for b in bus if bool(net.bus.at[b, 'in_service'])]
+        dead = [b for b in bus if b not in live]
+        if dead:
+            dead_names = [r.get('name') or r.get('id') or str(r.get('index'))
+                          for r in resolve_element_refs(net, 'bus', set(dead))]
+            if not live:
+                return {"error": True,
+                        "message": f"Short circuit: fault bus{'es' if len(dead) > 1 else ''} "
+                                   f"{', '.join(dead_names)} {'are' if len(dead) > 1 else 'is'} de-energised in this "
+                                   f"state - no source reaches {'them' if len(dead) > 1 else 'it'}, so there is no "
+                                   f"fault current to compute. Choose a bus a source supplies."}
+            _electrisim_warn(net, f"Fault bus{'es' if len(dead) > 1 else ''} {', '.join(dead_names)} "
+                                  f"{'are' if len(dead) > 1 else 'is'} de-energised in this state and left out: "
+                                  f"no source reaches {'them' if len(dead) > 1 else 'it'}, so no fault current.")
+            bus = live
     if bus is not None and len(bus) == 1:
         bus = bus[0]
     
     # Get other parameters
-    lv_tol_percent = int(in_data.get('fault_impedance', 10))  # Frontend 'fault_impedance' becomes 'lv_tol_percent'
+    # The frontend sends the LV tolerance as 'fault_impedance'.
+    iec_options = _sc_iec_options(in_data)
     ip = True
     ith = True
-    topology = in_data.get('topology', 'radial')
     tk_s = float(in_data.get('tk_s', 1.0))
     r_fault_ohm = float(in_data.get('r_fault_ohm', 0.0))
     x_fault_ohm = float(in_data.get('x_fault_ohm', 0.0))
-    inverse_y = in_data.get('inverse_y', False)
     
     # Debug print to see what parameters are being passed
     
@@ -7689,7 +11839,33 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
         # NOTE: return_all_currents=False (default) gives max/min per branch (simple index).
         #       return_all_currents=True gives results per (branch, fault_bus) combination (MultiIndex).
         #       For UI display, we want max/min per branch, so keep return_all_currents=False.
+        # Raised inside the try so it reaches the diagnostic dialog - the
+        # frontend drops a non-200 response without showing its message.
+        # Long-standing defaults for grids whose zero-sequence columns are
+        # absent come first, so only an explicit zero is reported below.
         ensure_ext_grid_zero_sequence_min(net)
+        if fault_type == '1ph':
+            # A three-wire converter has no zero-sequence path, and pandapower's
+            # zero-sequence model fails on a VSC.
+            _electrisim_set_aside_dc_network(
+                net, 'The single-phase short circuit',
+                why="pandapower's zero-sequence model has no VSC (a three-wire converter adds no zero-sequence "
+                    "path; its own fault current is held to its limit)")
+        _electrisim_sc_storage_as_current_sources(net)
+        missing_machine_data = _sc_missing_machine_data(net)
+        if fault_type == '1ph':
+            missing_machine_data += _sc_missing_zero_sequence_data(net)
+        if fault_location == 'min':
+            missing_machine_data += _sc_missing_min_case_data(net)
+        if missing_machine_data:
+            raise ValueError(
+                'data is missing - '
+                + '; '.join(missing_machine_data)
+                + '. Enter it under the element\'s Short circuit parameters, '
+                  'or take the element out of service'
+            )
+        if fault_type == '1ph':
+            _electrisim_fold_neutral_impedance(net, iec_options['lv_tol_percent'])
         sc.calc_sc(
             net,
             fault=fault_type,
@@ -7701,37 +11877,40 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
             kappa_method='C',
             r_fault_ohm=r_fault_ohm,
             x_fault_ohm=x_fault_ohm,
-            check_connectivity=False,
+            # False ran only because pp.diagnostic above had left
+            # net._is_elements_final behind; without it pandapower's gen
+            # lookup fails. Isolated buses are refused above, so the check
+            # changes nothing else.
+            check_connectivity=True,
             branch_results=True,
             return_all_currents=False,  # Changed: False gives max/min per branch with simple index
+            **iec_options,
         )
-        
+
         # Check if ip_ka and ith_ka calculations failed (all NaN) for single-phase faults
         if fault_type == '1ph' and net.res_bus_sc['ip_ka'].isna().all() and net.res_bus_sc['ith_ka'].isna().all():
-            
-            # Calculate ip_ka and ith_ka from ikss_ka using standard electrical engineering formulas
-            # ip_ka = kappa * sqrt(2) * ikss_ka (peak current)
-            # ith_ka = ikss_ka (for short duration faults, thermal current ≈ initial current)
+            # pandapower computes no peak or thermal current for an earth
+            # fault. IEC 60909-0 allows the three-phase kappa at the same bus:
+            #   ip1 = kappa * sqrt(2) * Ik1''     ith1 = Ik1'' * sqrt(m + n)
+            # with n = 1 (far from generator) and m from kappa, f and tk.
+            kappa = _three_phase_kappa(net, fault_location, bus, tk_s, r_fault_ohm, x_fault_ohm,
+                                       iec_options)
+            ikss = net.res_bus_sc['ikss_ka']
+            net.res_bus_sc['ip_ka'] = kappa * np.sqrt(2) * ikss
+            net.res_bus_sc['ith_ka'] = ikss * np.sqrt(
+                _iec_thermal_m(kappa, tk_s, float(getattr(net, 'f_hz', 50.0) or 50.0)) + 1.0)
+        elif abs(float(getattr(net, 'f_hz', 50.0) or 50.0) - 50.0) > 1e-9:
+            # pandapower takes m at 50 Hz whatever the network's frequency
+            # (shortcircuit.currents._calc_ith: f = 50): its thermal current at the network's.
+            net.res_bus_sc['ith_ka'] = _iec_ith_at_frequency(net.res_bus_sc['ikss_ka'], net.res_bus_sc['ith_ka'],
+                                                             float(net.f_hz))
+        if fault_type == '1ph':
+            # After the peak and thermal currents are filled in: they are filled only where none were.
+            _electrisim_sc_no_earth_path(net, dict(
+                fault=fault_type, case=fault_location, bus=bus, ip=ip, ith=ith, tk_s=tk_s, kappa_method='C',
+                r_fault_ohm=r_fault_ohm, x_fault_ohm=x_fault_ohm, check_connectivity=True,
+                branch_results=False, return_all_currents=False, **iec_options))
 
-            # Kappa factor for peak current calculation (typical value for medium voltage networks)
-            # This can vary from 1.0 to 2.0 depending on network characteristics
-            kappa_factor = 1.8  # Conservative estimate for medium voltage networks
-            
-            # Calculate ip_ka (peak short-circuit current)
-            net.res_bus_sc['ip_ka'] = kappa_factor * np.sqrt(2) * net.res_bus_sc['ikss_ka']
-            
-            # Calculate ith_ka (thermal short-circuit current)
-            # For short duration faults (tk_s = 1.0), ith ≈ ikss
-            # For longer durations, ith would be calculated differently
-            if tk_s <= 1.0:
-                net.res_bus_sc['ith_ka'] = net.res_bus_sc['ikss_ka']
-            else:
-                # For longer fault durations, thermal current is typically lower
-                # ith = ikss * sqrt(thermal_factor) where thermal_factor depends on fault duration
-                thermal_factor = 1.0 / tk_s if tk_s > 1.0 else 1.0
-                net.res_bus_sc['ith_ka'] = net.res_bus_sc['ikss_ka'] * np.sqrt(thermal_factor)
-            
-        
     except Exception as e:
         
         # Capture the diagnostic output and process it
@@ -7805,6 +11984,8 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
     busbarList: List[BusbarOut] = []
 
     for index, row in net.res_bus_sc.iterrows():
+        if _electrisim_is_grounding(net.bus, index):
+            continue   # a grounding transformer's delta
 
         # Handle ip_ka column (might not exist if ip=False)
         if 'ip_ka' in row and not math.isnan(row['ip_ka']):
@@ -7944,6 +12125,8 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
         trafos_sc_list = []
         for idx, row in res_trafo_sc_grouped.iterrows():
             trafo_entry = {}
+            if _electrisim_is_grounding(net.trafo, idx):
+                continue   # a grounding transformer: no branch current of its own in pandapower's results
 
             if idx in net.trafo.index:
                 trafo_entry["name"] = _clean_value(net.trafo.at[idx, "name"]) if "name" in net.trafo.columns else str(idx)
@@ -8022,8 +12205,14 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
         'tk_s': tk_s,
         'r_fault_ohm': r_fault_ohm,
         'x_fault_ohm': x_fault_ohm,
+        'lv_tol_percent': iec_options['lv_tol_percent'],
+        'topology': iec_options['topology'],
+        'inverse_y': iec_options['inverse_y'],
         'standard': 'iec60909',
     }
+    # Its warnings - the DC network set aside, a bus with no earth path - reached only the server log.
+    if getattr(net, 'warnings', None):
+        result['warnings'] = list(dict.fromkeys(net.warnings))
 
     if export_python and in_data_full is not None and Busbars is not None:
         try:
@@ -8038,8 +12227,12 @@ def shortcircuit(net, in_data, in_data_full=None, export_python=False, Busbars=N
             print(f"Short Circuit: pandapower Python export failed: {py_err}")
             result['pandapower_python_error'] = str(py_err)
 
-    # OPTIMIZED: Compact JSON for faster transfer
+    # OPTIMIZED: Compact JSON for faster transfer. A de-energised bus's results are NaN: null, as the browser's
+    # strict JSON.parse requires.
+    # (Its busbars are objects the encoder's default turns into dicts: cleaned after a first pass.)
     response = json.dumps(result, default=_json_serialize_default, separators=(",", ":"))
+    if 'NaN' in response or 'Infinity' in response:
+        response = json.dumps(_electrisim_json_finite(json.loads(response)), separators=(",", ":"))
     return response
 
 
@@ -8136,6 +12329,141 @@ def _contingency_friendly_name(net, raw_name):
     return name
 
 
+def _contingency_bus_power(net):
+    """
+    Base-case load and generation at each bus, MW: what an outage cuts off
+    with the bus. Storage counts as load while charging, generation while
+    discharging.
+    """
+    load, gen = {}, {}
+
+    def add(target, buses, values):
+        for bus, value in zip(buses, values):
+            if pd.notna(value) and value:
+                target[bus] = target.get(bus, 0.0) + float(value)
+
+    for table, target in (('load', load), ('motor', load), ('asymmetric_load', load),
+                          ('gen', gen), ('sgen', gen), ('asymmetric_sgen', gen)):
+        res = net.get('res_' + table) if hasattr(net, 'get') else getattr(net, 'res_' + table, None)
+        if table in net and len(net[table]) and res is not None and len(res):
+            on = net[table].index[net[table].in_service]
+            p = res['p_mw'] if 'p_mw' in res else res.filter(like='p_').sum(axis=1)
+            add(target, net[table].loc[on, 'bus'], p.reindex(on))
+    if 'storage' in net and len(net.storage) and len(net.res_storage):
+        on = net.storage.index[net.storage.in_service]
+        p = net.res_storage.p_mw.reindex(on)
+        add(load, net.storage.loc[on, 'bus'], p.clip(lower=0))
+        add(gen, net.storage.loc[on, 'bus'], (-p).clip(lower=0))
+    return load, gen
+
+
+def _contingency_worst_by_element(net, contingency_results):
+    """
+    Each element's worst over the N-1 cases, with the outage that causes it.
+
+    The diagram showed one case - the one with most violations - labelled
+    "worst-case N-1" on every element: on the transmission grid the Wind
+    farm cable's outage, with L3 at 16.9 % where the main transformer's
+    outage takes it to 52 %.
+    """
+    buses, lines, trafos = {}, {}, {}
+    for case in contingency_results:
+        if not case.get('converged'):
+            continue
+        outage = case.get('outage') or case.get('description')
+        for row in case.get('line_results', []):
+            value = row.get('loading_percent')
+            if value is None or pd.isna(value):
+                continue
+            best = lines.get(row['name'])
+            if best is None or value > best['loading_percent']:
+                lines[row['name']] = dict(row, worst_outage=outage)
+        for row in case.get('trafo_results', []):
+            value = row.get('loading_percent')
+            if value is None or pd.isna(value):
+                continue
+            best = trafos.get(row['name'])
+            if best is None or value > best['loading_percent']:
+                trafos[row['name']] = dict(row, worst_outage=outage)
+        for row in case.get('bus_results', []):
+            entry = buses.setdefault(row['name'], {
+                'bus_id': row['bus_id'], 'name': row['name'], 'vm_pu': None,
+                'vm_max_pu': None, 'worst_outage': None, 'worst_outage_max': None,
+                'deenergised_by': [],
+            })
+            value = row.get('vm_pu')
+            if value is None or pd.isna(value):
+                entry['deenergised_by'].append(outage)
+                continue
+            if entry['vm_pu'] is None or value < entry['vm_pu']:
+                entry.update(vm_pu=value, va_degree=row.get('va_degree'), p_mw=row.get('p_mw'),
+                             q_mvar=row.get('q_mvar'), worst_outage=outage)
+            if entry['vm_max_pu'] is None or value > entry['vm_max_pu']:
+                entry.update(vm_max_pu=value, worst_outage_max=outage)
+    return {'bus': list(buses.values()), 'line': list(lines.values()), 'transformer': list(trafos.values())}
+
+
+# Each source's kind, as a sentence names it.
+_DER_WORDS = {'Battery': 'battery', 'Flywheel': 'flywheel', 'SOFC': 'SOFC system', 'PV Array': 'PV array',
+              'Supercapacitor': 'supercapacitor'}
+
+
+def _contingency_inverter_sources(net):
+    """
+    The inverter-based sources in the base case: each PCS with its source,
+    its rating, its current limit, and the Q its rating leaves at its power.
+    """
+    out = []
+    for rec in getattr(net, 'electrisim_pcs', None) or []:
+        row = _electrisim_pcs_result(net, rec)
+        row.pop('_source', None)
+        out.append({k: row.get(k) for k in (
+            'name', 'id', 'label', 'control', 'source', 'source_kind', 'in_service', 's_rated_mva',
+            'current_limit_pu', 'p_mw', 'q_mvar', 'q_capability_mvar', 'p_max_mw', 'p_min_mw', 'loading_percent')})
+    return out
+
+
+def _contingency_dc_load_mw(net):
+    """Each DC bus's load (MW), from the base case: what a bus left without supply drops."""
+    out = {}
+    ld = getattr(net, 'load_dc', None)
+    if ld is None or not len(ld):
+        return out
+    for i in ld.index:
+        if bool(ld.at[i, 'in_service']) and not _electrisim_is_aux(ld, i):
+            b = int(ld.at[i, 'bus_dc'])
+            out[b] = out.get(b, 0.0) + max(float(ld.at[i, 'p_dc_mw']), 0.0)
+    return out
+
+
+def _contingency_ties(net):
+    """The bus ties a site would close on losing a supply: bus-to-bus switches left open."""
+    sw = getattr(net, 'switch', None)
+    if sw is None or not len(sw):
+        return []
+    return [i for i in sw.index if sw.at[i, 'et'] == 'b' and not bool(sw.at[i, 'closed'])]
+
+
+def _contingency_transfer(net_cont, ties):
+    """
+    After an outage, each open bus tie with a live bus on one side and a dead
+    one on the other closes - the transfer a site's scheme makes - and the
+    load flow runs again. The ties closed, by name.
+    """
+    closed = []
+    for _ in range(len(ties)):
+        res = net_cont.res_bus
+        live = lambda b: b in res.index and np.isfinite(res.at[b, 'vm_pu'])
+        go = [i for i in ties if not bool(net_cont.switch.at[i, 'closed'])
+              and live(int(net_cont.switch.at[i, 'bus'])) != live(int(net_cont.switch.at[i, 'element']))]
+        if not go:
+            break
+        net_cont.switch.at[go[0], 'closed'] = True
+        closed.append(_contingency_friendly_name(net_cont, net_cont.switch.at[go[0], 'name']))
+        _electrisim_runpp(net_cont, algorithm='nr', calculate_voltage_angles=True)
+    return closed
+
+
 def contingency_analysis(net, contingency_params):
     """
     Perform contingency analysis on the network.
@@ -8155,15 +12483,16 @@ def contingency_analysis(net, contingency_params):
         max_vm_pu = float(contingency_params.get('max_vm_pu', 1.05))
         max_loading_percent = float(contingency_params.get('max_loading_percent', 100))
         
-        # Validate network connectivity
-        isolated_buses = top.unsupplied_buses(net)
-        if len(isolated_buses) > 0:
-            raise ValueError(f"Isolated buses found: {isolated_buses}. Check your network connectivity.")
-        
+        # Validate network connectivity, naming the buses as the diagram does:
+        # the raw set read "{np.int64(5), np.int64(6), np.int64(7)}".
+        isolated = isolated_buses_message(net)
+        if isolated:
+            raise ValueError(isolated)
+
         # Check if network has elements
         
         # Run base case power flow
-        pp.runpp(net, algorithm='nr', calculate_voltage_angles=True)
+        _electrisim_runpp(net, algorithm='nr', calculate_voltage_angles=True)
         
         # Define contingency cases based on element type
         contingency_cases = []
@@ -8181,9 +12510,9 @@ def contingency_analysis(net, contingency_params):
                     })
         
         if element_type == 'transformer' or element_type == 'all':
-            # Add transformer contingencies
+            # Add transformer contingencies (a grounding transformer carries no load: its outage changes nothing here)
             for trafo_idx in net.trafo.index:
-                if net.trafo.loc[trafo_idx, 'in_service']:
+                if net.trafo.loc[trafo_idx, 'in_service'] and not _electrisim_is_grounding(net.trafo, trafo_idx):
                     trafo_name = _contingency_friendly_name(net, net.trafo.loc[trafo_idx, 'name'])
                     contingency_cases.append({
                         'name': f"Trafo_{trafo_name}",
@@ -8191,11 +12520,22 @@ def contingency_analysis(net, contingency_params):
                         'element_idx': trafo_idx,
                         'description': f"Outage of transformer {trafo_name}"
                     })
+            # Three-winding units too: they were never taken out, though one
+            # may be a bus's only supply.
+            for trafo_idx in net.trafo3w.index:
+                if net.trafo3w.loc[trafo_idx, 'in_service']:
+                    trafo_name = _contingency_friendly_name(net, net.trafo3w.loc[trafo_idx, 'name'])
+                    contingency_cases.append({
+                        'name': f"Trafo3w_{trafo_name}",
+                        'type': 'trafo3w',
+                        'element_idx': trafo_idx,
+                        'description': f"Outage of transformer {trafo_name}"
+                    })
         
         if element_type == 'generator' or element_type == 'all':
             # Add generator contingencies
             for gen_idx in net.gen.index:
-                if net.gen.loc[gen_idx, 'in_service']:
+                if net.gen.loc[gen_idx, 'in_service'] and not _electrisim_is_pcs(net.gen, gen_idx):
                     gen_name = _contingency_friendly_name(net, net.gen.loc[gen_idx, 'name'])
                     contingency_cases.append({
                         'name': f"Gen_{gen_name}",
@@ -8203,12 +12543,61 @@ def contingency_analysis(net, contingency_params):
                         'element_idx': gen_idx,
                         'description': f"Outage of generator {gen_name}"
                     })
+            # Static generators too - PV, wind - which were never taken out:
+            # the transmission grid's 2 MW wind farm among them.
+            for gen_idx in net.sgen.index:
+                if (net.sgen.loc[gen_idx, 'in_service'] and not _electrisim_is_pcs(net.sgen, gen_idx)
+                        and not _electrisim_is_aux(net.sgen, gen_idx)):
+                    gen_name = _contingency_friendly_name(net, net.sgen.loc[gen_idx, 'name'])
+                    contingency_cases.append({
+                        'name': f"Sgen_{gen_name}",
+                        'type': 'sgen',
+                        'element_idx': gen_idx,
+                        'description': f"Outage of generator {gen_name}"
+                    })
         
+        # Converters: each rectifier (VSC), solid-state transformer and DC/DC converter. The
+        # contingency study took out transformers, generators and PCS only; on a DC site the
+        # converters are most of what can fail.
+        if element_type == 'converter' or element_type == 'all':
+            vsc = getattr(net, 'vsc', None)
+            if vsc is not None and len(vsc):
+                for i in vsc.index:
+                    if bool(vsc.at[i, 'in_service']) and not _electrisim_is_aux(vsc, i):
+                        name = _contingency_friendly_name(net, vsc.at[i, 'name'])
+                        contingency_cases.append({'name': f"VSC_{name}", 'type': 'vsc', 'element_idx': i,
+                                                  'description': f"Outage of converter {name}"})
+            for k, rec in enumerate(getattr(net, 'electrisim_ssts', None) or []):
+                if rec.get('in_service', True):
+                    contingency_cases.append({'name': f"SST_{rec['label']}", 'type': 'sst', 'element_idx': k,
+                                              'description': f"Outage of converter {rec['label']}"})
+            for k, rec in enumerate(getattr(net, 'electrisim_dc_dc_converters', None) or []):
+                if rec.get('in_service', True):
+                    contingency_cases.append({'name': f"DCDC_{rec['label']}", 'type': 'dcdc', 'element_idx': k,
+                                              'description': f"Outage of converter {rec['label']}"})
+
+        # Each PCS, with the source behind it.
+        if element_type == 'generator' or element_type == 'all':
+            for k, rec in enumerate(getattr(net, 'electrisim_pcs', None) or []):
+                if rec['in_service']:
+                    contingency_cases.append({
+                        'name': f"PCS_{rec['label']}",
+                        'type': 'pcs',
+                        'element_idx': k,
+                        'description': f"Outage of PCS {rec['label']} ({_DER_WORDS.get(rec['source']['kind'], '')} "
+                                       f"{rec['source']['label']})"
+                    })
+
         # Results storage
         contingency_results = []
         violations = []
         critical_contingencies = []
         
+        bus_load_mw, bus_gen_mw = _contingency_bus_power(net)
+        dc_load_mw = _contingency_dc_load_mw(net)
+        transfer = str(contingency_params.get('auto_transfer', 'true')).lower() != 'false'
+        ties = _contingency_ties(net) if transfer else []
+
         # Store base case results
         base_case_results = {
             'bus_vm_pu': net.res_bus.vm_pu.copy(),
@@ -8228,14 +12617,87 @@ def contingency_analysis(net, contingency_params):
                     net_cont.line.loc[contingency_case['element_idx'], 'in_service'] = False
                 elif contingency_case['type'] == 'trafo':
                     net_cont.trafo.loc[contingency_case['element_idx'], 'in_service'] = False
+                elif contingency_case['type'] == 'trafo3w':
+                    net_cont.trafo3w.loc[contingency_case['element_idx'], 'in_service'] = False
                 elif contingency_case['type'] == 'gen':
                     net_cont.gen.loc[contingency_case['element_idx'], 'in_service'] = False
-                
+                elif contingency_case['type'] == 'sgen':
+                    net_cont.sgen.loc[contingency_case['element_idx'], 'in_service'] = False
+                elif contingency_case['type'] == 'pcs':
+                    rec = net_cont.electrisim_pcs[contingency_case['element_idx']]
+                    rec['in_service'] = False
+                    net_cont[rec['table']].loc[rec['index'], 'in_service'] = False
+                elif contingency_case['type'] == 'vsc':
+                    net_cont.vsc.loc[contingency_case['element_idx'], 'in_service'] = False
+                elif contingency_case['type'] == 'sst':
+                    rec = net_cont.electrisim_ssts[contingency_case['element_idx']]
+                    rec['in_service'] = False
+                    for table, idx in rec['aux'] + [st['input'] for st in rec['stages']] + [st['output'] for st in rec['stages']]:
+                        if idx is not None and idx in net_cont[table].index:
+                            net_cont[table].at[idx, 'in_service'] = False
+                elif contingency_case['type'] == 'dcdc':
+                    _electrisim_set_dc_dc_in_service(
+                        net_cont, net_cont.electrisim_dc_dc_converters[contingency_case['element_idx']], False)
+
                 # Run power flow for contingency case
-                pp.runpp(net_cont, algorithm='nr', calculate_voltage_angles=True)
-                
+                _electrisim_runpp(net_cont, algorithm='nr', calculate_voltage_angles=True)
+                # A supply lost: the open bus ties close where they would restore it.
+                ties_closed = _contingency_transfer(net_cont, ties) if ties else []
+                if ties_closed:
+                    contingency_case = {**contingency_case,
+                                        'outage_name': contingency_case['description'].split(' ', 3)[-1],
+                                        'description': contingency_case['description']
+                                        + f" (bus tie {', '.join(ties_closed)} closed)"}
+
                 # Check for violations
                 case_violations = []
+
+                # Lost supply: buses the outage islands have no voltage (NaN),
+                # which no limit catches - cutting off a bus counted as no
+                # violation at all.
+                in_service = net_cont.bus.index[net_cont.bus.in_service]
+                dead = net_cont.res_bus.loc[net_cont.res_bus.index.intersection(in_service)]
+                # How much each cut-off bus carried: every one counted the
+                # same, so an outage cutting off only a wind farm ranked with
+                # one dropping 1.3 MW of load.
+                lost_load = lost_gen = 0.0
+                for bus_idx in dead.index[dead.vm_pu.isna()]:
+                    if _electrisim_is_aux(net_cont.bus, bus_idx):
+                        continue        # a converter's own auxiliary bus, out with it
+                    bus_name = _contingency_friendly_name(net, net_cont.bus.loc[bus_idx, 'name'])
+                    load_mw, gen_mw = bus_load_mw.get(bus_idx, 0.0), bus_gen_mw.get(bus_idx, 0.0)
+                    lost_load += load_mw
+                    lost_gen += gen_mw
+                    case_violations.append({
+                        'type': 'supply',
+                        'element': f"Bus_{bus_name}",
+                        'description': (f'Loss of supply: bus de-energised, {load_mw:.3f} MW load '
+                                        f'and {gen_mw:.3f} MW generation cut off'),
+                        'severity': 'high',
+                        'lost_load_mw': load_mw,
+                        'lost_generation_mw': gen_mw,
+                    })
+                # The DC buses left without supply, and their load: it was not counted.
+                lost_dc = 0.0
+                res_dc = getattr(net_cont, 'res_bus_dc', None)
+                if res_dc is not None and len(res_dc):
+                    for bus_idx in net_cont.bus_dc.index[net_cont.bus_dc.in_service.fillna(False).astype(bool)]:
+                        if _electrisim_is_aux(net_cont.bus_dc, bus_idx) or bus_idx not in res_dc.index:
+                            continue
+                        if np.isfinite(res_dc.at[bus_idx, 'vm_pu']):
+                            continue
+                        load_mw = dc_load_mw.get(int(bus_idx), 0.0)
+                        lost_dc += load_mw
+                        bus_name = _contingency_friendly_name(net, net_cont.bus_dc.loc[bus_idx, 'name'])
+                        case_violations.append({
+                            'type': 'supply',
+                            'element': f"DC_Bus_{bus_name}",
+                            'description': f'Loss of supply: DC bus without supply, {load_mw:.3f} MW load cut off',
+                            'severity': 'high' if load_mw > 0 else 'medium',
+                            'lost_load_mw': load_mw,
+                            'lost_generation_mw': 0.0,
+                        })
+                lost_load += lost_dc
                 
                 # Check voltage violations
                 if voltage_limits:
@@ -8281,13 +12743,36 @@ def contingency_analysis(net, contingency_params):
                                 'description': f"Transformer overload: {trafo_data.loading_percent:.1f}%",
                                 'severity': 'high' if trafo_data.loading_percent > 120 else 'medium'
                             })
+
+                    if not net_cont.res_trafo3w.empty:
+                        trafo3w_overloads = net_cont.res_trafo3w[
+                            net_cont.res_trafo3w.loading_percent > max_loading_percent
+                        ]
+                        for trafo_idx, trafo_data in trafo3w_overloads.iterrows():
+                            trafo_name = _contingency_friendly_name(net, net_cont.trafo3w.loc[trafo_idx, 'name'])
+                            case_violations.append({
+                                'type': 'thermal',
+                                'element': f"Trafo3w_{trafo_name}",
+                                'description': f"Transformer overload: {trafo_data.loading_percent:.1f}%",
+                                'severity': 'high' if trafo_data.loading_percent > 120 else 'medium'
+                            })
                 
                 # Store results for this contingency
+                loadings = [v for v in list(net_cont.res_line.loading_percent)
+                            + list(net_cont.res_trafo.loading_percent)
+                            + list(net_cont.res_trafo3w.loading_percent) if pd.notna(v)]
                 contingency_result = {
                     'name': contingency_case['name'],
                     'description': contingency_case['description'],
+                    # The element taken out, by name ("Outage of line L4" -> "L4").
+                    'outage': contingency_case.get('outage_name') or contingency_case['description'].split(' ', 3)[-1],
                     'converged': True,
                     'violations': case_violations,
+                    'lost_load_mw': lost_load,
+                    'lost_dc_load_mw': lost_dc,
+                    'lost_generation_mw': lost_gen,
+                    'ties_closed': ties_closed,
+                    'max_loading_percent': max(loadings) if loadings else 0.0,
                     'bus_results': [],
                     'line_results': [],
                     'trafo_results': []
@@ -8295,6 +12780,8 @@ def contingency_analysis(net, contingency_params):
                 
                 # Store bus results
                 for bus_idx, bus_data in net_cont.res_bus.iterrows():
+                    if _electrisim_is_aux(net_cont.bus, bus_idx):
+                        continue   # a DC/DC converter's auxiliary AC bus
                     contingency_result['bus_results'].append({
                         'bus_id': net_cont.bus.loc[bus_idx, 'id'],
                         'name': _contingency_friendly_name(net, net_cont.bus.loc[bus_idx, 'name']),
@@ -8321,6 +12808,16 @@ def contingency_analysis(net, contingency_params):
                     contingency_result['trafo_results'].append({
                         'trafo_id': net_cont.trafo.loc[trafo_idx, 'id'],
                         'name': _contingency_friendly_name(net, net_cont.trafo.loc[trafo_idx, 'name']),
+                        'loading_percent': trafo_data.loading_percent,
+                        'p_hv_mw': trafo_data.p_hv_mw,
+                        'q_hv_mvar': trafo_data.q_hv_mvar,
+                        'p_lv_mw': trafo_data.p_lv_mw,
+                        'q_lv_mvar': trafo_data.q_lv_mvar
+                    })
+                for trafo_idx, trafo_data in net_cont.res_trafo3w.iterrows():
+                    contingency_result['trafo_results'].append({
+                        'trafo_id': net_cont.trafo3w.loc[trafo_idx, 'id'] if 'id' in net_cont.trafo3w.columns else str(trafo_idx),
+                        'name': _contingency_friendly_name(net, net_cont.trafo3w.loc[trafo_idx, 'name']),
                         'loading_percent': trafo_data.loading_percent,
                         'p_hv_mw': trafo_data.p_hv_mw,
                         'q_hv_mvar': trafo_data.q_hv_mvar,
@@ -8431,8 +12928,11 @@ def contingency_analysis(net, contingency_params):
             error_message = f"No contingency results generated. All {len(contingency_cases)} cases failed to converge."
             return json.dumps({'error': error_message}, separators=(',', ':'))
         
-        # Use the worst-case scenario results for display
-        worst_case = max(contingency_results, key=lambda x: len(x.get('violations', [])))
+        # The worst case: most violations, then most load cut off, then the
+        # highest loading. Violations alone tied every cut-off bus, and the
+        # first such case won - one cutting off no load at all.
+        worst_case = max(contingency_results, key=lambda x: (
+            len(x.get('violations', [])), x.get('lost_load_mw', 0.0), x.get('max_loading_percent', 0.0)))
         
         for bus_result in worst_case.get('bus_results', []):
             bus_out = ContingencyBusOut(
@@ -8475,7 +12975,10 @@ def contingency_analysis(net, contingency_params):
             'line': [line.__dict__ for line in line_out_list],
             'transformer': [trafo.__dict__ for trafo in trafo_out_list],
             'summary': summary,
-            'contingency_results': contingency_results
+            'contingency_results': contingency_results,
+            'worst_case': worst_case.get('name'),
+            'worst_by_element': _contingency_worst_by_element(net, contingency_results),
+            'inverter_sources': _contingency_inverter_sources(net),
         }
         
         # Sanitize NaN/Inf so the body is strict JSON (browser JSON.parse rejects NaN tokens).
@@ -8520,8 +13023,10 @@ def optimalPowerFlow(net, opf_params):
         # Extract OPF parameters
         opf_type = opf_params.get('opf_type', 'ac')
         algorithm = opf_params.get('ac_algorithm', 'pypower') if opf_type == 'ac' else opf_params.get('dc_algorithm', 'pypower')
-        calculate_voltage_angles = opf_params.get('calculate_voltage_angles', 'auto')
+        calculate_voltage_angles = _as_auto_voltage_angles(
+            net, _as_calculate_voltage_angles(opf_params.get('calculate_voltage_angles', 'auto')))
         init = opf_params.get('init', 'pf')
+        _electrisim_set_aside_dc_network(net, 'Optimal power flow', keep_ac_draw=True)
         delta = float(opf_params.get('delta', 1e-8))
         trafo_model = opf_params.get('trafo_model', 't')
         trafo_loading = opf_params.get('trafo_loading', 'current')
@@ -8566,11 +13071,12 @@ def optimalPowerFlow(net, opf_params):
         if not isinstance(dcline_cost_cp2, dict):
             dcline_cost_cp2 = {}
         
-        # Check for isolated buses
-        isolated_buses = top.unsupplied_buses(net)
-        if len(isolated_buses) > 0:
-            raise ValueError(f"Isolated buses found: {isolated_buses}. Check your network connectivity.")
-        
+        # Check for isolated buses, named as the diagram does: the raw set
+        # read "{np.int64(5), np.int64(6), np.int64(7)}".
+        isolated = isolated_buses_message(net)
+        if isolated:
+            raise ValueError(isolated)
+
         # Ensure min/max p_mw columns exist before default cost setup (PWL uses these breakpoints)
         if 'min_p_mw' not in net.gen.columns:
             net.gen['min_p_mw'] = 0.0
@@ -8684,6 +13190,8 @@ def optimalPowerFlow(net, opf_params):
                     if pd.isna(v):
                         net.dcline.loc[di, qcol] = qdef
         
+        _electrisim_pcs_opf_costs(net, generator_cost_cp1, sgen_cost_cp1)
+
         # Set up cost functions if specified and not already present
         if cost_function != 'none':
             setup_default_cost_functions(
@@ -8997,6 +13505,10 @@ def optimalPowerFlow(net, opf_params):
         
         # Initialize diagnostic response
         exc_text = str(e)
+        shortfalls = _electrisim_opf_island_shortfalls(net)
+        if shortfalls:
+            # Not the solver's fault: no dispatch exists. Said first, ahead of the solver tips.
+            exc_text = ' '.join(shortfalls) + '\n\n' + exc_text
         if isinstance(e, OPFNotConverged) or "did not converge" in exc_text.lower():
             exc_text += (
                 "\n\nTips:\n"
@@ -9012,22 +13524,18 @@ def optimalPowerFlow(net, opf_params):
             "exception": exc_text,
             "diagnostic": {}
         }
-        
+
         # Try to get diagnostic information
         try:
             diag_result_dict = pp.diagnostic(net, report_style='detailed')
-            
-            # Check for isolated buses
+
+            # Isolated buses as the load flow reports them, {index, id, name}:
+            # bare indices were listed as "5, 6, 7" and could not be located.
             isolated_buses = pp.topology.unsupplied_buses(net)
             if len(isolated_buses) > 0:
-                # Convert set to list (isolated_buses is a set, not numpy array)
-                if isinstance(isolated_buses, set):
-                    diagnostic_response["diagnostic"]["isolated_buses"] = list(isolated_buses)
-                elif hasattr(isolated_buses, 'tolist'):
-                    diagnostic_response["diagnostic"]["isolated_buses"] = isolated_buses.tolist()
-                else:
-                    diagnostic_response["diagnostic"]["isolated_buses"] = list(isolated_buses)
-            
+                diagnostic_response["diagnostic"]["isolated_buses"] = resolve_element_refs(
+                    net, 'bus', sorted(isolated_buses))
+
             # Process diagnostic data to convert element indices to user-friendly names
             processed_diagnostic = process_diagnostic_data(net, diag_result_dict)
             # Merge processed diagnostic with isolated_buses (don't overwrite)
@@ -9039,6 +13547,10 @@ def optimalPowerFlow(net, opf_params):
         # If no specific diagnostic was found, include the original exception
         if not diagnostic_response["diagnostic"]:
             diagnostic_response["diagnostic"]["general_error"] = str(e)
+        # An island its sources cannot supply: shown in the dialog's error details (the exception text is
+        # suppressed outside debugging).
+        if shortfalls:
+            diagnostic_response["diagnostic"]["general_error"] = ' '.join(shortfalls)
 
         if solver_verbose_text.strip():
             diagnostic_response["solver_verbose_log"] = _truncate_solver_verbose_log(solver_verbose_text)
@@ -9047,6 +13559,7 @@ def optimalPowerFlow(net, opf_params):
     
     # Build response with OPF results
     else:
+        _electrisim_pcs_opf_circle_check(net)
         # Define output classes (similar to powerflow function)
         class BusbarOut(object):
             def __init__(self, name: str, id: str, vm_pu: float, va_degree: float, p_mw: float, q_mvar: float, 
@@ -9543,10 +14056,22 @@ def optimalPowerFlow(net, opf_params):
         }
         
         # Add optimization results summary if available
+        # With no cost rows pandapower minimises the total generation, and
+        # res_cost is that sum in MW: it was reported as "11.4985 EUR". Report
+        # it as what it is, and a cost - per hour, MW times price per MWh -
+        # only when prices were used.
+        priced = len(net.poly_cost) > 0 or len(net.pwl_cost) > 0
+        response_data['cost_function'] = cost_function if priced else 'none'
         if hasattr(net, 'OPF_converged') and net.OPF_converged:
             response_data['opf_converged'] = True
             if hasattr(net, 'res_cost'):
-                response_data['total_cost'] = float(net.res_cost)
+                if priced:
+                    response_data['total_cost'] = float(net.res_cost)
+                    response_data['cost_per'] = 'h'
+                else:
+                    response_data['total_cost'] = None
+                    response_data['objective'] = 'total_generation'
+                    response_data['total_generation_mw'] = float(net.res_cost)
         else:
             response_data['opf_converged'] = False
         
@@ -9555,6 +14080,8 @@ def optimalPowerFlow(net, opf_params):
 
         # Label for UI: study currency from OPF payload (coefficient column names stay EUR-style in pandapower).
         response_data['cost_currency'] = str(opf_params.get('cost_currency') or 'EUR')
+        if getattr(net, 'warnings', None):
+            response_data['warnings'] = list(net.warnings)
 
         return _jsonify_safe(response_data)
 
@@ -9969,13 +14496,27 @@ def safe_float(value, default=0.0):
     except (ValueError, TypeError):
         return default
 
-def safe_int(value, default=1):
-    """Convert value to int with default fallback. Handles 'null', 'None', empty string."""
+def safe_int(value, default=0):
+    """Convert value to int with default fallback. Handles 'null', 'None', empty string.
+
+    A decimal-formatted integer ('0.0', '2.0') is parsed as the number it is.
+    int() rejects those outright, so they used to fall through to the default -
+    and the default was 1, which silently turned a tap position of 0 into 1 and
+    shifted the transformer ratio. Values that reach the payload that way come
+    from imported models, grid cells and JSON round-trips of floats.
+
+    int() is still tried first so anything that already converted exactly keeps
+    doing so, rather than losing precision through float.
+    """
     if value is None or value == 'null' or value == 'None' or value == '':
         return default
     try:
         return int(value)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
+        pass
+    try:
+        return int(float(value))
+    except (ValueError, TypeError, OverflowError):
         return default
 
 def parse_vector_group(vector_group):
@@ -10498,16 +15039,12 @@ def controller_simulation(net, controller_params):
         try:
             diag_result_dict = pp.diagnostic(net, report_style='detailed')
             
-            # Check for isolated buses
+            # Isolated buses as the load flow reports them, {index, id, name}:
+            # bare indices were listed as "5, 6, 7" and could not be located.
             isolated_buses = pp.topology.unsupplied_buses(net)
             if len(isolated_buses) > 0:
-                # Convert set to list (isolated_buses is a set, not numpy array)
-                if isinstance(isolated_buses, set):
-                    diagnostic_response["diagnostic"]["isolated_buses"] = list(isolated_buses)
-                elif hasattr(isolated_buses, 'tolist'):
-                    diagnostic_response["diagnostic"]["isolated_buses"] = isolated_buses.tolist()
-                else:
-                    diagnostic_response["diagnostic"]["isolated_buses"] = list(isolated_buses)
+                diagnostic_response["diagnostic"]["isolated_buses"] = resolve_element_refs(
+                    net, 'bus', sorted(isolated_buses))
             
             # Process diagnostic data to convert element indices to user-friendly names
             processed_diagnostic = process_diagnostic_data(net, diag_result_dict)
@@ -10618,18 +15155,11 @@ def _ts_orig_p_for_element(net, elem_name, element_type):
 
 def _ts_resolve_profile_mode(mode, values, orig_p):
     """
-    Detect notebook-style absolute MW profiles sent with mode='scale'.
-    Scale factors are dimensionless (typically 0–2); values in [0, orig_p] are absolute MW.
+    The profile's mode as the user set it. Scale factors peaking between 20 %
+    and 105 % of an element's base P used to be taken for MW: the dialog's own
+    Constant preset (1.0) ran a 3 MW load at 1 MW.
     """
-    if mode != 'scale' or not values:
-        return mode
-    op = abs(float(orig_p)) if orig_p else 0.0
-    vmax = max(abs(float(v)) for v in values)
-    if vmax > 3.0:
-        return 'absolute'
-    if op > 1.0 and vmax >= op * 0.2 and vmax <= op * 1.05:
-        return 'absolute'
-    return mode
+    return mode if mode in ('scale', 'absolute') else 'scale'
 
 
 def _ts_set_pq(table, idx, orig_p, orig_q, value, mode):
@@ -10652,10 +15182,163 @@ def _ts_set_pq(table, idx, orig_p, orig_q, value, mode):
         table.loc[idx, 'q_mvar'] = net_q
 
 
+def _ts_storage_state(net):
+    """
+    Each battery's drawn power and stored energy, for tracking hour by hour.
+
+    A battery held its drawn power every hour: 0.5 MW for 24 h from the
+    radial grid's 2 MWh at 80 %, 12 MWh out of 1.6. One without an energy
+    rating or a state of charge cannot be tracked and keeps its power.
+    """
+    state = {}
+    if not hasattr(net, 'storage') or net.storage.empty:
+        return state
+    for idx in net.storage.index:
+        row = net.storage.loc[idx]
+        scaling = float(row['scaling']) if 'scaling' in row and pd.notna(row['scaling']) else 1.0
+        max_e = float(row['max_e_mwh']) if 'max_e_mwh' in row and pd.notna(row['max_e_mwh']) else float('nan')
+        min_e = float(row['min_e_mwh']) if 'min_e_mwh' in row and pd.notna(row['min_e_mwh']) else 0.0
+        soc = float(row['soc_percent']) if 'soc_percent' in row and pd.notna(row['soc_percent']) else float('nan')
+        trackable = bool(row.get('in_service', True)) and max_e > 0 and not math.isnan(soc)
+        state[idx] = {
+            'p_mw': float(row['p_mw']) * scaling,   # + charging, as pandapower
+            'scaling': scaling or 1.0,
+            'max_e': max_e, 'min_e': min_e,
+            'energy': max_e * soc / 100.0 if trackable else float('nan'),
+            'trackable': trackable,
+            'limited_from': None,
+        }
+    return state
+
+
+def _ts_dispatch_storage(net, state, t, hours=1.0):
+    """Set each battery's power for this hour within the energy it has room for or holds."""
+    for idx, st in state.items():
+        if not st['trackable']:
+            continue
+        want = st['p_mw']
+        if want > 0:
+            p = min(want, max(0.0, st['max_e'] - st['energy']) / hours)
+        else:
+            p = -min(-want, max(0.0, st['energy'] - st['min_e']) / hours)
+        if abs(p) < 1e-12:
+            p = 0.0
+        if abs(p - want) > 1e-9 and st['limited_from'] is None:
+            st['limited_from'], st['limited_p'] = t, p
+        net.storage.loc[idx, 'p_mw'] = p / st['scaling']
+        st['p_now'] = p
+
+
+def _ts_advance_storage(state, hours=1.0):
+    for st in state.values():
+        if st['trackable']:
+            st['energy'] += st.get('p_now', 0.0) * hours
+
+
+# The time series' per-step rows for the DC network (and the AC breakers and motors), returned
+# up to this many steps: a week hourly. Beyond it - a year hourly, an hour by the second - the
+# per-element summary alone, as the rows would run to a million.
+TS_DC_ROW_CAP = 168
+
+# A DC result's ratings and settings: the same every step, so left out of its per-step row.
+_TS_DC_STATIC = frozenset((
+    'rated_mw', 'rated_current_ka', 'breaking_capacity_ka', 'capacity_ah', 'energy_kwh', 'v_f_v',
+    'current_limit_pu', 'q_capability_mvar', 'frequency_hz', 'p_max_mw', 'p_min_mw', 'link_kv',
+    'in_service', 'closed', 'islanded', 'capacitance_f', 'usable_kj',
+))
+
+
+def _ts_dc_rows(net, include_ders, vsc_rated):
+    """
+    One time step's DC results as the load flow gives them (_electrisim_dc_results),
+    each element's numbers and flags alone; an SST its stages' total loss and most
+    loaded stage, a VSC its loading from its rating. The AC breakers and motors with
+    them: the time series' AC tables leave them out. ``include_ders``: the sources
+    and stores and their PCS, unless the microgrid dispatch reports them.
+    """
+    ufn = getattr(net, 'user_friendly_names', {}) or {}
+    res = _electrisim_dc_results(net, warn=False)
+    if not include_ders:
+        res.pop('ders', None)
+        res.pop('pcs', None)
+    res.pop('groundingtransformers', None)
+    if hasattr(net, 'res_switch') and not net.res_switch.empty:
+        res['switches'] = [{'name': net.switch.at[i, 'name'], 'id': _electrisim_row_id(net.switch, i),
+                            'i_ka': row.get('i_ka'), 'loading_percent': row.get('loading_percent')}
+                           for i, row in net.res_switch.iterrows()]
+    if 'motor' in net and len(net.motor) and hasattr(net, 'res_motor') and not net.res_motor.empty:
+        res['motors'] = [{'name': net.motor.at[i, 'name'], 'id': _electrisim_row_id(net.motor, i),
+                          'p_mw': row.get('p_mw'), 'q_mvar': row.get('q_mvar')}
+                         for i, row in net.res_motor.iterrows()]
+    out = {}
+    for kind, items in res.items():
+        rows = []
+        for r in items or []:
+            if not isinstance(r, dict):
+                continue
+            name = r.get('name')
+            row = {'id': None if r.get('id') is None else str(r.get('id')),
+                   'name': r.get('label') or ufn.get(name, name)}
+            for k, v in r.items():
+                if k in ('id', 'name', 'label') or k in _TS_DC_STATIC:
+                    continue
+                if isinstance(v, (bool, np.bool_)):
+                    row[k] = bool(v)
+                elif isinstance(v, (int, float, np.integer, np.floating)) and np.isfinite(v):
+                    row[k] = float(v)
+            if kind == 'ssts':
+                stages = [st for st in r.get('stages') or [] if isinstance(st, dict)]
+                losses = [st['loss_mw'] for st in stages if st.get('loss_mw') is not None and np.isfinite(st['loss_mw'])]
+                loads = [st['loading_percent'] for st in stages
+                         if st.get('loading_percent') is not None and np.isfinite(st['loading_percent'])]
+                if losses:
+                    row['loss_mw'] = float(sum(losses))
+                if loads:
+                    row['loading_percent'] = float(max(loads))
+            elif kind == 'vscs' and row['id'] in vsc_rated and 'p_mw' in row:
+                rated = vsc_rated[row['id']]
+                row['loading_percent'] = 100.0 * math.hypot(row['p_mw'], row.get('q_mvar', 0.0)) / rated
+            rows.append(row)
+        out[kind] = rows
+    return out
+
+
+def _ts_dc_summary(steps):
+    """
+    Each element's range over the run from its per-step rows: of each number its
+    min, max and mean and the steps of its extremes; of each flag the steps it held.
+    """
+    acc = {}
+    for t, by_kind in enumerate(steps):
+        for kind, rows in (by_kind or {}).items():
+            for row in rows:
+                key = (kind, row['id'] if row['id'] is not None else row['name'])
+                e = acc.setdefault(key, {'kind': kind, 'id': row['id'], 'name': row['name'], 'num': {}, 'flag': {}})
+                for k, v in row.items():
+                    if k in ('id', 'name'):
+                        continue
+                    if isinstance(v, bool):
+                        e['flag'][k] = e['flag'].get(k, 0) + (1 if v else 0)
+                    else:
+                        e['num'].setdefault(k, []).append((t, v))
+    out = {}
+    for e in acc.values():
+        stats = {}
+        for k, tv in e['num'].items():
+            vals = [v for _, v in tv]
+            t_min = min(tv, key=lambda p: p[1])[0]
+            t_max = max(tv, key=lambda p: p[1])[0]
+            stats[k] = {'min': min(vals), 'max': max(vals), 'mean': sum(vals) / len(vals),
+                        't_min': t_min, 't_max': t_max}
+        out.setdefault(e['kind'], []).append({'id': e['id'], 'name': e['name'], 'steps': len(steps),
+                                              'stats': stats, 'flags_true_steps': e['flag']})
+    return out
+
+
 def _ts_run_powerflow(net, timeseries_params, time_index, prev_converged):
     """Run PF for one time step; warm-start from previous step when possible (pandapower timeseries style)."""
     algorithm = timeseries_params.get('algorithm', 'nr')
-    cva = timeseries_params.get('calculate_voltage_angles', 'auto')
+    cva = _as_calculate_voltage_angles(timeseries_params.get('calculate_voltage_angles', 'auto'))
     init_param = timeseries_params.get('init') or timeseries_params.get('initialization') or 'auto'
     pf_kwargs = _electrisim_enforce_q_lims_kw(net)
 
@@ -10665,10 +15348,10 @@ def _ts_run_powerflow(net, timeseries_params, time_index, prev_converged):
         pf_init = 'results'
 
     try:
-        pp.runpp(net, algorithm=algorithm, calculate_voltage_angles=cva, init=pf_init, **pf_kwargs)
+        _electrisim_runpp(net, algorithm=algorithm, calculate_voltage_angles=cva, init=pf_init, **pf_kwargs)
     except Exception:
         if pf_init == 'results':
-            pp.runpp(net, algorithm=algorithm, calculate_voltage_angles=cva, init='auto', **pf_kwargs)
+            _electrisim_runpp(net, algorithm=algorithm, calculate_voltage_angles=cva, init='auto', **pf_kwargs)
         else:
             raise
     return bool(net.converged)
@@ -10689,9 +15372,19 @@ def time_series_simulation(net, timeseries_params):
         generation_profile = timeseries_params.get('generation_profile', 'constant')
         profile_mode = timeseries_params.get('profile_mode', 'preset')
         element_profiles = timeseries_params.get('element_profiles') or {}
+        # Hourly unless the study sets its own step: AI training loads swing
+        # within seconds.
+        step_s = float(safe_float(timeseries_params.get('time_step_s')) or 3600.0)
+        if not step_s > 0:
+            step_s = 3600.0
+        hourly = abs(step_s - 3600.0) < 1e-9
+        step_hours = step_s / 3600.0
 
         import datetime
-        time_stamps = [datetime.datetime(2024, 1, 1, hour=h) for h in range(time_steps)]
+        # Offsets, not hour=h: datetime(2024, 1, 1, hour=24) raised, so no run
+        # could go past 24 steps.
+        time_stamps = [datetime.datetime(2024, 1, 1) + datetime.timedelta(seconds=step_s * h)
+                       for h in range(time_steps)]
 
         orig_load_p = net.load['p_mw'].copy() if len(net.load) > 0 else None
         orig_load_q = net.load['q_mvar'].copy() if len(net.load) > 0 else None
@@ -10731,19 +15424,85 @@ def time_series_simulation(net, timeseries_params):
                     'id': str(elem_name),
                 }
 
+        # Loads following a profile from the diagram's library: its value at
+        # each step, or its mean over the step when the step is longer than
+        # the profile's own samples.
+        import load_profiles_electrisim as _lp
+        library, library_notes = _lp.library_from_params(timeseries_params)
+        repeat = timeseries_params.get('profile_repeat', True) not in (False, 'false', 'False', 0, '0')
+        library_loads = {}
+        for load_name, assignment in (timeseries_params.get('load_profile_assignments') or {}).items():
+            prof = library.get(assignment['profile_id'])
+            if prof is None:
+                library_notes.append(f"{assignment['display_name']}: its load profile is not in the library, "
+                                     "so it does not follow one.")
+                continue
+            rel_t = prof['t'] - prof['t'][0]
+            prof_dt = float(np.median(np.diff(rel_t)))
+            averaged = step_s > 2 * prof_dt
+            if averaged:
+                values = [_lp.average_profile(rel_t, prof['p'], k * step_s, (k + 1) * step_s, repeat)
+                          for k in range(time_steps)]
+            else:
+                values = [float(v) for v in _lp.sample_profile(rel_t, prof['p'], np.arange(time_steps) * step_s, repeat)]
+            library_loads[load_name] = {'values': values, 'q_mode': assignment['q_mode']}
+            profiles_used[load_name] = {
+                'mode': 'scale',
+                'declared_mode': 'library',
+                'values': values,
+                'element_type': 'load',
+                'display_name': assignment['display_name'],
+                'id': load_name,
+                'library_profile': prof['name'],
+                'q_mode': assignment['q_mode'],
+                'sampling': 'average' if averaged else 'instant',
+            }
+            if averaged:
+                library_notes.append(f"{assignment['display_name']} follows \"{prof['name']}\" averaged over each "
+                                     f"{step_s:g} s step: the profile's samples are {prof_dt:g} s apart.")
+            lasts = _lp.period_s(rel_t) if repeat else float(rel_t[-1])
+            if time_steps * step_s > lasts + 1e-9:
+                library_notes.append(f"{assignment['display_name']}: \"{prof['name']}\" lasts {lasts:g} s, "
+                                     + ("so it repeats through the run." if repeat else "and holds its last value after."))
+
+        preset_used = set()
+
         def _element_profile(name, element_type, t, global_values):
             spec = resolved_profiles.get(str(name))
             if spec and spec.get('element_type') == element_type:
                 return spec['values'][t], spec.get('mode', 'scale')
+            preset_used.add('load' if element_type == 'load' else 'gen')
             return global_values[t % len(global_values)], 'scale'
 
         all_results = []
         prev_converged = False
+        storage_state = _ts_storage_state(net)
+        all_storages = []
+        # The microgrid's sources and stores: their profiles, states, smoothing and dispatch.
+        import microgrid_ts_electrisim as _mg
+        mg = _mg.MicrogridTs.create(net, timeseries_params, step_s, time_steps)
+        # The DC network each step, as the load flow reports it: its AC tables alone were kept,
+        # and every DC element - the racks, rectifiers, converters, diodes - had nothing to show.
+        dc_steps = []
+        dc_failed = None
+        vsc_rated = ({str(net.vsc.at[i, 'id']): float(net.vsc.at[i, 'rated_mva'])
+                      for i in net.vsc.index
+                      if 'id' in net.vsc.columns and 'rated_mva' in net.vsc.columns
+                      and np.isfinite(safe_float(net.vsc.at[i, 'rated_mva'])) and safe_float(net.vsc.at[i, 'rated_mva']) > 0}
+                     if 'vsc' in net and len(net.vsc) else {})
 
         for t in range(time_steps):
             if orig_load_p is not None:
                 for idx in net.load.index:
                     elem_name = str(net.load.loc[idx, 'name'])
+                    lib = library_loads.get(elem_name)
+                    if lib is not None:
+                        # 1.0 p.u. is the load's drawn P; Q follows at constant
+                        # power factor or stays as drawn.
+                        v = lib['values'][t]
+                        net.load.loc[idx, 'p_mw'] = float(orig_load_p.loc[idx]) * v
+                        net.load.loc[idx, 'q_mvar'] = float(orig_load_q.loc[idx]) * (v if lib['q_mode'] == 'pf' else 1.0)
+                        continue
                     val, mode = _element_profile(elem_name, 'load', t, load_profile_values)
                     _ts_set_pq(net.load, idx, orig_load_p, orig_load_q, val, mode)
 
@@ -10759,16 +15518,47 @@ def time_series_simulation(net, timeseries_params):
                     val, mode = _element_profile(elem_name, 'gen', t, gen_profile_values)
                     _ts_set_pq(net.gen, idx, orig_gen_p, orig_gen_q, val, mode)
 
-            prev_converged = _ts_run_powerflow(net, timeseries_params, t, prev_converged)
+            _ts_dispatch_storage(net, storage_state, t, hours=step_hours)
+            if mg is not None:
+                mg.before_step(t)
+                was = prev_converged
+                prev_converged = mg.solve(t, lambda: _ts_run_powerflow(net, timeseries_params, t, was))
+                mg.after_step(t, prev_converged)
+            else:
+                prev_converged = _ts_run_powerflow(net, timeseries_params, t, prev_converged)
+            try:
+                dc_steps.append(_ts_dc_rows(net, include_ders=mg is None, vsc_rated=vsc_rated))
+            except Exception as dc_ex:   # noqa: BLE001 - said in the notes; the AC results stand
+                dc_steps.append({})
+                dc_failed = dc_failed or f'step {t}: {dc_ex}'
+            _ts_advance_storage(storage_state, hours=step_hours)
+            ufn = getattr(net, 'user_friendly_names', {}) or {}
+            for idx, st in storage_state.items():
+                technical = net.storage.loc[idx, 'name']
+                all_storages.append({
+                    'name': get_display_name(ufn.get(technical, technical), technical, 'Storage', idx, 'timeseries'),
+                    'id': str(technical),
+                    'time_step': t,
+                    'p_mw': safe_float(net.res_storage.loc[idx, 'p_mw']),
+                    'q_mvar': safe_float(net.res_storage.loc[idx, 'q_mvar']),
+                    # State of charge at the end of the step.
+                    'soc_percent': safe_float(100.0 * st['energy'] / st['max_e']) if st['trackable'] else None,
+                    'energy_mwh': safe_float(st['energy']) if st['trackable'] else None,
+                })
 
             all_results.append({
                 'time_step': t,
                 'converged': net.converged,
-                'bus_results': net.res_bus.copy(),
+                'bus_results': _electrisim_res_without_aux(net, 'bus'),
                 'line_results': net.res_line.copy(),
                 'gen_results': net.res_gen.copy() if len(net.gen) > 0 else None,
-                'sgen_results': net.res_sgen.copy() if len(net.sgen) > 0 else None,
-                'load_results': net.res_load.copy() if len(net.load) > 0 else None,
+                'sgen_results': _electrisim_res_without_aux(net, 'sgen') if len(net.sgen) > 0 else None,
+                'load_results': _electrisim_res_without_aux(net, 'load') if len(net.load) > 0 else None,
+                # each load's demand this step, before any the microgrid dispatch shed
+                'load_demand': {i: p for i, (p, _) in mg.base_ac.items()} if mg is not None else {},
+                'trafo_results': net.res_trafo.copy() if len(net.trafo) > 0 else None,
+                'trafo3w_results': net.res_trafo3w.copy() if len(net.trafo3w) > 0 else None,
+                'ext_grid_results': _electrisim_res_without_aux(net, 'ext_grid') if len(net.ext_grid) > 0 else None,
             })
 
         # Prepare results
@@ -10812,6 +15602,27 @@ def time_series_simulation(net, timeseries_params):
         all_lines = []
         all_loads = []
         all_sgens = []
+        # Generators were run but not returned, transformers and the external
+        # grid not even kept: the most loaded element (a 79 % transformer on
+        # the transmission grid) did not show.
+        all_gens = []
+        all_transformers = []
+        all_ext_grids = []
+
+        def _element_rows(table, res, element_type, t, fields):
+            ufn = getattr(net, 'user_friendly_names', {}) or {}
+            rows = []
+            for idx, row in res.iterrows():
+                technical = net[table].loc[idx, 'name']
+                item = {
+                    'name': get_display_name(ufn.get(technical, technical), technical, element_type, idx, 'timeseries'),
+                    'id': str(technical),
+                    'time_step': t,
+                }
+                for key, column in fields:
+                    item[key] = safe_float(row[column])
+                rows.append(item)
+            return rows
 
         for result in all_results:
             t = result['time_step']
@@ -10849,13 +15660,29 @@ def time_series_simulation(net, timeseries_params):
                 for idx, load in load_results.iterrows():
                     load_name = net.load.loc[idx, 'name']
                     user_friendly_name = getattr(net, 'user_friendly_names', {}).get(load_name, load_name)
-                    all_loads.append(TimeSeriesLoadOut(
+                    row = TimeSeriesLoadOut(
                         name=get_display_name(user_friendly_name, load_name, 'Load', idx, 'timeseries'),
                         id=str(load_name),
                         time_step=t,
                         p_mw=safe_float(load['p_mw']),
                         q_mvar=safe_float(load['q_mvar'])
-                    ))
+                    )
+                    # its demand, served or not (under the microgrid dispatch; otherwise what it drew)
+                    row.p_demand_mw = safe_float(result.get('load_demand', {}).get(idx, load['p_mw']))
+                    all_loads.append(row)
+
+            if result.get('gen_results') is not None:
+                all_gens.extend(_element_rows('gen', result['gen_results'], 'Generator', t, (
+                    ('p_mw', 'p_mw'), ('q_mvar', 'q_mvar'), ('vm_pu', 'vm_pu'))))
+            if result.get('trafo_results') is not None:
+                all_transformers.extend(_element_rows('trafo', result['trafo_results'], 'Transformer', t, (
+                    ('loading_percent', 'loading_percent'), ('p_hv_mw', 'p_hv_mw'), ('q_hv_mvar', 'q_hv_mvar'))))
+            if result.get('trafo3w_results') is not None:
+                all_transformers.extend(_element_rows('trafo3w', result['trafo3w_results'], 'Transformer3W', t, (
+                    ('loading_percent', 'loading_percent'), ('p_hv_mw', 'p_hv_mw'), ('q_hv_mvar', 'q_hv_mvar'))))
+            if result.get('ext_grid_results') is not None:
+                all_ext_grids.extend(_element_rows('ext_grid', result['ext_grid_results'], 'External Grid', t, (
+                    ('p_mw', 'p_mw'), ('q_mvar', 'q_mvar'))))
 
             if sgen_results is not None:
                 for idx, sgen in sgen_results.iterrows():
@@ -10877,17 +15704,13 @@ def time_series_simulation(net, timeseries_params):
             display_name = get_display_name(user_friendly_name, bus_name, 'Bus', idx, 'timeseries')
             vm_values = [all_busbars[i].vm_pu for i in range(len(all_busbars)) 
                         if all_busbars[i].name == display_name]
-            if vm_values:  # Check if list is not empty
+            # A bus with no rows - a converter's own AC bus, left out of the results - is left
+            # out here too: it read as "Bus no. 11" at 0.0000 pu, a dead bus.
+            if vm_values:
                 vm_stats[display_name] = {
                     'min_vm_pu': min(vm_values),
                     'max_vm_pu': max(vm_values),
                     'avg_vm_pu': sum(vm_values) / len(vm_values)
-                }
-            else:
-                vm_stats[display_name] = {
-                    'min_vm_pu': 0.0,
-                    'max_vm_pu': 0.0,
-                    'avg_vm_pu': 0.0
                 }
         
         loading_stats = {}
@@ -10897,36 +15720,86 @@ def time_series_simulation(net, timeseries_params):
             display_name = get_display_name(user_friendly_name, line_name, 'Line', idx, 'timeseries')
             loading_values = [all_lines[i].loading_percent for i in range(len(all_lines)) 
                              if all_lines[i].name == display_name]
-            if loading_values:  # Check if list is not empty
+            if loading_values:   # none: no rows, left out as a bus with none is
                 loading_stats[display_name] = {
                     'min_loading_percent': min(loading_values),
                     'max_loading_percent': max(loading_values),
                     'avg_loading_percent': sum(loading_values) / len(loading_values)
                 }
-            else:
-                loading_stats[display_name] = {
-                    'min_loading_percent': 0.0,
-                    'max_loading_percent': 0.0,
-                    'avg_loading_percent': 0.0
-                }
         
+        transformer_stats = {}
+        for row in all_transformers:
+            transformer_stats.setdefault(row['name'], []).append(row['loading_percent'])
+        transformer_stats = {
+            name: {'min_loading_percent': min(values), 'max_loading_percent': max(values),
+                   'avg_loading_percent': sum(values) / len(values)}
+            for name, values in transformer_stats.items()
+        }
+
         timeseries_converged = all(result['converged'] for result in all_results)
-        
+
+        notes = list(library_notes)
+        microgrid = mg.results() if mg is not None else None
+        if microgrid:
+            notes += microgrid['notes']
+        for idx, st in storage_state.items():
+            technical = net.storage.loc[idx, 'name']
+            ufn = getattr(net, 'user_friendly_names', {}) or {}
+            label = ufn.get(technical, technical)
+            if not st['trackable']:
+                notes.append(f"{label}: no energy rating or state of charge, so it held "
+                             f"{abs(st['p_mw']):.3g} MW every {'hour' if hourly else 'step'}.")
+            elif st['limited_from'] is not None:
+                when = (f"in hour {st['limited_from']} ({abs(st['limited_p']):.3g} MW that hour)" if hourly else
+                        f"at step {st['limited_from']}, t = {st['limited_from'] * step_s:g} s "
+                        f"({abs(st['limited_p']):.3g} MW that step)")
+                notes.append(f"{label}: {'charging' if st['p_mw'] > 0 else 'discharging'} "
+                             f"{abs(st['p_mw']):.3g} MW, it runs {'full' if st['p_mw'] > 0 else 'empty'} "
+                             f"{when} and is idle after.")
+
+        # Each DC element's range over the run; its per-step rows up to TS_DC_ROW_CAP steps.
+        dc_out = None
+        if any(dc_steps):
+            dc_out = {'summary': _ts_dc_summary(dc_steps), 'step_cap': TS_DC_ROW_CAP,
+                      'steps': None, 'steps_omitted': time_steps > TS_DC_ROW_CAP}
+            if time_steps <= TS_DC_ROW_CAP:
+                dc_out['steps'] = {}
+                for t, by_kind in enumerate(dc_steps):
+                    for kind, rows in by_kind.items():
+                        dc_out['steps'].setdefault(kind, []).extend({**row, 'time_step': t} for row in rows)
+            else:
+                notes.append(f"The DC network's per-step results are left out over {TS_DC_ROW_CAP} steps "
+                             f"({time_steps} run): each DC element's range over the run is given.")
+        if dc_failed:
+            notes.append(f"The DC network's results could not be read at {dc_failed}.")
+
+        # A preset only reads as the run's when some element followed it:
+        # with a profile of its own for every element, "constant" described
+        # nothing that ran.
         return {
             'timeseries_converged': timeseries_converged,
             'time_steps': time_steps,
+            'time_step_s': step_s,
             'profile_mode': profile_mode,
-            'load_profile': load_profile,
-            'generation_profile': generation_profile,
-            'load_profile_values': load_profile_values,
-            'generation_profile_values': gen_profile_values,
+            'load_profile': load_profile if 'load' in preset_used else None,
+            'generation_profile': generation_profile if 'gen' in preset_used else None,
+            'load_profile_values': load_profile_values if 'load' in preset_used else [],
+            'generation_profile_values': gen_profile_values if 'gen' in preset_used else [],
             'profiles_used': profiles_used,
             'busbars': [vars(bus) for bus in all_busbars],
             'lines': [vars(line) for line in all_lines],
             'loads': [vars(ld) for ld in all_loads],
             'sgens': [vars(sg) for sg in all_sgens],
+            'gens': all_gens,
+            'transformers': all_transformers,
+            'externalgrids': all_ext_grids,
+            'storages': all_storages,
+            'microgrid': microgrid,
+            'dc': dc_out,
+            'notes': notes,
             'voltage_statistics': vm_stats,
             'loading_statistics': loading_stats,
+            'transformer_loading_statistics': transformer_stats,
             'time_stamps': [str(ts) for ts in time_stamps]
         }
         
@@ -10944,16 +15817,12 @@ def time_series_simulation(net, timeseries_params):
         try:
             diag_result_dict = pp.diagnostic(net, report_style='detailed')
             
-            # Check for isolated buses
+            # Isolated buses as the load flow reports them, {index, id, name}:
+            # bare indices were listed as "5, 6, 7" and could not be located.
             isolated_buses = pp.topology.unsupplied_buses(net)
             if len(isolated_buses) > 0:
-                # Convert set to list (isolated_buses is a set, not numpy array)
-                if isinstance(isolated_buses, set):
-                    diagnostic_response["diagnostic"]["isolated_buses"] = list(isolated_buses)
-                elif hasattr(isolated_buses, 'tolist'):
-                    diagnostic_response["diagnostic"]["isolated_buses"] = isolated_buses.tolist()
-                else:
-                    diagnostic_response["diagnostic"]["isolated_buses"] = list(isolated_buses)
+                diagnostic_response["diagnostic"]["isolated_buses"] = resolve_element_refs(
+                    net, 'bus', sorted(isolated_buses))
             
             # Process diagnostic data to convert element indices to user-friendly names
             processed_diagnostic = process_diagnostic_data(net, diag_result_dict)
@@ -10970,362 +15839,185 @@ def time_series_simulation(net, timeseries_params):
         return diagnostic_response
 
 
-class BESSControlForTargetBus(control.basic_controller.Controller):
-    """
-    Controller that adjusts BESS power to achieve target P and Q at Point of Coupling (POC).
-    Uses iterative approach to converge to the target.
-    
-    EXACT implementation from BESS_sizing_tutorial.ipynb - DO NOT MODIFY SIGN CONVENTIONS!
-    """
-    def __init__(self, net, element_index, target_p_mw, target_q_mvar, poc_bus_idx,
-                 kp_p=0.5, kp_q=0.5, max_p_mw=28.0, max_q_mvar=28.0, tolerance=1e-3,
-                 in_service=True, recycle=False, order=0, level=0, **kwargs):
-        super().__init__(net, in_service=in_service, recycle=recycle, 
-                        order=order, level=level, initial_run=True)
-        
-        self.element_index = element_index
-        self.target_p_mw = target_p_mw
-        self.target_q_mvar = target_q_mvar
-        self.poc_bus_idx = poc_bus_idx
-        self.kp_p = kp_p
-        self.kp_q = kp_q
-        self.max_p_mw = max_p_mw
-        self.max_q_mvar = max_q_mvar
-        self.tolerance = tolerance
-        
-        # EXACT notebook algorithm - simple initial guess:
-        # Sign convention: 
-        # - If target P > 0 (consumption), BESS should DISCHARGE (negative P)
-        # - If target P < 0 (generation), BESS should CHARGE (positive P)
-        # Account for losses: need slightly more power than target
-        initial_p = -target_p_mw * 1.05  # Negative because BESS discharges to supply load
-        initial_q = -target_q_mvar * 1.05  # Negative to match sign convention
-        self.p_mw = np.clip(initial_p, -max_p_mw, max_p_mw)
-        self.q_mvar = np.clip(initial_q, -max_q_mvar, max_q_mvar)
-        self.applied = False
-        self.iteration = 0
-        self.converged = False
-        
-        print(f"Initial guess: P={self.p_mw:.3f} MW, Q={self.q_mvar:.3f} Mvar")
-        
-    def is_converged(self, net):
-        return self.applied
-    
-    def control_step(self, net):
-        # DEBUG: Check storage value BEFORE setting
-        if self.iteration == 0:
-            print(f"  DEBUG: Storage BEFORE setting: p_mw={net.storage.at[self.element_index, 'p_mw']}, q_mvar={net.storage.at[self.element_index, 'q_mvar']}")
-        
-        # First, set the current BESS power values
-        net.storage.at[self.element_index, 'p_mw'] = self.p_mw
-        net.storage.at[self.element_index, 'q_mvar'] = self.q_mvar
-        
-        # DEBUG: Check storage value AFTER setting
-        if self.iteration == 0:
-            print(f"  DEBUG: Storage AFTER setting: p_mw={net.storage.at[self.element_index, 'p_mw']}, q_mvar={net.storage.at[self.element_index, 'q_mvar']}")
-        
-        # Run power flow to get current state (with sufficient iterations)
-        try:
-            pp.runpp(net, algorithm='nr', calculate_voltage_angles=True, 
-                    init='auto', verbose=False)
-        except Exception as e:
-            # If power flow fails, don't update - keep current values
-            # This can happen if the network is infeasible
-            print(f"Power flow failed at iteration {self.iteration}: {str(e)}")
-            self.applied = True
-            return
-        
-        # DEBUG: Check full network power balance after power flow
-        if self.iteration == 0:
-            print(f"  DEBUG: res_storage after PF: p_mw={net.res_storage.at[self.element_index, 'p_mw']}, q_mvar={net.res_storage.at[self.element_index, 'q_mvar']}")
-            print(f"  DEBUG: res_ext_grid: p_mw={net.res_ext_grid.at[net.ext_grid.index[0], 'p_mw']}, q_mvar={net.res_ext_grid.at[net.ext_grid.index[0], 'q_mvar']}")
-            
-            # Show ALL generators, loads, and other elements
-            print(f"  DEBUG: Network elements count:")
-            print(f"    - Buses: {len(net.bus)}")
-            print(f"    - Ext grids: {len(net.ext_grid)}")
-            print(f"    - Storages: {len(net.storage)}")
-            print(f"    - Loads: {len(net.load) if hasattr(net, 'load') else 0}")
-            print(f"    - Generators: {len(net.gen) if hasattr(net, 'gen') else 0}")
-            print(f"    - Sgens: {len(net.sgen) if hasattr(net, 'sgen') else 0}")
-            print(f"    - Trafos: {len(net.trafo)}")
-            
-            # Show bus results
-            print(f"  DEBUG: Bus results:")
-            for bus_idx in net.bus.index:
-                bus_name = net.bus.at[bus_idx, 'name'] if 'name' in net.bus.columns else f"bus_{bus_idx}"
-                bus_vn = net.bus.at[bus_idx, 'vn_kv']
-                bus_vm = net.res_bus.at[bus_idx, 'vm_pu']
-                bus_p = net.res_bus.at[bus_idx, 'p_mw']
-                bus_q = net.res_bus.at[bus_idx, 'q_mvar']
-                print(f"    Bus {bus_idx} ({bus_name}, {bus_vn}kV): vm={bus_vm:.4f}pu, P={bus_p:.3f}MW, Q={bus_q:.3f}Mvar")
-            
-            # Show transformer results (losses)
-            print(f"  DEBUG: Transformer losses:")
-            for trafo_idx in net.trafo.index:
-                trafo_name = net.trafo.at[trafo_idx, 'name'] if 'name' in net.trafo.columns else f"trafo_{trafo_idx}"
-                p_loss = net.res_trafo.at[trafo_idx, 'pl_mw']
-                q_loss = net.res_trafo.at[trafo_idx, 'ql_mvar']
-                print(f"    Trafo {trafo_idx} ({trafo_name}): P_loss={p_loss:.4f}MW, Q_loss={q_loss:.4f}Mvar")
-            
-            # Show if there are any generators
-            if hasattr(net, 'gen') and len(net.gen) > 0:
-                print(f"  DEBUG: Generator results:")
-                for gen_idx in net.gen.index:
-                    print(f"    Gen {gen_idx}: P={net.res_gen.at[gen_idx, 'p_mw']:.3f}MW, Q={net.res_gen.at[gen_idx, 'q_mvar']:.3f}Mvar")
-            
-            # Show if there are any sgens (static generators)
-            if hasattr(net, 'sgen') and len(net.sgen) > 0:
-                print(f"  DEBUG: Static generator results:")
-                for sgen_idx in net.sgen.index:
-                    print(f"    Sgen {sgen_idx}: P={net.res_sgen.at[sgen_idx, 'p_mw']:.3f}MW, Q={net.res_sgen.at[sgen_idx, 'q_mvar']:.3f}Mvar")
-            
-            # Show if there are any loads
-            if hasattr(net, 'load') and len(net.load) > 0:
-                print(f"  DEBUG: Load results:")
-                for load_idx in net.load.index:
-                    print(f"    Load {load_idx}: P={net.res_load.at[load_idx, 'p_mw']:.3f}MW, Q={net.res_load.at[load_idx, 'q_mvar']:.3f}Mvar")
-        
-        # Get current P and Q at POC from external grid
-        ext_grid_idx = net.ext_grid.index[0]
-        current_p = -net.res_ext_grid.at[ext_grid_idx, 'p_mw']
-        current_q = -net.res_ext_grid.at[ext_grid_idx, 'q_mvar']
-        
-        # Calculate error
-        error_p = self.target_p_mw - current_p
-        error_q = self.target_q_mvar - current_q
-        
-        # Print diagnostic info every 10 iterations or at iteration 0
-        if self.iteration % 10 == 0:
-            print(f"Iteration {self.iteration}: BESS P={self.p_mw:.3f} MW, Q={self.q_mvar:.3f} Mvar")
-            print(f"  POC: P={current_p:.3f} MW (target {self.target_p_mw:.3f}), Q={current_q:.3f} Mvar (target {self.target_q_mvar:.3f})")
-            print(f"  Error: P={error_p:.3f} MW, Q={error_q:.3f} Mvar")
-        
-        # Check convergence - EXACT notebook tolerance
-        if abs(error_p) < self.tolerance and abs(error_q) < self.tolerance:
-            self.converged = True
-            print(f"CONVERGED at iteration {self.iteration}!")
-            print(f"  Final BESS: P={self.p_mw:.4f} MW, Q={self.q_mvar:.4f} Mvar")
-        else:
-            # EXACT notebook algorithm - simple damping, NO inversion
-            # Adjust BESS power proportionally to error (with damping to avoid oscillations)
-            # Sign convention: 
-            # - If error_p > 0 (need more consumption), decrease BESS P (more negative = more discharge)
-            # - If error_p < 0 (too much consumption), increase BESS P (less negative = less discharge)
-            damping = 0.5  # Damping factor to prevent oscillations
-            # Error correction: if we need more P at POC, BESS should discharge more (more negative)
-            delta_p = -self.kp_p * error_p * damping  # Negative because BESS P is opposite to POC P
-            delta_q = -self.kp_q * error_q * damping  # Same for Q
-            
-            self.p_mw += delta_p
-            self.q_mvar += delta_q
-            
-            # Apply limits
-            self.p_mw = np.clip(self.p_mw, -self.max_p_mw, self.max_p_mw)
-            self.q_mvar = np.clip(self.q_mvar, -self.max_q_mvar, self.max_q_mvar)
-        
-        self.iteration += 1
-        self.applied = True
+def _bess_sizing_failure(message):
+    return json.dumps({
+        'error': message,
+        'bess_p_mw': None, 'bess_q_mvar': None, 'bess_s_mva': None,
+        'achieved_p_mw': None, 'achieved_q_mvar': None,
+        'error_p_mw': None, 'error_q_mvar': None,
+        'converged': False, 'iterations': 0,
+    })
+
+
+def _bess_sizing_violations(net, vmin_pu, vmax_pu, max_loading_percent=100.0):
+    """Branches above their rating and buses outside the voltage band, by name."""
+    out = []
+    for table, results, kind in (('line', 'res_line', 'Line'), ('trafo', 'res_trafo', 'Transformer'),
+                                 ('trafo3w', 'res_trafo3w', 'Transformer')):
+        if table not in net or net[table].empty or results not in net or 'loading_percent' not in net[results]:
+            continue
+        for idx, loading in net[results]['loading_percent'].items():
+            if pd.notna(loading) and loading > max_loading_percent:
+                out.append({'kind': kind, 'name': _contingency_friendly_name(net, net[table].at[idx, 'name']),
+                            'value': round(float(loading), 1), 'unit': '%',
+                            'limit': max_loading_percent})
+    for idx, vm in net.res_bus['vm_pu'].items():
+        if pd.notna(vm) and not (vmin_pu <= vm <= vmax_pu):
+            out.append({'kind': 'Bus', 'name': _contingency_friendly_name(net, net.bus.at[idx, 'name']),
+                        'value': round(float(vm), 4), 'unit': 'pu',
+                        'limit': vmin_pu if vm < vmin_pu else vmax_pu})
+    return out
 
 
 def bess_sizing(net, bess_params):
     """
-    Calculate required BESS power using iterative controller approach.
-    
-    Uses pandapower's control framework with BESSControlForTargetBus controller
-    that iteratively adjusts BESS power until target P/Q at POC is achieved.
-    
-    Parameters:
-    -----------
-    net : pandapower network
-        The network object
-    bess_params : dict
-        Dictionary containing:
-        - storageId: ID of the storage element (from frontend)
-        - pocBusbarId: ID of the POC busbar (from frontend)
-        - targetP: Target active power at POC (MW)
-        - targetQ: Target reactive power at POC (Mvar)
-        - tolerance: Convergence tolerance (default: 0.001)
-        - maxIterations: Maximum control iterations (default: 50)
-        - kpP: Proportional gain for active power control (default: 0.5)
-        - kpQ: Proportional gain for reactive power control (default: 0.5)
-        - frequency: Network frequency (default: 50)
-        - algorithm: Power flow algorithm (default: 'nr')
-        
-    Returns:
-    --------
-    str : JSON string with results
+    The battery P and Q that put the target exchange at the POC, found by a
+    Newton solve on the load flow, and what that operating point does to the
+    battery's own rating and to the network.
+
+    The drawn battery's rating does not cap the answer - finding the rating is
+    the point. A proportional controller limited P and Q each to the drawn
+    sn_mva (which a battery without one took from its MWh), and reported the
+    clipped values as the required size: 2.8 MVA where the radial reference
+    grid needs 21.1 MVA, and a feeder cable at 126 % unmentioned.
+
+    bess_params: storageId, pocBusbarId (diagram cell ids), targetP / targetQ
+    (MW / Mvar exported at the POC), tolerance, maxIterations, algorithm,
+    vmin_pu / vmax_pu (default 0.9 / 1.1).
+
+    Returns a JSON string.
     """
     try:
-        # Extract parameters
         storage_id = bess_params.get('storageId')
         poc_busbar_id = bess_params.get('pocBusbarId')
-        target_p = float(bess_params.get('targetP', 0.0))
-        target_q = float(bess_params.get('targetQ', 0.0))
+        target = np.array([float(bess_params.get('targetP', 0.0)), float(bess_params.get('targetQ', 0.0))])
         tolerance = float(bess_params.get('tolerance', 0.001))
         max_iterations = int(bess_params.get('maxIterations', 50))
-        kp_p = float(bess_params.get('kpP', 0.5))
-        kp_q = float(bess_params.get('kpQ', 0.5))
-        
-        # Find storage element by ID (match with busbar name)
-        storage_idx = None
-        for idx in net.storage.index:
-            # Try to match by name or bus
-            storage_name = net.storage.at[idx, 'name'] if 'name' in net.storage.columns else None
-            storage_bus = net.storage.at[idx, 'bus']
-            
-            # Match by storage ID (could be name or bus index)
-            if str(storage_id) == str(storage_name) or str(storage_id) == str(storage_bus):
-                storage_idx = idx
-                break
-        
-        if storage_idx is None:
-            # Fallback: use first storage element
-            if len(net.storage) > 0:
-                storage_idx = net.storage.index[0]
-            else:
-                return json.dumps({
-                    'error': 'No storage element found in network',
-                    'bess_p_mw': None,
-                    'bess_q_mvar': None,
-                    'bess_s_mva': None,
-                    'achieved_p_mw': None,
-                    'achieved_q_mvar': None,
-                    'error_p_mw': None,
-                    'error_q_mvar': None,
-                    'converged': False,
-                    'iterations': 0
-                })
-        
-        # Find POC bus by ID (match with busbar name)
-        poc_bus_idx = None
-        for idx in net.bus.index:
-            bus_name = net.bus.at[idx, 'name'] if 'name' in net.bus.columns else None
-            
-            # Match by POC busbar ID
-            if str(poc_busbar_id) == str(bus_name) or str(poc_busbar_id) == str(idx):
-                poc_bus_idx = idx
-                break
-        
+        algorithm = bess_params.get('algorithm', 'nr')
+        vmin_pu = float(bess_params.get('vmin_pu', 0.9))
+        vmax_pu = float(bess_params.get('vmax_pu', 1.1))
+
+        if net.storage.empty:
+            return _bess_sizing_failure('No storage element found in network')
+        # The dialog sends the diagram cell id; name and bus index are older forms.
+        storage_idx = next((idx for idx in net.storage.index
+                            if str(storage_id) in (str(net.storage.at[idx, 'id']) if 'id' in net.storage else '',
+                                                   str(net.storage.at[idx, 'name']),
+                                                   str(net.storage.at[idx, 'bus']))),
+                           net.storage.index[0])
+        poc_bus_idx = next((idx for idx in net.bus.index
+                            if str(poc_busbar_id) in (str(net.bus.at[idx, 'id']) if 'id' in net.bus else '',
+                                                      str(net.bus.at[idx, 'name']), str(idx))), None)
         if poc_bus_idx is None:
-            # Fallback: use first bus (usually external grid bus)
-            if len(net.bus) > 0:
-                poc_bus_idx = net.bus.index[0]
+            return _bess_sizing_failure('No POC bus found in network')
+
+        # P and Q are measured at the External Grid on the POC bus (it was
+        # the first External Grid in the network, wherever it was).
+        ext_at_poc = [idx for idx in net.ext_grid.index if net.ext_grid.at[idx, 'bus'] == poc_bus_idx]
+        if not ext_at_poc:
+            grid_buses = [net.bus.at[int(b), 'name'] for b in net.ext_grid['bus']]
+            labels = getattr(net, 'user_friendly_names', None) or {}
+            return _bess_sizing_failure(
+                'BESS sizing sets P and Q where the network meets the External Grid. '
+                "Choose the External Grid's bus as the POC ("
+                + ', '.join(str(labels.get(n, n)) for n in grid_buses) + ').')
+        ext_idx = ext_at_poc[0]
+
+        net_s = deepcopy(net)
+        solved = [False]
+
+        def poc_exchange(x):
+            """Export-positive P, Q at the POC with the battery at x (pandapower
+            storage sign: + charge)."""
+            net_s.storage.at[storage_idx, 'p_mw'] = float(x[0])
+            net_s.storage.at[storage_idx, 'q_mvar'] = float(x[1])
+            pp.runpp(net_s, algorithm=algorithm, calculate_voltage_angles=True,
+                     init='results' if solved[0] else 'auto')
+            solved[0] = True
+            return np.array([-float(net_s.res_ext_grid.at[ext_idx, 'p_mw']),
+                             -float(net_s.res_ext_grid.at[ext_idx, 'q_mvar'])])
+
+        warnings_out = []
+        # Start from the battery as drawn. Starting from minus the whole POC
+        # target put 4.9 MW of charge on a 0.4 kV battery behind a 0.63 MVA
+        # transformer when the target was the grid's own 5 MW import less
+        # 0.3 MW; that load flow failed before any point had solved.
+        x = np.array([float(net_s.storage.at[storage_idx, 'p_mw']),
+                      float(net_s.storage.at[storage_idx, 'q_mvar'])])
+        try:
+            y = poc_exchange(x)
+        except pp.LoadflowNotConverged:
+            return _bess_sizing_failure('The load flow does not converge with the battery as drawn.')
+        converged, iterations = False, 0
+        while iterations < max_iterations:
+            err = y - target
+            if np.abs(err).max() < tolerance:
+                converged = True
+                break
+            iterations += 1
+            try:
+                h = 1e-3
+                jac = np.column_stack([(poc_exchange(x + h * e) - y) / h for e in np.eye(2)])
+                step = np.linalg.solve(jac, err)
+            except (pp.LoadflowNotConverged, np.linalg.LinAlgError) as e:
+                poc_exchange(x)
+                warnings_out.append(
+                    f'The solve stopped at the last operating point that converged ({e.__class__.__name__}).')
+                break
+            # Halve a step whose load flow fails; the network may not carry it.
+            for _ in range(8):
+                try:
+                    x_try = x - step
+                    y_try = poc_exchange(x_try)
+                    x, y = x_try, y_try
+                    break
+                except pp.LoadflowNotConverged:
+                    step = step / 2
             else:
-                return json.dumps({
-                    'error': 'No POC bus found in network',
-                    'bess_p_mw': None,
-                    'bess_q_mvar': None,
-                    'bess_s_mva': None,
-                    'achieved_p_mw': None,
-                    'achieved_q_mvar': None,
-                    'error_p_mw': None,
-                    'error_q_mvar': None,
-                    'converged': False,
-                    'iterations': 0
-                })
-        
-        # Get storage bus index
-        bess_bus_idx = net.storage.at[storage_idx, 'bus']
-        
-        # Validate network configuration
-        # Check if POC bus has an external grid
-        ext_grid_at_poc = False
-        for idx in net.ext_grid.index:
-            if net.ext_grid.at[idx, 'bus'] == poc_bus_idx:
-                ext_grid_at_poc = True
+                poc_exchange(x)  # leave the results at the last operating point that solved
+                warnings_out.append(
+                    'The load flow did not converge on the way to this target: the network '
+                    'cannot carry the power it needs.')
                 break
-        
-        if not ext_grid_at_poc:
-            print(f"WARNING: POC bus {poc_bus_idx} does not have an external grid!")
-            print(f"External grid is at bus {net.ext_grid.at[net.ext_grid.index[0], 'bus']}")
-        
-        # Get storage limits from network
-        max_p_mw = abs(net.storage.at[storage_idx, 'sn_mva']) if 'sn_mva' in net.storage.columns else 28.0
-        max_q_mvar = abs(net.storage.at[storage_idx, 'sn_mva']) if 'sn_mva' in net.storage.columns else 28.0
-        
-        print(f"=== BESS SIZING STARTED ===")
-        print(f"Storage: idx={storage_idx}, bus={bess_bus_idx}, max_P={max_p_mw:.1f} MW, max_Q={max_q_mvar:.1f} Mvar")
-        print(f"POC: bus_idx={poc_bus_idx}, has_ext_grid={ext_grid_at_poc}")
-        print(f"Target: P={target_p:.3f} MW, Q={target_q:.3f} Mvar")
-        print(f"Control gains: kp_P={kp_p}, kp_Q={kp_q}, max_iter={max_iterations}, tolerance={tolerance}")
-        
-        # Create a copy of the network
-        net_ctrl = deepcopy(net)
-        
-        # Create controller (using EXACT notebook algorithm)
-        bess_ctrl = BESSControlForTargetBus(
-            net_ctrl, storage_idx, target_p, target_q, poc_bus_idx,
-            kp_p=kp_p, kp_q=kp_q, max_p_mw=max_p_mw, max_q_mvar=max_q_mvar,
-            tolerance=tolerance
-        )
-        
-        # Run iterative control loop
-        for iteration in range(max_iterations):
-            bess_ctrl.applied = False
-            # Call control_step which will run power flow and adjust BESS power
-            bess_ctrl.control_step(net_ctrl)
-            if bess_ctrl.converged:
-                break
-        
-        # Get final results
-        ext_grid_idx = net_ctrl.ext_grid.index[0]
-        achieved_p = -net_ctrl.res_ext_grid.at[ext_grid_idx, 'p_mw']
-        achieved_q = -net_ctrl.res_ext_grid.at[ext_grid_idx, 'q_mvar']
-        
-        # Calculate apparent power
-        bess_s_mva = np.sqrt(bess_ctrl.p_mw**2 + bess_ctrl.q_mvar**2)
-        
-        error_p_final = achieved_p - target_p
-        error_q_final = achieved_q - target_q
-        
-        print(f"\n=== BESS SIZING RESULTS ===")
-        print(f"Converged: {'YES' if bess_ctrl.converged else 'NO'}")
-        print(f"Iterations: {bess_ctrl.iteration}")
-        print(f"Final BESS: P={bess_ctrl.p_mw:.3f} MW, Q={bess_ctrl.q_mvar:.3f} Mvar, S={bess_s_mva:.3f} MVA")
-        print(f"Achieved POC: P={achieved_p:.3f} MW, Q={achieved_q:.3f} Mvar")
-        print(f"Final errors: P={error_p_final:.6f} MW, Q={error_q_final:.6f} Mvar")
-        
-        if not bess_ctrl.converged:
-            print("\nPossible reasons for non-convergence:")
-            print("1. Network might be too complex or have numerical issues")
-            print("2. Target might be outside BESS capability")
-            print("3. POC bus might not be properly connected to external grid")
-            print("4. Try increasing maxIterations or adjusting gains (kpP, kpQ)")
-        
-        # Prepare response
-        result = {
-            'bess_p_mw': float(bess_ctrl.p_mw),
-            'bess_q_mvar': float(bess_ctrl.q_mvar),
-            'bess_s_mva': float(bess_s_mva),
-            'achieved_p_mw': float(achieved_p),
-            'achieved_q_mvar': float(achieved_q),
-            'error_p_mw': float(error_p_final),
-            'error_q_mvar': float(error_q_final),
-            'converged': bool(bess_ctrl.converged),
-            'iterations': int(bess_ctrl.iteration)
-        }
-        
-        return json.dumps(result)
-        
+        if not converged and not warnings_out:
+            warnings_out.append(f'The target was not reached within {max_iterations} iterations.')
+
+        bess_s_mva = float(np.hypot(*x))
+        rating = float(net.storage.at[storage_idx, 'sn_mva']) if 'sn_mva' in net.storage else 0.0
+        rating = rating if pd.notna(rating) and rating > 0 else None
+        within_rating = None if rating is None else bool(bess_s_mva <= rating + 1e-6)
+        storage_name = _contingency_friendly_name(net, net.storage.at[storage_idx, 'name'])
+        if rating is None:
+            warnings_out.append(f"'{storage_name}' has no MVA rating; it needs {bess_s_mva:.3f} MVA.")
+        elif not within_rating:
+            warnings_out.append(
+                f"'{storage_name}' is rated {rating:.3f} MVA; this target needs {bess_s_mva:.3f} MVA.")
+        violations = _bess_sizing_violations(net_s, vmin_pu, vmax_pu)
+        for v in violations:
+            warnings_out.append(
+                f"{v['kind']} {v['name']}: {v['value']} {v['unit']} (limit {v['limit']} {v['unit']}) "
+                'at this operating point.')
+
+        return json.dumps({
+            'bess_p_mw': float(x[0]),
+            'bess_q_mvar': float(x[1]),
+            'bess_s_mva': bess_s_mva,
+            'achieved_p_mw': float(y[0]),
+            'achieved_q_mvar': float(y[1]),
+            'error_p_mw': float(y[0] - target[0]),
+            'error_q_mvar': float(y[1] - target[1]),
+            'converged': bool(converged),
+            'iterations': int(iterations),
+            'storage_name': storage_name,
+            'storage_rating_mva': rating,
+            'within_rating': within_rating,
+            'violations': violations,
+            'warnings': warnings_out,
+        })
     except Exception as e:
         import traceback
-        error_msg = f"BESS sizing calculation failed: {str(e)}"
-        print(error_msg)
         print(traceback.format_exc())
-        
-        return json.dumps({
-            'error': error_msg,
-            'bess_p_mw': None,
-            'bess_q_mvar': None,
-            'bess_s_mva': None,
-            'achieved_p_mw': None,
-            'achieved_q_mvar': None,
-            'error_p_mw': None,
-            'error_q_mvar': None,
-            'converged': False,
-            'iterations': 0
-        })
+        return _bess_sizing_failure(f'BESS sizing calculation failed: {e}')
 
 
 def _economic_get_month_index(time_steps):
@@ -11347,6 +16039,10 @@ def _economic_get_load_profile(load_profile, time_steps):
         'industrial': np.array([0.1, 0.05, 0.05, 0.05, 0.1, 0.2, 0.6, 0.9, 1.0, 1.0, 1.0, 1.0,
                                1.0, 1.0, 1.0, 1.0, 1.0, 0.9, 0.7, 0.5, 0.3, 0.2, 0.1, 0.05]),
     }
+    if load_profile == 'constant':
+        # As the generation profile has it: the diagram's load every hour.
+        # The random variation below used to apply here too.
+        return np.ones(time_steps, dtype=float)
     t_arr = np.arange(time_steps)
     hour_arr = t_arr % 24
     month_idx = _economic_get_month_index(time_steps)
@@ -11451,7 +16147,7 @@ def economic_analysis(net, in_data, params):
         currency = params.get('currency', 'EUR').upper()
         
         algorithm = params.get('algorithm', 'nr')
-        calculate_voltage_angles = params.get('calculate_voltage_angles', 'auto')
+        calculate_voltage_angles = _as_calculate_voltage_angles(params.get('calculate_voltage_angles', 'auto'))
         init = params.get('init', 'dc')
         use_generation_profile = params.get('use_generation_profile', False)
         time_steps = max(1, min(8760, int(params.get('time_steps', 8760))))
@@ -11583,6 +16279,8 @@ def economic_analysis(net, in_data, params):
         if hasattr(net, 'res_line_dc') and not net.res_line_dc.empty:
             for index, row in net.res_line_dc.iterrows():
                 pl_mw = float(row.get('pl_mw', 0) or 0)
+                if _electrisim_is_hidden(net.line_dc, index):
+                    continue   # a battery's own resistance
                 if pl_mw > 0:
                     try:
                         internal = net.line_dc.at[index, 'name'] if hasattr(net, 'line_dc') and index in net.line_dc.index and 'name' in net.line_dc.columns else str(index)
@@ -11594,6 +16292,8 @@ def economic_analysis(net, in_data, params):
         
         total_energy_losses_mwh = None
         total_energy_losses_period_mwh = None
+        total_energy_losses_annual_mwh = None
+        energy_warnings = []
         energy_loss_cost = None
         energy_loss_period_hours = None
         
@@ -11602,73 +16302,79 @@ def economic_analysis(net, in_data, params):
             gen_scale = _economic_get_generation_profile(generation_profile, time_steps)
             orig_load_p = net.load['p_mw'].copy() if len(net.load) > 0 else None
             orig_load_q = net.load['q_mvar'].copy() if len(net.load) > 0 else None
-            orig_gen_p = net.gen['p_mw'].copy() if len(net.gen) > 0 else None
+            # The generation profile (solar, wind) is for static generators and
+            # wind turbines. Synchronous generators keep their drawn P: a 4 MW
+            # CHP plant followed the onshore-wind profile, averaging 1.7 MW, and
+            # the year's losses came out 12 % low.
             orig_sgen_p = net.sgen['p_mw'].copy() if len(net.sgen) > 0 else None
             orig_sgen_q = net.sgen['q_mvar'].copy() if len(net.sgen) > 0 and 'q_mvar' in net.sgen.columns else None
 
-            # Lookup table: precompute power flows for (load_scale, gen_scale) grid; interpolate per hour
-            use_1d = (load_profile == 'constant')
-            if use_1d:
-                gen_vals = np.linspace(0, 1, 21)
-                loss_vals = np.zeros(21)
-                for i, gs in enumerate(gen_vals):
+            # Lookup table: power flows on a grid of (load, generation) scales,
+            # interpolated per hour. The grid spans what the profiles reach:
+            # it stopped at load 1.2 and generation 1.0 while the residential
+            # profile reaches 1.3 and the wind ones 1.15, and every hour
+            # beyond read 0 MW - the heaviest hours, 7.6 % of a year's losses.
+            def _axis(values, n):
+                lo, hi = float(np.min(values)), float(np.max(values))
+                return np.array([lo]) if hi - lo < 1e-9 else np.linspace(lo, hi, n)
+
+            load_vals = _axis(load_scale, 11)
+            gen_vals = _axis(gen_scale, 21 if len(load_vals) == 1 else 11)
+            loss_grid = np.full((len(load_vals), len(gen_vals)), np.nan)
+            for i, ls in enumerate(load_vals):
+                for j, gs in enumerate(gen_vals):
                     if orig_load_p is not None:
-                        net.load['p_mw'] = orig_load_p
-                        net.load['q_mvar'] = orig_load_q
-                    if orig_gen_p is not None:
-                        net.gen['p_mw'] = orig_gen_p * gs
+                        net.load['p_mw'] = orig_load_p * ls
+                        net.load['q_mvar'] = orig_load_q * ls
                     if orig_sgen_p is not None:
                         net.sgen['p_mw'] = orig_sgen_p * gs
                         if orig_sgen_q is not None:
                             net.sgen['q_mvar'] = orig_sgen_q * gs
                     try:
-                        init_this = init if i == 0 else "results"
+                        init_this = init if (i == 0 and j == 0) else "results"
                         pp.runpp(net, algorithm=algorithm, calculate_voltage_angles=calculate_voltage_angles, init=init_this,
                                  **_electrisim_enforce_q_lims_kw(net))
-                        loss_vals[i] = _economic_get_loss_mw(net) if net.converged else 0.0
+                        if net.converged:
+                            loss_grid[i, j] = _economic_get_loss_mw(net)
                     except Exception:
-                        loss_vals[i] = 0.0
-                losses_per_hour = np.interp(gen_scale, gen_vals, loss_vals)
+                        pass  # left NaN: not counted, and said so below
+            if len(load_vals) == 1 and len(gen_vals) == 1:
+                losses_per_hour = np.full(time_steps, loss_grid[0, 0])
+            elif len(load_vals) == 1:
+                losses_per_hour = np.interp(gen_scale, gen_vals, loss_grid[0])
+            elif len(gen_vals) == 1:
+                losses_per_hour = np.interp(load_scale, load_vals, loss_grid[:, 0])
             else:
-                load_vals = np.linspace(0.1, 1.2, 11)
-                gen_vals = np.linspace(0, 1, 11)
-                loss_grid = np.zeros((11, 11))
-                for i, ls in enumerate(load_vals):
-                    for j, gs in enumerate(gen_vals):
-                        if orig_load_p is not None:
-                            net.load['p_mw'] = orig_load_p * ls
-                            net.load['q_mvar'] = orig_load_q * ls
-                        if orig_gen_p is not None:
-                            net.gen['p_mw'] = orig_gen_p * gs
-                        if orig_sgen_p is not None:
-                            net.sgen['p_mw'] = orig_sgen_p * gs
-                            if orig_sgen_q is not None:
-                                net.sgen['q_mvar'] = orig_sgen_q * gs
-                        try:
-                            init_this = init if (i == 0 and j == 0) else "results"
-                            pp.runpp(net, algorithm=algorithm, calculate_voltage_angles=calculate_voltage_angles, init=init_this,
-                                     **_electrisim_enforce_q_lims_kw(net))
-                            loss_grid[i, j] = _economic_get_loss_mw(net) if net.converged else 0.0
-                        except Exception:
-                            loss_grid[i, j] = 0.0
                 from scipy.interpolate import RegularGridInterpolator
-                interp = RegularGridInterpolator((load_vals, gen_vals), loss_grid, method='linear', bounds_error=False, fill_value=0.0)
-                pts = np.column_stack((load_scale, gen_scale))
-                losses_per_hour = interp(pts)
-            total_energy_period_mwh = float(np.sum(np.maximum(losses_per_hour, 0)))
+                interp = RegularGridInterpolator((load_vals, gen_vals), loss_grid, method='linear')
+                losses_per_hour = interp(np.column_stack((load_scale, gen_scale)))
+            uncounted = int(np.count_nonzero(~np.isfinite(losses_per_hour)))
+            if uncounted:
+                energy_warnings.append(
+                    f'{uncounted} of {time_steps} hours fall on operating points where the power flow '
+                    'did not converge; their losses are not counted.'
+                )
+            total_energy_period_mwh = float(np.nansum(np.maximum(losses_per_hour, 0)))
 
             if orig_load_p is not None:
                 net.load['p_mw'] = orig_load_p
                 net.load['q_mvar'] = orig_load_q
-            if orig_gen_p is not None:
-                net.gen['p_mw'] = orig_gen_p
             if orig_sgen_p is not None:
                 net.sgen['p_mw'] = orig_sgen_p
                 if orig_sgen_q is not None:
                     net.sgen['q_mvar'] = orig_sgen_q
             lifetime_years_econ = max(1, min(100, int(params.get('lifetime_years', 30))))
             total_energy_losses_period_mwh = round(total_energy_period_mwh, 4)
-            total_energy_losses_mwh = round(total_energy_period_mwh * lifetime_years_econ, 4)
+            # The lifetime is in years, so the period is scaled to one first:
+            # a 24-hour period gave "30 years" of losses equal to 30 days.
+            annual_mwh = total_energy_period_mwh * 8760.0 / time_steps
+            if time_steps < 8760:
+                energy_warnings.append(
+                    f'Losses over the first {time_steps} hours of the year (from 1 January) '
+                    'were scaled to a full year; simulate 8760 hours for the seasons.'
+                )
+            total_energy_losses_annual_mwh = round(annual_mwh, 4)
+            total_energy_losses_mwh = round(annual_mwh * lifetime_years_econ, 4)
             energy_loss_period_hours = time_steps
             if energy_price is not None and energy_price > 0:
                 energy_loss_cost = round(total_energy_losses_mwh * energy_price, 2)
@@ -11683,6 +16389,7 @@ def economic_analysis(net, in_data, params):
         if total_energy_losses_mwh is not None:
             lifetime_years = max(1, min(100, int(params.get('lifetime_years', 30))))
             result['total_energy_losses_period_mwh'] = total_energy_losses_period_mwh
+            result['total_energy_losses_annual_mwh'] = total_energy_losses_annual_mwh
             result['total_energy_losses_mwh'] = total_energy_losses_mwh
             result['energy_loss_cost'] = energy_loss_cost
             result['energy_loss_cost_currency'] = energy_price_currency
@@ -11694,6 +16401,8 @@ def economic_analysis(net, in_data, params):
             result['calculation_mode'] = calculation_mode
             result['load_profile_values'] = load_scale.tolist()
             result['generation_profile_values'] = gen_scale.tolist()
+            if energy_warnings:
+                result['warnings'] = energy_warnings
         return result
         
     except Exception as e:
@@ -12936,6 +17645,7 @@ _PROTECTION_KIND_EARTH_FAULT = "earth_fault"
 _PROTECTION_KIND_DIRECTIONAL = "directional"
 _PROTECTION_KIND_DIFF = "differential"
 _PROTECTION_KIND_DIST = "distance"
+_PROTECTION_KIND_UV = "undervoltage"
 _PROTECTION_KIND_NONE = "none"
 
 # OC relay subtype -> pandapower switch.type marker used internally by the library.
@@ -13020,6 +17730,7 @@ _PROT_KIND_SETTING_KEYS = {
     _PROTECTION_KIND_EARTH_FAULT: ("I_e_a", "t_e"),
     _PROTECTION_KIND_DIRECTIONAL: ("directional_mode", "I_g_a", "I_s_a", "t_g"),
     _PROTECTION_KIND_DIFF: ("I_diff_a", "diff_slope", "t_g"),
+    _PROTECTION_KIND_UV: ("U_pu", "t_u"),
     _PROTECTION_KIND_DIST: ("z1_r_ohm", "z1_x_ohm", "t_z1", "z2_r_ohm", "z2_x_ohm",
                             "t_z2", "z3_r_ohm", "z3_x_ohm", "t_z3"),
 }
@@ -13140,9 +17851,9 @@ def _prot_apply_ocrelay_overrides(device, spec, grading_mode):
 
 def _prot_eval_oc_trip(spec, subtype, current_a, evaluator="oc_electrisim"):
     """Trip time for an ElectriSim-side OCR (IEEE curves or native-OCRelay fallback)."""
-    I_s = spec.get("I_s_a")
-    I_g = spec.get("I_g_a")
-    I_gg = spec.get("I_gg_a")
+    # A pickup of 0 A is unset, not "trip on any current".
+    I_s, I_g, I_gg = (v if v is not None and v > 0 else None
+                      for v in (spec.get("I_s_a"), spec.get("I_g_a"), spec.get("I_gg_a")))
     tms = spec.get("tms", 1.0)
     t_grade = spec.get("t_grade", 0.5)
     t_g = spec.get("t_g", 0.5)
@@ -13229,6 +17940,183 @@ def _prot_safe_float(value, default=None):
         return default
 
 
+# --- Automatic OCR settings -------------------------------------------------------
+#
+# pandapower's OCRelay sets pickups only for relays on lines, and grades them only
+# when every closed switch sits on a line: on any grid with a transformer breaker
+# no relay set to "automatic" could be evaluated. These rules are pandapower's,
+# carried over to transformer breakers, and evaluated by Electrisim.
+
+_PROT_AUTO_SC_FRACTION = 0.95          # I>> of a line relay: a fault 95 % along its line
+_PROT_AUTO_TRAFO_INST_MARGIN = 1.2     # I>> of a transformer relay: 120 % of its worst through-fault
+_PROT_AUTO_INVERSE_OVERLOAD = 1.2      # IDMT pickup: 120 % of the rated current, as pandapower
+
+
+def _prot_auto_grading_depths(net, sw_indices):
+    """
+    Relays crossed between the External Grid and each relay (itself included),
+    the depth pandapower grades line relays by: the deepest trips first.
+    """
+    from collections import deque
+    adjacency, element_node = _prot_element_graph(net)
+    relay_edges = {}
+    for sw_idx in sw_indices:
+        sw = net.switch.loc[int(sw_idx)]
+        if not bool(sw['closed']) or sw['et'] == 'b':
+            continue
+        relay_edges[frozenset((('bus', int(sw['bus'])), element_node(sw['et'], sw['element'])))] = int(sw_idx)
+    dist, queue = {}, deque()
+    for _, row in net.ext_grid.iterrows():
+        if bool(row.get('in_service', True)):
+            node = ('bus', int(row['bus']))
+            dist[node] = 0
+            queue.append(node)
+    while queue:
+        node = queue.popleft()
+        for nxt in adjacency.get(node, ()):
+            weight = 1 if frozenset((node, nxt)) in relay_edges else 0
+            if dist[node] + weight < dist.get(nxt, math.inf):
+                dist[nxt] = dist[node] + weight
+                (queue.appendleft if weight == 0 else queue.append)(nxt)
+    depths = {}
+    for edge, sw_idx in relay_edges.items():
+        known = [dist[n] for n in edge if n in dist]
+        if known:
+            depths[sw_idx] = min(known) + 1
+    return depths
+
+
+def _prot_auto_rated_ka(net, sw):
+    """Rated current of what the relay protects, on its own side."""
+    et, element, bus = str(sw['et']), int(sw['element']), int(sw['bus'])
+
+    def num(row, key, default=1.0):
+        value = row.get(key, default)
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return default
+        return value if value > 0 and math.isfinite(value) else default
+
+    if et == 'l' and element in net.line.index:
+        row = net.line.loc[element]
+        return num(row, 'max_i_ka', 0.0) * num(row, 'df') * num(row, 'parallel'), 'its line rating'
+    if et == 't' and element in net.trafo.index:
+        row = net.trafo.loc[element]
+        side = 'hv' if int(row['hv_bus']) == bus else 'lv'
+        return (num(row, 'sn_mva', 0.0) * num(row, 'parallel')
+                / (math.sqrt(3) * num(row, f'vn_{side}_kv'))), f'the transformer {side.upper()} rating'
+    if et == 't3' and element in net.trafo3w.index:
+        row = net.trafo3w.loc[element]
+        side = next((s for s in ('hv', 'mv', 'lv') if int(row[f'{s}_bus']) == bus), 'hv')
+        return (num(row, f'sn_{side}_mva', 0.0)
+                / (math.sqrt(3) * num(row, f'vn_{side}_kv'))), f'the transformer {side.upper()} rating'
+    return 0.0, None
+
+
+def _prot_auto_fault_current_ka(net, sw_idx, fault_bus=None, line_fraction=None):
+    """Maximum three-phase fault current the relay sees, for a fault at a bus or along its line."""
+    net_sc = deepcopy(net)
+    if line_fraction is not None:
+        from pandapower.protection.utility_functions import create_sc_bus
+        element = int(net.switch.at[sw_idx, 'element'])
+        net_sc = _prot_split_line(net_sc, element, float(line_fraction))
+        # As in the line-fault scenarios: create_sc_bus moves non-line switches too.
+        not_line = net.switch.index[net.switch['et'] != 'l']
+        net_sc.switch.loc[not_line, 'element'] = net.switch.loc[not_line, 'element']
+        fault_bus = int(max(net_sc.bus.index))
+    ensure_ext_grid_zero_sequence_min(net_sc)
+    sc.calc_sc(net_sc, bus=int(fault_bus), branch_results=True, fault='3ph', case='max')
+    return _prot_switch_current_ka(net_sc, sw_idx)
+
+
+def _prot_auto_oc_settings(net, spec, sw_idx, depths, grading_mode):
+    """
+    (settings, note): the relay's automatic pickups and grading, or (None, why).
+
+    I>: the rated current x overload factor x CT factor. I>>: for a line relay
+    the current it sees for a fault 95 % along its line (x safety factor); for a
+    transformer relay on the grid side 120 % of the worst through-fault at its
+    other terminals, so only an internal fault trips it at once, and none on
+    the load side (an incomer cannot tell its busbar from a feeder fault). t>:
+    the base t> for the deepest relay, plus t_diff for each relay nearer the
+    grid.
+    """
+    sw = net.switch.loc[int(sw_idx)]
+    et = str(sw['et'])
+    rated_ka, rated_basis = _prot_auto_rated_ka(net, sw)
+    if not rated_ka > 0:
+        return None, 'the protected element has no current rating'
+    out = dict(spec)
+    overload = float(spec.get('overload_factor') or 1.25)
+    ct = float(spec.get('ct_current_factor') or 1.2)
+    safety = float(spec.get('safety_factor') or 1.0)
+    out['I_g_a'] = rated_ka * overload * ct * 1000.0
+    out['I_s_a'] = rated_ka * _PROT_AUTO_INVERSE_OVERLOAD * 1000.0
+
+    inst_ka, inst_basis = None, None
+    try:
+        if et == 'l':
+            line = net.line.loc[int(sw['element'])]
+            at_from = int(line['from_bus']) == int(sw['bus'])
+            fraction = _PROT_AUTO_SC_FRACTION if at_from else 1.0 - _PROT_AUTO_SC_FRACTION
+            seen = _prot_auto_fault_current_ka(net, sw_idx, line_fraction=fraction)
+            if seen:
+                inst_ka = seen * safety
+                inst_basis = f'a fault {_PROT_AUTO_SC_FRACTION:.0%} along its line'
+        elif et in ('t', 't3'):
+            adjacency, element_node = _prot_element_graph(net)
+            grid = {('bus', int(b)) for b, live in zip(net.ext_grid['bus'], net.ext_grid.get('in_service', [True] * len(net.ext_grid))) if bool(live)}
+            if _prot_reaches_source(adjacency, ('bus', int(sw['bus'])), grid,
+                                    {element_node(et, sw['element'])}):
+                table = net.trafo if et == 't' else net.trafo3w
+                cols = ('hv_bus', 'lv_bus') if et == 't' else ('hv_bus', 'mv_bus', 'lv_bus')
+                others = [int(table.at[int(sw['element']), c]) for c in cols
+                          if int(table.at[int(sw['element']), c]) != int(sw['bus'])]
+                through = [x for x in (_prot_auto_fault_current_ka(net, sw_idx, fault_bus=b) for b in others) if x]
+                if through:
+                    inst_ka = max(through) * _PROT_AUTO_TRAFO_INST_MARGIN * safety
+                    inst_basis = f'{_PROT_AUTO_TRAFO_INST_MARGIN:.0%} of the worst through-fault'
+            else:
+                inst_basis = 'none on the load side of a transformer'
+    except Exception as e:
+        inst_basis = f'none: its fault current could not be computed ({type(e).__name__})'
+    if inst_ka is not None and inst_ka * 1000.0 <= out['I_g_a']:
+        inst_ka, inst_basis = None, 'none: the fault current along it is below I>'
+    out['I_gg_a'] = inst_ka * 1000.0 if inst_ka is not None else None
+
+    depth = depths.get(int(sw_idx))
+    if grading_mode != 'manual' and depth is not None and depths:
+        steps = max(depths.values()) - depth
+        out['t_g'] = float(spec.get('t_g') or 0.5) + steps * float(spec.get('t_diff') or 0.3)
+
+    parts = [f"I> {out['I_g_a']:.0f} A ({rated_basis} {rated_ka * 1000:.0f} A x {overload:g} x {ct:g})"]
+    parts.append(f"I>> {out['I_gg_a']:.0f} A ({inst_basis})" if out['I_gg_a'] else f'I>> {inst_basis or "none"}')
+    if depth is not None and grading_mode != 'manual':
+        parts.append(f"t> {out['t_g']:.2f} s ({depth} relay{'s' if depth != 1 else ''} from the grid)")
+    return out, 'Automatic settings by Electrisim: ' + '; '.join(parts) + '.'
+
+
+def _prot_zone_diff_rows(row):
+    """A switch row's zone differentials: its zdiff_zones, a JSON list of {buses: [bus names], i_a, slope, t_s}."""
+    raw = row.get('zdiff_zones') if isinstance(row, dict) else None
+    if not raw:
+        return []
+    try:
+        zones = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return []
+    out = []
+    for z in zones if isinstance(zones, list) else []:
+        buses = [str(b) for b in (z.get('buses') or [])] if isinstance(z, dict) else []
+        i_a = _prot_safe_float(z.get('i_a')) if isinstance(z, dict) else None
+        if buses and i_a and i_a > 0:
+            slope, t_s = _prot_safe_float(z.get('slope')), _prot_safe_float(z.get('t_s'))
+            out.append({'buses': buses, 'i_a': float(i_a), 'slope': 0.3 if slope is None else float(slope),
+                        't_s': 0.03 if t_s is None else float(t_s)})
+    return out
+
+
 def _prot_collect_switch_protection_specs(in_data):
     """
     Walk the raw frontend payload and collect the protection spec for every Switch
@@ -13247,7 +18135,11 @@ def _prot_collect_switch_protection_specs(in_data):
             continue
         protection_type = str(row.get('protection_type', _PROTECTION_KIND_NONE) or _PROTECTION_KIND_NONE).strip().lower()
         if protection_type in ('', _PROTECTION_KIND_NONE):
-            continue
+            # A breaker whose only protection is its switchboards' bus differential (a bus section), or the
+            # zone differential of the zones it bounds, is still one of that zone's CTs, and trips with it.
+            if not (_prot_safe_float(row.get('bdiff_i_a')) or 0) > 0 and not _prot_zone_diff_rows(row):
+                continue
+            protection_type = _PROTECTION_KIND_NONE
         sw_id = row.get('id') or row.get('name')
         if sw_id is None:
             continue
@@ -13276,6 +18168,33 @@ def _prot_collect_switch_protection_specs(in_data):
             'directional_mode': str(row.get('directional_mode', 'forward') or 'forward').lower(),
             'I_diff_a': _prot_safe_float(row.get('I_diff_a')),
             'diff_slope': _prot_safe_float(row.get('diff_slope')),
+            'U_pu': _prot_safe_float(row.get('U_pu')),
+            't_u': _prot_safe_float(row.get('t_u')),
+            # Breaker failure (50BF): its breaker's own setting, whatever relay trips it.
+            'bf_time_s': _prot_safe_float(row.get('bf_time_s')),
+            # ... and whether it also sends a transfer trip beyond the breaker (the cable's far end, the sources there)
+            'bf_transfer_trip': str(row.get('bf_transfer_trip', '') or '').strip().lower() in ('1', 'true', 'yes'),
+            # Arc-flash detection (50ARC), beside whatever relay the breaker has: light in its
+            # switchboard (the switch's bus) and current through it, tripping in arc_t_s; it can
+            # also block the grid-forming inverters on that bus.
+            'arc_t_s': _prot_safe_float(row.get('arc_t_s')),
+            'arc_i_a': _prot_safe_float(row.get('arc_i_a')),
+            'arc_block_pcs': str(row.get('arc_block_pcs', 'false') or 'false').strip().lower() == 'true',
+            # Bus differential (87B): the breakers at a switchboard with bdiff_i_a set are its zone's
+            # CTs, their currents summed, and trip together in bdiff_t_s.
+            'bdiff_i_a': _prot_safe_float(row.get('bdiff_i_a')),
+            'bdiff_slope': _prot_safe_float(row.get('bdiff_slope')),
+            'bdiff_t_s': _prot_safe_float(row.get('bdiff_t_s')),
+            # Zone differential (87T / 87L / 87B over a zone of several buses): the zones this breaker trips for,
+            # each its buses (by name), pickup, slope and time - a ring-bus element between two breakers, a
+            # breaker-and-a-half diameter's element, a ring-main segment with its taps.
+            'zdiff_zones': _prot_zone_diff_rows(row),
+            # Intertrip: when its relay trips, every other breaker at its bus trips too.
+            'intertrip_bus': str(row.get('intertrip_bus', 'false') or 'false').strip().lower() == 'true',
+            # An earth-fault alarm (a sensitive 51N's alarm stage): its residual current - a grounding
+            # transformer's neutral current - over alarm_ie_a for alarm_t_s raises an alarm, and trips nothing.
+            'alarm_ie_a': _prot_safe_float(row.get('alarm_ie_a')),
+            'alarm_t_s': _prot_safe_float(row.get('alarm_t_s')),
             'z1_r_ohm': _prot_safe_float(row.get('z1_r_ohm')),
             'z1_x_ohm': _prot_safe_float(row.get('z1_x_ohm')),
             'z2_r_ohm': _prot_safe_float(row.get('z2_r_ohm')),
@@ -13566,6 +18485,7 @@ def _attach_protection_devices(net, specs, grading_mode='auto'):
         subtype: _prot_build_manual_time_settings(net, specs, subtype)
         for subtype in _OC_SUBTYPE_TO_SWITCH_TYPE
     } if grading_mode == 'manual' else {}
+    auto_depths = None  # relays' grading depths, found when first needed
 
     for sw_id, spec in specs.items():
         sw_idx = _prot_resolve_sw_idx_for_id(net, sw_id)
@@ -13582,6 +18502,8 @@ def _attach_protection_devices(net, specs, grading_mode='auto'):
             continue
 
         kind = spec.get('protection_type', _PROTECTION_KIND_NONE)
+        if kind == _PROTECTION_KIND_NONE:
+            continue        # an 87B-only breaker: _prot_apply_bus_differential evaluates it
 
         # --- OCR --------------------------------------------------------------------
         if kind == _PROTECTION_KIND_OCR:
@@ -13673,6 +18595,49 @@ def _attach_protection_devices(net, specs, grading_mode='auto'):
                 # OCRelay registered itself before it failed; unregister it so the
                 # relay is reported once, by the ElectriSim evaluator below.
                 _prot_drop_new_protection_rows(net, protection_index_before)
+                if spec.get('pickup_mode') != 'manual':
+                    # pandapower's OCRelay sets and grades relays on lines only:
+                    # Electrisim sets this one by the same rules, extended to
+                    # transformer breakers. (Evaluating the dialog's unset, zero,
+                    # pickups tripped every relay instantly for every fault.)
+                    if auto_depths is None:
+                        auto_depths = _prot_auto_grading_depths(net, [
+                            i for i in (_prot_resolve_sw_idx_for_id(net, k) for k, v in specs.items()
+                                        if v.get('protection_type') == _PROTECTION_KIND_OCR)
+                            if i is not None])
+                    auto_spec, auto_note = _prot_auto_oc_settings(net, spec, int(sw_idx), auto_depths, grading_mode)
+                    if auto_spec is not None:
+                        summaries.append({
+                            'switch_id': sw_id,
+                            'switch_name': spec.get('sw_name'),
+                            'user_friendly_name': spec.get('user_friendly_name'),
+                            'sw_idx': int(sw_idx),
+                            'kind': 'OCR', 'subtype': subtype, 'curve_type': curve_type,
+                            'pickup_mode': spec.get('pickup_mode'),
+                            'engine': 'electrisim',
+                            'attached': True,
+                            'custom_evaluator': 'oc_electrisim',
+                            'not_computed': False,
+                            'settings': auto_spec,
+                            'reason': auto_note,
+                            'traceback': tb_text,
+                        })
+                        continue
+                    summaries.append({
+                        'switch_id': sw_id,
+                        'switch_name': spec.get('sw_name'),
+                        'user_friendly_name': spec.get('user_friendly_name'),
+                        'sw_idx': int(sw_idx),
+                        'kind': 'OCR', 'subtype': subtype, 'curve_type': curve_type,
+                        'pickup_mode': spec.get('pickup_mode'),
+                        'attached': False, 'not_computed': True,
+                        'reason': (
+                            f'Automatic pickup could not be set: {auto_note}. '
+                            "Set this relay's pickup currents by hand (pickup mode Manual) to evaluate it."
+                        ),
+                        'traceback': tb_text,
+                    })
+                    continue
                 summaries.append({
                     'switch_id': sw_id,
                     'switch_name': spec.get('sw_name'),
@@ -13687,12 +18652,11 @@ def _attach_protection_devices(net, specs, grading_mode='auto'):
                     'custom_evaluator': 'oc_electrisim',
                     'not_computed': False,
                     'settings': dict(spec),
-                    'reason': (
-                        f'pandapower OCRelay could not be built ({type(e).__name__}: {e}); '
-                        'trip times and the TCC curve were evaluated by ElectriSim from the '
-                        'Switch dialog settings. pandapower topological grading requires every '
-                        'closed switch to sit on a line.'
-                    ),
+                    # No 'reason': pandapower's OCRelay grades only networks of
+                    # lines, and with pickups set by hand it is not needed. Its
+                    # exception (kept in the traceback) filled the evaluation
+                    # notes for every relay; the settings table already names
+                    # the ElectriSim evaluator.
                     'traceback': tb_text,
                 })
 
@@ -13737,7 +18701,7 @@ def _attach_protection_devices(net, specs, grading_mode='auto'):
 
         # --- Electrisim-side devices -----------------------------------------------
         elif kind in (_PROTECTION_KIND_EARTH_FAULT, _PROTECTION_KIND_DIRECTIONAL,
-                      _PROTECTION_KIND_DIFF, _PROTECTION_KIND_DIST):
+                      _PROTECTION_KIND_DIFF, _PROTECTION_KIND_DIST, _PROTECTION_KIND_UV):
             summaries.append({
                 'switch_id': sw_id,
                 'switch_name': spec.get('sw_name'),
@@ -13748,6 +18712,7 @@ def _attach_protection_devices(net, specs, grading_mode='auto'):
                     _PROTECTION_KIND_DIRECTIONAL: 'Directional OCR',
                     _PROTECTION_KIND_DIFF: 'Differential (87)',
                     _PROTECTION_KIND_DIST: 'Distance (21)',
+                    _PROTECTION_KIND_UV: 'Undervoltage (27)',
                 }[kind],
                 'engine': 'electrisim',
                 'attached': True,
@@ -14105,6 +19070,19 @@ def _prot_fault_bus_label(net, fault_bus_idx):
     return str(fault_bus_idx)
 
 
+def _prot_fault_label(net, scenario):
+    """'L1, 50 %' for a line fault, the bus name for a busbar fault."""
+    try:
+        if scenario.get('sc_line_id') is not None and scenario.get('fault_location_mode') != 'bus':
+            idx = int(scenario['sc_line_id'])
+            name = _contingency_friendly_name(net, net.line.at[idx, 'name']) if idx in net.line.index else f'line {idx}'
+            return f"{name}, {100 * float(scenario.get('sc_fraction') or 0):.0f} %"
+        idx = int(scenario['fault_bus_idx'])
+        return _contingency_friendly_name(net, net.bus.at[idx, 'name']) if idx in net.bus.index else str(idx)
+    except (KeyError, TypeError, ValueError):
+        return scenario.get('fault_bus')
+
+
 def _prot_clean_scalar(v):
     if v is None:
         return None
@@ -14222,13 +19200,43 @@ def _prot_switch_current_ka(net_sc, sw_idx, fault_bus_idx=None):
     try:
         sw = net_sc.switch.loc[int(sw_idx)]
         et, element = str(sw.get('et')), int(sw.get('element'))
+        # A breaker on a de-energised part of the network (set aside, out of service) carries nothing; the
+        # fault's total, the fallback below, made every breaker on a dead board see it.
+        if not bool(net_sc.bus.at[int(sw.get('bus')), 'in_service']):
+            return 0.0
+        if et == 'b' and not bool(net_sc.bus.at[element, 'in_service']):
+            return 0.0
+        dead_element = {'l': 'line', 't': 'trafo', 't3': 'trafo3w'}.get(et)
+        if dead_element and element in getattr(net_sc, dead_element).index \
+                and not bool(getattr(net_sc, dead_element).at[element, 'in_service']):
+            return 0.0
+        if et == 'b':
+            # A breaker between two buses (a bus coupler, or a feeder breaker
+            # drawn so): its own current, when the study gave it an impedance
+            # (_prot_bus_switch_branches); the fault's total otherwise.
+            res = getattr(net_sc, 'res_switch_sc', None)
+            if res is not None and int(sw_idx) in res.index and 'ikss_ka' in res.columns:
+                value = res.at[int(sw_idx), 'ikss_ka']
+                if pd.notna(value):
+                    return abs(float(value))
         table = {'l': 'res_line_sc', 't': 'res_trafo_sc', 't3': 'res_trafo3w_sc'}.get(et)
         if table and hasattr(net_sc, table):
             result = getattr(net_sc, table)
             if element in result.index:
                 row = result.loc[element]
-                for col in ('ikss_ka', 'ikss_from_ka', 'ikss_to_ka',
-                            'ikss_hv_ka', 'ikss_lv_ka', 'ikss_mv_ka'):
+                # The current on the switch's own side: a transformer's HV
+                # current is its LV current scaled by the ratio, so taking
+                # whichever column came first made an LV-side breaker see
+                # 20/110 of its fault current.
+                sides = {'l': (('from_bus', 'ikss_from_ka'), ('to_bus', 'ikss_to_ka')),
+                         't': (('hv_bus', 'ikss_hv_ka'), ('lv_bus', 'ikss_lv_ka')),
+                         't3': (('hv_bus', 'ikss_hv_ka'), ('mv_bus', 'ikss_mv_ka'),
+                                ('lv_bus', 'ikss_lv_ka'))}[et]
+                elements = {'l': net_sc.line, 't': net_sc.trafo, 't3': net_sc.trafo3w}[et]
+                own = [col for bus_col, col in sides
+                       if element in elements.index
+                       and int(elements.at[element, bus_col]) == int(sw.get('bus'))]
+                for col in own + ['ikss_ka'] + [col for _, col in sides]:
                     if col in row.index and pd.notna(row[col]):
                         return abs(float(row[col]))
     except Exception:
@@ -14236,6 +19244,248 @@ def _prot_switch_current_ka(net_sc, sw_idx, fault_bus_idx=None):
     if fault_bus_idx is not None:
         return _prot_extract_short_circuit_at_bus(net_sc, fault_bus_idx).get('ikss_ka')
     return None
+
+
+def _prot_num(value, default=0.0):
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return default
+    return x if np.isfinite(x) else default
+
+
+def _prot_switch_voltage_pu(net_sc, sw_idx):
+    """The fault's voltage (pu) at a switch's bus, from its element's branch results; None if not given."""
+    try:
+        sw = net_sc.switch.loc[int(sw_idx)]
+        et, element, bus = str(sw['et']), int(sw['element']), int(sw['bus'])
+    except (KeyError, TypeError, ValueError):
+        return None
+    sides = {'l': ('line', 'res_line_sc', (('from_bus', 'vm_from_pu'), ('to_bus', 'vm_to_pu'))),
+             't': ('trafo', 'res_trafo_sc', (('hv_bus', 'vm_hv_pu'), ('lv_bus', 'vm_lv_pu')))}.get(et)
+    if sides is None:
+        return None
+    table, res_name, cols = sides
+    res = getattr(net_sc, res_name, None)
+    if res is None or element not in res.index or element not in net_sc[table].index:
+        return None
+    for bus_col, vm_col in cols:
+        if int(net_sc[table].at[element, bus_col]) == bus and vm_col in res.columns:
+            vm = _prot_num(res.at[element, vm_col], np.nan)
+            return float(vm) if np.isfinite(vm) else None
+    return None
+
+
+def _prot_diff_zone_currents(net_sc, sw_idx, fault_bus_idx=None):
+    """
+    A differential relay's protected element - its switch's line (both halves
+    of a line split at the fault) or transformer - and the fault currents
+    into it at each of its terminals, referred to the switch's voltage: the
+    operating current is their phasor sum, the restraint half their
+    magnitudes' sum. An earth fault's branch results have no angles: then
+    the magnitudes, added for a fault inside the element and differenced
+    for one beyond it. None for any other switch.
+    """
+    try:
+        sw = net_sc.switch.loc[int(sw_idx)]
+        et, element = str(sw['et']), int(sw['element'])
+    except (KeyError, TypeError, ValueError):
+        return None
+    terminals = []   # (bus, magnitude kA, angle deg or NaN, scale to the switch's side)
+    inside = False
+    if et == 'l':
+        split = net_sc.get('_electrisim_sc_split') if hasattr(net_sc, 'get') else None
+        parts = [element]
+        if split and element in [split['line']] + split['new']:
+            parts = [split['line']] + split['new']
+            inside = True
+        if getattr(net_sc, 'res_line_sc', None) is None:
+            return None
+        parts = [li for li in parts if li in net_sc.line.index]
+        terminals, remote_inside = _prot_line_terminals(
+            net_sc, parts, {split['bus']} if inside else set(),
+            int(fault_bus_idx) if fault_bus_idx is not None else None)
+        inside = inside or remote_inside
+    elif et == 't':
+        res = getattr(net_sc, 'res_trafo_sc', None)
+        if res is None or element not in res.index:
+            return None
+        hv, lv = float(net_sc.trafo.at[element, 'vn_hv_kv']), float(net_sc.trafo.at[element, 'vn_lv_kv'])
+        own_lv = int(sw['bus']) == int(net_sc.trafo.at[element, 'lv_bus'])
+        # pandapower's short-circuit branch angles leave out the vector group's shift.
+        for side, ratio in (('hv', hv / lv if own_lv else 1.0), ('lv', 1.0 if own_lv else lv / hv)):
+            terminals.append((int(net_sc.trafo.at[element, f'{side}_bus']), _prot_num(res.at[element, f'ikss_{side}_ka']),
+                              _prot_num(res.at[element, f'ikss_{side}_degree'], np.nan), ratio))
+    elif et == 'b':
+        zone = _prot_diff_zone_beyond_bus_breaker(net_sc, int(sw_idx), element, fault_bus_idx)
+        if zone is None:
+            return None
+        terminals, inside = zone
+    else:
+        return None
+    if not terminals:
+        return None
+    mags = [abs(m) * s * 1e3 if np.isfinite(m) else 0.0 for _, m, _, s in terminals]
+    phasors = all(np.isfinite(a) for _, m, a, _ in terminals if np.isfinite(m) and abs(m) > 0)
+    if phasors:
+        operate = abs(sum(mag * np.exp(1j * np.radians(a)) for mag, (_, m, a, _) in zip(mags, terminals)
+                          if mag > 0))
+    elif inside:
+        operate = sum(mags)
+    else:
+        operate = abs(2.0 * max(mags) - sum(mags))
+    return {'operate_a': float(operate), 'restraint_a': float(sum(mags) / 2.0), 'phasors': bool(phasors),
+            'terminals_a': [round(float(m), 3) for m in mags]}
+
+
+def _prot_remote_breaker(net_sc, line_idx, far_bus):
+    """
+    The breaker at a cable's far end, when the cable ends on a node of its own - that line and one closed breaker
+    between two buses to the board beyond: (switch index, board bus); None when it ends on a board.
+    """
+    lines = [i for i in net_sc.line.index if i != line_idx and bool(net_sc.line.at[i, 'in_service'])
+             and far_bus in (int(net_sc.line.at[i, 'from_bus']), int(net_sc.line.at[i, 'to_bus']))]
+    trafos = [i for i in net_sc.trafo.index if bool(net_sc.trafo.at[i, 'in_service'])
+              and far_bus in (int(net_sc.trafo.at[i, 'hv_bus']), int(net_sc.trafo.at[i, 'lv_bus']))]
+    sw = net_sc.switch[(net_sc.switch['et'] == 'b') & (net_sc.switch['closed'] == True)
+                       & ((net_sc.switch['bus'] == far_bus) | (net_sc.switch['element'] == far_bus))]
+    if lines or trafos or len(sw) != 1:
+        return None
+    si = int(sw.index[0])
+    a, b = int(net_sc.switch.at[si, 'bus']), int(net_sc.switch.at[si, 'element'])
+    return si, (b if a == far_bus else a)
+
+
+def _prot_line_terminals(net_sc, parts, skip_buses, fault):
+    """
+    A cable's terminals for its 87L: each end's current into it, except at `skip_buses` (the relay's own node, a
+    split's fault bus); an end on a node of its own is measured at its breaker (the remote CT) instead, and a fault
+    on that node is inside. Returns (terminals, inside).
+    """
+    res = getattr(net_sc, 'res_line_sc', None)
+    terminals, inside = [], False
+    for part in parts:
+        if res is None or part not in res.index:
+            continue
+        for end in ('from', 'to'):
+            bus = int(net_sc.line.at[part, f'{end}_bus'])
+            if bus in skip_buses:
+                continue
+            remote = _prot_remote_breaker(net_sc, part, bus)
+            ph = _prot_bus_switch_phasor(net_sc, remote[0], remote[1]) if remote else None
+            if ph is not None:
+                terminals.append((remote[1], ph[0], ph[1], 1.0))
+                inside = inside or fault == bus
+            else:
+                terminals.append((bus, _prot_num(res.at[part, f'ikss_{end}_ka']),
+                                  _prot_num(res.at[part, f'ikss_{end}_degree'], np.nan), 1.0))
+    return terminals, inside
+
+
+def _prot_diff_zone_beyond_bus_breaker(net_sc, sw_idx, node, fault_bus_idx):
+    """
+    The 87 zone of a breaker drawn between its switchboard and a node: the one line (87L) or transformer (87T)
+    beyond the node. Terminals (bus, kA, angle, scale): the breaker's own current at its board, and the element's
+    at its far end - a cable's far breaker's when it ends on a node of its own - referred to the breaker's voltage;
+    where an angle is missing (an earth fault; a transformer, whose angles leave out its vector group) the zone is
+    judged by magnitudes. A fault is inside on the node, on the line or its far node, or on a transformer's far bus
+    when that bus is its terminal (nothing beyond it but injections). None when the node leads to anything else.
+    """
+    res_sw = getattr(net_sc, 'res_switch_sc', None)
+    if res_sw is None or sw_idx not in res_sw.index or pd.isna(res_sw.at[sw_idx, 'ikss_ka']):
+        return None
+    split = net_sc.get('_electrisim_sc_split') if hasattr(net_sc, 'get') else None
+    lines = [int(i) for i in net_sc.line.index if bool(net_sc.line.at[i, 'in_service'])
+             and node in (int(net_sc.line.at[i, 'from_bus']), int(net_sc.line.at[i, 'to_bus']))]
+    trafos = [int(i) for i in net_sc.trafo.index if bool(net_sc.trafo.at[i, 'in_service'])
+              and node in (int(net_sc.trafo.at[i, 'hv_bus']), int(net_sc.trafo.at[i, 'lv_bus']))]
+    board = int(net_sc.switch.at[sw_idx, 'bus']) if int(net_sc.switch.at[sw_idx, 'element']) == node \
+        else int(net_sc.switch.at[sw_idx, 'element'])
+    ph = _prot_bus_switch_phasor(net_sc, sw_idx, board)
+    own = (board, ph[0], ph[1], 1.0)
+    fault = int(fault_bus_idx) if fault_bus_idx is not None else None
+    if len(lines) == 1 and not trafos:
+        li = lines[0]
+        parts, inside = [li], fault == node
+        if split and li in [split['line']] + split['new']:
+            parts, inside = [split['line']] + split['new'], True
+        if getattr(net_sc, 'res_line_sc', None) is None:
+            return None
+        far, remote_inside = _prot_line_terminals(net_sc, parts, {node} | ({split['bus']} if split else set()), fault)
+        return [own] + far, inside or remote_inside
+    if len(trafos) == 1 and not lines:
+        ti = trafos[0]
+        res = getattr(net_sc, 'res_trafo_sc', None)
+        if res is None or ti not in res.index:
+            return None
+        hv_bus, lv_bus = int(net_sc.trafo.at[ti, 'hv_bus']), int(net_sc.trafo.at[ti, 'lv_bus'])
+        far, side = (lv_bus, 'lv') if node == hv_bus else (hv_bus, 'hv')
+        ratio = float(net_sc.trafo.at[ti, f'vn_{side}_kv']) / float(net_sc.trafo.at[ti, f'vn_{"hv" if side == "lv" else "lv"}_kv'])
+        far_branches = sum(1 for i in net_sc.line.index if bool(net_sc.line.at[i, 'in_service'])
+                           and far in (int(net_sc.line.at[i, 'from_bus']), int(net_sc.line.at[i, 'to_bus'])))
+        far_branches += sum(1 for i in net_sc.trafo.index if i != ti and bool(net_sc.trafo.at[i, 'in_service'])
+                            and far in (int(net_sc.trafo.at[i, 'hv_bus']), int(net_sc.trafo.at[i, 'lv_bus'])))
+        far_branches += int(((net_sc.switch['et'] == 'b') & (net_sc.switch['closed'] == True)
+                             & ((net_sc.switch['bus'] == far) | (net_sc.switch['element'] == far))).sum())
+        inside = fault == node or (fault == far and far_branches == 0)
+        # a transformer's branch angles leave out its vector group's shift: judged by magnitudes
+        return [(own[0], own[1], np.nan, 1.0), (far, _prot_num(res.at[ti, f'ikss_{side}_ka']), np.nan, ratio)], inside
+    return None
+
+
+def _prot_delta_winding_beyond(net_sc, sw_row):
+    """
+    The bus between the switch and a transformer whose winding on the switch's side is delta - the switch's own for
+    a switch on the transformer, the node a breaker between two buses leads to when the transformer is all that is
+    on it - or None. No zero-sequence current passes the delta: the switch carries a residual only for an earth fault
+    on that bus, between it and the winding.
+    """
+    et, element, bus = str(sw_row['et']), int(sw_row['element']), int(sw_row['bus'])
+    trafo, side_bus = None, bus
+    if et == 't':
+        trafo = element
+    elif et == 'b':
+        node = element
+        lines = [i for i in net_sc.line.index if bool(net_sc.line.at[i, 'in_service'])
+                 and node in (int(net_sc.line.at[i, 'from_bus']), int(net_sc.line.at[i, 'to_bus']))]
+        trafos = [int(i) for i in net_sc.trafo.index if bool(net_sc.trafo.at[i, 'in_service'])
+                  and node in (int(net_sc.trafo.at[i, 'hv_bus']), int(net_sc.trafo.at[i, 'lv_bus']))]
+        if not lines and len(trafos) == 1:
+            trafo, side_bus = trafos[0], node
+    if trafo is None or trafo not in net_sc.trafo.index or _electrisim_is_grounding(net_sc.trafo, trafo):
+        return None
+    group = re.sub(r'[^A-Za-z]', '', str(net_sc.trafo.at[trafo, 'vector_group'] if 'vector_group' in net_sc.trafo.columns else ''))
+    hv = re.match(r'[A-Z]+', group)
+    hv_token = hv.group(0) if hv else ''
+    lv_token = group[len(hv_token):].lower()
+    on_hv = int(net_sc.trafo.at[trafo, 'hv_bus']) == side_bus
+    delta = hv_token.startswith('D') if on_hv else lv_token.startswith('d')
+    if not delta:
+        return None
+    return side_bus if et == 'b' else -1        # on the transformer itself: no bus between them, never a residual
+
+
+def _prot_residual_a(net_sc, sw_idx, fault_type, fault_bus_idx, current_a):
+    """
+    A switch's residual current in a fault: for a 1ph SC its Ikss, the fault-loop
+    current, is the available estimate; a grounding transformer's breaker its
+    neutral current, 3 I0; a breaker feeding a transformer's delta winding none,
+    but for a fault between it and the winding - zero sequence does not pass a
+    delta (an SOFC group's breaker, whose fault-loop current was taken for
+    residual, tripped its 67N for every earth fault). Other fault types have none.
+    """
+    if fault_type != '1ph':
+        return 0.0
+    residual_a = current_a
+    sw_row = net_sc.switch.loc[int(sw_idx)] if sw_idx is not None else None
+    if sw_row is not None and sw_row['et'] == 't' and _electrisim_is_grounding(net_sc.trafo, int(sw_row['element'])):
+        neutral_ka = _prot_grounding_neutral_ka(net_sc, int(sw_row['element']), fault_bus_idx)
+        residual_a = neutral_ka * 1000.0 if neutral_ka is not None else residual_a
+    elif sw_row is not None:
+        node = _prot_delta_winding_beyond(net_sc, sw_row)
+        if node is not None and (fault_bus_idx is None or int(fault_bus_idx) != node):
+            residual_a = 0.0
+    return residual_a
 
 
 def _prot_custom_trip_rows(net_sc, attach_summaries, fault_type, fault_bus_idx=None):
@@ -14261,9 +19511,7 @@ def _prot_custom_trip_rows(net_sc, attach_summaries, fault_type, fault_bus_idx=N
                     detail['multiple'] = current_a / pickup
         elif evaluator == _PROTECTION_KIND_EARTH_FAULT:
             pickup = spec.get('I_e_a') or 1.0
-            # For a 1ph SC, Ikss is the fault-loop current and is the available
-            # residual-current estimate. Other fault types have no residual trip.
-            residual_a = current_a if fault_type == '1ph' else 0.0
+            residual_a = _prot_residual_a(net_sc, summary.get('sw_idx'), fault_type, fault_bus_idx, current_a)
             tripped = residual_a >= pickup
             t_trip = spec.get('t_e', 0.2) if tripped else None
             detail = {'residual_current_a': residual_a, 'pickup_a': pickup}
@@ -14281,14 +19529,31 @@ def _prot_custom_trip_rows(net_sc, attach_summaries, fault_type, fault_bus_idx=N
         elif evaluator == _PROTECTION_KIND_DIFF:
             pickup = spec.get('I_diff_a') or 1.0
             slope = spec.get('diff_slope') or 0.0
-            # A switch defines the protected boundary. Branch fault current is the
-            # operating current; half is a conservative restraint-current proxy.
-            operate = current_a or 0.0
-            restraint = operate / 2.0
+            # The protected element is the switch's: the currents into it at each of its
+            # terminals, their sum the operating current and half their magnitudes' the
+            # restraint. The branch current alone tripped it for every fault beyond.
+            zone = _prot_diff_zone_currents(net_sc, summary.get('sw_idx'), fault_bus_idx)
+            if zone is None:
+                operate = current_a or 0.0
+                restraint = operate / 2.0
+            else:
+                operate, restraint = zone['operate_a'], zone['restraint_a']
             tripped = operate >= pickup + slope * restraint
-            t_trip = spec.get('t_g', 0.03) if tripped else None
+            t_trip = (spec.get('t_g') if spec.get('t_g') is not None else 0.03) if tripped else None
             detail = {'i_operate_a': operate, 'i_restraint_a': restraint,
-                      'pickup_a': pickup, 'slope': slope}
+                      'pickup_a': pickup, 'slope': slope,
+                      **({'terminals_a': zone['terminals_a'], 'phasors': zone['phasors']} if zone else {})}
+        elif evaluator == _PROTECTION_KIND_UV:
+            # The voltage at its switch's bus, on its own side of its element: what an
+            # inverter's own undervoltage trip, or a 27 relay on its breaker, sees.
+            pickup = spec.get('U_pu') if spec.get('U_pu') is not None else 0.5
+            vm = _prot_switch_voltage_pu(net_sc, summary.get('sw_idx'))
+            tripped = vm is not None and vm < pickup
+            t_trip = (spec.get('t_u') if spec.get('t_u') is not None else 0.5) if tripped else None
+            detail = {'vm_pu': vm, 'pickup_pu': pickup, 'evaluated': vm is not None}
+            if vm is None:
+                detail['note'] = ("pandapower gives no branch voltages for an unbalanced fault: "
+                                  "the undervoltage element is not evaluated")
         elif evaluator == _PROTECTION_KIND_DIST:
             z_base = None
             try:
@@ -14412,16 +19677,549 @@ def _prot_native_and_custom_trips(net_sc, attach_summaries, summary_by_sw_idx, f
             continue
         trip.append(row)
         reported.add(row.get('switch_idx'))
+    _prot_apply_bus_differential(net_sc, trip, fault_bus_idx)
+    _prot_apply_zone_differential(net_sc, trip, fault_bus_idx)
+    _prot_apply_arc_detection(net_sc, trip, fault_bus_idx)
+    _prot_apply_intertrip(net_sc, trip)
+    _prot_apply_alarms(net_sc, trip, fault_type, fault_bus_idx)
     return trip, warning
 
 
-def _prot_run_bus_scenario(base_net, fault_bus_idx, fault_type, case, attach_summaries):
-    """Short-circuit and protection times for a fault placed directly on a bus."""
+def _prot_apply_alarms(net_sc, trip, fault_type, fault_bus_idx):
+    """Each alarm stage's pick-up in the fault; whether it is raised - the fault still on at its delay - is graded later."""
+    settings = net_sc.get('_electrisim_alarms') if hasattr(net_sc, 'get') else None
+    if not settings:
+        return
+    for row in trip:
+        cfg = settings.get(row.get('switch_idx'))
+        if cfg is None:
+            continue
+        ka = _prot_switch_current_ka(net_sc, row['switch_idx'], fault_bus_idx)
+        residual = _prot_residual_a(net_sc, row['switch_idx'], fault_type, fault_bus_idx,
+                                    float(ka) * 1000.0 if ka is not None else 0.0) or 0.0
+        row['alarm_stage'] = {'current_a': float(residual), 'pickup_a': cfg['i_a'], 't_s': cfg['t_s'],
+                              'picked_up': residual >= cfg['i_a']}
+
+
+def _prot_bus_switch_phasor(net_sc, sw_idx, at_bus):
+    """
+    (kA, angle deg or NaN) of a breaker between two buses at `at_bus`, into the breaker: pandapower reports only its
+    magnitude (res_switch_sc), but keeps the branch it made of it (_prot_bus_switch_branches) in its ppc, with the
+    angle at each end as for a line - an unbalanced fault's has none. None when it has no current of its own.
+    """
+    sw_idx = int(sw_idx)
+    res = getattr(net_sc, 'res_switch_sc', None)
+    if res is None or sw_idx not in res.index or pd.isna(res.at[sw_idx, 'ikss_ka']):
+        return None
+    mag, angle = _prot_num(res.at[sw_idx, 'ikss_ka']), np.nan
+    try:
+        # its row: the one between its two buses (the ppc's switch rows do not follow net.switch's order)
+        from pandapower.pypower.idx_brch import F_BUS, T_BUS
+        from pandapower.pypower.idx_brch_sc import IKSS_ANGLE_F, IKSS_ANGLE_T, IKSS_F, IKSS_T
+        f, t = net_sc._pd2ppc_lookups['branch']['switch']
+        lookup, br = net_sc._pd2ppc_lookups['bus'], net_sc._ppc['branch']
+        here = int(lookup[int(at_bus)])
+        other_bus = int(net_sc.switch.at[sw_idx, 'element']) if int(net_sc.switch.at[sw_idx, 'bus']) == int(at_bus) \
+            else int(net_sc.switch.at[sw_idx, 'bus'])
+        there = int(lookup[other_bus])
+        rows = [r for r in range(int(f), int(t))
+                if {int(br[r, F_BUS].real), int(br[r, T_BUS].real)} == {here, there}]
+        if len(rows) == 1:
+            r = rows[0]
+            mag_col, ang_col = (IKSS_F, IKSS_ANGLE_F) if int(br[r, F_BUS].real) == here else (IKSS_T, IKSS_ANGLE_T)
+            value = float(br[r, ang_col].real)
+            if np.isfinite(value) and abs(float(br[r, mag_col].real) - mag) <= 0.01 * max(mag, 1e-6):
+                angle = value
+    except Exception:
+        pass
+    return mag, angle
+
+
+def _prot_bus_terminal_current(net_sc, sw_idx, at_bus=None):
+    """(kA, angle deg or NaN): a breaker's current at its own bus (or `at_bus`, a bus section's other board),
+    from its line's or transformer's branch result, or its own as a breaker between two buses."""
+    sw = net_sc.switch.loc[int(sw_idx)]
+    et, element, bus = str(sw['et']), int(sw['element']), int(sw['bus'])
+    if et == 'b':
+        return _prot_bus_switch_phasor(net_sc, sw_idx, bus if at_bus is None else at_bus)
+    sides = {'l': ('line', 'res_line_sc', (('from_bus', 'from'), ('to_bus', 'to'))),
+             't': ('trafo', 'res_trafo_sc', (('hv_bus', 'hv'), ('lv_bus', 'lv')))}.get(et)
+    if sides is None:
+        return None
+    table, res_name, cols = sides
+    res = getattr(net_sc, res_name, None)
+    if res is None or element not in res.index or element not in net_sc[table].index:
+        return None
+    for bus_col, side in cols:
+        if int(net_sc[table].at[element, bus_col]) == bus:
+            return _prot_num(res.at[element, f'ikss_{side}_ka']), _prot_num(res.at[element, f'ikss_{side}_degree'], np.nan)
+    return None
+
+
+def _prot_apply_bus_differential(net_sc, trip, fault_bus_idx):
+    """
+    Bus differential (87B): each switchboard whose breakers carry it sums their
+    currents at the bus - the fault's current for a fault on it, nothing
+    (what goes in comes out) for one beyond - against its pickup plus slope x
+    the restraint, half their magnitudes' sum, and trips them all. The zone is
+    every breaker at the board with the 87B (a bus section's at both its
+    boards) and every line or transformer joined to it with no breaker. An
+    earth fault's branch results have no angles: then their magnitudes, all
+    into the zone, for a fault on the bus, and nothing for one beyond - ideal
+    CTs balance - with the restraint their magnitudes' as ever.
+    """
+    settings = net_sc.get('_electrisim_bus_diff') if hasattr(net_sc, 'get') else None
+    if not settings:
+        return
+    rows = {row.get('switch_idx'): row for row in trip}
+    zones = {}
+    closed = [i for i in settings if i in net_sc.switch.index and bool(net_sc.switch.at[i, 'closed'])]
+    for sw_idx in closed:
+        zones.setdefault(int(net_sc.switch.at[sw_idx, 'bus']), []).append(sw_idx)
+    # A bus section (a breaker between two switchboards) is a CT of each board's zone.
+    for sw_idx in closed:
+        if net_sc.switch.at[sw_idx, 'et'] == 'b' and int(net_sc.switch.at[sw_idx, 'element']) in zones:
+            zones[int(net_sc.switch.at[sw_idx, 'element'])].append(sw_idx)
+    for bus, members in zones.items():
+        # (current at the board: (kA, angle) or None, the bus it leads to)
+        currents = []
+        for i in members:
+            sw_bus, element = int(net_sc.switch.at[i, 'bus']), int(net_sc.switch.at[i, 'element'])
+            et = str(net_sc.switch.at[i, 'et'])
+            if et == 'b':
+                currents.append((_prot_bus_terminal_current(net_sc, i, at_bus=bus), element if sw_bus == bus else sw_bus))
+                continue
+            table = {'l': 'line', 't': 'trafo'}.get(et)
+            ends = (('from_bus', 'to_bus') if et == 'l' else ('hv_bus', 'lv_bus'))
+            far = None
+            if table and element in net_sc[table].index:
+                a, b = (int(net_sc[table].at[element, c]) for c in ends)
+                far = b if a == bus else a
+            currents.append((_prot_bus_terminal_current(net_sc, i), far))
+        # Lines and transformers joined to the board with no breaker (a ring's taps) are in the zone too:
+        # their currents enter or leave it, so a fault beyond the board balances.
+        on_breaker = {(str(net_sc.switch.at[i, 'et']), int(net_sc.switch.at[i, 'element'])) for i in members}
+        for table, et, res_name, cols in (('line', 'l', 'res_line_sc', (('from_bus', 'from'), ('to_bus', 'to'))),
+                                          ('trafo', 't', 'res_trafo_sc', (('hv_bus', 'hv'), ('lv_bus', 'lv')))):
+            data, res = getattr(net_sc, table, None), getattr(net_sc, res_name, None)
+            if data is None or data.empty or res is None:
+                continue
+            for el in data.index:
+                if (et, int(el)) in on_breaker or not bool(data.at[el, 'in_service']) or el not in res.index:
+                    continue
+                for k, (bus_col, side) in enumerate(cols):
+                    if int(data.at[el, bus_col]) == bus:
+                        far = int(data.at[el, cols[1 - k][0]])
+                        currents.append(((_prot_num(res.at[el, f'ikss_{side}_ka']),
+                                          _prot_num(res.at[el, f'ikss_{side}_degree'], np.nan)), far))
+        mags = [abs(c[0]) * 1e3 if c else 0.0 for c, _ in currents]
+        phasors = all(np.isfinite(c[1]) for c, _ in currents if c and abs(c[0]) > 0)
+        inside = fault_bus_idx is not None and int(fault_bus_idx) == bus
+        if phasors:
+            operate = abs(sum(m * np.exp(1j * np.radians(c[1])) for m, (c, _) in zip(mags, currents) if m > 0))
+        elif inside or fault_bus_idx is None:
+            operate = sum(mags)
+        else:
+            # beyond the board what goes in comes out: its CTs, taken as ideal, sum to nothing. (The magnitudes
+            # cannot show it - on a meshed board the fault draws out through two circuits, and an earth fault's
+            # branch results leave out the zero sequence a grounding transformer carries.)
+            operate = 0.0
+        restraint = sum(mags) / 2.0
+        for i in members:
+            cfg = settings[i]
+            pickup, slope = cfg['i_a'], cfg['slope']
+            seen = operate >= pickup + slope * restraint
+            row = rows.get(i)
+            if row is None:
+                # an 87B-only breaker (a bus section) has no relay row of its own
+                name = net_sc.switch.at[i, 'name']
+                row = {'switch_idx': i, 'switch_id': None, 'switch_name': name,
+                       'user_friendly_name': (getattr(net_sc, 'user_friendly_names', None) or {}).get(name, name),
+                       'device': 'Bus differential (87B)', 'device_kind': 'Bus differential (87B)', 'is_fuse': False,
+                       'tripped': False, 't_trip_s': None, 'evaluation': {}}
+                trip.append(row)
+                rows[i] = row
+            row['bus_differential'] = {'bus_idx': bus, 'i_operate_a': float(operate), 'i_restraint_a': float(restraint),
+                                       'pickup_a': pickup, 'slope': slope, 'phasors': bool(phasors), 'tripped': bool(seen),
+                                       'terminals_a': [round(float(m), 3) for m in mags]}
+            if seen and (not row.get('tripped') or row.get('t_trip_s') is None or row['t_trip_s'] > cfg['t_s']):
+                row['tripped'], row['t_trip_s'] = True, cfg['t_s']
+                row['bus_differential']['tripped_first'] = True
+
+
+def _prot_apply_intertrip(net_sc, trip):
+    """A breaker with intertrip: when it trips, so does every other breaker at its bus - a row added for one with no relay."""
+    flagged = net_sc.get('_electrisim_intertrip') if hasattr(net_sc, 'get') else None
+    if not flagged:
+        return
+    rows = {row.get('switch_idx'): row for row in trip}
+    for sw_idx in sorted(flagged):
+        row = rows.get(sw_idx)
+        if not row or not row.get('tripped') or row.get('t_trip_s') is None:
+            continue
+        t, bus = float(row['t_trip_s']), int(net_sc.switch.at[sw_idx, 'bus'])
+        source = row.get('user_friendly_name') or str(sw_idx)
+        for other in net_sc.switch.index[(net_sc.switch['bus'] == bus) & (net_sc.switch['closed'] == True)]:
+            other = int(other)
+            if other == sw_idx:
+                continue
+            target = rows.get(other)
+            if target is None:
+                name = net_sc.switch.at[other, 'name']
+                target = {'switch_idx': other, 'switch_id': None, 'switch_name': name,
+                          'user_friendly_name': (getattr(net_sc, 'user_friendly_names', None) or {}).get(name, name),
+                          'device': 'Intertrip', 'device_kind': 'Intertrip', 'is_fuse': False,
+                          'tripped': False, 't_trip_s': None, 'evaluation': {}}
+                trip.append(target)
+                rows[other] = target
+            if not target.get('tripped') or target.get('t_trip_s') is None or target['t_trip_s'] > t:
+                target['tripped'], target['t_trip_s'] = True, t
+                target['intertrip_from'] = source
+
+
+def _prot_grounding_neutrals(net_sc, fault_type, fault_bus_idx):
+    """An earth fault's grounding transformers: [{trafo index, label, neutral A, rating}] - their duty is graded later."""
+    if fault_type != '1ph' or 'electrisim_grounding' not in net_sc.trafo.columns:
+        return []
+    out = []
+    names = getattr(net_sc, 'user_friendly_names', None) or {}
+    for i in net_sc.trafo.index[net_sc.trafo['electrisim_grounding'] == True]:
+        if not bool(net_sc.trafo.at[i, 'in_service']):
+            continue
+        ka = _prot_grounding_neutral_ka(net_sc, int(i), fault_bus_idx)
+        name = net_sc.trafo.at[i, 'name']
+        out.append({'trafo_idx': int(i), 'name': name, 'label': names.get(name, name),
+                    'neutral_a': float(ka) * 1000.0 if ka is not None else None,
+                    'i_rated_a': float(net_sc.trafo.at[i, 'electrisim_gt_i_rated_a']),
+                    't_rated_s': float(net_sc.trafo.at[i, 'electrisim_gt_t_rated_s'])})
+    return out
+
+
+def _prot_grounding_duty(net, scenario, rows, trip_time):
+    """
+    Each grounding transformer's thermal duty in an earth fault: its neutral
+    current for as long as it flows - until the fault is cleared, or its own
+    breaker opens first - against its short-time rating, I^2 t over
+    I_rated^2 t_rated. With the primaries, and with a primary breaker failed
+    (the slowest of the breaker-failure cases); neither clearing it - a fault
+    under every relay's pickup - is a continuous duty, which its short-time
+    rating does not cover.
+    """
+    out = []
+    t_clear = scenario.get('clearing_time_s')
+    failures = scenario.get('breaker_failure') or []
+    t_backup = None
+    if failures:
+        times = [r.get('t_clear_s') for r in failures]
+        t_backup = None if any(t is None for t in times) else max(times)
+    elif t_clear is not None:
+        t_backup = t_clear
+    for g in scenario.get('grounding_neutral') or []:
+        own = [k for k in rows if net.switch.at[k, 'et'] == 't' and int(net.switch.at[k, 'element']) == g['trafo_idx']]
+        t_own = min([trip_time(k) for k in own if trip_time(k) is not None], default=None)
+
+        def flowing(t):
+            ends = [x for x in (t, t_own) if x is not None]
+            return min(ends) if ends else None
+
+        def duty(t):
+            if t is None or g['neutral_a'] is None or not g['i_rated_a'] or not g['t_rated_s']:
+                return None
+            return 100.0 * (g['neutral_a'] / g['i_rated_a']) ** 2 * t / g['t_rated_s']
+
+        t1, t2 = flowing(t_clear), flowing(t_backup)
+        out.append({'label': g['label'], 'trafo_idx': g['trafo_idx'], 'neutral_a': g['neutral_a'], 'i_rated_a': g['i_rated_a'],
+                    't_rated_s': g['t_rated_s'], 't_flowing_s': t1, 't_flowing_backup_s': t2,
+                    'duty_percent': duty(t1), 'duty_backup_percent': duty(t2),
+                    'continuous': t1 is None, 'continuous_backup': t2 is None})
+    return out
+
+
+def _prot_grounding_neutral_ka(net_sc, trafo_idx, fault_bus_idx):
+    """
+    A grounding transformer's neutral current (3 I0) in an earth fault: the
+    fault's current shared by the grounding transformers it reaches through
+    lines, by their zero-sequence admittance. pandapower's single-phase branch
+    results carry no zero sequence - a zigzag read 0 A - and the cables' z0 is
+    small beside a resistance-limited zigzag's (0.1 against some 50 ohm), so
+    the zero-sequence voltage is about the same at each.
+    """
+    if fault_bus_idx is None or 'electrisim_grounding' not in net_sc.trafo.columns:
+        return None
+    i_f = _prot_extract_short_circuit_at_bus(net_sc, fault_bus_idx).get('ikss_ka')
+    if not i_f:
+        return None
+    import networkx as nx
+    graph = nx.Graph()
+    graph.add_nodes_from(int(b) for b in net_sc.bus.index)
+    for i, line in net_sc.line.iterrows():
+        if bool(line['in_service']):
+            graph.add_edge(int(line['from_bus']), int(line['to_bus']))
+    for _, sw in net_sc.switch.iterrows():
+        if sw['et'] == 'b' and bool(sw['closed']):
+            graph.add_edge(int(sw['bus']), int(sw['element']))
+    for _, sw in net_sc.switch.iterrows():
+        if sw['et'] == 'l' and not bool(sw['closed']) and graph.has_edge(*(int(net_sc.line.at[int(sw['element']), c]) for c in ('from_bus', 'to_bus'))):
+            graph.remove_edge(*(int(net_sc.line.at[int(sw['element']), c]) for c in ('from_bus', 'to_bus')))
+    reach = nx.node_connected_component(graph, int(fault_bus_idx))
+    admittance = {}
+    for i in net_sc.trafo.index[net_sc.trafo['electrisim_grounding'] == True]:
+        if not bool(net_sc.trafo.at[i, 'in_service']) or int(net_sc.trafo.at[i, 'hv_bus']) not in reach:
+            continue
+        r = _prot_num(net_sc.trafo.at[i, 'electrisim_gt_r0']) + 3.0 * _prot_num(net_sc.trafo.at[i, 'electrisim_gt_r_n'])
+        x = _prot_num(net_sc.trafo.at[i, 'electrisim_gt_x0']) + 3.0 * _prot_num(net_sc.trafo.at[i, 'electrisim_gt_x_n'])
+        admittance[int(i)] = 1.0 / complex(r, x) if abs(complex(r, x)) > 0 else 0.0
+    total = sum(admittance.values())
+    if int(trafo_idx) not in admittance or abs(total) == 0:
+        return 0.0
+    return float(i_f) * abs(admittance[int(trafo_idx)] / total)
+
+
+def _prot_arc_detection_settings(net, specs):
+    """
+    {switch index: settings} of the breakers with arc-flash detection, kept on
+    the network for every scenario - with those of its bus differential (87B)
+    and intertrip add-ons.
+    """
+    out, bus_diff, intertrip, alarms = {}, {}, set(), {}
+    for sw_id, spec in specs.items():
+        sw_idx = _prot_resolve_sw_idx_for_id(net, sw_id)
+        if sw_idx is None:
+            continue
+        t = spec.get('arc_t_s')
+        if t and t > 0:
+            out[int(sw_idx)] = {'t_s': float(t), 'i_a': float(spec.get('arc_i_a') or 0.0),
+                                'block_pcs': bool(spec.get('arc_block_pcs'))}
+        if spec.get('bdiff_i_a') and spec['bdiff_i_a'] > 0:
+            bus_diff[int(sw_idx)] = {'i_a': float(spec['bdiff_i_a']),
+                                     'slope': float(spec.get('bdiff_slope') if spec.get('bdiff_slope') is not None else 0.3),
+                                     't_s': float(spec.get('bdiff_t_s') if spec.get('bdiff_t_s') is not None else 0.05)}
+        if spec.get('intertrip_bus'):
+            intertrip.add(int(sw_idx))
+        if spec.get('alarm_ie_a') and spec['alarm_ie_a'] > 0:
+            alarms[int(sw_idx)] = {'i_a': float(spec['alarm_ie_a']),
+                                   't_s': float(spec.get('alarm_t_s') if spec.get('alarm_t_s') is not None else 10.0)}
+    net['_electrisim_arc_detection'] = out
+    net['_electrisim_bus_diff'] = bus_diff
+    net['_electrisim_intertrip'] = intertrip
+    net['_electrisim_alarms'] = alarms
+    net['_electrisim_zone_diff'] = _prot_zone_diff_settings(net, specs)
+    return out
+
+
+def _prot_zone_diff_settings(net, specs):
+    """
+    The zone differentials the breakers declare, keyed by their bus set: {key: {'buses': {bus idx}, 'i_a', 'slope',
+    't_s', 'members': [the switches that trip for it]}}. A zone's buses are named as the diagram names them (its
+    cells' names, or their display names). Zones naming a bus the network does not have are left out.
+    """
+    lookup = {str(n): int(i) for i, n in net.bus['name'].items()}
+    for name, friendly in (getattr(net, 'user_friendly_names', None) or {}).items():
+        if str(name) in lookup:
+            lookup.setdefault(str(friendly), lookup[str(name)])
+    zones = {}
+    for sw_id, spec in specs.items():
+        sw_idx = _prot_resolve_sw_idx_for_id(net, sw_id)
+        if sw_idx is None:
+            continue
+        for z in spec.get('zdiff_zones') or []:
+            if any(b not in lookup for b in z['buses']):
+                continue
+            key = tuple(sorted(z['buses']))
+            entry = zones.setdefault(key, {'buses': {lookup[b] for b in z['buses']}, 'i_a': z['i_a'],
+                                           'slope': z['slope'], 't_s': z['t_s'], 'members': []})
+            entry['members'].append(int(sw_idx))
+    return zones
+
+
+def _prot_zone_diff_boundary_switches(net):
+    """The breakers between two buses on a zone's boundary: their currents are computed as branches."""
+    out = set()
+    for z in (net.get('_electrisim_zone_diff') if hasattr(net, 'get') else None) or {}:
+        buses = net['_electrisim_zone_diff'][z]['buses']
+        for i in net.switch.index[net.switch['et'] == 'b']:
+            if (int(net.switch.at[i, 'bus']) in buses) != (int(net.switch.at[i, 'element']) in buses):
+                out.add(int(i))
+    return sorted(out)
+
+
+def _prot_apply_zone_differential(net_sc, trip, fault_bus_idx):
+    """
+    Zone differential (87 over a zone of buses): every current crossing the zone's boundary - a closed breaker
+    between a zone bus and one outside it, a line or transformer with one end inside - summed as it leaves the
+    zone, referred to the zone's highest voltage: the fault's current for a fault inside, and for one outside
+    whatever the zone's own sources (a ring-main segment's taps) feed out through it. Against the pickup plus
+    slope x the restraint, half the magnitudes' sum; its member breakers trip together in its time. An earth
+    fault's branch results have no angles: then the magnitudes, all into the zone, for a fault inside, and
+    nothing for one outside (ideal CTs), as the bus differential reads them.
+    """
+    zones = net_sc.get('_electrisim_zone_diff') if hasattr(net_sc, 'get') else None
+    if not zones:
+        return
+    rows = {row.get('switch_idx'): row for row in trip}
+    vn = net_sc.bus['vn_kv']
+    open_line = {int(net_sc.switch.at[i, 'element']) for i in net_sc.switch.index
+                 if net_sc.switch.at[i, 'et'] == 'l' and not bool(net_sc.switch.at[i, 'closed'])}
+    open_trafo = {int(net_sc.switch.at[i, 'element']) for i in net_sc.switch.index
+                  if net_sc.switch.at[i, 'et'] == 't' and not bool(net_sc.switch.at[i, 'closed'])}
+    for key, z in zones.items():
+        buses = z['buses']
+        v_ref = max(float(vn.at[b]) for b in buses)
+        terms = []      # (kA referred to v_ref, angle)
+        for i in net_sc.switch.index[(net_sc.switch['et'] == 'b') & (net_sc.switch['closed'] == True)]:
+            a, b = int(net_sc.switch.at[i, 'bus']), int(net_sc.switch.at[i, 'element'])
+            if (a in buses) != (b in buses):
+                inside = a if a in buses else b
+                ph = _prot_bus_switch_phasor(net_sc, i, inside)
+                if ph is not None:
+                    terms.append((ph[0] * float(vn.at[inside]) / v_ref, ph[1]))
+        for table, res_name, cols, opened in (('line', 'res_line_sc', (('from_bus', 'from'), ('to_bus', 'to')), open_line),
+                                              ('trafo', 'res_trafo_sc', (('hv_bus', 'hv'), ('lv_bus', 'lv')), open_trafo)):
+            data, res = getattr(net_sc, table, None), getattr(net_sc, res_name, None)
+            if data is None or data.empty or res is None:
+                continue
+            for el in data.index:
+                if not bool(data.at[el, 'in_service']) or el in opened or el not in res.index:
+                    continue
+                ends = [int(data.at[el, c]) for c, _ in cols]
+                if (ends[0] in buses) == (ends[1] in buses):
+                    continue
+                k = 0 if ends[0] in buses else 1
+                side = cols[k][1]
+                terms.append((_prot_num(res.at[el, f'ikss_{side}_ka']) * float(vn.at[ends[k]]) / v_ref,
+                              _prot_num(res.at[el, f'ikss_{side}_degree'], np.nan)))
+        mags = [abs(m) * 1e3 if np.isfinite(m) else 0.0 for m, _ in terms]
+        phasors = all(np.isfinite(a) for m, a in terms if np.isfinite(m) and abs(m) > 0)
+        inside = fault_bus_idx is not None and int(fault_bus_idx) in buses
+        if phasors:
+            operate = abs(sum(mag * np.exp(1j * np.radians(a)) for mag, (_, a) in zip(mags, terms) if mag > 0))
+        elif inside or fault_bus_idx is None:
+            operate = sum(mags)
+        else:
+            operate = 0.0
+        restraint = sum(mags) / 2.0
+        seen = operate >= z['i_a'] + z['slope'] * restraint
+        for i in z['members']:
+            if i not in net_sc.switch.index or not bool(net_sc.switch.at[i, 'closed']):
+                continue
+            row = rows.get(i)
+            if row is None:
+                name = net_sc.switch.at[i, 'name']
+                row = {'switch_idx': i, 'switch_id': None, 'switch_name': name,
+                       'user_friendly_name': (getattr(net_sc, 'user_friendly_names', None) or {}).get(name, name),
+                       'device': 'Zone differential (87)', 'device_kind': 'Zone differential (87)', 'is_fuse': False,
+                       'tripped': False, 't_trip_s': None, 'evaluation': {}}
+                trip.append(row)
+                rows[i] = row
+            row.setdefault('zone_differential', []).append(
+                {'zone': list(key), 'i_operate_a': float(operate), 'i_restraint_a': float(restraint),
+                 'pickup_a': z['i_a'], 'slope': z['slope'], 'phasors': bool(phasors), 'tripped': bool(seen)})
+            if seen and (not row.get('tripped') or row.get('t_trip_s') is None or row['t_trip_s'] > z['t_s']):
+                row['tripped'], row['t_trip_s'] = True, z['t_s']
+
+
+def _prot_apply_arc_detection(net_sc, trip, fault_bus_idx):
+    """
+    A breaker's arc-flash detection: an arc in its switchboard - a fault on its
+    switch's bus - lights its sensors, and with the current through it at its
+    pickup (0: light alone) it trips in its own time, whatever its other relay
+    does. A fault anywhere else is dark to it.
+    """
+    settings = net_sc.get('_electrisim_arc_detection') if hasattr(net_sc, 'get') else None
+    if not settings or fault_bus_idx is None:
+        return
+    for row in trip:
+        arc = settings.get(row.get('switch_idx'))
+        if arc is None:
+            continue
+        sw_bus = int(net_sc.switch.at[int(row['switch_idx']), 'bus'])
+        current_ka = _prot_switch_current_ka(net_sc, row['switch_idx'], fault_bus_idx)
+        current_a = float(current_ka) * 1000.0 if current_ka is not None else 0.0
+        seen = sw_bus == int(fault_bus_idx) and current_a >= arc['i_a']
+        row['arc_detection'] = {'light': sw_bus == int(fault_bus_idx), 'current_a': current_a,
+                                'pickup_a': arc['i_a'], 'tripped': seen, 'blocks_inverters': arc['block_pcs']}
+        if seen and (not row.get('tripped') or row.get('t_trip_s') is None or row['t_trip_s'] > arc['t_s']):
+            row['tripped'], row['t_trip_s'] = True, arc['t_s']
+            row['arc_detection']['tripped_first'] = True
+
+
+def _prot_split_line(net, line, fraction):
+    """
+    pandapower's create_sc_bus, the fault bus along a line, and the new half
+    given the line's zero sequence and fault temperature: it copies neither,
+    and the NaN that left made every earth fault along a line fail.
+    """
+    from pandapower.protection.utility_functions import create_sc_bus
+    before = set(net.line.index)
+    source = net.line.loc[line].copy()
+    net = create_sc_bus(net, sc_line_id=line, sc_fraction=fraction)
+    # The two halves and the fault bus between them: a differential relay's zone is both.
+    net['_electrisim_sc_split'] = {'line': int(line), 'new': sorted(int(i) for i in set(net.line.index) - before),
+                                   'bus': int(max(net.bus.index))}
+    for i in set(net.line.index) - before:
+        for col in ('r0_ohm_per_km', 'x0_ohm_per_km', 'c0_nf_per_km', 'g0_us_per_km', 'endtemp_degree'):
+            if col in net.line.columns and col in source.index and pd.isna(net.line.at[i, col]):
+                net.line.at[i, col] = source[col]
+    return net
+
+
+def _prot_earth_fault_net(net_sc, fault_type):
+    """
+    An earth fault's network as the IEC short-circuit study builds it: the DC
+    network set aside (pandapower's zero sequence has no VSC: every
+    single-phase scenario failed with one on the diagram) and each
+    transformer's neutral resistor in its zero sequence (a resistance-grounded
+    winding was solidly grounded).
+    """
+    # A switch with no rating: pandapower divides each switch's fault current by its in_ka,
+    # and 0 / 0 - a breaker no earth-fault current reaches - stopped every scenario.
+    if len(net_sc.switch) and 'in_ka' in net_sc.switch.columns:
+        net_sc.switch['in_ka'] = net_sc.switch['in_ka'].where(net_sc.switch['in_ka'] > 0, np.nan)
+    if fault_type != '1ph':
+        return
+    _electrisim_set_aside_dc_network(
+        net_sc, 'The single-phase protection study',
+        why="pandapower's zero-sequence model has no VSC (a three-wire converter adds no zero-sequence path)")
+    _electrisim_fold_neutral_impedance(net_sc, 10)
+
+
+_PROT_BUS_SWITCH_Z_PU = 1e-6        # on 1 MVA: 1 milliohm at 33 kV, 0.16 micro-ohm at 0.4 kV
+
+
+def _prot_bus_switch_branches(net_sc, sw_indices):
+    """
+    pandapower fuses the buses of a closed bus-bus switch into one node, so
+    the switch has no current of its own and a relay on it read the fault's
+    total. Each such switch with a relay becomes a branch of negligible
+    impedance (1e-6 pu on 1 MVA), and the short circuit reports its current.
+    """
+    if net_sc.switch.empty:
+        return
+    if 'z_ohm' not in net_sc.switch.columns:
+        net_sc.switch['z_ohm'] = 0.0
+    for si in sw_indices:
+        if si is None or int(si) not in net_sc.switch.index:
+            continue
+        si = int(si)
+        if net_sc.switch.at[si, 'et'] != 'b' or not bool(net_sc.switch.at[si, 'closed']):
+            continue
+        if _prot_num(net_sc.switch.at[si, 'z_ohm']) > 0:
+            continue
+        vn = _prot_num(net_sc.bus.at[int(net_sc.switch.at[si, 'bus']), 'vn_kv'], 1.0)
+        net_sc.switch.at[si, 'z_ohm'] = max(_PROT_BUS_SWITCH_Z_PU * vn * vn, 1e-9)
+
+
+def _prot_run_bus_scenario(base_net, fault_bus_idx, fault_type, case, attach_summaries, r_fault_ohm=0.0):
+    """Short-circuit and protection times for a fault placed directly on a bus (through r_fault_ohm: an arc)."""
     summary_by_sw_idx = {int(s['sw_idx']): s for s in attach_summaries if s.get('sw_idx') is not None}
     net_sc = deepcopy(base_net)
     try:
+        _prot_bus_switch_branches(net_sc, list(summary_by_sw_idx) + list(net_sc.get("_electrisim_bus_diff") or {})
+                                  + _prot_zone_diff_boundary_switches(net_sc))
         ensure_ext_grid_zero_sequence_min(net_sc)
-        sc.calc_sc(net_sc, bus=int(fault_bus_idx), branch_results=True, fault=fault_type, case=case)
+        _prot_earth_fault_net(net_sc, fault_type)
+        sc.calc_sc(net_sc, bus=int(fault_bus_idx), branch_results=True, fault=fault_type, case=case,
+                   **({'r_fault_ohm': float(r_fault_ohm)} if r_fault_ohm else {}))
     except Exception as e:
         return {
             'fault_location_mode': 'bus',
@@ -14446,13 +20244,14 @@ def _prot_run_bus_scenario(base_net, fault_bus_idx, fault_type, case, attach_sum
         'case': case,
         'short_circuit': sc_info,
         'trip': trip,
+        'grounding_neutral': _prot_grounding_neutrals(net_sc, fault_type, fault_bus_idx),
     }
     if prot_warning:
         out['warning'] = prot_warning
     return out
 
 
-def _prot_run_scenario(base_net, sc_line_id, sc_fraction, fault_type, case, attach_summaries):
+def _prot_run_scenario(base_net, sc_line_id, sc_fraction, fault_type, case, attach_summaries, r_fault_ohm=0.0):
     """
     Run a single fault scenario on a copy of the network and return:
     - per-device trip rows (switch_id, tripped, t_trip_s, ikss_ka)
@@ -14475,7 +20274,12 @@ def _prot_run_scenario(base_net, sc_line_id, sc_fraction, fault_type, case, atta
     summary_by_sw_idx = {int(s['sw_idx']): s for s in attach_summaries if s.get('sw_idx') is not None}
 
     try:
-        net_sc = create_sc_bus(deepcopy(base_net), sc_line_id=int(sc_line_id), sc_fraction=float(sc_fraction))
+        net_sc = _prot_split_line(deepcopy(base_net), int(sc_line_id), float(sc_fraction))
+        # pandapower (3.3) moves every switch whose element number is the
+        # line's onto the new line half - transformer and bus switches too, so
+        # a transformer switch then named a transformer that does not exist.
+        not_line = base_net.switch.index[base_net.switch['et'] != 'l']
+        net_sc.switch.loc[not_line, 'element'] = base_net.switch.loc[not_line, 'element']
     except Exception as e:
         return {
             'sc_line_id': int(sc_line_id),
@@ -14487,8 +20291,12 @@ def _prot_run_scenario(base_net, sc_line_id, sc_fraction, fault_type, case, atta
 
     try:
         fault_bus = int(max(net_sc.bus.index))
+        _prot_bus_switch_branches(net_sc, list(summary_by_sw_idx) + list(net_sc.get("_electrisim_bus_diff") or {})
+                                  + _prot_zone_diff_boundary_switches(net_sc))
         ensure_ext_grid_zero_sequence_min(net_sc)
-        sc.calc_sc(net_sc, bus=fault_bus, branch_results=True, fault=fault_type, case=case)
+        _prot_earth_fault_net(net_sc, fault_type)
+        sc.calc_sc(net_sc, bus=fault_bus, branch_results=True, fault=fault_type, case=case,
+                   **({'r_fault_ohm': float(r_fault_ohm)} if r_fault_ohm else {}))
     except Exception as e:
         return {
             'sc_line_id': int(sc_line_id),
@@ -14512,95 +20320,345 @@ def _prot_run_scenario(base_net, sc_line_id, sc_fraction, fault_type, case, atta
         'case': case,
         'short_circuit': _prot_extract_short_circuit_at_bus(net_sc, fault_bus),
         'trip': trip,
+        'grounding_neutral': _prot_grounding_neutrals(net_sc, fault_type, fault_bus),
     }
     if prot_warning:
         out['warning'] = prot_warning
     return out
 
 
-def _prot_bus_distances(net, starts):
-    """Unweighted bus distances through in-service lines and transformers."""
+def _prot_element_graph(net, fault_line_id=None):
+    """
+    Buses and branch elements as graph nodes. A branch is a node of its own,
+    joined to each of its buses, so a relay - a switch at one bus of one
+    element - is the edge between the two. A faulted line becomes the fault
+    node 'F'. Open switches cut their edge.
+    """
     adjacency = {}
+
     def connect(a, b):
-        adjacency.setdefault(int(a), set()).add(int(b))
-        adjacency.setdefault(int(b), set()).add(int(a))
-    for table, cols in (('line', ('from_bus', 'to_bus')), ('trafo', ('hv_bus', 'lv_bus'))):
+        adjacency.setdefault(a, set()).add(b)
+        adjacency.setdefault(b, set()).add(a)
+
+    for b in net.bus.index:
+        adjacency.setdefault(('bus', int(b)), set())
+    tables = (('line', 'l', ('from_bus', 'to_bus')), ('trafo', 't', ('hv_bus', 'lv_bus')),
+              ('trafo3w', 't3', ('hv_bus', 'mv_bus', 'lv_bus')), ('impedance', 'i', ('from_bus', 'to_bus')))
+    for table, et, cols in tables:
         data = getattr(net, table, None)
-        if data is None:
+        if data is None or data.empty:
+            continue
+        for idx, row in data.iterrows():
+            if not bool(row.get('in_service', True)):
+                continue
+            node = 'F' if (et == 'l' and fault_line_id is not None and int(idx) == int(fault_line_id)) else (et, int(idx))
+            for col in cols:
+                connect(('bus', int(row[col])), node)
+    if fault_line_id is not None:
+        adjacency.setdefault('F', set())
+
+    def element_node(et, element):
+        if et == 'l' and fault_line_id is not None and int(element) == int(fault_line_id):
+            return 'F'
+        return ('bus', int(element)) if et == 'b' else (et, int(element))
+
+    for _, sw in net.switch.iterrows():
+        a, b = ('bus', int(sw['bus'])), element_node(sw['et'], sw['element'])
+        if sw['et'] == 'b':
+            if bool(sw['closed']):
+                connect(a, b)
+        elif not bool(sw['closed']) and b in adjacency.get(a, ()):
+            adjacency[a].discard(b)
+            adjacency[b].discard(a)
+    return adjacency, element_node
+
+
+def _prot_zone(adjacency, starts, relay_at_edge, blocked=()):
+    """Nodes reachable from starts without crossing a relay, and the relays met (relay -> far node)."""
+    seen = set(starts) | set(blocked)
+    zone, boundary, queue = set(starts), {}, list(starts)
+    for node in queue:
+        for nxt in adjacency.get(node, ()):
+            relay = relay_at_edge.get(frozenset((node, nxt)))
+            if relay is not None:
+                boundary.setdefault(relay, nxt)
+                continue
+            if nxt not in seen:
+                seen.add(nxt)
+                zone.add(nxt)
+                queue.append(nxt)
+    return zone, boundary
+
+
+def _prot_reaches_source(adjacency, start, sources, blocked):
+    seen, queue = set(blocked) | {start}, [start]
+    for node in queue:
+        if node in sources:
+            return True
+        for nxt in adjacency.get(node, ()):
+            if nxt not in seen:
+                seen.add(nxt)
+                queue.append(nxt)
+    return False
+
+
+def _prot_breaker_failure(net, adjacency, element_node, fault_node, sources, rows, primaries, trip_time, label,
+                          bf_times, relay_at_edge=None, bf_transfer=()):
+    """
+    Each primary breaker that trips, failing to open: what clears the fault
+    then. The other relays open their breakers at their trip times; a failed
+    breaker with breaker-failure protection (50BF) trips every other breaker
+    at its bus its delay after its relay did. One that also sends a transfer
+    trip (`bf_transfer`) trips every breaker bounding the zones on both its
+    sides - its board's and, beyond it, the cable's far end or what else
+    bounds that zone - and the sources inside them with no breaker of their
+    own (an inverter's block, a generator's lockout): its board alone leaves a
+    fault on the board fed on through it from the far end. The fault is cleared when no
+    source reaches it. One row per primary: the time by the relays alone, by
+    50BF, and the clearing time - None, the fault left on.
+    """
+    def edge_of(si):
+        sw = net.switch.loc[si]
+        return frozenset((('bus', int(sw['bus'])), element_node(sw['et'], sw['element'])))
+
+    def cleared_at(events):
+        # events: (t, edges opened, sources tripped)
+        adj = {n: set(v) for n, v in adjacency.items()}
+        live = set(sources)
+        for t, edges, *tripped in sorted(events, key=lambda e: e[0]):
+            for edge in edges:
+                a, b = tuple(edge)
+                adj.get(a, set()).discard(b)
+                adj.get(b, set()).discard(a)
+            for src in (tripped[0] if tripped else ()):
+                live.discard(src)
+            if not _prot_reaches_source(adj, fault_node, live, ()):
+                return t
+        return None
+
+    out = []
+    for key in primaries:
+        t_p = trip_time(key)
+        if t_p is None:
+            continue
+        relays = [(trip_time(k), [edge_of(k)]) for k in rows if k != key and trip_time(k) is not None]
+        t_relays = cleared_at(relays)
+        bf = bf_times.get(key)
+        t_bf, opened = None, []
+        if bf is not None and bf > 0:
+            bus = int(net.switch.at[key, 'bus'])
+            tripped = set()
+            if relay_at_edge and key in bf_transfer:
+                at_bus = set()
+                for side in edge_of(key):
+                    zone, bounding = _prot_zone(adjacency, [side], relay_at_edge)
+                    at_bus |= {si for si in bounding if si != key}
+                    # a source with no breaker of its own beyond the failed one - a PCS behind its tap, the genset -
+                    # is stopped by the 50BF's trip to it (an inverter block, a generator lockout)
+                    tripped |= zone & set(sources)
+                at_bus = sorted(at_bus)
+            else:
+                at_bus = [si for si in net.switch.index if si != key and bool(net.switch.at[si, 'closed'])
+                          and (int(net.switch.at[si, 'bus']) == bus
+                               or (net.switch.at[si, 'et'] == 'b' and int(net.switch.at[si, 'element']) == bus))]
+            t_bf = cleared_at(relays + [(t_p + bf, [edge_of(si) for si in at_bus], tripped)])
+            opened = [_contingency_friendly_name(net, net.switch.at[si, 'name']) for si in at_bus]
+        times = [t for t in (t_relays, t_bf) if t is not None]
+        out.append({'failed_switch': label(key), 't_primary_s': t_p, 'bf_time_s': bf,
+                    't_clear_relays_s': t_relays, 't_clear_50bf_s': t_bf, 'opened_by_50bf': opened,
+                    't_clear_s': min(times) if times else None})
+    return out
+
+
+def _prot_check_miscoordination(net, scenarios, t_diff, bf_times=None, bf_transfer=()):
+    """
+    Grade the relays of each fault by protection zone. The zone is what the
+    fault reaches without passing a relay; the relays on its edge that lead
+    to a source must clear it (primaries). Behind each primary, the next
+    relays towards a source are its backups and must be t_diff slower. Any
+    other relay that trips before the fault is cleared (plus t_diff) trips
+    needlessly - on a meshed network, fault current flows round the healthy
+    side too.
+
+    Ordering relays by their hop distance from the external grid paired
+    unrelated relays: a three-winding transformer was not a path, so the
+    parallel transformer feeds were graded as primary and backup.
+
+    Returns (miscoordination, unwanted_trips); each scenario gets
+    primary_switches, clearing_time_s and unprotected_sources.
+    """
+    miscoord, unwanted = [], []
+    sources = set()
+    for table in ('ext_grid', 'gen'):
+        data = getattr(net, table, None)
+        if data is None or data.empty:
             continue
         for _, row in data.iterrows():
             if bool(row.get('in_service', True)):
-                connect(row[cols[0]], row[cols[1]])
-    distance, queue = {}, [int(x) for x in starts if x is not None]
-    for x in queue:
-        distance[x] = 0
-    for bus in queue:
-        for adjacent in adjacency.get(bus, ()):
-            if adjacent not in distance:
-                distance[adjacent] = distance[bus] + 1
-                queue.append(adjacent)
-    return distance
+                sources.add(('bus', int(row['bus'])))
+    # A grid-forming PCS holds its island's voltage and feeds its faults at its current limit:
+    # where the PCS are an island's only sources, its relays' primaries lead to them. As one
+    # PCS (the island's reference) alone, the other blocks' breakers were never primaries.
+    # (On a grid a PCS stays an inverter-based source, named apart below.)
+    islands = [r for r in getattr(net, 'electrisim_pcs', None) or [] if r.get('as_source') is not None]
+    held = set()
+    if islands:
+        graph = top.create_nxgraph(net, respect_switches=True)
+        for r in islands:
+            held |= set(int(b) for b in top.connected_component(graph, r['bus']))
+    forming = [r for r in getattr(net, 'electrisim_pcs', None) or []
+               if r.get('in_service') and r.get('control') == 'grid_forming' and int(r['bus']) in held]
+    for rec in forming:
+        sources.add(('bus', int(rec['bus'])))
+    source_names = {}
+    for rec in forming:
+        source_names.setdefault(('bus', int(rec['bus'])), []).append(rec.get('label') or rec.get('name'))
+    for table in ('gen', 'ext_grid'):
+        data = getattr(net, table, None)
+        if data is not None and not data.empty:
+            for idx, row in data.iterrows():
+                source_names.setdefault(('bus', int(row['bus'])), []).append(
+                    _contingency_friendly_name(net, row.get('name') if pd.notna(row.get('name')) else f'{table} {idx}'))
+    # Inverter-based sources (static generators, wind turbines, storage) feed a
+    # fault too - about their rated current - until their own protection
+    # disconnects them. Too little to operate an overcurrent relay, they do not
+    # make a relay a primary, but a fault zone holding one is not cleared of
+    # it by the breakers: the wind farm inside the transmission ring's L1-L4
+    # zone, or behind the radial grid's wind feeder breaker, went unmentioned.
+    inverter_names = {}
+    for table in ('sgen', 'storage'):
+        data = getattr(net, table, None)
+        if data is None or data.empty:
+            continue
+        for idx, row in data.iterrows():
+            if bool(row.get('in_service', True)) and int(row['bus']) not in {int(r['bus']) for r in forming}:
+                inverter_names.setdefault(('bus', int(row['bus'])), []).append(
+                    _contingency_friendly_name(net, row.get('name') if pd.notna(row.get('name')) else f'{table} {idx}'))
 
-
-def _prot_scenario_fault_buses(net, scenario):
-    if scenario.get('fault_bus_idx') in net.bus.index:
-        return [scenario['fault_bus_idx']]
-    line_id = scenario.get('sc_line_id')
-    if line_id in getattr(net, 'line', pd.DataFrame()).index:
-        row = net.line.loc[line_id]
-        return [int(row['from_bus']), int(row['to_bus'])]
-    return []
-
-
-def _prot_check_miscoordination(net, scenarios, t_diff):
-    """Check only primary/backup devices that lie on a source-to-fault path."""
-    miscoord = []
-    sources = list(getattr(net, 'ext_grid', pd.DataFrame()).get('bus', []))
-    source_distance = _prot_bus_distances(net, sources)
     for scenario in scenarios:
-        fault_buses = _prot_scenario_fault_buses(net, scenario)
-        fault_distance = _prot_bus_distances(net, fault_buses)
-        trips = [t for t in scenario.get('trip', []) if t.get('tripped') and t.get('t_trip_s') is not None]
-        on_path = []
-        source_to_fault = min((source_distance.get(b, float('inf')) for b in fault_buses), default=float('inf'))
-        for trip in trips:
+        if scenario.get('error'):
+            continue
+        line_id = scenario.get('sc_line_id')
+        if scenario.get('fault_location_mode') == 'bus' or line_id is None:
+            fault_line = None
+            fault_node = ('bus', int(scenario['fault_bus_idx']))
+        else:
+            fault_line = int(line_id)
+            fault_node = 'F'
+        adjacency, element_node = _prot_element_graph(net, fault_line)
+        rows = {}
+        relay_at_edge = {}
+        for row in scenario.get('trip', []):
             try:
-                sw = net.switch.loc[int(trip['switch_idx'])]
-                bus = int(sw['bus'])
-                ds, df = source_distance.get(bus), fault_distance.get(bus)
-                # A protection point is on a shortest supplied path when its
-                # source/fault distances add up to the path length (allow one
-                # hop because a switch is attached to a line terminal).
-                if ds is not None and df is not None and ds + df <= source_to_fault + 1:
-                    trip['_fault_distance'] = df
-                    on_path.append(trip)
-            except Exception:
+                sw = net.switch.loc[int(row['switch_idx'])]
+            except (KeyError, TypeError, ValueError):
                 continue
-        # Closer-to-fault relay is primary; only its immediate upstream relay is
-        # a valid backup. Devices on other feeders are deliberately excluded.
-        trips = sorted(on_path, key=lambda r: (r['_fault_distance'], r['t_trip_s']))
-        for i in range(len(trips) - 1):
-            primary = trips[i]
-            backup = trips[i + 1]
-            if primary['_fault_distance'] == backup['_fault_distance']:
+            if not bool(sw['closed']):
                 continue
-            delta_t = float(backup['t_trip_s']) - float(primary['t_trip_s'])
-            if delta_t < t_diff:
+            key = int(row['switch_idx'])
+            rows[key] = row
+            relay_at_edge[frozenset((('bus', int(sw['bus'])), element_node(sw['et'], sw['element'])))] = key
+
+        def trip_time(key):
+            row = rows.get(key) or {}
+            return float(row['t_trip_s']) if row.get('tripped') and row.get('t_trip_s') is not None else None
+
+        def label(key):
+            row = rows[key]
+            return row.get('user_friendly_name') or row.get('switch_name') or str(key)
+
+        zone, boundary = _prot_zone(adjacency, [fault_node], relay_at_edge)
+        primaries = {k: far for k, far in boundary.items()
+                     if _prot_reaches_source(adjacency, far, sources, zone)}
+        scenario['unprotected_sources'] = sorted({n for b in zone & sources for n in source_names.get(b, [])})
+        scenario['unprotected_inverter_sources'] = sorted(
+            {n for b in zone for n in inverter_names.get(b, [])})
+        scenario['primary_switches'] = [label(k) for k in primaries]
+
+        backups = {}
+        for key, far in primaries.items():
+            zone2, boundary2 = _prot_zone(adjacency, [far], relay_at_edge, blocked=zone)
+            if zone2 & sources:
+                continue  # a source right behind the relay: nothing can back it up
+            backups[key] = [b for b, far2 in boundary2.items()
+                            if b != key and b not in primaries
+                            and _prot_reaches_source(adjacency, far2, sources, zone | zone2)]
+
+        clearing = []
+        for key in primaries:
+            t = trip_time(key)
+            if t is None:
+                t_backup = [trip_time(b) for b in backups.get(key, []) if trip_time(b) is not None]
+                t = min(t_backup) if t_backup else None
+            clearing.append(t)
+        t_clear = max(clearing) if clearing and None not in clearing else None
+        scenario['clearing_time_s'] = t_clear
+        scenario['breaker_failure'] = _prot_breaker_failure(
+            net, adjacency, element_node, fault_node, sources, rows, primaries, trip_time, label, bf_times or {},
+            relay_at_edge, bf_transfer)
+        raised = {}
+        for key, row in rows.items():
+            stage = row.get('alarm_stage')
+            if not stage:
+                continue
+            ends = [t for t in (scenario.get('clearing_time_s'), trip_time(key)) if t is not None]
+            stage['raised'] = bool(stage['picked_up'] and (not ends or min(ends) >= stage['t_s'] - 1e-9))
+            if stage['raised']:
+                raised[key] = label(key)
+        scenario['alarms'] = sorted(raised.values())
+        scenario['grounding_duty'] = _prot_grounding_duty(net, scenario, rows, trip_time)
+        for d in scenario['grounding_duty']:
+            d['alarmed'] = any(net.switch.at[k, 'et'] == 't' and int(net.switch.at[k, 'element']) == d['trafo_idx']
+                               for k in raised)
+
+        common = {
+            'sc_line_id': scenario.get('sc_line_id'),
+            'sc_fraction': scenario.get('sc_fraction'),
+            'fault_bus': scenario.get('fault_bus'),
+            'fault_label': scenario.get('fault_label'),
+        }
+        for key in primaries:
+            t_p = trip_time(key)
+            if t_p is None:
+                continue
+            for b in backups.get(key, []):
+                t_b = trip_time(b)
+                if t_b is None or t_b - t_p >= t_diff - 1e-9:
+                    continue
                 miscoord.append({
-                    'sc_line_id': scenario.get('sc_line_id'),
-                    'sc_fraction': scenario.get('sc_fraction'),
-                    'fault_bus': scenario.get('fault_bus'),
-                    'primary_switch_id': primary.get('switch_id'),
-                    'primary_user_friendly_name': primary.get('user_friendly_name'),
-                    'primary_t_s': primary.get('t_trip_s'),
-                    'backup_switch_id': backup.get('switch_id'),
-                    'backup_user_friendly_name': backup.get('user_friendly_name'),
-                    'backup_t_s': backup.get('t_trip_s'),
-                    'delta_t_s': delta_t,
+                    **common,
+                    'primary_switch_id': rows[key].get('switch_id'),
+                    'primary_user_friendly_name': label(key),
+                    'primary_t_s': t_p,
+                    'backup_switch_id': rows[b].get('switch_id'),
+                    'backup_user_friendly_name': label(b),
+                    'backup_t_s': t_b,
+                    'delta_t_s': t_b - t_p,
                     'required_t_diff_s': float(t_diff),
                     'topology_path': True,
                 })
-    return miscoord
+        graded = set(primaries) | {b for bs in backups.values() for b in bs}
+        # A breaker on a bus inside the fault's zone only parts an element from the faulted bus, which its
+        # primaries leave dead anyway: a bus differential (87B) opening its feeder and zigzag is not unwanted.
+        on_faulted_bus = {k for k in rows if ('bus', int(net.switch.at[k, 'bus'])) in zone}
+        # Nor is a breaker on the zone's edge with no source behind it: it parts the faulted zone from a part its
+        # primaries leave dead - a line differential opening both ends of its cable, the far one feeding nothing.
+        if t_clear is not None:
+            for key in rows:
+                t = trip_time(key)
+                if key in graded or key in on_faulted_bus or key in boundary or t is None \
+                        or t >= t_clear + t_diff - 1e-9:
+                    continue
+                unwanted.append({
+                    **common,
+                    'switch_id': rows[key].get('switch_id'),
+                    'user_friendly_name': label(key),
+                    't_trip_s': t,
+                    'clearing_time_s': t_clear,
+                    'required_t_diff_s': float(t_diff),
+                    'primary_switches': scenario['primary_switches'],
+                })
+    return miscoord, unwanted
 
 
 def protection_coordination(net, prot_params, in_data):
@@ -14624,16 +20682,21 @@ def protection_coordination(net, prot_params, in_data):
         if not (0.0 < sc_fraction < 1.0):
             sc_fraction = 0.5
         t_diff = float(prot_params.get('t_diff', 0.3))
+        # A fault through a resistance (ohm): a high-resistance earth fault, and what still sees it.
+        r_fault_ohm = max(_prot_safe_float(prot_params.get('r_fault_ohm'), 0.0) or 0.0, 0.0)
         grading_mode = str(prot_params.get('grading_mode', 'auto') or 'auto').lower()
         if grading_mode not in ('auto', 'manual'):
             grading_mode = 'auto'
 
-        # Validate connectivity early so we surface a clear message before sc.calc_sc.
-        isolated_buses = top.unsupplied_buses(net)
-        if len(isolated_buses) > 0:
+        # De-energised parts of the network - a board lost, a black-start step - are set aside as the short
+        # circuit sets them aside (out of service, named in a warning); they were refused, and with them every
+        # state of an island that leaves a section dead. With no source at all the study says so.
+        try:
+            _electrisim_sc_drop_dead_buses(net)
+        except ValueError as e:
             return json.dumps({
                 'error': True,
-                'message': f'Isolated buses found: {sorted(isolated_buses)}. Connect every component to a supplied bus before running protection coordination.',
+                'message': f'{e} Connect every component to a supplied bus before running protection coordination.',
                 'scenarios': [],
                 'devices': [],
                 'summary': {'converged': False},
@@ -14665,13 +20728,18 @@ def protection_coordination(net, prot_params, in_data):
         _prot_ensure_bus_geodata(net)
 
         attach_summaries = _attach_protection_devices(net, specs, grading_mode)
+        _prot_arc_detection_settings(net, specs)
         attached_count = sum(1 for s in attach_summaries if s.get('attached'))
         not_computed_count = sum(1 for s in attach_summaries if s.get('not_computed'))
 
         if attached_count == 0:
             return json.dumps({
                 'error': True,
-                'message': 'No protection device could be attached to the network. See `attach_summaries` for details.',
+                # The alert is all the user sees, so it carries each reason.
+                'message': 'No protection device could be evaluated:\n' + '\n'.join(
+                    f"- {s.get('user_friendly_name') or s.get('switch_name') or s.get('switch_id')}: "
+                    f"{s.get('reason') or 'not attached'}"
+                    for s in attach_summaries),
                 'attach_summaries': attach_summaries,
                 'scenarios': [],
                 'devices': [],
@@ -14695,7 +20763,19 @@ def protection_coordination(net, prot_params, in_data):
                     'devices': [],
                     'summary': {'converged': False},
                 }, separators=(',', ':'))
-            scenarios.append(_prot_run_bus_scenario(net, fault_bus_idx, fault_type, case, attach_summaries))
+            if not bool(net.bus.at[fault_bus_idx, 'in_service']):
+                name = (resolve_element_refs(net, 'bus', {fault_bus_idx}) or [{}])[0]
+                return json.dumps({
+                    'error': True,
+                    'message': f"Protection coordination: fault bus {name.get('name') or fault_bus_idx} is "
+                               f"de-energised in this state - no source reaches it, so there is no fault current. "
+                               f"Choose a bus a source supplies.",
+                    'scenarios': [],
+                    'devices': [],
+                    'summary': {'converged': False},
+                }, separators=(',', ':'))
+            scenarios.append(_prot_run_bus_scenario(net, fault_bus_idx, fault_type, case, attach_summaries,
+                                                    r_fault_ohm=r_fault_ohm))
         else:
             if sc_line_id_raw in (None, '', 'all'):
                 line_ids = [int(idx) for idx in net.line.index if net.line.at[idx, 'in_service']]
@@ -14705,7 +20785,8 @@ def protection_coordination(net, prot_params, in_data):
                 except (TypeError, ValueError):
                     line_ids = [int(idx) for idx in net.line.index if net.line.at[idx, 'in_service']]
             for line_id in line_ids:
-                scenarios.append(_prot_run_scenario(net, line_id, sc_fraction, fault_type, case, attach_summaries))
+                scenarios.append(_prot_run_scenario(net, line_id, sc_fraction, fault_type, case, attach_summaries,
+                                                    r_fault_ohm=r_fault_ohm))
 
         scenario_warning = None
         if not scenarios:
@@ -14723,7 +20804,16 @@ def protection_coordination(net, prot_params, in_data):
         devices = _prot_extract_devices_for_ui(net, attach_summaries)
         _prot_append_custom_devices(devices, attach_summaries)
 
-        miscoord = _prot_check_miscoordination(net, scenarios, t_diff)
+        for scenario in scenarios:
+            scenario['fault_label'] = _prot_fault_label(net, scenario)
+        bf_times, bf_transfer = {}, set()
+        for sw_id, spec in specs.items():
+            sw_idx = _prot_resolve_sw_idx_for_id(net, sw_id)
+            if sw_idx is not None and spec.get('bf_time_s'):
+                bf_times[int(sw_idx)] = float(spec['bf_time_s'])
+                if spec.get('bf_transfer_trip'):
+                    bf_transfer.add(int(sw_idx))
+        miscoord, unwanted = _prot_check_miscoordination(net, scenarios, t_diff, bf_times, bf_transfer)
 
         n_tripped = sum(1 for sc_res in scenarios for trip in sc_res.get('trip', []) if trip.get('tripped'))
         response = {
@@ -14739,14 +20829,32 @@ def protection_coordination(net, prot_params, in_data):
                 'n_scenarios': len(scenarios),
                 'n_tripped': n_tripped,
                 'n_miscoordination': len(miscoord),
+                'n_unwanted_trips': len(unwanted),
+                # A primary breaker failing: the faults then left on, by nothing else clearing them.
+                'n_breaker_failure_uncleared': sum(1 for sc in scenarios for r in sc.get('breaker_failure') or []
+                                                   if r['t_clear_s'] is None),
                 'fault_type': fault_type,
                 'case': case,
+                'r_fault_ohm': r_fault_ohm,
+                # Grounding transformers: their worst short-time duty, and the earth faults nothing clears.
+                'max_grounding_duty_percent': max([d['duty_percent'] for sc in scenarios for d in sc.get('grounding_duty') or []
+                                                   if d.get('duty_percent') is not None], default=None),
+                'max_grounding_duty_backup_percent': max([d['duty_backup_percent'] for sc in scenarios
+                                                          for d in sc.get('grounding_duty') or []
+                                                          if d.get('duty_backup_percent') is not None], default=None),
+                'n_grounding_continuous': sum(1 for sc in scenarios for d in sc.get('grounding_duty') or []
+                                              if d.get('continuous')),
+                # ...and of those, the ones no alarm stage flags; and every alarm raised.
+                'n_grounding_continuous_unalarmed': sum(1 for sc in scenarios for d in sc.get('grounding_duty') or []
+                                                        if d.get('continuous') and not d.get('alarmed')),
+                'n_alarms': sum(len(sc.get('alarms') or []) for sc in scenarios),
                 'grading_mode': grading_mode,
                 'fault_location_mode': fault_location_mode,
                 't_diff_s': t_diff,
                 **({'scenario_warning': scenario_warning} if scenario_warning else {}),
             },
             'miscoordination': miscoord,
+            'unwanted_trips': unwanted,
             'output': {
                 'show_curves': bool(prot_params.get('show_curves', True)),
                 'show_table': bool(prot_params.get('show_table', True)),
@@ -14755,6 +20863,9 @@ def protection_coordination(net, prot_params, in_data):
         }
         if scenario_warning:
             response['warning'] = scenario_warning
+        if getattr(net, 'warnings', None):
+            # the de-energised buses set aside, among others
+            response['warnings'] = list(net.warnings)
         return json.dumps(
             _prot_to_jsonable(response),
             default=_json_serialize_default,
@@ -14770,3 +20881,129 @@ def protection_coordination(net, prot_params, in_data):
             'devices': [],
             'summary': {'converged': False},
         }, separators=(',', ':'))
+
+
+def protection_arc_clearing_times(net, in_data, prot_params, faults):
+    """
+    The relays' clearing time for each arcing fault: [(bus_idx, ratio)], ratio
+    the arcing current over the bolted (IEEE 1584's; None: bolted) ->
+    [{'t_relay_s', 'clearing_switches', 'ikss_ka', ...}] in the same order.
+
+    Each fault is a three-phase bus fault through the arc's resistance, so the
+    relays see what the arc draws and the voltage it holds. The resistance is
+    the one holding the bus at the arc's voltage, sqrt(1 - ratio^2) of the
+    source's: behind the grid that draws IEEE 1584's arcing current; fed by
+    inverters at their current limit the current stays, and only the voltage
+    - what an undervoltage relay reads - is the arc's. (Solving for the
+    current instead ran the inverter-fed buses' resistance up until their
+    voltage passed 1 pu.)
+    """
+    specs = _prot_collect_switch_protection_specs(in_data)
+    if not specs or net.switch.empty:
+        return [{'error': 'no relays on the diagram'} for _ in faults]
+    _prot_merge_study_defaults(specs, prot_params)
+    net = deepcopy(net)
+    _prot_ensure_bus_geodata(net)
+    grading_mode = str(prot_params.get('grading_mode', 'auto') or 'auto').lower()
+    attach_summaries = _attach_protection_devices(net, specs, grading_mode)
+    arc_detection = _prot_arc_detection_settings(net, specs)
+    bolted = {}
+    scenarios = []
+    for bus_idx, ratio in faults:
+        if bus_idx not in bolted:
+            bolted[bus_idx] = _prot_run_bus_scenario(net, bus_idx, '3ph', 'max', attach_summaries)
+        scenario, r_f = bolted[bus_idx], 0.0
+        i_f = (scenario.get('short_circuit') or {}).get('ikss_ka')
+        if ratio and 0 < ratio < 1 and i_f:
+            # The arc's phase voltage (kV) at c max 1.1, and the resistance holding it at the fault's current.
+            v_arc = math.sqrt(1.0 - ratio ** 2) * 1.1 * float(net.bus.at[bus_idx, 'vn_kv']) / math.sqrt(3.0)
+            r_f = v_arc / (ratio * i_f)
+            for _ in range(5):
+                scenario = _prot_run_bus_scenario(net, bus_idx, '3ph', 'max', attach_summaries, r_fault_ohm=r_f)
+                got = (scenario.get('short_circuit') or {}).get('ikss_ka')
+                if not got:
+                    break
+                r_next = v_arc / got
+                if abs(r_next - r_f) <= 0.01 * r_f:
+                    break
+                r_f = r_next
+        scenarios.append({**scenario, 'r_fault_ohm': r_f})
+    for scenario in scenarios:
+        scenario['fault_label'] = _prot_fault_label(net, scenario)
+    _prot_check_miscoordination(net, scenarios, float(prot_params.get('t_diff', 0.3) or 0.3))
+    # The arc burns until the last voltage source feeding it is cut off, by whichever relays trip:
+    # the grading's primaries and their backups miss a backbone arc the inverters' 27s de-energize.
+    # Voltage sources: the grid, machines and grid-forming inverters. Grid-following inverters
+    # (static generators, storage) feed it their limited current until their own controls stop
+    # them: counted, a rooftop PV behind a feeder left every feeder's arc uncleared.
+    adjacency, element_node = _prot_element_graph(net)
+    # An arc-flash relay that blocks its bus's grid-forming inverters stops them when it trips.
+    # (An island's PCS standing in as its short-circuit source, an External Grid, is the inverter.)
+    as_source = {int(r['as_source']) for r in getattr(net, 'electrisim_pcs', None) or [] if r.get('as_source') is not None}
+    fixed_sources = set()
+    for table in ('ext_grid', 'gen'):
+        data = getattr(net, table, None)
+        if data is not None and not data.empty:
+            fixed_sources |= {('bus', int(r['bus'])) for i, r in data.iterrows() if bool(r.get('in_service', True))
+                              and not (table == 'ext_grid' and int(i) in as_source)
+                              and r.get('electrisim_pcs') is not True}
+    pcs_sources = {('bus', int(r['bus'])) for r in getattr(net, 'electrisim_pcs', None) or []
+                   if r.get('in_service') and r.get('control') == 'grid_forming'}
+    grid_sources = fixed_sources | pcs_sources
+    out = []
+    for scenario in scenarios:
+        if scenario.get('error'):
+            out.append({'error': scenario['error']})
+            continue
+        fault = ('bus', int(scenario['fault_bus_idx']))
+        blocked = set()
+
+        def live():
+            return (fixed_sources | (pcs_sources - blocked)) - {fault}
+
+        def fed_on_bus():
+            return fault in fixed_sources or (fault in pcs_sources and fault not in blocked)
+
+        cut = {k: set(v) for k, v in adjacency.items()}
+        opened, t_off = [], None
+        trips = sorted(((float(r['t_trip_s']), r) for r in scenario.get('trip', [])
+                        if r.get('tripped') and r.get('t_trip_s') is not None), key=lambda x: x[0])
+        # The grid, a machine or a grid-forming inverter on the faulted bus feeds it whatever the
+        # relays do: its own breaker is not on the diagram, or none parts an inverter from its bus -
+        # unless an arc-flash relay there blocks the inverters.
+        grid_on_bus = fed_on_bus()
+        if not fed_on_bus() and not _prot_reaches_source(cut, fault, live(), ()):
+            t_off = 0.0
+        for t, r in trips:
+            if t_off is not None:
+                break
+            sw = net.switch.loc[int(r['switch_idx'])]
+            a, b = ('bus', int(sw['bus'])), element_node(sw['et'], sw['element'])
+            cut.get(a, set()).discard(b)
+            cut.get(b, set()).discard(a)
+            opened.append(r.get('user_friendly_name') or str(r['switch_idx']))
+            arc = arc_detection.get(int(r['switch_idx']))
+            if arc and arc['block_pcs'] and (r.get('arc_detection') or {}).get('tripped'):
+                blocked.add(a)
+            if not fed_on_bus() and not _prot_reaches_source(cut, fault, live(), ()):
+                t_off = t
+        out.append({
+            't_relay_s': t_off,
+            'clearing_switches': opened if t_off is not None else [],
+            'primary_switches': scenario.get('primary_switches') or [],
+            'tripped': sorted(r.get('user_friendly_name') or str(r.get('switch_idx'))
+                              for r in scenario.get('trip', []) if r.get('tripped')),
+            'unprotected_sources': scenario.get('unprotected_sources') or [],
+            # Inverters on the faulted bus itself: no relay parts them from the arc.
+            'grid_on_bus': grid_on_bus and t_off is None,
+            'inverters_blocked': bool(blocked & {fault}),
+            'inverters_on_bus': sorted(set(
+                [str(r.get('label') or r.get('name')) for r in getattr(net, 'electrisim_pcs', None) or []
+                 if r.get('in_service') and int(r['bus']) == fault[1]]
+                + [_contingency_friendly_name(net, row.get('name') if pd.notna(row.get('name')) else f'{table} {idx}')
+                   for table in ('sgen', 'storage') for idx, row in (getattr(net, table, None) if getattr(net, table, None) is not None else pd.DataFrame()).iterrows()
+                   if bool(row.get('in_service', True)) and int(row['bus']) == fault[1]])),
+            'ikss_ka': (scenario.get('short_circuit') or {}).get('ikss_ka'),
+            'r_fault_ohm': scenario['r_fault_ohm'],
+        })
+    return out

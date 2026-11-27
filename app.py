@@ -30,6 +30,17 @@ def _console(msg):
         pass
 
 
+def _as_frequency(value, default=50.0):
+    """Parse a frequency field from the request. Never eval() request data."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if not (1.0 <= f <= 1000.0):
+        raise ValueError(f'frequency out of range: {f}')
+    return f
+
+
 def _coerce_export_flag(value):
     """Normalize JSON export checkboxes from the Electrisim frontend."""
     if value is True or value == 1:
@@ -39,17 +50,37 @@ def _coerce_export_flag(value):
     return False
 
 
+def _drop_null_text(in_data):
+    """
+    Remove fields whose value is the text "null", "undefined" or "NaN".
+
+    Diagrams imported before the frontend stopped writing them hold pandapower's
+    empty cells as that text. OpenDSS reads every field with .get(key, default),
+    so a dropped field takes its default, where the text stopped the run with
+    "could not convert string to float: 'null'".
+    """
+    for element in (in_data.values() if isinstance(in_data, dict) else in_data):
+        if not isinstance(element, dict):
+            continue
+        for key in [k for k, v in element.items()
+                    if isinstance(v, str) and v in ('null', 'undefined', 'NaN')]:
+            del element[key]
+
+
 import pandapower_electrisim
 import grid_code_pq_electrisim
 import grid_code_vq_electrisim
 import opendss_electrisim
+import electrisim_ops
+import electrisim_sld
 import opender_electrisim
 import arcflash_electrisim
+import load_profiles_electrisim
 import andes_electrisim
 import motor_starting_electrisim
 import json
 
-from flask import Flask, request, jsonify, make_response, Response, stream_with_context
+from flask import Flask, request, jsonify, make_response, Response, stream_with_context, g
 from flask_cors import CORS, cross_origin #żeby działało trzeba wywołać polecenie pip install -U flask-cors==3.0.10 
 import pandapower as pp
 import pandas as pd
@@ -85,9 +116,13 @@ cors_origins = [o.strip() for o in _cors_env.split(',') if o.strip()] if _cors_e
 CORS(app, 
      origins=cors_origins, 
      methods=['GET', 'POST', 'OPTIONS'],
-     allow_headers=['Content-Type', 'Authorization', 'Accept', 'Accept-Encoding',
+     allow_headers=['Content-Type', 'Accept', 'Accept-Encoding',
                     'Access-Control-Allow-Credentials'],
+     expose_headers=['X-Electrisim-State', 'X-Electrisim-Envelope', 'X-Electrisim-Envelope-Why'],
      supports_credentials=True)
+
+electrisim_ops.install(app)
+_console(electrisim_ops.startup_report(app))
 
 app.config['CORS_HEADERS'] = 'Content-Type'
 #app.config['CORS_ORIGINS'] = 'http://128.0.0.1:5500' #nie było tego
@@ -107,7 +142,21 @@ def _element_typ(item):
 def add_noindex_header(response):
     """API host is not a website — keep it out of Google Search index."""
     response.headers.setdefault('X-Robots-Tag', 'noindex, nofollow')
-    response.headers.setdefault('Access-Control-Allow-Private-Network', 'true')
+    # The operating state a study ran in (mgtwin_state), readable by the frontend.
+    state_id = getattr(g, 'mgtwin_state_id', None)
+    if state_id:
+        response.headers['X-Electrisim-State'] = str(state_id)
+    # The twin's validity envelope on that study (mgtwin_check.study_label): inside / provisional / outside, why.
+    label = getattr(g, 'mgtwin_label', None)
+    if label:
+        verdict, why = label
+        response.headers['X-Electrisim-Envelope'] = verdict
+        if why:
+            text = '; '.join(why)
+            response.headers['X-Electrisim-Envelope-Why'] = text.encode('ascii', 'replace').decode('ascii')[:900]
+    # REMOVED: this header lets public websites reach this server on loopback/private
+    # IPs. With exec/eval endpoints below that is drive-by code execution.
+    # response.headers.setdefault('Access-Control-Allow-Private-Network', 'true')
     return response
 
 
@@ -137,6 +186,26 @@ def simulation():
             return jsonify({
                 'error': 'Request body must be a JSON object with simulation elements.'
             }), 400
+        # An operating state of the network's mgtwin Site: {"site": <Site>, "state_id": "..."}. The drawn diagram is
+        # its normal state; the study runs in the one chosen - its switches, its sources, its load transfers - as
+        # the twin reads a state (mgtwin_site_io.apply_state).
+        state_request = in_data.pop('mgtwin_state', None)
+        if state_request is not None:
+            from mgtwin_site_io import apply_state
+            try:
+                site, state_id = state_request['site'], state_request['state_id']
+                in_data = apply_state(in_data, site, state_id)
+            except (KeyError, TypeError, StopIteration) as e:
+                return jsonify({'error': True, 'message': f"Operating state not applied: mgtwin_state needs a 'site' "
+                                f"with the state {state_request.get('state_id') if isinstance(state_request, dict) else None!r} "
+                                f"among its islands ({type(e).__name__}: {e})."}), 400
+            g.mgtwin_state_id = state_id
+            g.mgtwin_site = site
+            try:
+                from mgtwin_check import study_label
+                g.mgtwin_label = study_label(site, state_id, (in_data.get('0') or {}).get('typ'))
+            except Exception as e:   # noqa: BLE001 - a label is an aid; its failure must not stop the study
+                _console(f"mgtwin envelope label not given: {type(e).__name__}: {e}")
         try:
             _typs = sorted({
                 _element_typ(v) for v in in_data.values() if _element_typ(v)
@@ -168,6 +237,7 @@ def simulation():
         if isinstance(dg_params, dict) and 'DgInterconnectionOpenDss' in str(dg_params.get('typ', '')):
             user_email = dg_params.get('user_email', 'unknown@user.com')
             print(f"=== DG INTERCONNECTION SCREENING REQUESTED BY USER: {user_email} ===")
+            _drop_null_text(in_data)
             response_data = opendss_electrisim.dg_interconnection_screening(in_data, dg_params)
             accept_encoding = request.headers.get('Accept-Encoding', '')
             if 'gzip' in accept_encoding and len(response_data) > 1024:
@@ -356,7 +426,7 @@ def simulation():
                 # Extract OPF parameters
                 opf_params = {
                     'opf_type': in_data[x]['opf_type'],
-                    'frequency': eval(in_data[x]['frequency']),
+                    'frequency': _as_frequency(in_data[x]['frequency']),
                     'ac_algorithm': in_data[x]['ac_algorithm'],
                     'dc_algorithm': in_data[x]['dc_algorithm'],
                     'calculate_voltage_angles': in_data[x]['calculate_voltage_angles'],
@@ -397,7 +467,7 @@ def simulation():
                 user_email = in_data[x].get('user_email', 'unknown@user.com')
                 print(f"=== LOAD FLOW SIMULATION REQUESTED BY USER: {user_email} ===")
                 
-                frequency=eval(in_data[x]['frequency'])
+                frequency=_as_frequency(in_data[x]['frequency'])
                 algorithm=in_data[x]['algorithm']
                 calculate_voltage_angles = in_data[x]['calculate_voltage_angles']
                 init = in_data[x]['initialization']
@@ -753,7 +823,8 @@ def simulation():
                 # Extract user email for logging
                 user_email = in_data[x].get('user_email', 'unknown@user.com')
 
-                net = pp.create_empty_network()
+                # At the network's frequency: an earth fault's thermal current depends on it.
+                net = pp.create_empty_network(f_hz=_as_frequency(in_data[x].get('frequency', 50)))
                 Busbars = pandapower_electrisim.create_busbars(in_data, net)
                 pandapower_electrisim.create_other_elements(in_data, net, x, Busbars)
                 export_python = _coerce_export_flag(in_data[x].get('exportPython', False))
@@ -816,6 +887,83 @@ def simulation():
                     return response
                 return response_data
 
+            if "EmtStudy" in typ:
+                import emt_electrisim
+                user_email = in_data[x].get('user_email', 'unknown@user.com')
+                print(f"=== EMT STUDY REQUESTED BY USER: {user_email} ===")
+
+                net = pp.create_empty_network(f_hz=float(in_data[x].get('frequency') or 50))
+                Busbars = pandapower_electrisim.create_busbars(in_data, net)
+                pandapower_electrisim.create_other_elements(in_data, net, x, Busbars)
+                response_data = emt_electrisim.emt_study(net, in_data[x], in_data)
+
+                accept_encoding = request.headers.get('Accept-Encoding', '')
+                if 'gzip' in accept_encoding and len(response_data) > 1024:
+                    compressed = gzip.compress(response_data.encode('utf-8'))
+                    response = make_response(compressed)
+                    response.headers['Content-Encoding'] = 'gzip'
+                    response.headers['Content-Type'] = 'application/json'
+                    response.headers['Content-Length'] = len(compressed)
+                    return response
+                return response_data
+
+            if "AcDcOpfPandaPower" in typ:
+                # The AC/DC optimal power flow with least shed (Pyomo and Ipopt), on the drawn network.
+                import acdc_opf_electrisim
+                net = pp.create_empty_network(f_hz=float(in_data[x].get('frequency') or 50))
+                Busbars = pandapower_electrisim.create_busbars(in_data, net)
+                pandapower_electrisim.create_other_elements(in_data, net, x, Busbars)
+                response_data = acdc_opf_electrisim.acdc_opf_study(net, in_data[x], in_data)
+                accept_encoding = request.headers.get('Accept-Encoding', '')
+                if 'gzip' in accept_encoding and len(response_data) > 1024:
+                    compressed = gzip.compress(response_data.encode('utf-8'))
+                    response = make_response(compressed)
+                    response.headers['Content-Encoding'] = 'gzip'
+                    response.headers['Content-Type'] = 'application/json'
+                    response.headers['Content-Length'] = len(compressed)
+                    return response
+                return response_data
+
+            if "DcFaultStudy" in typ:
+                import dc_fault_electrisim
+                user_email = in_data[x].get('user_email', 'unknown@user.com')
+                print(f"=== DC FAULT STUDY REQUESTED BY USER: {user_email} ===")
+
+                net = pp.create_empty_network(f_hz=float(in_data[x].get('frequency') or 50))
+                Busbars = pandapower_electrisim.create_busbars(in_data, net)
+                pandapower_electrisim.create_other_elements(in_data, net, x, Busbars)
+                response_data = dc_fault_electrisim.dc_fault_study(net, in_data[x], in_data)
+
+                accept_encoding = request.headers.get('Accept-Encoding', '')
+                if 'gzip' in accept_encoding and len(response_data) > 1024:
+                    compressed = gzip.compress(response_data.encode('utf-8'))
+                    response = make_response(compressed)
+                    response.headers['Content-Encoding'] = 'gzip'
+                    response.headers['Content-Type'] = 'application/json'
+                    response.headers['Content-Length'] = len(compressed)
+                    return response
+                return response_data
+
+            if "StateEstimationPandaPower" in typ:
+                import state_estimation_electrisim
+                user_email = in_data[x].get('user_email', 'unknown@user.com')
+                print(f"=== STATE ESTIMATION REQUESTED BY USER: {user_email} ===")
+
+                net = pp.create_empty_network(f_hz=float(in_data[x].get('frequency') or 50))
+                Busbars = pandapower_electrisim.create_busbars(in_data, net)
+                pandapower_electrisim.create_other_elements(in_data, net, x, Busbars)
+                response_data = state_estimation_electrisim.state_estimation(net, in_data[x], in_data)
+
+                accept_encoding = request.headers.get('Accept-Encoding', '')
+                if 'gzip' in accept_encoding and len(response_data) > 1024:
+                    compressed = gzip.compress(response_data.encode('utf-8'))
+                    response = make_response(compressed)
+                    response.headers['Content-Encoding'] = 'gzip'
+                    response.headers['Content-Type'] = 'application/json'
+                    response.headers['Content-Length'] = len(compressed)
+                    return response
+                return response_data
+
             if "ArcFlashPandaPower" in typ:
                 user_email = in_data[x].get('user_email', 'unknown@user.com')
                 print(f"=== ARC FLASH REQUESTED BY USER: {user_email} ===")
@@ -840,14 +988,12 @@ def simulation():
                 user_email = in_data[x].get('user_email', 'unknown@user.com')
                 print(f"=== MOTOR STARTING REQUESTED BY USER: {user_email} ===")
 
-                mode = str(in_data[x].get('mode', 'steady')).lower()
-                if mode in ('dynamic', 'transient', 'tds', 'andes'):
-                    response_data = motor_starting_electrisim.motor_starting(None, in_data[x], in_data)
-                else:
-                    net = pp.create_empty_network()
-                    Busbars = pandapower_electrisim.create_busbars(in_data, net)
-                    pandapower_electrisim.create_other_elements(in_data, net, x, Busbars)
-                    response_data = motor_starting_electrisim.motor_starting(net, in_data[x], in_data)
+                # Both modes get the pandapower network: the dynamic start's
+                # thermal check is a load flow at its moment of largest demand.
+                net = pp.create_empty_network()
+                Busbars = pandapower_electrisim.create_busbars(in_data, net)
+                pandapower_electrisim.create_other_elements(in_data, net, x, Busbars)
+                response_data = motor_starting_electrisim.motor_starting(net, in_data[x], in_data)
 
                 accept_encoding = request.headers.get('Accept-Encoding', '')
                 if 'gzip' in accept_encoding and len(response_data) > 1024:
@@ -859,6 +1005,23 @@ def simulation():
                     return response
                 else:
                     return response_data
+
+            if "ParameterSweep" in typ:
+                import sweep_electrisim
+                return jsonify({'sweep': sweep_electrisim.run(app, in_data, x)})
+
+            if "VoltageStabilityPandaPower" in typ:
+                import voltage_stability_electrisim
+                net = pp.create_empty_network(f_hz=float(in_data[x].get('frequency') or 50))
+                Busbars = pandapower_electrisim.create_busbars(in_data, net)
+                pandapower_electrisim.create_other_elements(in_data, net, x, Busbars)
+                return jsonify({'voltage_stability': voltage_stability_electrisim.study(net, in_data[x])})
+
+            if "CriticalClearingAndes" in typ or "ContingencyBatchAndes" in typ:
+                import dynamic_studies_electrisim as dyn
+                if "CriticalClearingAndes" in typ:
+                    return jsonify({'critical_clearing': dyn.critical_clearing(in_data, in_data[x])})
+                return jsonify({'contingency_batch': dyn.contingency_batch(in_data, in_data[x])})
 
             if "TransientStabilityAndes" in typ:
                 user_email = in_data[x].get('user_email', 'unknown@user.com')
@@ -889,6 +1052,7 @@ def simulation():
                 return response_data
 
             if "ShortCircuitOpenDss" in typ:
+                _drop_null_text(in_data)
                 # Extract user email for logging
                 user_email = in_data[x].get('user_email', 'unknown@user.com')
                 frequency = int(in_data[x].get('frequency', 50))
@@ -919,6 +1083,7 @@ def simulation():
                     return response_data
            
             if "DgInterconnectionOpenDss" in typ:
+                _drop_null_text(in_data)
                 user_email = in_data[x].get('user_email', 'unknown@user.com')
                 print(f"=== DG INTERCONNECTION SCREENING REQUESTED BY USER: {user_email} ===")
                 response_data = opendss_electrisim.dg_interconnection_screening(in_data, in_data[x])
@@ -933,6 +1098,7 @@ def simulation():
                 return response_data
 
             if "PowerFlowOpenDss" in typ:
+                _drop_null_text(in_data)
                 # Extract user email for logging
                 user_email = in_data[x].get('user_email', 'unknown@user.com')
                 
@@ -1160,6 +1326,7 @@ def simulation():
                     't_gg': in_data[x].get('t_gg', 0.07),
                     'tms': in_data[x].get('tms', 1.0),
                     't_grade': in_data[x].get('t_grade', 0.5),
+                    'r_fault_ohm': in_data[x].get('r_fault_ohm', 0),
                     'export_results': in_data[x].get('export_results', False),
                 }
 
@@ -1180,6 +1347,76 @@ def simulation():
                 else:
                     return response_data
 
+            if "ReliabilityElectrisim" in typ:
+                # Reliability by contingency enumeration over the protection zones (reliability_electrisim):
+                # the drawn network as an mgtwin Site - its operating state's Site lends the states - every
+                # zone fault, stuck breaker, relay failure, maintenance overlap and failed black start priced.
+                import reliability_electrisim
+                p_in = in_data[x]
+                numeric = ('lam_zone', 'lam_tx', 'lam_cab_km', 'p_bf', 'p_rf', 'beta_cc', 'p_vrt', 't_rep_h',
+                           'restore_min', 't_maint_h', 'maint_restore_h', 'lam_bo', 'p_step', 't_man_h', 'p_cold',
+                           't_cold_h', 't_rt_min', 'ups_min', 'recoverable_factor', 'storage_mwh', 'aux_shed_max_h',
+                           'voll_it', 'voll_aux', 'p_forming_mw', 'p_following_mw', 'zone_kv', 'p_fc')
+                rel_params = {k: float(p_in[k]) for k in numeric if str(p_in.get(k, '')).strip() not in ('', 'None')}
+                if 'black_start_steps' in p_in and str(p_in['black_start_steps']).strip():
+                    rel_params['black_start_steps'] = int(float(p_in['black_start_steps']))
+                for k in ('dup_87', 'backup_trips_gfl', 'forming_storage_backed', 'include_maintenance', 'include_second_order'):
+                    if k in p_in:
+                        rel_params[k] = str(p_in[k]).strip().lower() in ('true', '1', 'yes', 'on')
+                split = lambda v: [t.strip() for t in str(v or '').replace(';', ',').split(',') if t.strip()]  # noqa: E731
+                if split(p_in.get('it_loads')):
+                    rel_params['it_loads'] = split(p_in.get('it_loads'))
+                pairs = [[t.strip() for t in grp.split('+') if t.strip()] for grp in split(p_in.get('transfer_groups'))]
+                if pairs:
+                    rel_params['transfer_groups'] = [grp for grp in pairs if len(grp) > 1]
+
+                def own_inputs(text):
+                    # a design's own inputs, 'storage_mwh=0.0635; black_start_steps=1; transfer_groups=A1+B1, A2+B2'
+                    # (a switch: true / false; its IT loads and dual-cord pairs as in the dialog)
+                    out = {}
+                    for item in str(text or '').split(';'):
+                        if '=' not in item:
+                            continue
+                        k, v = (t.strip() for t in item.split('=', 1))
+                        if k == 'it_loads':
+                            out[k] = [t.strip() for t in v.split(',') if t.strip()]
+                        elif k == 'transfer_groups':
+                            out[k] = [grp for grp in ([t.strip() for t in pair.split('+') if t.strip()]
+                                                      for pair in v.split(',')) if len(grp) > 1]
+                        elif k in reliability_electrisim.BOOLEAN:
+                            out[k] = v.lower() in ('true', '1', 'yes', 'on')
+                        elif k in reliability_electrisim.SWEEPABLE or k in ('p_forming_mw', 'p_following_mw'):
+                            out[k] = int(float(v)) if k == 'black_start_steps' else float(v)
+                    return out
+
+                def numbers(text):
+                    # an hourly profile pasted as numbers (24 for a day, 8760 for a year), any separators
+                    return [float(t) for t in re.split(r'[\s,;]+', str(text or '').strip()) if t]
+
+                sweep = {'param': str(p_in.get('sweep_param') or '').strip(), 'values': p_in.get('sweep_values')}
+                if sweep['param'] and sweep['param'] not in reliability_electrisim.SWEEPABLE:
+                    return jsonify({'error': True, 'message': f"No sweep of '{sweep['param']}'"}), 400
+                try:
+                    # other pages of the drawing, as designs set beside this one, and one input swept across them
+                    designs = [{'name': d.get('name'), 'payload': d.get('network') or {},
+                                'capex_meur': float(d.get('capex_meur') or 0), 'params': own_inputs(d.get('own_inputs'))}
+                               for d in (p_in.get('designs') or []) if isinstance(d, dict)]
+                    result = reliability_electrisim.study(
+                        in_data, rel_params, getattr(g, 'mgtwin_site', None), getattr(g, 'mgtwin_state_id', None),
+                        designs=designs, sweep=sweep, crf=float(p_in.get('crf') or 0.08),
+                        capex_meur=float(p_in.get('capex_meur') or 0), title=str(p_in.get('page_name') or 'This page'),
+                        mc={'years': min(10 ** 6, int(float(p_in.get('mc_years') or 0))), 'seed': int(float(p_in.get('mc_seed') or 1)),
+                            'repair': 'fixed' if str(p_in.get('mc_repair')) == 'fixed' else 'exponential',
+                            'recharge_h': float(p_in.get('mc_recharge_h') or 0),
+                            'it_profile': numbers(p_in.get('mc_it_profile')),
+                            'storage_profile': numbers(p_in.get('mc_storage_profile')),
+                            # the last time-series run of this drawing, when the dialog takes its profiles from it
+                            'time_series': p_in.get('mc_time_series') if isinstance(p_in.get('mc_time_series'), dict) else None})
+                except (KeyError, ValueError, TypeError, StopIteration) as e:
+                    return jsonify({'error': True, 'message': f'The reliability study could not read the network: '
+                                    f'{type(e).__name__}: {e}'}), 400
+                return jsonify(result)
+
             if "EconomicAnalysisPandaPower" in typ:
                 # Extract user email for logging
                 user_email = in_data[x].get('user_email', 'unknown@user.com')
@@ -1187,7 +1424,7 @@ def simulation():
                 
                 # Extract economic analysis parameters
                 economic_params = {
-                    'frequency': eval(in_data[x].get('frequency', '50')),
+                    'frequency': _as_frequency(in_data[x].get('frequency', '50')),
                     'currency': in_data[x].get('currency', 'EUR'),
                     'algorithm': in_data[x].get('algorithm', 'nr'),
                     'calculate_voltage_angles': in_data[x].get('calculate_voltage_angles', 'auto'),
@@ -1222,7 +1459,7 @@ def simulation():
                     'tap_control': in_data[x].get('tap_control', False),
                     'discrete_tap_control': in_data[x].get('discrete_tap_control', False),
                     'continuous_tap_control': in_data[x].get('continuous_tap_control', False),
-                    'frequency': eval(in_data[x].get('frequency', '50')),
+                    'frequency': _as_frequency(in_data[x].get('frequency', '50')),
                     'algorithm': in_data[x].get('algorithm', 'nr'),
                     'calculate_voltage_angles': in_data[x].get('calculate_voltage_angles', 'auto'),
                     'init': in_data[x].get('init', 'dc')
@@ -1248,12 +1485,24 @@ def simulation():
                     'generation_profile': in_data[x].get('generation_profile', 'constant'),
                     'profile_mode': in_data[x].get('profile_mode', 'preset'),
                     'element_profiles': in_data[x].get('element_profiles') or {},
-                    'frequency': eval(in_data[x].get('frequency', '50')),
+                    'frequency': _as_frequency(in_data[x].get('frequency', '50')),
                     'algorithm': in_data[x].get('algorithm', 'nr'),
                     'calculate_voltage_angles': in_data[x].get('calculate_voltage_angles', 'auto'),
                     'init': in_data[x].get('init') or in_data[x].get('initialization') or 'auto',
+                    # Seconds between steps (hourly by default) and the
+                    # diagram's load profile library, with the loads that follow it.
+                    'time_step_s': in_data[x].get('time_step_s'),
+                    'load_profiles': in_data[x].get('load_profiles') or {},
+                    'profile_repeat': in_data[x].get('profile_repeat', True),
+                    'load_profile_assignments': load_profiles_electrisim.load_assignments(in_data),
+                    # DC loads following the library (rack training cycles), and the microgrid's dispatch.
+                    'dc_load_profile_assignments': load_profiles_electrisim.dc_load_assignments(in_data),
+                    'microgrid_dispatch': in_data[x].get('microgrid_dispatch', False),
+                    'sofc_tau_s': in_data[x].get('sofc_tau_s'),
+                    'secondary_soc_percent': in_data[x].get('secondary_soc_percent'),
+                    'secondary_restore_h': in_data[x].get('secondary_restore_h'),
                 }
-                
+
                 # Create network
                 net = pp.create_empty_network(f_hz=timeseries_params['frequency'])
                 Busbars = pandapower_electrisim.create_busbars(in_data, net)
@@ -1459,6 +1708,10 @@ def pandapower_net_to_json(net):
                 _scalar(r['va_degree']),
                 _scalar(r['slack_weight']),
                 bool(_scalar(r['in_service'])) if r.get('in_service') is not None else True,
+                # The importer reads the short-circuit data from here on; without
+                # it every imported grid drew as an infinite 1e6 MVA source.
+                *[_scalar(r.get(c)) for c in ('s_sc_max_mva', 's_sc_min_mva', 'rx_max', 'rx_min',
+                                             'r0x0_max', 'x0x_max', 'r0x0_min', 'x0x_min')],
             ])
         return rows
 
@@ -1488,9 +1741,113 @@ def pandapower_net_to_json(net):
             ])
         return rows
 
+    def normalize_sgen_rows():
+        # The importer reads sgen rows by position. pandapower's own column order
+        # has min_q_mvar / max_q_mvar after q_mvar, which shifted sn_mva, scaling,
+        # in_service and type each onto the wrong field.
+        df = net.sgen
+        if df.empty:
+            return []
+        rows = []
+        for idx in df.index:
+            r = df.loc[idx]
+            nm = r['name'] if 'name' in df.columns else None
+            if _is_blank_name(nm):
+                nm = f'Sgen_{idx}'
+            rows.append([
+                nm,
+                _pos_bus(r['bus']),
+                _scalar(r['p_mw']),
+                _scalar(r['q_mvar']),
+                _scalar(r['sn_mva']) if 'sn_mva' in df.columns else None,
+                _scalar(r['scaling']) if 'scaling' in df.columns else 1.0,
+                bool(_scalar(r['in_service'])) if r.get('in_service') is not None else True,
+                _scalar(r['type']) if r.get('type') is not None else 'wye',
+                bool(_scalar(r['current_source'])) if r.get('current_source') is not None else True,
+            ])
+        return rows
+
+    def normalize_storage_rows():
+        # Importer order: name, bus, p_mw, q_mvar, sn_mva, soc_percent,
+        # min_e_mwh, max_e_mwh, scaling, in_service, type. pandapower's own
+        # matched it until a column was added (controllable, for the OPF),
+        # which shifted in_service and type onto the wrong fields.
+        df = net.storage
+        if df.empty:
+            return []
+        rows = []
+        for idx in df.index:
+            r = df.loc[idx]
+            nm = r['name'] if 'name' in df.columns else None
+            if _is_blank_name(nm):
+                nm = f'Storage_{idx}'
+            rows.append([
+                nm, _pos_bus(r['bus']),
+                *[_scalar(r.get(c)) for c in ('p_mw', 'q_mvar', 'sn_mva', 'soc_percent',
+                                              'min_e_mwh', 'max_e_mwh', 'scaling')],
+                bool(_scalar(r['in_service'])) if r.get('in_service') is not None else True,
+                _scalar(r.get('type')),
+            ])
+        return rows
+
+    def normalize_shunt_rows():
+        # Importer order: bus, name, q_mvar, p_mw, vn_kv, step, max_step,
+        # in_service. pandapower 3.x puts its characteristic-table columns
+        # before in_service.
+        df = net.shunt
+        if df.empty:
+            return []
+        rows = []
+        for idx in df.index:
+            r = df.loc[idx]
+            nm = r['name'] if 'name' in df.columns else None
+            if _is_blank_name(nm):
+                nm = f'Shunt_{idx}'
+            rows.append([
+                _pos_bus(r['bus']),
+                nm,
+                _scalar(r['q_mvar']),
+                _scalar(r['p_mw']),
+                _scalar(r['vn_kv']),
+                _scalar(r['step']),
+                _scalar(r['max_step']),
+                bool(_scalar(r['in_service'])) if r.get('in_service') is not None else True,
+            ])
+        return rows
+
     def build_electrisim_import_sidecar():
         """Extra SC / breaker fields keyed by element name for frontend import."""
-        sidecar = {'switch': {}, 'gen': {}, 'sgen': {}, 'storage': {}, 'trafo': {}}
+        sidecar = {'switch': {}, 'gen': {}, 'sgen': {}, 'storage': {}, 'trafo': {},
+                   'trafo3w': {}, 'line': {}, 'ext_grid': {}, 'bus': {}, 'shunt': {}}
+        # A harmonic filter's tuning: its rated Mvar, order, type and quality, on its Capacitor.
+        if hasattr(net, 'shunt') and not net.shunt.empty and 'electrisim_filter_order' in net.shunt.columns:
+            for idx, r in net.shunt.iterrows():
+                if _scalar(r.get('electrisim_filter_order')):
+                    nm = r.get('name', f'Shunt_{idx}')
+                    if _is_blank_name(nm):
+                        nm = f'Shunt_{idx}'
+                    sidecar['shunt'][str(nm)] = {
+                        'q_mvar': _scalar(r.get('electrisim_filter_rated_q_mvar')),
+                        'filter_order': _scalar(r.get('electrisim_filter_order')),
+                        'filter_type': _scalar(r.get('electrisim_filter_type')),
+                        'filter_q': _scalar(r.get('electrisim_filter_quality')),
+                    }
+
+        def opf_fields(table, idx, r, columns):
+            # What an optimal power flow reads beyond the load-flow rows: the
+            # dispatch limits, and the price as the canvas names it.
+            out = {c: _scalar(r.get(c)) for c in columns}
+            if 'controllable' in out and out['controllable'] is not None:
+                out['controllable'] = 'true' if bool(out['controllable']) else 'false'
+            pc = getattr(net, 'poly_cost', None)
+            if pc is not None and not pc.empty:
+                rows = pc[(pc['et'] == table) & (pc['element'] == idx)]
+                if len(rows):
+                    out['opf_marginal_cost_eur_per_mwh'] = _scalar(rows.iloc[0]['cp1_eur_per_mw'])
+                    out['opf_cp2_eur_per_mw2'] = _scalar(rows.iloc[0]['cp2_eur_per_mw2'])
+            return out
+
+        opf_pq = ('controllable', 'min_p_mw', 'max_p_mw', 'min_q_mvar', 'max_q_mvar')
         if hasattr(net, 'switch') and net.switch is not None and not net.switch.empty:
             for idx, r in net.switch.iterrows():
                 nm = r.get('name', f'Switch_{idx}')
@@ -1502,6 +1859,9 @@ def pandapower_net_to_json(net):
                     'in_ka': _scalar(r.get('in_ka')),
                     'type': _scalar(r.get('type')),
                     'ansi_device_class': _scalar(r.get('ansi_device_class')),
+                    # Its Protection tab, as a spec gives it (electrisim_sld): the drawing kept the defaults.
+                    'protection': {c: _scalar(r.get(c)) for c in electrisim_sld.SWITCH_PROTECTION_FIELDS
+                                   if c in net.switch.columns and _scalar(r.get(c)) is not None},
                 }
         if hasattr(net, 'gen') and not net.gen.empty:
             for idx, r in net.gen.iterrows():
@@ -1513,8 +1873,10 @@ def pandapower_net_to_json(net):
                     'xdss_pu': _scalar(r.get('xdss_pu')),
                     'rdss_ohm': _scalar(r.get('rdss_ohm')),
                     'rdss_pu': _scalar(r.get('rdss_pu')),
-                    'min_p_mw': _scalar(r.get('min_p_mw')),
-                    'max_p_mw': _scalar(r.get('max_p_mw')),
+                    'cos_phi': _scalar(r.get('cos_phi')),
+                    **opf_fields('gen', idx, r, opf_pq),
+                    # Its Dynamics tab, as a spec gives it (electrisim_sld): the drawing kept the defaults.
+                    **{c: _scalar(r.get(c)) for c in net.gen.columns if str(c).startswith('dyn_')},
                 }
         if hasattr(net, 'sgen') and not net.sgen.empty:
             for idx, r in net.sgen.iterrows():
@@ -1528,6 +1890,7 @@ def pandapower_net_to_json(net):
                     'k': _scalar(r.get('k')),
                     'current_source': _scalar(r.get('current_source')),
                     'lrc_pu': _scalar(r.get('lrc_pu')),
+                    **opf_fields('sgen', idx, r, opf_pq),
                 }
         if hasattr(net, 'storage') and not net.storage.empty:
             for idx, r in net.storage.iterrows():
@@ -1538,6 +1901,18 @@ def pandapower_net_to_json(net):
                     'max_ik_ka': _scalar(r.get('max_ik_ka')),
                     'rx': _scalar(r.get('rx')),
                     'current_source': _scalar(r.get('current_source')),
+                    **opf_fields('storage', idx, r, ('controllable',)),
+                }
+        if hasattr(net, 'ext_grid') and not net.ext_grid.empty:
+            for idx, r in net.ext_grid.iterrows():
+                nm = r.get('name', f'ExtGrid_{idx}')
+                if _is_blank_name(nm):
+                    nm = f'ExtGrid_{idx}'
+                sidecar['ext_grid'][str(nm)] = opf_fields('ext_grid', idx, r, ('min_p_mw', 'max_p_mw'))
+        if not net.bus.empty:
+            for idx, r in net.bus.iterrows():
+                sidecar['bus'][str(bus_export_name.get(int(idx), f'Bus_{idx}'))] = {
+                    k: _scalar(r.get(k)) for k in ('min_vm_pu', 'max_vm_pu')
                 }
         if hasattr(net, 'trafo') and not net.trafo.empty:
             for idx, r in net.trafo.iterrows():
@@ -1550,6 +1925,30 @@ def pandapower_net_to_json(net):
                     'vkr0_percent': _scalar(r.get('vkr0_percent')),
                     'rn_ohm': _scalar(r.get('rn_ohm')),
                     'xn_ohm': _scalar(r.get('xn_ohm')),
+                    'mag0_percent': _scalar(r.get('mag0_percent')),
+                    'mag0_rx': _scalar(r.get('mag0_rx')),
+                    'si0_hv_partial': _scalar(r.get('si0_hv_partial')),
+                }
+        # Zero sequence the row formats have no place for: without it a
+        # single-phase fault on the drawing used the canvas placeholders.
+        if hasattr(net, 'trafo3w') and not net.trafo3w.empty:
+            for idx, r in net.trafo3w.iterrows():
+                nm = r.get('name', f'Trafo3w_{idx}')
+                if _is_blank_name(nm):
+                    nm = f'Trafo3w_{idx}'
+                sidecar['trafo3w'][str(nm)] = {
+                    k: _scalar(r.get(k)) for k in (
+                        'vector_group', 'vk0_hv_percent', 'vk0_mv_percent', 'vk0_lv_percent',
+                        'vkr0_hv_percent', 'vkr0_mv_percent', 'vkr0_lv_percent')
+                }
+        if hasattr(net, 'line') and not net.line.empty:
+            for idx, r in net.line.iterrows():
+                nm = r.get('name', f'Line_{idx}')
+                if _is_blank_name(nm):
+                    nm = f'Line_{idx}'
+                sidecar['line'][str(nm)] = {
+                    k: _scalar(r.get(k)) for k in ('r0_ohm_per_km', 'x0_ohm_per_km', 'c0_nf_per_km',
+                                                   'endtemp_degree')
                 }
         return sidecar
 
@@ -1623,6 +2022,56 @@ def pandapower_net_to_json(net):
                 _scalar(r['parallel']),
                 _scalar(r['df']),
                 bool(_scalar(r['in_service'])) if r.get('in_service') is not None else True,
+            ])
+        return rows
+
+    def normalize_trafo3w_rows():
+        """
+        Rows in the fixed order insertComponentsForData destructures.
+
+        pandapower 3.x put shift_lv_degree straight after shift_mv_degree, and the
+        importer has no slot for it, so exporting the DataFrame as-is shifted
+        every later field by one: the tap settings stored on the drawn
+        transformer were each read from the column before (tap_side from
+        shift_lv_degree, tap_neutral from tap_side, ...). shift_lv_degree has no
+        place in the importer's row and is dropped here.
+        """
+        df = net.trafo3w
+        if df.empty:
+            return []
+
+        def col(r, name):
+            return _scalar(r[name]) if name in df.columns else None
+
+        rows = []
+        for idx in df.index:
+            r = df.loc[idx]
+            nm = r['name'] if 'name' in df.columns else None
+            if _is_blank_name(nm):
+                nm = f'Trafo3w_{idx}'
+            in_service = col(r, 'in_service')
+            rows.append([
+                nm,
+                col(r, 'std_type'),
+                _pos_bus(r['hv_bus']),
+                _pos_bus(r['mv_bus']),
+                _pos_bus(r['lv_bus']),
+                col(r, 'sn_hv_mva'), col(r, 'sn_mv_mva'), col(r, 'sn_lv_mva'),
+                col(r, 'vn_hv_kv'), col(r, 'vn_mv_kv'), col(r, 'vn_lv_kv'),
+                col(r, 'vk_hv_percent'), col(r, 'vk_mv_percent'), col(r, 'vk_lv_percent'),
+                col(r, 'vkr_hv_percent'), col(r, 'vkr_mv_percent'), col(r, 'vkr_lv_percent'),
+                col(r, 'pfe_kw'),
+                col(r, 'i0_percent'),
+                col(r, 'shift_mv_degree'),
+                col(r, 'tap_side'),
+                col(r, 'tap_neutral'),
+                col(r, 'tap_min'),
+                col(r, 'tap_max'),
+                col(r, 'tap_step_percent'),
+                col(r, 'tap_step_degree'),
+                col(r, 'tap_pos'),
+                bool(col(r, 'tap_at_star_point')),
+                bool(in_service) if in_service is not None else True,
             ])
         return rows
 
@@ -1717,7 +2166,7 @@ def pandapower_net_to_json(net):
             },
             "sgen": {
                 "_object": json.dumps({
-                    "data": export_element_rows(net.sgen) if hasattr(net, 'sgen') and not net.sgen.empty else []
+                    "data": normalize_sgen_rows() if hasattr(net, 'sgen') else []
                 })
             },
             "asymmetric_sgen": {
@@ -1732,12 +2181,12 @@ def pandapower_net_to_json(net):
             },
             "trafo3w": {
                 "_object": json.dumps({
-                    "data": export_element_rows(net.trafo3w) if hasattr(net, 'trafo3w') and not net.trafo3w.empty else []
+                    "data": normalize_trafo3w_rows() if hasattr(net, 'trafo3w') else []
                 })
             },
             "shunt": {
                 "_object": json.dumps({
-                    "data": export_element_rows(net.shunt) if hasattr(net, 'shunt') and not net.shunt.empty else []
+                    "data": normalize_shunt_rows() if hasattr(net, 'shunt') else []
                 })
             },
             "load": {
@@ -1772,7 +2221,7 @@ def pandapower_net_to_json(net):
             },
             "storage": {
                 "_object": json.dumps({
-                    "data": export_element_rows(net.storage) if hasattr(net, 'storage') and not net.storage.empty else []
+                    "data": normalize_storage_rows() if hasattr(net, 'storage') else []
                 })
             },
             "svc": {
@@ -1802,12 +2251,101 @@ def pandapower_net_to_json(net):
     return json.dumps(model)
 
 
+@app.route('/mgtwin/states', methods=['POST'])
+def mgtwin_states():
+    """
+    A Site's operating states, for the state selector: {"site": <Site>} -> {"states": [{id, description,
+    grid_connected, sources, open_switches, closed_switches, load_factors, settings_group}]}.
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    site = body.get('site')
+    if not isinstance(site, dict) or not isinstance(site.get('islands'), list):
+        return jsonify({'error': True, 'message': "Send {'site': <mgtwin Site>} with its 'islands' (operating states)."}), 400
+    return jsonify({'site_id': site.get('id'), 'states': [
+        {'id': i.get('id'), 'description': i.get('description', ''), 'grid_connected': bool(i.get('grid_connected')),
+         'sources': len(i.get('energized_source_ids') or []), 'open_switches': i.get('open_switches') or [],
+         'closed_switches': i.get('closed_switches') or [], 'load_factors': i.get('load_factors') or {},
+         'settings_group': i.get('settings_group', 'A')} for i in site['islands']]})
+
+
+@app.route('/mgtwin/site', methods=['POST'])
+def mgtwin_site():
+    """
+    The drawn diagram as an mgtwin Site: {"diagram": <payload>, "site_id"?, "s_base_mva"?, "template"?: <Site>} ->
+    the Site. A template - a Site of the same network - lends its states, relays and what a diagram cannot hold.
+    """
+    from mgtwin_site_io import payload_to_site
+    body = request.get_json(force=True, silent=True) or {}
+    diagram = body.get('diagram')
+    if not isinstance(diagram, dict):
+        return jsonify({'error': True, 'message': "Send {'diagram': <the diagram payload>}."}), 400
+    try:
+        site = payload_to_site(diagram, str(body.get('site_id') or 'DRAWN'), float(body.get('s_base_mva') or 50.0),
+                               template=body.get('template'))
+    except (KeyError, ValueError, TypeError) as e:
+        return jsonify({'error': True, 'message': f'The diagram could not be read as a Site: {type(e).__name__}: {e}'}), 400
+    return jsonify(site)
+
+
+@app.route('/mgtwin/check', methods=['POST'])
+def mgtwin_check_design():
+    """
+    Check design: the drawn network through mgtwin's gates - {"diagram": <payload>, "site_id"?, "s_base_mva"?,
+    "template"?: <Site>} -> {counts, by_gate, findings (FAIL and WARN), states}. The template lends the states and
+    relays the gates screen.
+    """
+    import mgtwin_check
+    if not mgtwin_check.available():
+        return jsonify({'error': True, 'message': 'mgtwin is not installed on this server (requirements-mgtwin.txt).'}), 501
+    body = request.get_json(force=True, silent=True) or {}
+    diagram = body.get('diagram')
+    if not isinstance(diagram, dict):
+        return jsonify({'error': True, 'message': "Send {'diagram': <the diagram payload>}."}), 400
+    try:
+        out = mgtwin_check.check_design(diagram, str(body.get('site_id') or 'DRAWN'),
+                                        float(body.get('s_base_mva') or 50.0), template=body.get('template'))
+    except Exception as e:   # noqa: BLE001 - a Site the twin refuses: say why
+        return jsonify({'error': True, 'message': f'The design could not be checked: {type(e).__name__}: {e}'}), 400
+    return jsonify(out)
+
+
+@app.route('/mgtwin/protection', methods=['POST'])
+def mgtwin_protection():
+    """
+    The Site's relay settings as the drawn breakers' protection fields: {"site": <Site>, "group"?: "A",
+    "fault_type"?: "3ph" | "1ph"} -> {"group", "switches": {breaker id: {field: value}}, "fields": [the fields a
+    breaker's protection is made of], "notes"}. For a relay with phase and earth elements, "1ph" carries the earth one
+    (mgtwin_site_io.protection_settings); the drawing applies them to the breakers it has.
+    """
+    from mgtwin_site_io import PROTECTION_FIELDS, protection_settings
+    body = request.get_json(force=True, silent=True) or {}
+    site = body.get('site')
+    if not isinstance(site, dict) or not isinstance(site.get('relays'), list) or not site['relays']:
+        return jsonify({'error': True, 'message': "Send {'site': <mgtwin Site>} with its 'relays' and their settings."}), 400
+    group = str(body.get('group') or 'A')
+    fault_type = body.get('fault_type') if body.get('fault_type') in ('3ph', '1ph') else None
+    try:
+        switches, notes = protection_settings(site, group, fault_type)
+    except (KeyError, TypeError, ValueError) as e:
+        return jsonify({'error': True, 'message': f'The Site\'s relays could not be read: {type(e).__name__}: {e}'}), 400
+    unset = sorted(sw for sw, f in switches.items() if f.get('protection_type') == 'none')
+    if len(unset) == len(switches):
+        notes.append('no relay in this Site has a setting yet: every breaker would get no protection')
+    return jsonify({'group': group, 'fault_type': fault_type, 'switches': switches, 'fields': list(PROTECTION_FIELDS),
+                    'notes': notes})
+
+
 @app.route('/import-pandapower', methods=['POST'])
 def import_pandapower():
     """
     Accepts a Pandapower .py script, executes it to build `net`,
     and returns the network as JSON (the structure expected by insertComponentsForData).
     """
+    # Disabled: exec() of request-supplied Python on a public endpoint.
+    # Set ELECTRISIM_ALLOW_SCRIPT_IMPORT=1 only on a trusted, isolated host.
+    if os.getenv('ELECTRISIM_ALLOW_SCRIPT_IMPORT') != '1':
+        return jsonify({'error': 'Pandapower script import is disabled on this server.'}), 403
+
     payload = request.get_json(force=True)
     code = payload.get('content', '')
 
@@ -1853,6 +2391,62 @@ def import_pandapower():
         error_details = traceback.format_exc()
         print(f"Error in import_pandapower: {error_details}")
         return jsonify({'error': str(e), 'details': error_details}), 400
+
+
+@app.route('/build-model', methods=['POST'])
+def build_model():
+    """
+    Build a network from a declarative single-line-diagram spec and return the
+    model JSON the canvas consumes.
+
+    This is the structured counterpart to /import-pandapower. That route takes a
+    Python script and exec()s it, which is why it is disabled by default; this
+    one takes data and validates it field by field, so it is safe to leave on.
+    """
+    payload = request.get_json(force=True, silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({'error': 'Request body must be a JSON object holding the spec.'}), 400
+
+    # Accept either {"spec": {...}, options} or the spec itself.
+    wrapped = isinstance(payload.get('spec'), dict)
+    spec = payload['spec'] if wrapped else payload
+    options = payload if wrapped else {}
+
+    try:
+        net, report = electrisim_sld.build_network(spec)
+    except electrisim_sld.SpecError as exc:
+        # Every problem at once: the caller is usually generating the spec and
+        # can fix them in one pass rather than one round trip each.
+        return jsonify({
+            'error': 'The spec could not be built.',
+            'problems': exc.problems,
+        }), 400
+    except Exception as exc:  # pragma: no cover - unexpected pandapower failure
+        return jsonify({'error': f'Could not build the network: {exc}'}), 400
+
+    body = {'report': report}
+    if options.get('include_model', True):
+        # Serialised before solving, so result tables never reach the diagram.
+        body['model'] = pandapower_net_to_json(net)
+        layer = electrisim_sld.electrisim_elements(net)
+        if layer:
+            # The DC and microgrid layer is Electrisim's, not pandapower's: drawn by its own routine.
+            model = json.loads(body['model'])
+            model['_object']['electrisim_elements'] = {'_object': json.dumps(layer)}
+            body['model'] = json.dumps(model)
+    if options.get('run_power_flow'):
+        def _limit(key, default):
+            try:
+                return float(options.get(key, default))
+            except (TypeError, ValueError):
+                return default
+        body['power_flow'] = electrisim_sld.solve(
+            net,
+            vm_min_pu=_limit('vm_min_pu', 0.95),
+            vm_max_pu=_limit('vm_max_pu', 1.05),
+            max_loading_percent=_limit('max_loading_percent', 100.0),
+        )
+    return jsonify(body), 200
 
 
 def _infer_opendss_voltage_bases(dss, dss_text=''):

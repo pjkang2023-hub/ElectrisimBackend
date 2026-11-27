@@ -1,0 +1,13 @@
+{
+  "_": "Two grid-forming PCS (50 and 100 kVA, 2 % P-f and 5 % Q-V droop, 20 ms power filters) on a 400 V bus with a 120 kW + 30 kvar R-L load the grid supplies; at 20 ms the grid's breaker opens, each phase at its current's zero, and the two PCS share the load by their droops.",
+  "f_hz": 50.0,
+  "grid": {"v_ll": 400.0, "s_sc": 5000000.0, "xr": 5.0},
+  "load": {"p": 120000.0, "q": 30000.0},
+  "pcs": [
+    {"s_rated": 50000.0, "droop_pf": 0.02, "droop_qv": 0.05, "r_pu": 0.01, "x_pu": 0.15},
+    {"s_rated": 100000.0, "droop_pf": 0.02, "droop_qv": 0.05, "r_pu": 0.01, "x_pu": 0.15}
+  ],
+  "limit_pu": 1.2, "tau_f": 0.02, "v_dc": 800.0,
+  "t_island": 0.02, "t_end": 0.6, "dt": 2e-05, "dt_out": 0.0002,
+  "switch_r_on": 1e-06, "switch_r_off": 1e9
+}

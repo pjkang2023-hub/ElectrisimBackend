@@ -1,0 +1,3988 @@
+{
+ "id": "CAMPAIGN-003-ring-v17_protection_draft",
+ "name": "Ring bus v17 on the OWNER basis (34.6 MW): 20 SOFC (2.5 MVA Dy11), 5 PCST5500 (4 NER, YNd11d11), gensets G-A/G-B, cell black start, off-grid [corrected: C1 reactance base, C2 normally-open switches, C3 BAAH cells, C4 cord transfer, C5 board breakers]",
+ "base": {
+  "s_base_mva": 50.0,
+  "v_base_kv": 33.0,
+  "f_base_hz": 50.0
+ },
+ "buses": [
+  {
+   "id": "MVA",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "MVB",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "CHG_A_STUB",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "CHG_B_STUB",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_F_MVA",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_SOFC01",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_SOFC02",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_SOFC03",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_SOFC04",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_PCS1",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_SOFC05",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_SOFC06",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_SOFC07",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_SOFC08",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_PCS2",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_SOFC09",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_SOFC10",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_F_MVB",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_SOFC11",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_SOFC12",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_SOFC13",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_SOFC14",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_PCS3",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_SOFC15",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_SOFC16",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_SOFC17",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_SOFC18",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_PCS4",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_SOFC19",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_SOFC20",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "R_PCS5",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC01_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC02_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC03_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC04_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC05_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC06_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC07_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC08_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC09_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC10_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC11_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC12_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC13_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC14_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC15_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC16_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC17_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC18_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC19_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "SOFC20_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "PCS1_LV",
+   "v_nom_kv": 0.69,
+   "is_poi": false
+  },
+  {
+   "id": "PCS2_LV",
+   "v_nom_kv": 0.69,
+   "is_poi": false
+  },
+  {
+   "id": "PCS3_LV",
+   "v_nom_kv": 0.69,
+   "is_poi": false
+  },
+  {
+   "id": "PCS4_LV",
+   "v_nom_kv": 0.69,
+   "is_poi": false
+  },
+  {
+   "id": "PCS5_LV",
+   "v_nom_kv": 0.69,
+   "is_poi": false
+  },
+  {
+   "id": "GEN_A_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "GEN_B_LV",
+   "v_nom_kv": 0.4,
+   "is_poi": false
+  },
+  {
+   "id": "IT_cordA_N",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "IT_cordB_N",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "AUX_A_N",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "AUX_B_N",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "LN_A_MVA_FAR_N",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "LN_B_MVB_FAR_N",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "GEN_A_HV",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  },
+  {
+   "id": "GEN_B_HV",
+   "v_nom_kv": 33.0,
+   "is_poi": false
+  }
+ ],
+ "branches": [
+  {
+   "id": "LN_A_MVA",
+   "from_bus": "R_F_MVA",
+   "to_bus": "LN_A_MVA_FAR_N",
+   "r_pu": 0.001,
+   "x_pu": 0.002,
+   "b_pu": 0.0,
+   "s_base_mva": 50.0,
+   "v_base_kv": 33.0,
+   "rating_mva": 60.0
+  },
+  {
+   "id": "LN_B_MVB",
+   "from_bus": "R_F_MVB",
+   "to_bus": "LN_B_MVB_FAR_N",
+   "r_pu": 0.001,
+   "x_pu": 0.002,
+   "b_pu": 0.0,
+   "s_base_mva": 50.0,
+   "v_base_kv": 33.0,
+   "rating_mva": 60.0
+  },
+  {
+   "id": "CHG_A",
+   "from_bus": "R_SOFC05",
+   "to_bus": "CHG_A_STUB",
+   "r_pu": 0.0,
+   "x_pu": 0.001,
+   "b_pu": 0.014,
+   "s_base_mva": 50.0,
+   "v_base_kv": 33.0,
+   "rating_mva": 1.0
+  },
+  {
+   "id": "CHG_B",
+   "from_bus": "R_SOFC15",
+   "to_bus": "CHG_B_STUB",
+   "r_pu": 0.0,
+   "x_pu": 0.001,
+   "b_pu": 0.014,
+   "s_base_mva": 50.0,
+   "v_base_kv": 33.0,
+   "rating_mva": 1.0
+  }
+ ],
+ "transformers": [
+  {
+   "id": "TR_SOFC01",
+   "hv_bus": "R_SOFC01",
+   "lv_bus": "SOFC01_LV",
+   "s_rated_mva": 2.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.05,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_SOFC02",
+   "hv_bus": "R_SOFC02",
+   "lv_bus": "SOFC02_LV",
+   "s_rated_mva": 2.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.05,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_SOFC03",
+   "hv_bus": "R_SOFC03",
+   "lv_bus": "SOFC03_LV",
+   "s_rated_mva": 2.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.05,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_SOFC04",
+   "hv_bus": "R_SOFC04",
+   "lv_bus": "SOFC04_LV",
+   "s_rated_mva": 2.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.05,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_SOFC05",
+   "hv_bus": "R_SOFC05",
+   "lv_bus": "SOFC05_LV",
+   "s_rated_mva": 2.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.05,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_SOFC06",
+   "hv_bus": "R_SOFC06",
+   "lv_bus": "SOFC06_LV",
+   "s_rated_mva": 2.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.05,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_SOFC07",
+   "hv_bus": "R_SOFC07",
+   "lv_bus": "SOFC07_LV",
+   "s_rated_mva": 2.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.05,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_SOFC08",
+   "hv_bus": "R_SOFC08",
+   "lv_bus": "SOFC08_LV",
+   "s_rated_mva": 2.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.05,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_SOFC09",
+   "hv_bus": "R_SOFC09",
+   "lv_bus": "SOFC09_LV",
+   "s_rated_mva": 2.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.05,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_SOFC10",
+   "hv_bus": "R_SOFC10",
+   "lv_bus": "SOFC10_LV",
+   "s_rated_mva": 2.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.05,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_SOFC11",
+   "hv_bus": "R_SOFC11",
+   "lv_bus": "SOFC11_LV",
+   "s_rated_mva": 2.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.05,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_SOFC12",
+   "hv_bus": "R_SOFC12",
+   "lv_bus": "SOFC12_LV",
+   "s_rated_mva": 2.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.05,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_SOFC13",
+   "hv_bus": "R_SOFC13",
+   "lv_bus": "SOFC13_LV",
+   "s_rated_mva": 2.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.05,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_SOFC14",
+   "hv_bus": "R_SOFC14",
+   "lv_bus": "SOFC14_LV",
+   "s_rated_mva": 2.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.05,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_SOFC15",
+   "hv_bus": "R_SOFC15",
+   "lv_bus": "SOFC15_LV",
+   "s_rated_mva": 2.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.05,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_SOFC16",
+   "hv_bus": "R_SOFC16",
+   "lv_bus": "SOFC16_LV",
+   "s_rated_mva": 2.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.05,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_SOFC17",
+   "hv_bus": "R_SOFC17",
+   "lv_bus": "SOFC17_LV",
+   "s_rated_mva": 2.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.05,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_SOFC18",
+   "hv_bus": "R_SOFC18",
+   "lv_bus": "SOFC18_LV",
+   "s_rated_mva": 2.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.05,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_SOFC19",
+   "hv_bus": "R_SOFC19",
+   "lv_bus": "SOFC19_LV",
+   "s_rated_mva": 2.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.05,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_SOFC20",
+   "hv_bus": "R_SOFC20",
+   "lv_bus": "SOFC20_LV",
+   "s_rated_mva": 2.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.05,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_PCS1",
+   "hv_bus": "R_PCS1",
+   "lv_bus": "PCS1_LV",
+   "s_rated_mva": 5.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.69,
+   "x_pu": 0.06,
+   "r_pu": 0.008,
+   "hv_config": "wye_grounded",
+   "lv_config": "delta",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_PCS2",
+   "hv_bus": "R_PCS2",
+   "lv_bus": "PCS2_LV",
+   "s_rated_mva": 5.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.69,
+   "x_pu": 0.06,
+   "r_pu": 0.008,
+   "hv_config": "wye_grounded",
+   "lv_config": "delta",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_PCS3",
+   "hv_bus": "R_PCS3",
+   "lv_bus": "PCS3_LV",
+   "s_rated_mva": 5.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.69,
+   "x_pu": 0.06,
+   "r_pu": 0.008,
+   "hv_config": "wye_grounded",
+   "lv_config": "delta",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_PCS4",
+   "hv_bus": "R_PCS4",
+   "lv_bus": "PCS4_LV",
+   "s_rated_mva": 5.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.69,
+   "x_pu": 0.06,
+   "r_pu": 0.008,
+   "hv_config": "delta",
+   "lv_config": "wye_ungrounded",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_PCS5",
+   "hv_bus": "R_PCS5",
+   "lv_bus": "PCS5_LV",
+   "s_rated_mva": 5.5,
+   "hv_kv": 33.0,
+   "lv_kv": 0.69,
+   "x_pu": 0.06,
+   "r_pu": 0.008,
+   "hv_config": "wye_grounded",
+   "lv_config": "delta",
+   "inrush_pu": 12.0
+  },
+  {
+   "id": "TR_GEN_A",
+   "hv_bus": "GEN_A_HV",
+   "lv_bus": "GEN_A_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.06,
+   "r_pu": 0.006,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 10.0
+  },
+  {
+   "id": "TR_GEN_B",
+   "hv_bus": "GEN_B_HV",
+   "lv_bus": "GEN_B_LV",
+   "s_rated_mva": 3.0,
+   "hv_kv": 33.0,
+   "lv_kv": 0.4,
+   "x_pu": 0.06,
+   "r_pu": 0.006,
+   "hv_config": "delta",
+   "lv_config": "wye_grounded",
+   "inrush_pu": 10.0
+  }
+ ],
+ "switches": [
+  {
+   "id": "RB01",
+   "from_bus": "R_F_MVA",
+   "to_bus": "R_SOFC01",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB02",
+   "from_bus": "R_SOFC01",
+   "to_bus": "R_SOFC02",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB03",
+   "from_bus": "R_SOFC02",
+   "to_bus": "R_SOFC03",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB04",
+   "from_bus": "R_SOFC03",
+   "to_bus": "R_SOFC04",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB05",
+   "from_bus": "R_SOFC04",
+   "to_bus": "R_PCS1",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB06",
+   "from_bus": "R_PCS1",
+   "to_bus": "R_SOFC05",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB07",
+   "from_bus": "R_SOFC05",
+   "to_bus": "R_SOFC06",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB08",
+   "from_bus": "R_SOFC06",
+   "to_bus": "R_SOFC07",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB09",
+   "from_bus": "R_SOFC07",
+   "to_bus": "R_SOFC08",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB10",
+   "from_bus": "R_SOFC08",
+   "to_bus": "R_PCS2",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB11",
+   "from_bus": "R_PCS2",
+   "to_bus": "R_SOFC09",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB12",
+   "from_bus": "R_SOFC09",
+   "to_bus": "R_SOFC10",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB13",
+   "from_bus": "R_SOFC10",
+   "to_bus": "R_F_MVB",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB14",
+   "from_bus": "R_F_MVB",
+   "to_bus": "R_SOFC11",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB15",
+   "from_bus": "R_SOFC11",
+   "to_bus": "R_SOFC12",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB16",
+   "from_bus": "R_SOFC12",
+   "to_bus": "R_SOFC13",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB17",
+   "from_bus": "R_SOFC13",
+   "to_bus": "R_SOFC14",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB18",
+   "from_bus": "R_SOFC14",
+   "to_bus": "R_PCS3",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB19",
+   "from_bus": "R_PCS3",
+   "to_bus": "R_SOFC15",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB20",
+   "from_bus": "R_SOFC15",
+   "to_bus": "R_SOFC16",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB21",
+   "from_bus": "R_SOFC16",
+   "to_bus": "R_SOFC17",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB22",
+   "from_bus": "R_SOFC17",
+   "to_bus": "R_SOFC18",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB23",
+   "from_bus": "R_SOFC18",
+   "to_bus": "R_PCS4",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB24",
+   "from_bus": "R_PCS4",
+   "to_bus": "R_SOFC19",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB25",
+   "from_bus": "R_SOFC19",
+   "to_bus": "R_SOFC20",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB26",
+   "from_bus": "R_SOFC20",
+   "to_bus": "R_PCS5",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "RB27",
+   "from_bus": "R_PCS5",
+   "to_bus": "R_F_MVA",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_TIE",
+   "from_bus": "MVA",
+   "to_bus": "MVB",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_L_IT_cordA",
+   "from_bus": "MVA",
+   "to_bus": "IT_cordA_N",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_L_IT_cordB",
+   "from_bus": "MVB",
+   "to_bus": "IT_cordB_N",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_L_AUX_A",
+   "from_bus": "MVA",
+   "to_bus": "AUX_A_N",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_L_AUX_B",
+   "from_bus": "MVB",
+   "to_bus": "AUX_B_N",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_LN_A_MVA_FAR",
+   "from_bus": "MVA",
+   "to_bus": "LN_A_MVA_FAR_N",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_LN_B_MVB_FAR",
+   "from_bus": "MVB",
+   "to_bus": "LN_B_MVB_FAR_N",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_GEN_A",
+   "from_bus": "MVA",
+   "to_bus": "GEN_A_HV",
+   "normally_closed": true,
+   "is_pcc": false
+  },
+  {
+   "id": "CB_GEN_B",
+   "from_bus": "MVB",
+   "to_bus": "GEN_B_HV",
+   "normally_closed": true,
+   "is_pcc": false
+  }
+ ],
+ "relays": [
+  {
+   "id": "R_RB01",
+   "switch_id": "RB01",
+   "functions": [
+    {
+     "ansi": "87L",
+     "pickup_a": 60.0,
+     "zone_buses": [
+      "LN_A_MVA_FAR_N",
+      "R_F_MVA"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 60 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC01",
+      "TR_SOFC01_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_F_MVA",
+      "R_SOFC01"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB02",
+   "switch_id": "RB02",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC01",
+      "TR_SOFC01_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC02",
+      "TR_SOFC02_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_SOFC01",
+      "R_SOFC02"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB03",
+   "switch_id": "RB03",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC02",
+      "TR_SOFC02_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC03",
+      "TR_SOFC03_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_SOFC02",
+      "R_SOFC03"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB04",
+   "switch_id": "RB04",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC03",
+      "TR_SOFC03_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC04",
+      "TR_SOFC04_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_SOFC03",
+      "R_SOFC04"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB05",
+   "switch_id": "RB05",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_PCS1",
+      "TR_PCS1_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC04",
+      "TR_SOFC04_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_SOFC04",
+      "R_PCS1"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB06",
+   "switch_id": "RB06",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_PCS1",
+      "TR_PCS1_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC05",
+      "TR_SOFC05_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_PCS1",
+      "R_SOFC05"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB07",
+   "switch_id": "RB07",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC05",
+      "TR_SOFC05_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC06",
+      "TR_SOFC06_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_SOFC05",
+      "R_SOFC06"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB08",
+   "switch_id": "RB08",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC06",
+      "TR_SOFC06_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC07",
+      "TR_SOFC07_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_SOFC06",
+      "R_SOFC07"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB09",
+   "switch_id": "RB09",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC07",
+      "TR_SOFC07_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC08",
+      "TR_SOFC08_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_SOFC07",
+      "R_SOFC08"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB10",
+   "switch_id": "RB10",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_PCS2",
+      "TR_PCS2_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC08",
+      "TR_SOFC08_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_SOFC08",
+      "R_PCS2"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB11",
+   "switch_id": "RB11",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_PCS2",
+      "TR_PCS2_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC09",
+      "TR_SOFC09_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_PCS2",
+      "R_SOFC09"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB12",
+   "switch_id": "RB12",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC09",
+      "TR_SOFC09_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC10",
+      "TR_SOFC10_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_SOFC09",
+      "R_SOFC10"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB13",
+   "switch_id": "RB13",
+   "functions": [
+    {
+     "ansi": "87L",
+     "pickup_a": 60.0,
+     "zone_buses": [
+      "LN_B_MVB_FAR_N",
+      "R_F_MVB"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 60 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC10",
+      "TR_SOFC10_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_SOFC10",
+      "R_F_MVB"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB14",
+   "switch_id": "RB14",
+   "functions": [
+    {
+     "ansi": "87L",
+     "pickup_a": 60.0,
+     "zone_buses": [
+      "LN_B_MVB_FAR_N",
+      "R_F_MVB"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 60 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC11",
+      "TR_SOFC11_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_F_MVB",
+      "R_SOFC11"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB15",
+   "switch_id": "RB15",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC11",
+      "TR_SOFC11_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC12",
+      "TR_SOFC12_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_SOFC11",
+      "R_SOFC12"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB16",
+   "switch_id": "RB16",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC12",
+      "TR_SOFC12_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC13",
+      "TR_SOFC13_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_SOFC12",
+      "R_SOFC13"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB17",
+   "switch_id": "RB17",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC13",
+      "TR_SOFC13_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC14",
+      "TR_SOFC14_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_SOFC13",
+      "R_SOFC14"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB18",
+   "switch_id": "RB18",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_PCS3",
+      "TR_PCS3_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC14",
+      "TR_SOFC14_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_SOFC14",
+      "R_PCS3"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB19",
+   "switch_id": "RB19",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_PCS3",
+      "TR_PCS3_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC15",
+      "TR_SOFC15_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_PCS3",
+      "R_SOFC15"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB20",
+   "switch_id": "RB20",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC15",
+      "TR_SOFC15_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC16",
+      "TR_SOFC16_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_SOFC15",
+      "R_SOFC16"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB21",
+   "switch_id": "RB21",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC16",
+      "TR_SOFC16_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC17",
+      "TR_SOFC17_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_SOFC16",
+      "R_SOFC17"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB22",
+   "switch_id": "RB22",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC17",
+      "TR_SOFC17_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC18",
+      "TR_SOFC18_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_SOFC17",
+      "R_SOFC18"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB23",
+   "switch_id": "RB23",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_PCS4",
+      "TR_PCS4_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC18",
+      "TR_SOFC18_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_SOFC18",
+      "R_PCS4"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB24",
+   "switch_id": "RB24",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_PCS4",
+      "TR_PCS4_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC19",
+      "TR_SOFC19_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_PCS4",
+      "R_SOFC19"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB25",
+   "switch_id": "RB25",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC19",
+      "TR_SOFC19_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC20",
+      "TR_SOFC20_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_SOFC19",
+      "R_SOFC20"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB26",
+   "switch_id": "RB26",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_PCS5",
+      "TR_PCS5_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_SOFC20",
+      "TR_SOFC20_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_SOFC20",
+      "R_PCS5"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_RB27",
+   "switch_id": "RB27",
+   "functions": [
+    {
+     "ansi": "87L",
+     "pickup_a": 60.0,
+     "zone_buses": [
+      "LN_A_MVA_FAR_N",
+      "R_F_MVA"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 60 A, slope 0.3"
+    },
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "R_PCS5",
+      "TR_PCS5_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "R_PCS5",
+      "R_F_MVA"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_CB_TIE",
+   "switch_id": "CB_TIE",
+   "functions": [
+    {
+     "ansi": "87B",
+     "pickup_a": 60.0,
+     "zone_buses": [
+      "MVA"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 60 A, slope 0.3"
+    },
+    {
+     "ansi": "87B",
+     "pickup_a": 60.0,
+     "zone_buses": [
+      "MVB"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 60 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVA",
+      "MVB"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_CB_L_IT_cordA",
+   "switch_id": "CB_L_IT_cordA",
+   "functions": [
+    {
+     "ansi": "87B",
+     "pickup_a": 60.0,
+     "zone_buses": [
+      "IT_cordA_N"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 60 A, slope 0.3"
+    },
+    {
+     "ansi": "87B",
+     "pickup_a": 60.0,
+     "zone_buses": [
+      "MVA"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 60 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 695.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x IT_cordA with the halls transferred (552 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVA",
+      "IT_cordA_N"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_CB_L_IT_cordB",
+   "switch_id": "CB_L_IT_cordB",
+   "functions": [
+    {
+     "ansi": "87B",
+     "pickup_a": 60.0,
+     "zone_buses": [
+      "IT_cordB_N"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 60 A, slope 0.3"
+    },
+    {
+     "ansi": "87B",
+     "pickup_a": 60.0,
+     "zone_buses": [
+      "MVB"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 60 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 695.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x IT_cordB with the halls transferred (552 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVB",
+      "IT_cordB_N"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_CB_L_AUX_A",
+   "switch_id": "CB_L_AUX_A",
+   "functions": [
+    {
+     "ansi": "87B",
+     "pickup_a": 60.0,
+     "zone_buses": [
+      "AUX_A_N"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 60 A, slope 0.3"
+    },
+    {
+     "ansi": "87B",
+     "pickup_a": 60.0,
+     "zone_buses": [
+      "MVA"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 60 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 50.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x AUX_A (37 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVA",
+      "AUX_A_N"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_CB_L_AUX_B",
+   "switch_id": "CB_L_AUX_B",
+   "functions": [
+    {
+     "ansi": "87B",
+     "pickup_a": 60.0,
+     "zone_buses": [
+      "AUX_B_N"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 60 A, slope 0.3"
+    },
+    {
+     "ansi": "87B",
+     "pickup_a": 60.0,
+     "zone_buses": [
+      "MVB"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 60 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 50.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x AUX_B (37 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVB",
+      "AUX_B_N"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_CB_LN_A_MVA_FAR",
+   "switch_id": "CB_LN_A_MVA_FAR",
+   "functions": [
+    {
+     "ansi": "87L",
+     "pickup_a": 60.0,
+     "zone_buses": [
+      "LN_A_MVA_FAR_N",
+      "R_F_MVA"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 60 A, slope 0.3"
+    },
+    {
+     "ansi": "87B",
+     "pickup_a": 60.0,
+     "zone_buses": [
+      "MVA"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 60 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVA",
+      "LN_A_MVA_FAR_N"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_CB_LN_B_MVB_FAR",
+   "switch_id": "CB_LN_B_MVB_FAR",
+   "functions": [
+    {
+     "ansi": "87L",
+     "pickup_a": 60.0,
+     "zone_buses": [
+      "LN_B_MVB_FAR_N",
+      "R_F_MVB"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 60 A, slope 0.3"
+    },
+    {
+     "ansi": "87B",
+     "pickup_a": 60.0,
+     "zone_buses": [
+      "MVB"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 60 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 825.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x the whole plant through one feeder (Phase 1) (658 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVB",
+      "LN_B_MVB_FAR_N"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_CB_GEN_A",
+   "switch_id": "CB_GEN_A",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "GEN_A_HV",
+      "TR_GEN_A_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87B",
+     "pickup_a": 60.0,
+     "zone_buses": [
+      "MVA"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 60 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 70.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x TR_GEN_A rating (52 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVA",
+      "GEN_A_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  },
+  {
+   "id": "R_CB_GEN_B",
+   "switch_id": "CB_GEN_B",
+   "functions": [
+    {
+     "ansi": "87T",
+     "pickup_a": 40.0,
+     "zone_buses": [
+      "GEN_B_HV",
+      "TR_GEN_B_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 40 A, slope 0.3"
+    },
+    {
+     "ansi": "87B",
+     "pickup_a": 60.0,
+     "zone_buses": [
+      "MVB"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); biased, Is1 60 A, slope 0.3"
+    },
+    {
+     "ansi": "51",
+     "pickup_a": 70.0,
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); backup, definite time 0.4 s; 1.25 x TR_GEN_B rating (52 A)"
+    },
+    {
+     "ansi": "67N",
+     "pickup_a": 50.0,
+     "direction": "forward",
+     "curve": "DT",
+     "time_dial": 0.4,
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); forward into the protected circuit, definite time 0.4 s"
+    },
+    {
+     "ansi": "50BF",
+     "time_dial": 0.15,
+     "zone_buses": [
+      "MVB",
+      "GEN_B_HV"
+     ],
+     "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs); breaker failure 0.15 s, transfer trip to both sides"
+    }
+   ],
+   "notes": "C003 six topologies, Phase 2 draft, 30 Oct 2026 - PROVISIONAL pending vendor data (A26, charging, CTs)"
+  }
+ ],
+ "converters": [
+  {
+   "id": "SOFC01",
+   "bus": "SOFC01_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC02",
+   "bus": "SOFC02_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC03",
+   "bus": "SOFC03_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC04",
+   "bus": "SOFC04_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC05",
+   "bus": "SOFC05_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC06",
+   "bus": "SOFC06_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC07",
+   "bus": "SOFC07_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC08",
+   "bus": "SOFC08_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC09",
+   "bus": "SOFC09_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC10",
+   "bus": "SOFC10_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC11",
+   "bus": "SOFC11_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC12",
+   "bus": "SOFC12_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC13",
+   "bus": "SOFC13_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC14",
+   "bus": "SOFC14_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC15",
+   "bus": "SOFC15_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC16",
+   "bus": "SOFC16_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC17",
+   "bus": "SOFC17_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC18",
+   "bus": "SOFC18_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC19",
+   "bus": "SOFC19_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "SOFC20",
+   "bus": "SOFC20_LV",
+   "s_rated_mva": 2.2,
+   "control": "grid_following",
+   "params": {
+    "p_f_droop_pu": null,
+    "q_v_droop_pu": null,
+    "h_sec": null,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.2,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": null
+  },
+  {
+   "id": "PCS1",
+   "bus": "PCS1_LV",
+   "s_rated_mva": 5.5,
+   "control": "grid_forming_vsm",
+   "params": {
+    "p_f_droop_pu": 0.04,
+    "q_v_droop_pu": 0.05,
+    "h_sec": 2.0,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.1,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": 0.635
+  },
+  {
+   "id": "PCS2",
+   "bus": "PCS2_LV",
+   "s_rated_mva": 5.5,
+   "control": "grid_forming_vsm",
+   "params": {
+    "p_f_droop_pu": 0.04,
+    "q_v_droop_pu": 0.05,
+    "h_sec": 2.0,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.1,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": 0.635
+  },
+  {
+   "id": "PCS3",
+   "bus": "PCS3_LV",
+   "s_rated_mva": 5.5,
+   "control": "grid_forming_vsm",
+   "params": {
+    "p_f_droop_pu": 0.04,
+    "q_v_droop_pu": 0.05,
+    "h_sec": 2.0,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.1,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": 0.635
+  },
+  {
+   "id": "PCS4",
+   "bus": "PCS4_LV",
+   "s_rated_mva": 5.5,
+   "control": "grid_forming_vsm",
+   "params": {
+    "p_f_droop_pu": 0.04,
+    "q_v_droop_pu": 0.05,
+    "h_sec": 2.0,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.1,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": 0.635
+  },
+  {
+   "id": "PCS5",
+   "bus": "PCS5_LV",
+   "s_rated_mva": 5.5,
+   "control": "grid_forming_vsm",
+   "params": {
+    "p_f_droop_pu": 0.04,
+    "q_v_droop_pu": 0.05,
+    "h_sec": 2.0,
+    "tp_sec": 0.05,
+    "tv_sec": 0.02,
+    "i_limit_transient_pu": 1.1,
+    "i_limit_steady_pu": null,
+    "ride_through_identified": false
+   },
+   "sign": "generator",
+   "vendor": "",
+   "firmware": "",
+   "energy_mwh": 0.635
+  }
+ ],
+ "machines": [
+  {
+   "id": "GEN_A",
+   "bus": "GEN_A_LV",
+   "s_rated_mva": 3.0,
+   "h_sec": 1.0,
+   "xd_subtransient_pu": 0.15,
+   "droop_pu": 0.05,
+   "isochronous_capable": true,
+   "neutral_grounded": false
+  },
+  {
+   "id": "GEN_B",
+   "bus": "GEN_B_LV",
+   "s_rated_mva": 3.0,
+   "h_sec": 1.0,
+   "xd_subtransient_pu": 0.15,
+   "droop_pu": 0.05,
+   "isochronous_capable": true,
+   "neutral_grounded": false
+  }
+ ],
+ "loads": [
+  {
+   "id": "IT_cordA",
+   "bus": "IT_cordA_N",
+   "p_mw": 15.0,
+   "q_mvar": 4.93,
+   "model": "zip",
+   "zip_p": [
+    0,
+    0,
+    1
+   ],
+   "zip_q": [
+    0,
+    0,
+    1
+   ],
+   "critical": true,
+   "sign": "load"
+  },
+  {
+   "id": "IT_cordB",
+   "bus": "IT_cordB_N",
+   "p_mw": 15.0,
+   "q_mvar": 4.93,
+   "model": "zip",
+   "zip_p": [
+    0,
+    0,
+    1
+   ],
+   "zip_q": [
+    0,
+    0,
+    1
+   ],
+   "critical": true,
+   "sign": "load"
+  },
+  {
+   "id": "AUX_A",
+   "bus": "AUX_A_N",
+   "p_mw": 2.0,
+   "q_mvar": 0.6,
+   "model": "zip",
+   "zip_p": [
+    0,
+    0,
+    1
+   ],
+   "zip_q": [
+    0,
+    0,
+    1
+   ],
+   "critical": true,
+   "sign": "load"
+  },
+  {
+   "id": "AUX_B",
+   "bus": "AUX_B_N",
+   "p_mw": 2.0,
+   "q_mvar": 0.6,
+   "model": "zip",
+   "zip_p": [
+    0,
+    0,
+    1
+   ],
+   "zip_q": [
+    0,
+    0,
+    1
+   ],
+   "critical": true,
+   "sign": "load"
+  }
+ ],
+ "grounding": [
+  {
+   "id": "NER_PCS1",
+   "bus": "R_PCS1",
+   "kind": "low_resistance_grounded",
+   "z0_ohm": 76.0,
+   "available_when_islanded": true,
+   "notes": "YNd11d11 station transformer neutral, 76 ohm (~250 A, 10 s), 51N + 64 REF"
+  },
+  {
+   "id": "NER_PCS2",
+   "bus": "R_PCS2",
+   "kind": "low_resistance_grounded",
+   "z0_ohm": 76.0,
+   "available_when_islanded": true,
+   "notes": "YNd11d11 station transformer neutral, 76 ohm (~250 A, 10 s), 51N + 64 REF"
+  },
+  {
+   "id": "NER_PCS3",
+   "bus": "R_PCS3",
+   "kind": "low_resistance_grounded",
+   "z0_ohm": 76.0,
+   "available_when_islanded": true,
+   "notes": "YNd11d11 station transformer neutral, 76 ohm (~250 A, 10 s), 51N + 64 REF"
+  },
+  {
+   "id": "NER_PCS5",
+   "bus": "R_PCS5",
+   "kind": "low_resistance_grounded",
+   "z0_ohm": 76.0,
+   "available_when_islanded": true,
+   "notes": "YNd11d11 station transformer neutral, 76 ohm (~250 A, 10 s), 51N + 64 REF"
+  },
+  {
+   "id": "IT_PCS1",
+   "bus": "PCS1_LV",
+   "kind": "ungrounded",
+   "z0_ohm": 0.0,
+   "available_when_islanded": true,
+   "notes": "690 V pocket declared IT per PCS vendor; IMD"
+  },
+  {
+   "id": "IT_PCS2",
+   "bus": "PCS2_LV",
+   "kind": "ungrounded",
+   "z0_ohm": 0.0,
+   "available_when_islanded": true,
+   "notes": "690 V pocket declared IT per PCS vendor; IMD"
+  },
+  {
+   "id": "IT_PCS3",
+   "bus": "PCS3_LV",
+   "kind": "ungrounded",
+   "z0_ohm": 0.0,
+   "available_when_islanded": true,
+   "notes": "690 V pocket declared IT per PCS vendor; IMD"
+  },
+  {
+   "id": "IT_PCS4",
+   "bus": "PCS4_LV",
+   "kind": "ungrounded",
+   "z0_ohm": 0.0,
+   "available_when_islanded": true,
+   "notes": "690 V pocket declared IT per PCS vendor; IMD"
+  },
+  {
+   "id": "IT_PCS5",
+   "bus": "PCS5_LV",
+   "kind": "ungrounded",
+   "z0_ohm": 0.0,
+   "available_when_islanded": true,
+   "notes": "690 V pocket declared IT per PCS vendor; IMD"
+  }
+ ],
+ "islands": [
+  {
+   "id": "NORMAL",
+   "description": "island, ring closed, 27 ring breakers closed",
+   "open_switches": [],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "SOFC01",
+    "SOFC02",
+    "SOFC03",
+    "SOFC04",
+    "SOFC05",
+    "SOFC06",
+    "SOFC07",
+    "SOFC08",
+    "SOFC09",
+    "SOFC10",
+    "SOFC11",
+    "SOFC12",
+    "SOFC13",
+    "SOFC14",
+    "SOFC15",
+    "SOFC16",
+    "SOFC17",
+    "SOFC18",
+    "SOFC19",
+    "SOFC20",
+    "PCS1",
+    "PCS2",
+    "PCS3",
+    "PCS4",
+    "PCS5"
+   ],
+   "settings_group": "A"
+  },
+  {
+   "id": "N1_SOFC",
+   "description": "one group released (SOFC06 zone)",
+   "open_switches": [
+    "RB07",
+    "RB08"
+   ],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "SOFC01",
+    "SOFC02",
+    "SOFC03",
+    "SOFC04",
+    "SOFC05",
+    "SOFC07",
+    "SOFC08",
+    "SOFC09",
+    "SOFC10",
+    "SOFC11",
+    "SOFC12",
+    "SOFC13",
+    "SOFC14",
+    "SOFC15",
+    "SOFC16",
+    "SOFC17",
+    "SOFC18",
+    "SOFC19",
+    "SOFC20",
+    "PCS1",
+    "PCS2",
+    "PCS3",
+    "PCS4",
+    "PCS5"
+   ],
+   "settings_group": "A"
+  },
+  {
+   "id": "N1_PCS",
+   "description": "one station released (PCS4, non-NER)",
+   "open_switches": [
+    "RB23",
+    "RB24"
+   ],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "SOFC01",
+    "SOFC02",
+    "SOFC03",
+    "SOFC04",
+    "SOFC05",
+    "SOFC06",
+    "SOFC07",
+    "SOFC08",
+    "SOFC09",
+    "SOFC10",
+    "SOFC11",
+    "SOFC12",
+    "SOFC13",
+    "SOFC14",
+    "SOFC15",
+    "SOFC16",
+    "SOFC17",
+    "SOFC18",
+    "SOFC19",
+    "SOFC20",
+    "PCS1",
+    "PCS2",
+    "PCS3",
+    "PCS5"
+   ],
+   "settings_group": "A"
+  },
+  {
+   "id": "ZONE_FAULT_NER_STATION",
+   "description": "fault in the PCS1 zone: a NER station lost, three remain",
+   "open_switches": [
+    "RB05",
+    "RB06"
+   ],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "SOFC01",
+    "SOFC02",
+    "SOFC03",
+    "SOFC04",
+    "SOFC05",
+    "SOFC06",
+    "SOFC07",
+    "SOFC08",
+    "SOFC09",
+    "SOFC10",
+    "SOFC11",
+    "SOFC12",
+    "SOFC13",
+    "SOFC14",
+    "SOFC15",
+    "SOFC16",
+    "SOFC17",
+    "SOFC18",
+    "SOFC19",
+    "SOFC20",
+    "PCS2",
+    "PCS3",
+    "PCS4",
+    "PCS5"
+   ],
+   "settings_group": "A"
+  },
+  {
+   "id": "ZONE_FAULT_F_MVA",
+   "description": "MVA feeder zone out; MVA supplied through the tie",
+   "open_switches": [
+    "RB27",
+    "RB01"
+   ],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "SOFC01",
+    "SOFC02",
+    "SOFC03",
+    "SOFC04",
+    "SOFC05",
+    "SOFC06",
+    "SOFC07",
+    "SOFC08",
+    "SOFC09",
+    "SOFC10",
+    "SOFC11",
+    "SOFC12",
+    "SOFC13",
+    "SOFC14",
+    "SOFC15",
+    "SOFC16",
+    "SOFC17",
+    "SOFC18",
+    "SOFC19",
+    "SOFC20",
+    "PCS1",
+    "PCS2",
+    "PCS3",
+    "PCS4",
+    "PCS5"
+   ],
+   "settings_group": "A"
+  },
+  {
+   "id": "BREAKER_FAIL_SOFC04_PCS1",
+   "description": "worst adjacent pair: group 04 + NER station 1",
+   "open_switches": [
+    "RB04",
+    "RB06"
+   ],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "SOFC01",
+    "SOFC02",
+    "SOFC03",
+    "SOFC05",
+    "SOFC06",
+    "SOFC07",
+    "SOFC08",
+    "SOFC09",
+    "SOFC10",
+    "SOFC11",
+    "SOFC12",
+    "SOFC13",
+    "SOFC14",
+    "SOFC15",
+    "SOFC16",
+    "SOFC17",
+    "SOFC18",
+    "SOFC19",
+    "SOFC20",
+    "PCS2",
+    "PCS3",
+    "PCS4",
+    "PCS5"
+   ],
+   "settings_group": "A"
+  },
+  {
+   "id": "RING_SPLIT",
+   "description": "halves separated at the feeders + tie: A (S01-10, P1-2, MVA) / B (S11-20, P3-5, MVB)",
+   "open_switches": [
+    "RB13",
+    "RB27",
+    "CB_TIE"
+   ],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "SOFC01",
+    "SOFC02",
+    "SOFC03",
+    "SOFC04",
+    "SOFC05",
+    "SOFC06",
+    "SOFC07",
+    "SOFC08",
+    "SOFC09",
+    "SOFC10",
+    "SOFC11",
+    "SOFC12",
+    "SOFC13",
+    "SOFC14",
+    "SOFC15",
+    "SOFC16",
+    "SOFC17",
+    "SOFC18",
+    "SOFC19",
+    "SOFC20",
+    "PCS1",
+    "PCS2",
+    "PCS3",
+    "PCS4",
+    "PCS5"
+   ],
+   "settings_group": "A"
+  },
+  {
+   "id": "BUS_MVB_FAULT",
+   "description": "MVB isolated by 87B: Aux-B, cord B (moved to A) and G-B lost; no station lost",
+   "open_switches": [
+    "RB13",
+    "RB14",
+    "CB_TIE"
+   ],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "SOFC01",
+    "SOFC02",
+    "SOFC03",
+    "SOFC04",
+    "SOFC05",
+    "SOFC06",
+    "SOFC07",
+    "SOFC08",
+    "SOFC09",
+    "SOFC10",
+    "SOFC11",
+    "SOFC12",
+    "SOFC13",
+    "SOFC14",
+    "SOFC15",
+    "SOFC16",
+    "SOFC17",
+    "SOFC18",
+    "SOFC19",
+    "SOFC20",
+    "PCS1",
+    "PCS2",
+    "PCS3",
+    "PCS4",
+    "PCS5"
+   ],
+   "load_factors": {
+    "IT_cordA": 2.0
+   },
+   "settings_group": "A"
+  },
+  {
+   "id": "BUS_MVB_FAULT_RING_OPEN_GFL",
+   "description": "MVB out + RB15 opened by hand: S11-S14 isolated, grid-following only (GI-2 case)",
+   "open_switches": [
+    "RB13",
+    "RB14",
+    "CB_TIE",
+    "RB18"
+   ],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "SOFC01",
+    "SOFC02",
+    "SOFC03",
+    "SOFC04",
+    "SOFC05",
+    "SOFC06",
+    "SOFC07",
+    "SOFC08",
+    "SOFC09",
+    "SOFC10",
+    "SOFC11",
+    "SOFC12",
+    "SOFC13",
+    "SOFC14",
+    "SOFC15",
+    "SOFC16",
+    "SOFC17",
+    "SOFC18",
+    "SOFC19",
+    "SOFC20",
+    "PCS1",
+    "PCS2",
+    "PCS3",
+    "PCS4",
+    "PCS5"
+   ],
+   "load_factors": {
+    "IT_cordA": 2.0
+   },
+   "settings_group": "A"
+  },
+  {
+   "id": "BUS_MVB_FAULT_RING_OPEN_NER",
+   "description": "MVB out + RB16 opened: isolated stretch holds PCS3 (NER) - grounded",
+   "open_switches": [
+    "RB13",
+    "RB14",
+    "CB_TIE",
+    "RB19"
+   ],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "SOFC01",
+    "SOFC02",
+    "SOFC03",
+    "SOFC04",
+    "SOFC05",
+    "SOFC06",
+    "SOFC07",
+    "SOFC08",
+    "SOFC09",
+    "SOFC10",
+    "SOFC11",
+    "SOFC12",
+    "SOFC13",
+    "SOFC14",
+    "SOFC15",
+    "SOFC16",
+    "SOFC17",
+    "SOFC18",
+    "SOFC19",
+    "SOFC20",
+    "PCS1",
+    "PCS2",
+    "PCS3",
+    "PCS4",
+    "PCS5"
+   ],
+   "load_factors": {
+    "IT_cordA": 2.0
+   },
+   "settings_group": "A"
+  },
+  {
+   "id": "BS_CELL_A_RAMP",
+   "description": "cell A assembled dead (MVA, half-A ring: 10 group + 2 station transformers), PCS1 ramps 0->1 pu",
+   "open_switches": [
+    "RB13",
+    "RB27",
+    "CB_TIE",
+    "CB_L_IT_cordA",
+    "CB_L_IT_cordB",
+    "CB_L_AUX_B"
+   ],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "PCS1"
+   ],
+   "energise_mode": "ramp",
+   "energise_transformer_ids": [
+    "TR_SOFC01",
+    "TR_SOFC02",
+    "TR_SOFC03",
+    "TR_SOFC04",
+    "TR_PCS1",
+    "TR_SOFC05",
+    "TR_SOFC06",
+    "TR_SOFC07",
+    "TR_SOFC08",
+    "TR_PCS2",
+    "TR_SOFC09"
+   ],
+   "settings_group": "A"
+  },
+  {
+   "id": "BS_CELL_B_RAMP",
+   "description": "cell B assembled dead (MVB, half-B ring: 10 group + 3 station transformers), PCS3 ramps",
+   "open_switches": [
+    "RB13",
+    "RB27",
+    "CB_TIE",
+    "CB_L_IT_cordA",
+    "CB_L_IT_cordB",
+    "CB_L_AUX_A"
+   ],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "PCS3"
+   ],
+   "energise_mode": "ramp",
+   "energise_transformer_ids": [
+    "TR_SOFC11",
+    "TR_SOFC12",
+    "TR_SOFC13",
+    "TR_SOFC14",
+    "TR_PCS3",
+    "TR_SOFC15",
+    "TR_SOFC16",
+    "TR_SOFC17",
+    "TR_SOFC18",
+    "TR_PCS4",
+    "TR_SOFC19",
+    "TR_SOFC20",
+    "TR_PCS5"
+   ],
+   "settings_group": "A"
+  },
+  {
+   "id": "BS_WHOLE_RING_RAMP",
+   "description": "whole ring assembled dead (20 group + 5 station transformers) ramped by PCS1 alone",
+   "open_switches": [
+    "CB_L_IT_cordA",
+    "CB_L_IT_cordB",
+    "CB_L_AUX_B"
+   ],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "PCS1"
+   ],
+   "energise_mode": "ramp",
+   "energise_transformer_ids": [
+    "TR_SOFC01",
+    "TR_SOFC02",
+    "TR_SOFC03",
+    "TR_SOFC04",
+    "TR_PCS1",
+    "TR_SOFC05",
+    "TR_SOFC06",
+    "TR_SOFC07",
+    "TR_SOFC08",
+    "TR_PCS2",
+    "TR_SOFC09",
+    "TR_SOFC11",
+    "TR_SOFC12",
+    "TR_SOFC13",
+    "TR_SOFC14",
+    "TR_PCS3",
+    "TR_SOFC15",
+    "TR_SOFC16",
+    "TR_SOFC17",
+    "TR_SOFC18",
+    "TR_PCS4",
+    "TR_SOFC19",
+    "TR_SOFC20",
+    "TR_PCS5"
+   ],
+   "settings_group": "A"
+  },
+  {
+   "id": "BS_WHOLE_RING_RAMP_TWO",
+   "description": "whole ring ramped by PCS1 + PCS3 together",
+   "open_switches": [
+    "CB_L_IT_cordA",
+    "CB_L_IT_cordB",
+    "CB_L_AUX_B"
+   ],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "PCS1",
+    "PCS3"
+   ],
+   "energise_mode": "ramp",
+   "energise_transformer_ids": [
+    "TR_SOFC01",
+    "TR_SOFC02",
+    "TR_SOFC03",
+    "TR_SOFC04",
+    "TR_PCS1",
+    "TR_SOFC05",
+    "TR_SOFC06",
+    "TR_SOFC07",
+    "TR_SOFC08",
+    "TR_PCS2",
+    "TR_SOFC09",
+    "TR_SOFC11",
+    "TR_SOFC12",
+    "TR_SOFC13",
+    "TR_SOFC14",
+    "TR_PCS3",
+    "TR_SOFC15",
+    "TR_SOFC16",
+    "TR_SOFC17",
+    "TR_SOFC18",
+    "TR_PCS4",
+    "TR_SOFC19",
+    "TR_SOFC20",
+    "TR_PCS5"
+   ],
+   "settings_group": "A"
+  },
+  {
+   "id": "BS_HARD_ONE_GROUP_FALLBACK",
+   "description": "fallback: one 2.5 MVA group transformer switched in with 5 stations on-line",
+   "open_switches": [
+    "CB_L_IT_cordA",
+    "CB_L_IT_cordB",
+    "CB_L_AUX_B"
+   ],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "PCS1",
+    "PCS2",
+    "PCS3",
+    "PCS4",
+    "PCS5"
+   ],
+   "energise_mode": "switch",
+   "energise_transformer_ids": [
+    "TR_SOFC01"
+   ],
+   "settings_group": "A"
+  },
+  {
+   "id": "BS_GEN_SWITCHES_PCS_TR",
+   "description": "genset G-A switches a station transformer in (forbidden)",
+   "open_switches": [
+    "CB_L_IT_cordA",
+    "CB_L_IT_cordB",
+    "CB_L_AUX_B"
+   ],
+   "grid_connected": false,
+   "energized_source_ids": [
+    "GEN_A"
+   ],
+   "energise_mode": "switch",
+   "energise_transformer_ids": [
+    "TR_PCS2"
+   ],
+   "settings_group": "A"
+  }
+ ]
+}

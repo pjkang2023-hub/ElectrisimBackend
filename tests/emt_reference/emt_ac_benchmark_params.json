@@ -1,0 +1,15 @@
+{
+  "description": "AC EMT benchmark: a 20 kV, 50 Hz source behind its short-circuit impedance (500 MVA, X/R 10, the same in zero sequence, star grounded) feeds a 10 km line (2 coupled pi sections), a 2.5 MVA 20/0.4 kV Dyn11 transformer and a resistive 0.4 kV load (grounded star). simscape_emt_ac_benchmark.m builds it from Simscape Electrical's three-phase blocks; tests/test_emt_ac.py builds Electrisim's circuit from this file. Each case applies one fault at 300 ms for 60 ms, once the energising transient - the line ringing, time constant 2L/R = 40 ms - has died away. SI units.",
+  "f_hz": 50.0,
+  "v_ll": 20000.0,
+  "phase_deg": 0.0,
+  "s_sc": 500e6,
+  "xr": 10.0,
+  "line": {"km": 10.0, "r_per_km": 0.1, "l_per_km": 2.0e-3, "m_per_km": 0.6e-3, "cg_per_km": 8e-9, "cl_per_km": 3e-9, "sections": 2},
+  "trafo": {"s": 2.5e6, "v1": 20000.0, "v2": 400.0, "clock": 11, "rw_pu": 0.005, "xl_pu": 0.0296, "xm_pu": 1000.0, "rm_pu": 500.0},
+  "load_r": 0.08,
+  "cases": {
+    "slg_lv": {"bus": "lv", "type": "ag", "r": 1e-3, "t_on": 0.3, "duration": 0.06, "t_end": 0.38},
+    "abcg_hv": {"bus": "hv", "type": "abcg", "r": 1e-3, "t_on": 0.3, "duration": 0.06, "t_end": 0.38}
+  }
+}
