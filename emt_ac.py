@@ -90,6 +90,23 @@ def parse_vector_group_3w(vector_group, shift_mv, shift_lv):
     return (conn(hv), hv == 'YN'), (conn(mv), mv == 'yn', clocks[0]), (conn(lv), lv == 'yn', clocks[1]), assumed
 
 
+def unrealisable_clock(hv_c, lv_c, clock, label, shift_degree):
+    """
+    A warning when a transformer's clock (its load-flow shift over 30 degrees) is one its windings cannot make -
+    a star-delta at an even clock, a star-star or delta-delta at an odd one - or None. winding_pairs then winds it
+    at the nearest it can (a star-delta at 11, the others at 0), so the EMT's angles beyond it are not the load
+    flow's and the run starts away from it. In Electrisim the vector group's number is the shift: shift_degree
+    adds to it, so e.g. YNd1 with shift_degree 30 makes 60 degrees.
+    """
+    supported = _SUPPORTED_CLOCKS.get((hv_c, lv_c), ())
+    if clock in supported:
+        return None
+    used = 11 if hv_c != lv_c else 0
+    return (f'Transformer {label}: its load-flow shift of {_f(shift_degree, 0.0):g} degrees (clock {clock}) is not one a '
+            f'{hv_c}-{lv_c} connection can make; the EMT winds it at clock {used}, so the study does not start in the load '
+            "flow's state. The vector group's number already gives the shift: shift_degree adds to it.")
+
+
 def winding_pairs(hv_c, lv_c, clock):
     """
     For each single-phase unit k: the HV winding's (from, to) phase indices and
@@ -824,6 +841,9 @@ class AcBuilder:
         if assumed:
             self.warnings.append(f"Transformer {label}: its vector group gives no clock number and its load-flow "
                                  "shift is 0 - taken as clock 11.")
+        bad = unrealisable_clock(hv_c, lv_c, clock, label, col('shift_degree', 0.0))
+        if bad:
+            self.warnings.append(bad)
         s_ph = col('sn_mva', 1.0) * max(col('parallel', 1.0), 1.0) * 1e6 / 3.0
         v_hv, v_lv = col('vn_hv_kv', 1.0) * 1e3, col('vn_lv_kv', 1.0) * 1e3
         tap = (col('tap_pos', 0.0) - col('tap_neutral', 0.0)) * col('tap_step_percent', 0.0) / 100.0
@@ -890,6 +910,10 @@ class AcBuilder:
             net.trafo3w.at[ti, 'vector_group'] if 'vector_group' in net.trafo3w.columns else 'YNynd', col('shift_mv_degree', 0.0), col('shift_lv_degree', 0.0))
         if assumed:
             self.warnings.append(f"Transformer {label}: a delta winding with no load-flow shift - taken as clock 11.")
+        for conn, clock, shift in ((mv_c, c_mv, col('shift_mv_degree', 0.0)), (lv_c, c_lv, col('shift_lv_degree', 0.0))):
+            bad = unrealisable_clock(hv_c, conn, clock, label, shift)
+            if bad:
+                self.warnings.append(bad)
         sn = np.array([col('sn_hv_mva', 1.0), col('sn_mv_mva', 1.0), col('sn_lv_mva', 1.0)])
         s_ph = sn[0] * 1e6 / 3.0
         v = [col('vn_hv_kv', 1.0) * 1e3, col('vn_mv_kv', 1.0) * 1e3, col('vn_lv_kv', 1.0) * 1e3]
