@@ -1205,6 +1205,9 @@ class AcBuilder:
         controlled = str(p.get('ac_energise_controlled') or 'false').strip().lower() in ('true', '1', 'yes')
         self.energise = {'shunt': i, 'bus': b, 't': t_on, 'switches': switches, 'label': label,
                          'controlled': controlled, 'closed_ms': [None, None, None]}
+        # Its current through its breaker's poles, whichever way they close.
+        self.series.append(('Shunt', str(net.shunt.at[i, 'name']), _row_id(net, 'shunt', i), f'{label} (energised)',
+                            [('i_sw', k, None, 1.0) for k in switches]))
         if not controlled:
             for k in switches:
                 ckt.at(t_on, lambda st, k=k: st.set_switch(k, True))
@@ -1233,8 +1236,6 @@ class AcBuilder:
                 en['closed_ms'][2] = t * 1e3
             return True
         ckt.add_controller(close)
-        self.series.append(('Shunt', str(net.shunt.at[i, 'name']), _row_id(net, 'shunt', i), f'{label} (energised)',
-                            [('i_sw', k, None, 1.0) for k in switches]))
 
     def _energised_trafo(self):
         """
